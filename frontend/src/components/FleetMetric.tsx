@@ -1,152 +1,88 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
-import { Svg, Path, Circle } from 'react-native-svg';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { GlassSurface } from './GlassSurface';
+import { useRouter } from 'expo-router';
 
 interface FleetMetricProps {
-  runningCount: number;
-  blockedCount: number;
-  prsCount: number;
-  needsYouCount: number;
+  runningCount?: number;
+  blockedCount?: number;
+  prsOpenCount?: number;
+  needsYouCount?: number;
 }
 
-export const FleetMetric: React.FC<FleetMetricProps> = ({
-  runningCount,
-  blockedCount,
-  prsCount,
-  needsYouCount
-}) => {
+export function FleetMetric({
+  runningCount = 1,
+  blockedCount = 0,
+  prsOpenCount = 2,
+  needsYouCount = 0
+}: FleetMetricProps) {
+  const router = useRouter();
+
   return (
-    <View style={styles.container} pointerEvents="none">
-      {/* RUNNING CARD (GREEN) */}
-      <View style={styles.touchable}>
-        <GlassSurface variant="card" style={styles.card}>
-          <Text style={[
-            styles.number,
-            {
-              color: '#34D399',
-              textShadowColor: '#34D399',
-              textShadowOffset: { width: 0, height: 0 },
-              textShadowRadius: 10
-            }
-          ]}>{runningCount}</Text>
-          <Text style={[styles.label, { color: '#34D399' }]}>RUNNING</Text>
-          <View style={styles.iconBox}>
-            <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="#34D399" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-              <Path d="M2 12h4l3-9 4 18 3-9h4" />
-            </Svg>
-          </View>
+    <View style={styles.grid}>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+        <GlassSurface variant="card" intensity={50} style={styles.card}>
+          <Text style={styles.valueText}>{runningCount}</Text>
+          <Text style={styles.labelText}>RUNNING</Text>
         </GlassSurface>
-      </View>
+      </TouchableOpacity>
 
-      {/* BLOCKED CARD (ORANGE) */}
-      <View style={styles.touchable}>
-        <GlassSurface variant="card" style={styles.card}>
-          <Text style={[
-            styles.number,
-            {
-              color: '#F59E0B',
-              textShadowColor: '#F59E0B',
-              textShadowOffset: { width: 0, height: 0 },
-              textShadowRadius: 10
-            }
-          ]}>{blockedCount}</Text>
-          <Text style={[styles.label, { color: '#F59E0B' }]}>BLOCKED</Text>
-          <View style={styles.iconBox}>
-            <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-              <Circle cx="12" cy="12" r="9" />
-              <Path d="M12 8v4M12 16h.01" />
-            </Svg>
-          </View>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+        <GlassSurface variant="card" intensity={50} style={styles.card}>
+          <Text style={styles.valueText}>{blockedCount}</Text>
+          <Text style={styles.labelText}>BLOCKED</Text>
         </GlassSurface>
-      </View>
+      </TouchableOpacity>
 
-      {/* PRS OPEN CARD (CYAN) */}
-      <View style={styles.touchable}>
-        <GlassSurface variant="card" style={styles.card}>
-          <Text style={[
-            styles.number,
-            {
-              color: '#38BDF8',
-              textShadowColor: '#38BDF8',
-              textShadowOffset: { width: 0, height: 0 },
-              textShadowRadius: 10
-            }
-          ]}>{prsCount}</Text>
-          <Text style={[styles.label, { color: '#38BDF8' }]}>PRS OPEN</Text>
-          <View style={styles.iconBox}>
-            <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="#38BDF8" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-              <Path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <Path d="M14 2v6h6" />
-              <Path d="M16 13H8M16 17H8M10 9H8" />
-            </Svg>
-          </View>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+        <GlassSurface variant="card" intensity={50} style={styles.card}>
+          <Text style={styles.valueText}>{prsOpenCount}</Text>
+          <Text style={styles.labelText}>PRS OPEN</Text>
         </GlassSurface>
-      </View>
+      </TouchableOpacity>
 
-      {/* NEEDS YOU CARD (PURPLE) */}
-      <View style={styles.touchable}>
-        <GlassSurface variant="card" style={styles.card}>
-          <Text style={[
-            styles.number,
-            {
-              color: '#A855F7',
-              textShadowColor: '#A855F7',
-              textShadowOffset: { width: 0, height: 0 },
-              textShadowRadius: 10
-            }
-          ]}>{needsYouCount}</Text>
-          <Text style={[styles.label, { color: '#A855F7' }]}>NEEDS YOU</Text>
-          <View style={styles.iconBox}>
-            <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="#A855F7" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-              <Path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-              <Circle cx="12" cy="7" r="4" />
-            </Svg>
-          </View>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+        <GlassSurface variant="card" intensity={50} style={styles.card}>
+          <Text style={styles.valueText}>{needsYouCount}</Text>
+          <Text style={styles.labelText}>NEEDS YOU</Text>
         </GlassSurface>
-      </View>
+      </TouchableOpacity>
     </View>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  container: {
+  grid: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 8,
-    marginVertical: 12
+    flexWrap: 'wrap',
+    gap: 12,
+    justifyContent: 'space-between'
   },
-  touchable: {
-    flex: 1
+  cardTouch: {
+    width: '48%',
+    marginBottom: 8
   },
   card: {
-    paddingVertical: 16,
-    paddingHorizontal: 2,
-    minHeight: 108,
+    paddingVertical: 18,
+    paddingHorizontal: 12,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 18
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    borderWidth: 1
   },
-  number: {
+  valueText: {
     fontFamily: 'monospace',
     fontSize: 26,
     fontWeight: 'bold',
-    textAlign: 'center',
-    alignSelf: 'center',
-    marginBottom: 2
+    color: '#FFFFFF',
+    marginBottom: 4
   },
-  label: {
+  labelText: {
     fontFamily: 'monospace',
-    fontSize: 8.5,
+    fontSize: 10,
     fontWeight: 'bold',
-    letterSpacing: 0.8,
-    textAlign: 'center',
-    alignSelf: 'center',
-    marginBottom: 6
-  },
-  iconBox: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    alignSelf: 'center'
+    color: 'rgba(255, 255, 255, 0.65)',
+    letterSpacing: 1.2
   }
 });

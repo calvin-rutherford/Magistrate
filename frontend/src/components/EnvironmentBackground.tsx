@@ -1,81 +1,56 @@
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Animated, ImageBackground, Platform } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { getEnvironmentTheme, EnvironmentTheme, getCurrentTimePeriod } from '../services/environmentTheme';
+import React from 'react';
+import { View, StyleSheet, ImageBackground, PanResponder } from 'react-native';
+import { getEnvironmentTheme } from '../services/environmentTheme';
+import { BottomControls } from './BottomControls';
+import { useRouter, usePathname } from 'expo-router';
 
 interface EnvironmentBackgroundProps {
   children: React.ReactNode;
 }
 
-export const EnvironmentBackground: React.FC<EnvironmentBackgroundProps> = ({ children }) => {
-  const [theme, setTheme] = useState<EnvironmentTheme>(getEnvironmentTheme());
-  const [imgError, setImgError] = useState<boolean>(false);
-  const fadeAnim = useState(() => new Animated.Value(1))[0];
+export function EnvironmentBackground({ children }: EnvironmentBackgroundProps) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const theme = getEnvironmentTheme();
 
-  const bgImageUri = theme.sceneImageUri || 'https://images.unsplash.com/photo-1519681393784-d120267933ba?q=80&w=1600&auto=format&fit=crop';
-
-  useEffect(() => {
-    const updateTheme = () => {
-      const newTheme = getEnvironmentTheme(getCurrentTimePeriod());
-      Animated.sequence([
-        Animated.timing(fadeAnim, { toValue: 0.7, duration: 1000, useNativeDriver: true }),
-        Animated.timing(fadeAnim, { toValue: 1.0, duration: 1000, useNativeDriver: true })
-      ]).start();
-      setTheme(newTheme);
-    };
-
-    const interval = setInterval(updateTheme, 60000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const isWeb = Platform.OS === 'web';
+  // Right-Swipe Back Gesture Handler (Active on non-chat screens)
+  const panResponder = React.useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        return pathname !== '/chat' && gestureState.dx > 50 && Math.abs(gestureState.dy) < 40;
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        if (gestureState.dx > 60) {
+          router.back();
+        }
+      }
+    })
+  ).current;
 
   return (
-    <View style={styles.container}>
-      <Animated.View style={[
-        StyleSheet.absoluteFill,
-        { opacity: fadeAnim },
-        isWeb ? ({ filter: 'blur(1px)', WebkitFilter: 'blur(1px)', transform: [{ scale: 1.01 }] } as any) : null
-      ]}>
-        {!imgError ? (
-          <ImageBackground
-            source={{ uri: bgImageUri }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-            onError={() => setImgError(true)}
-          >
-            <LinearGradient
-              colors={theme.gradientColors}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={[StyleSheet.absoluteFill, { opacity: 0.15 }]}
-            />
-            <View style={[styles.overlay, { backgroundColor: 'rgba(10, 16, 26, 0.12)' }]} />
-          </ImageBackground>
-        ) : (
-          <LinearGradient
-            colors={theme.gradientColors}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={StyleSheet.absoluteFill}
-          />
-        )}
-      </Animated.View>
-      <View style={styles.content}>{children}</View>
+    <View style={styles.container} {...panResponder.panHandlers}>
+      <ImageBackground
+        source={{ uri: theme.sceneImageUri }}
+        style={styles.bgImage}
+        resizeMode="cover"
+      >
+        <View style={styles.darkDimOverlay} />
+        <View style={styles.contentArea}>
+          {children}
+        </View>
+
+        {pathname !== '/chat' ? <BottomControls /> : null}
+      </ImageBackground>
     </View>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0D1322'
+  container: { flex: 1 },
+  bgImage: { flex: 1, width: '100%', height: '100%' },
+  darkDimOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(10, 15, 26, 0.45)'
   },
-  overlay: {
-    ...StyleSheet.absoluteFill
-  },
-  content: {
-    flex: 1,
-    zIndex: 2
-  }
+  contentArea: { flex: 1 }
 });

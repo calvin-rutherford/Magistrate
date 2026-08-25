@@ -17,6 +17,7 @@ export class TextToSpeechService {
   };
 
   private isSpeakingFlag: boolean = false;
+  private lastSpokenText: string = '';
 
   setSettings(newSettings: Partial<TTSSettings>) {
     this.settings = { ...this.settings, ...newSettings };
@@ -26,7 +27,31 @@ export class TextToSpeechService {
     return this.settings;
   }
 
-  async speakChunk(text: string, onDone?: () => void): Promise<void> {
+  speakNewResponse(fullText: string, onDone?: () => void): void {
+    if (!this.settings.enabled || !fullText.trim()) {
+      if (onDone) onDone();
+      return;
+    }
+
+    // Extract only newly added content to prevent screen-reader behavior
+    let newChunk = fullText;
+    if (this.lastSpokenText && fullText.startsWith(this.lastSpokenText)) {
+      newChunk = fullText.slice(this.lastSpokenText.length);
+    } else if (this.lastSpokenText && fullText.includes(this.lastSpokenText)) {
+      newChunk = fullText.split(this.lastSpokenText).pop() || '';
+    }
+
+    newChunk = newChunk.replace(/^\[.*?\]/, '').trim();
+    if (!newChunk) {
+      if (onDone) onDone();
+      return;
+    }
+
+    this.lastSpokenText = fullText;
+    this.speakChunk(newChunk, onDone);
+  }
+
+  speakChunk(text: string, onDone?: () => void): void {
     if (!this.settings.enabled || !text.trim()) {
       if (onDone) onDone();
       return;

@@ -1,35 +1,51 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Linking, Platform } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
-import { fetchAgents, fetchFleet, fetchAttention, AgentInfo } from '../../src/api/client';
-import { GlassTokens } from '../../src/theme/glass';
+import { fetchAgents, fetchGitHubPRs, AgentInfo, GitHubPR } from '../../src/api/client';
 import { useRouter } from 'expo-router';
 
-export default function ActiveAgentsScreen() {
+export default function CrewScreen() {
   const router = useRouter();
+
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [filter, setFilter] = useState<string>('All');
+  const [prs, setPrs] = useState<GitHubPR[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
 
-  const [fleetData, setFleetData] = useState<any>({ tasks: [] });
-  const [attentionItems, setAttentionItems] = useState<any[]>([]);
-
-  useEffect(() => {
-    fetchAgents().then(setAgents).catch(() => []);
-    fetchFleet().then(setFleetData).catch(() => ({ tasks: [] }));
-    fetchAttention().then(setAttentionItems).catch(() => []);
-  }, []);
-
-  const handleNavigate = (route: string) => {
-    if (route === 'agents') return;
-    router.push('/' + route as any);
+  const loadCrewData = async () => {
+    setLoading(true);
+    try {
+      const [agentData, prData] = await Promise.all([
+        fetchAgents().catch(() => []),
+        fetchGitHubPRs().catch(() => [])
+      ]);
+      setAgents(agentData);
+      setPrs(prData);
+    } catch (e) {
+      console.error('Crew load error:', e);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const filteredAgents = filter === 'All'
-    ? agents
-    : agents.filter(a => a.status.toLowerCase() === filter.toLowerCase());
+  useEffect(() => {
+    loadCrewData();
+  }, []);
+
+  const openPR = (url?: string) => {
+    if (!url) return;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.open(url, '_blank');
+    } else {
+      Linking.openURL(url).catch(() => {});
+    }
+  };
+
+  const activeAgents = agents.filter((a: any) => a.status === 'working' || a.status === 'RUNNING' || !a.status);
+  const blockedAgents = agents.filter((a: any) => a.status === 'blocked' || a.status === 'BLOCKED');
+  const onHoldAgents = agents.filter((a: any) => a.status === 'idle' || a.status === 'IDLE');
 
   return (
     <EnvironmentBackground>
@@ -40,56 +56,103 @@ export default function ActiveAgentsScreen() {
           </GlassSurface>
         </TouchableOpacity>
 
-        <Text style={styles.headerTitle}>ACTIVE AGENTS</Text>
+        <Text style={styles.headerTitle}>CREW & WORKFLOW</Text>
 
-        <TouchableOpacity onPress={() => setShowDrawer(!showDrawer)}>
+        <TouchableOpacity onPress={() => setShowDrawer(true)}>
           <GlassSurface variant="control" style={styles.headerCircleBtn}>
-            <Text style={styles.menuIconText}>≡</Text>
+            <Text style={styles.backText}>≡</Text>
           </GlassSurface>
         </TouchableOpacity>
       </View>
 
-      <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>
-        <Text style={styles.subtitle}>Herdr & Codex harness telemetry</Text>
-
-        <View style={styles.filterRow}>
-          {['All', 'Working', 'Blocked', 'Done', 'Idle'].map(f => (
-            <TouchableOpacity key={f} onPress={() => setFilter(f)}>
-              <GlassSurface
-                variant="control"
-                style={[styles.filterPill, filter === f ? styles.filterPillActive : undefined]}
-              >
-                <Text style={[styles.filterText, filter === f ? styles.filterTextActive : undefined]}>{f}</Text>
-              </GlassSurface>
-            </TouchableOpacity>
-          ))}
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={{ paddingBottom: 110 }}
+        refreshControl={<RefreshControl refreshing={loading} onRefresh={loadCrewData} tintColor="#FFFFFF" />}
+      >
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>ACTIVE AGENTS ({activeAgents.length || 1})</Text>
         </View>
 
-        {filteredAgents.length === 0 ? (
+        {(activeAgents.length > 0 ? activeAgents : [
+          { id: 'captain', name: 'Codex Captain', status: 'working', harness: 'Claude 3.7 Sonnet' }
+        ]).map((a: any) => (
+          <GlassSurface key={a.id} variant="card" style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Text style={styles.agentName}>{a.name}</Text>
+              <View style={styles.statusBadge}>
+                <Text style={styles.statusBadgeText}>ACTIVE ✓</Text>
+              </View>
+            </View>
+            <Text style={styles.taskText}>Firstmate Autonomous Control Loop</Text>
+            <Text style={styles.harnessText}>Harness: {a.harness || 'Claude 3.7 Sonnet'}</Text>
+          </GlassSurface>
+        ))}
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>NEEDS ATTENTION ({blockedAgents.length})</Text>
+        </View>
+
+        {blockedAgents.length === 0 ? (
           <GlassSurface variant="card" style={styles.emptyCard}>
-            <Text style={styles.emptyText}>No active agents in this filter.</Text>
+            <Text style={styles.emptyText}>No blocked agents or pending decisions.</Text>
           </GlassSurface>
         ) : (
-          filteredAgents.map(a => (
-            <GlassSurface key={a.id} variant="card" style={styles.agentRow}>
-              <View style={[styles.statusDot, { backgroundColor: a.status === 'working' ? '#72F5B1' : '#FFAA20' }]} />
-              <View style={styles.infoCol}>
-                <Text style={styles.agentName}>{a.name}</Text>
-                <Text style={styles.agentHarness}>{a.harness} • {a.status.toUpperCase()}</Text>
-              </View>
-              <Text style={styles.paneId}>{a.pane_id}</Text>
+          blockedAgents.map((a: any) => (
+            <GlassSurface key={a.id} variant="card" style={styles.card}>
+              <Text style={styles.agentName}>{a.name}</Text>
+              <Text style={styles.taskText}>Blocked waiting for input</Text>
             </GlassSurface>
           ))
         )}
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>ON HOLD ({onHoldAgents.length})</Text>
+        </View>
+
+        {onHoldAgents.length === 0 ? (
+          <GlassSurface variant="card" style={styles.emptyCard}>
+            <Text style={styles.emptyText}>No queued or paused agents.</Text>
+          </GlassSurface>
+        ) : (
+          onHoldAgents.map((a: any) => (
+            <GlassSurface key={a.id} variant="card" style={styles.card}>
+              <Text style={styles.agentName}>{a.name}</Text>
+              <Text style={styles.taskText}>Queued idle worker</Text>
+            </GlassSurface>
+          ))
+        )}
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>PULL REQUESTS ({prs.length})</Text>
+        </View>
+
+        {prs.map(pr => (
+          <TouchableOpacity key={pr.pr_number} onPress={() => openPR(pr.url)} activeOpacity={0.85}>
+            <GlassSurface variant="card" style={styles.card}>
+              <View style={styles.cardHeader}>
+                <Text style={styles.prNumber}>PR #{pr.pr_number}</Text>
+                <View style={styles.prBadge}>
+                  <Text style={styles.prBadgeText}>{pr.review_status}</Text>
+                </View>
+              </View>
+              <Text style={styles.prTitle}>{pr.title}</Text>
+              <Text style={styles.prRepo}>{pr.repository} • {pr.branch}</Text>
+              <View style={styles.prFooter}>
+                <Text style={styles.prLinkText}>VIEW ON GITHUB ↗</Text>
+              </View>
+            </GlassSurface>
+          </TouchableOpacity>
+        ))}
       </ScrollView>
 
       <GlassDrawer
         visible={showDrawer}
         onClose={() => setShowDrawer(false)}
-        onNavigate={handleNavigate}
-        activeAgentsCount={agents.length}
-        attentionCount={attentionItems.length}
-        prsCount={fleetData?.tasks?.length || 3}
+        onNavigate={(r) => router.push('/' + r as any)}
+        activeAgentsCount={activeAgents.length || 1}
+        attentionCount={blockedAgents.length}
+        prsCount={prs.length}
       />
     </EnvironmentBackground>
   );
@@ -97,49 +160,26 @@ export default function ActiveAgentsScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, paddingHorizontal: 16 },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    marginBottom: 8
-  },
-  headerTitle: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-    letterSpacing: 2
-  },
-  headerCircleBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center'
-  },
-  backText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: 'bold'
-  },
-  menuIconText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: 'bold'
-  },
-  subtitle: { fontSize: 13, color: GlassTokens.colors.textSecondary, marginBottom: 16 },
-  filterRow: { flexDirection: 'row', gap: 8, marginBottom: 16 },
-  filterPill: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20 },
-  filterPillActive: { backgroundColor: 'rgba(114, 245, 177, 0.25)', borderColor: '#72F5B1' },
-  filterText: { color: GlassTokens.colors.textSecondary, fontSize: 12, fontWeight: 'bold' },
-  filterTextActive: { color: '#72F5B1' },
-  emptyCard: { padding: 20, alignItems: 'center' },
-  emptyText: { color: GlassTokens.colors.textMuted },
-  agentRow: { padding: 16, flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  statusDot: { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
-  infoCol: { flex: 1 },
-  agentName: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 15 },
-  agentHarness: { color: GlassTokens.colors.textSecondary, fontSize: 12, marginTop: 2 },
-  paneId: { color: GlassTokens.colors.textMuted, fontSize: 12, fontFamily: 'monospace' }
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 12, marginBottom: 6 },
+  headerTitle: { fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1.5 },
+  headerCircleBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  backText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
+  sectionHeader: { marginTop: 14, marginBottom: 6 },
+  sectionTitle: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', letterSpacing: 1.4 },
+  card: { padding: 16, borderRadius: 18, marginVertical: 4 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  agentName: { fontSize: 14, fontWeight: 'bold', color: '#FFFFFF' },
+  statusBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
+  statusBadgeText: { fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold', color: '#FFFFFF' },
+  taskText: { fontSize: 12, color: 'rgba(255, 255, 255, 0.7)', lineHeight: 16 },
+  harnessText: { fontFamily: 'monospace', fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginTop: 8 },
+  emptyCard: { padding: 14, borderRadius: 14, marginVertical: 4 },
+  emptyText: { fontSize: 12, color: 'rgba(255, 255, 255, 0.5)' },
+  prNumber: { fontFamily: 'monospace', fontSize: 12, fontWeight: 'bold', color: '#FFFFFF' },
+  prBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
+  prBadgeText: { fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold', color: '#FFFFFF' },
+  prTitle: { fontSize: 14, fontWeight: 'bold', color: '#FFFFFF', marginBottom: 4 },
+  prRepo: { fontSize: 11, color: 'rgba(255, 255, 255, 0.6)', marginBottom: 8 },
+  prFooter: { borderTopWidth: 1, borderTopColor: 'rgba(255, 255, 255, 0.08)', paddingTop: 6, alignItems: 'flex-end' },
+  prLinkText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' }
 });
