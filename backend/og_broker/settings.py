@@ -99,15 +99,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Channels configuration
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {
-            "hosts": [os.getenv("CHANNEL_LAYER_REDIS_URL", "redis://localhost:6379/1")],
-        },
+        "BACKEND": "channels.layers.InMemoryChannelLayer"
     },
 }
 
 # Celery Configuration Options
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "amqp://omnigent:password@localhost:5672//")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "amqp://magistrate:password@localhost:5672//")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'

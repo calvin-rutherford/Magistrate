@@ -1,24 +1,17 @@
-# 🌌 Omnigent Vision
+# Vision: The AI-Native Government
 
-## The Core Philosophy
-Omnigent exists to cure context chaos. Modern developers juggle dozens of disconnected AI chat windows, losing track of prompts, context, and project history. We believe developers shouldn't just *chat* with AI—they should **command a fleet**.
+We are moving past the era of raw "agents" and "chatbots."
 
-Omnigent gives developers a calm, inspectable, terminal-based dashboard to monitor, steer, and manage a team of AI workers.
+When building systems that scale beyond a few toy scripts, simply dumping 50 LLM workers into a repository creates chaos. An organization needs structure, memory, accountability, and law.
 
-### 1. Sessions are Cheap
-Creating a new agent should feel as frictionless as opening a new tab. Forking agents and running concurrent specialized agents (e.g., "Frontend Analyzer" and "Backend Tester") is highly encouraged.
+Magistrate treats AI engineering not as a scripting problem, but as a **governance problem**.
 
-### 2. The Broker is the Source of Truth
-Workers do **not** blindly mutate global state. Instead:
-- Workers propose updates.
-- The Broker commits them.
-- All actions are recorded in an append-only event log.
+## Do not merely spawn agents. Build institutions.
 
-### 3. Artifacts are First-Class Citizens
-Outputs aren't lost in a scrolling chat window. Code files, research findings, and architecture plans are stored explicitly as "Artifacts" that can be reviewed, committed, or rejected.
+Magistrate provides the constitutional framework above the workers. It establishes:
+- **Executive Branch**: Coordinates fleets of agents working on complex objectives.
+- **Legislative Branch**: Ensures that standard operating procedures (Laws and Policies) are recorded permanently and enforced.
+- **Judicial Branch**: Protects the user from unsafe operations by mandating injunctions and approval gates.
+- **Independent Oversight**: The Census Bureau and Intelligence Community constantly measure the civilization of agents to prevent technical debt and corruption.
 
-### 4. A Calm "Mission Control" Interface
-Inspired by `htop`, `tmux`, and `k9s`. No flashing banners, no chaotic UI. Just a focused terminal environment showing you exactly what your fleet is doing.
-
-## Future Horizons
-While the MVP runs local processes via Celery, the ultimate vision for Omnigent is **One Agent = One Sandboxed Container**. In the future, each AI worker will execute inside its own isolated Docker or Podman container with full terminal access, safely separated from the host machine while reporting back to the Broker.
+You are the President. Magistrate is your Government.

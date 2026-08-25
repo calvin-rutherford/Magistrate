@@ -1,4 +1,4 @@
-# 🌌 Omnigent 🚀
+# 🌌 Magistrate 🚀
 ```text
   ____                    _                    _   
  / __ \                  (_)                  | |  
@@ -18,13 +18,13 @@
 
 ---
 
-## 🤔 Why Omnigent?
+## 🤔 Why Magistrate?
 
 Are you tired of juggling 15 different browser tabs just to chat with your AI coding assistants? Do you lose track of context, forget which prompt you pasted where, and feel the chaos taking over? 🌪️
 
-**Welcome to Omnigent.** (Formerly known as Agent Top).
+**Welcome to Magistrate.** (Formerly known as Agent Top).
 
-Omnigent gives you a calm, inspectable, `htop`-style terminal dashboard to monitor, steer, and manage multiple AI sessions simultaneously. You don't just chat anymore; you **command a fleet**. 🧑‍✈️
+Magistrate gives you a calm, inspectable, `htop`-style terminal dashboard to monitor, steer, and manage multiple AI sessions simultaneously. You don't just chat anymore; you **command a fleet**. 🧑‍✈️
 
 ---
 
@@ -60,12 +60,12 @@ graph TD
 
 ## 🚀 Quick Start (VPS Deployment)
 
-Omnigent uses a production-grade backend (Django, PostgreSQL, RabbitMQ, Redis). The best way to run it is on a dedicated Linux VPS or a robust local dev machine with Docker! 🐳
+Magistrate uses a production-grade backend (Django, PostgreSQL, RabbitMQ, Redis). The best way to run it is on a dedicated Linux VPS or a robust local dev machine with Docker! 🐳
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/omnigent.git
-   cd omnigent
+   git clone https://github.com/yourusername/magistrate.git
+   cd magistrate
    ```
 
 2. **Run the magic setup script! 🪄**
@@ -85,7 +85,7 @@ Omnigent uses a production-grade backend (Django, PostgreSQL, RabbitMQ, Redis). 
 4. **Launch the TUI Dashboard 🎛️:**
    ```bash
    source venv/bin/activate
-   omni top
+   magistrate top
    ```
 
 Now, just type `"Analyze the authentication system and create a test plan"` into the bottom bar and watch the Broker spawn an agent to do it for you!

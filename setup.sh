@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Starting Omnigent VPS Setup..."
+echo "Starting Magistrate VPS Setup..."
 
 # Ensure python3-venv, docker, and docker-compose are installed
 if ! command -v docker &> /dev/null; then
@@ -34,7 +34,7 @@ if [ ! -f .env ]; then
     echo "Created .env from .env.example. PLEASE EDIT .env TO ADD YOUR API KEY."
 fi
 
-echo "Building and Starting the entire Omnigent Engine in Docker..."
+echo "Building and Starting the entire Magistrate Engine in Docker..."
 $DOCKER_COMPOSE_CMD up --build -d
 
 echo "Waiting for the Broker to be ready..."
@@ -49,5 +49,5 @@ echo "The Database, Message Queue, WebSockets Server, and AI Workers"
 echo "are now all running silently in the background via Docker!"
 echo ""
 echo "To launch your fleet dashboard, simply run:"
-echo "  source venv/bin/activate && omni top"
+echo "  source venv/bin/activate && magistrate top"
 echo "--------------------------------------------------------"

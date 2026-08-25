@@ -4,13 +4,13 @@ import os
 
 @click.group()
 def cli():
-    """Omnigent (Agent Top) CLI tool for managing AI Agents."""
+    """Magistrate (Agent Top) CLI tool for managing AI Agents."""
     pass
 
 @cli.command()
 def start():
-    """Start the Omnigent backend services (Docker compose & Django)."""
-    click.echo("Starting Omnigent Backend Infrastructure...")
+    """Start the Magistrate backend services (Docker compose & Django)."""
+    click.echo("Starting Magistrate Backend Infrastructure...")
     subprocess.run(["docker-compose", "up", "-d"], cwd=os.path.join(os.path.dirname(__file__), '..'))
     click.echo("Services started. Make sure to run Django migrations if you haven't yet.")
     # Here we would normally start daphne and celery worker processes
@@ -18,7 +18,7 @@ def start():
 
 @cli.command()
 def top():
-    """Launch the Omnigent Terminal UI."""
+    """Launch the Magistrate Terminal UI."""
     from .repl import main
     main()
 

@@ -1,53 +1,51 @@
-# 🏗 Omnigent Architecture
+# Magistrate Architecture
 
-Omnigent is designed around an event-driven, broker-worker model. It utilizes a production-grade Python stack to ensure stability and scalability.
+Magistrate is not a chatbot or a generic agent framework. It is an **AI-native engineering government**. 
 
-## High-Level Diagram
+## The Metaphor
+
+```text
+User = President / Commander in Chief
+Magistrate = Government / Strategic Command State
+Broker = Executive Office
+Agent fleets = Naval fleets / departments / field offices
+Individual agents = Civil servants, engineers, inspectors
+```
+
+## System Architecture
 
 ```mermaid
 graph TD
-    User([User]) -->|Natural Language / !Commands| TUI[Textual TUI / omni CLI]
-    TUI <-->|WebSockets (Channels)| Django[Django Backend / Broker]
+    President([President/User]) -->|Directives| ExecOffice[Executive Office]
     
-    subgraph "Broker Node"
-        Django <--> PG[(PostgreSQL)]
-        Django -->|Task Dispatch| RMQ[RabbitMQ Message Broker]
-        Django <--> BrokerAgent[Broker Agent LLM]
+    subgraph "The Government"
+        ExecOffice -->|Spawns| FleetCommand[Fleet Command]
+        ExecOffice -->|Submits| Congress[Legislative Branch]
+        ExecOffice -->|Escalates| Courts[Judicial Branch]
     end
     
-    subgraph "Worker Fleet"
-        RMQ --> Celery1[Celery Worker: Research]
-        RMQ --> Celery2[Celery Worker: Coding]
+    subgraph "Operations Layer"
+        FleetCommand -->|Deploys| Ship1[Ship: Backend]
+        FleetCommand -->|Deploys| Ship2[Ship: Frontend]
+        
+        Ship1 -->|Runs| Crew1[Crew Agents]
+        Ship2 -->|Runs| Crew2[Crew Agents]
     end
     
-    BrokerAgent --> LiteLLM[Universal Provider Layer]
-    Celery1 --> LiteLLM
-    Celery2 --> LiteLLM
-    
-    LiteLLM --> APIs((Gemini / OpenAI / Anthropic / Local))
+    Crew1 -.->|Approval Request| Courts
+    Courts -.->|Injunction or Approval| Crew1
 ```
 
 ## Core Abstractions
 
-### 1. The Broker Agent
-The Broker isn't just a router—it's an LLM equipped with Function Calling. When a user types a command in the TUI, the Broker interprets the intent. If a complex task is requested, the Broker autonomously invokes the `omni_spawn_agent` tool to dispatch a Celery worker. The Broker is also explicitly prompted to converse naturally when you are just chatting.
+### 1. The Executive Branch
+Powered by a Celery worker pool and Gemini, the Executive Office interprets directives from the President and issues Executive Orders. It manages the lifecycle of Fleets and Ships.
 
-### 1.5. Native TUI & Shell Passthrough
-While the Broker and workers run safely inside a Docker-compose environment, the TUI is a thin, native client on the host machine. By prefixing commands with `!`, the user can execute arbitrary shell commands (e.g., `!git status`) natively on the host machine, seeing the output directly in the TUI without disrupting the LLM context.
+### 2. The Legislative Branch
+Creates and stores persistent `Laws` and `Policies` in the PostgreSQL database. These act as hard constraints and system prompts for all spawned agents.
 
-### 2. Append-Only Event Log
-Every action is recorded in the `EventLog` database table. 
-- `AgentCreated`
-- `TaskAssigned`
-- `ArtifactCreated`
-- `MessageSent`
-The entire project history can be reconstructed from these events.
+### 3. The Judicial Branch
+Controls the execution flow. When a Crew Agent requests to execute a bash command via the `execute_bash_in_sandbox` tool, the Judicial Service opens a `CourtCase`. The case remains blocked until a `Ruling` is issued (either by an automated Security Court or by the President).
 
-### 3. Persistent Agent Sessions
-Agents are represented as database rows (`Agent` model) with distinct statuses (`Running`, `Waiting`, `Complete`, `Error`). A Celery task represents the active execution thread of an Agent.
-
-### 4. Artifacts
-When an agent produces code or documentation, it generates an `Artifact` record with a status of `Proposed`. The Broker (or User) can then review and transition it to `Committed`.
-
-### 5. Universal Provider Layer
-Thanks to **LiteLLM**, Omnigent is model-agnostic. Workers and the Broker communicate with a universal provider interface, allowing users to swap between Gemini, OpenAI, Anthropic, or local Ollama models simply by changing the `.env` variable.
+### 4. Independent Oversight
+The `CensusBureau` and `IntelligenceCommunity` run background tasks to scrape the `EventLog`, calculate metrics, and provide Intelligence Briefs to the President.

@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+import asyncio
+import json
+import websockets
+from textual.app import App, ComposeResult
+from textual.widgets import Header, Footer, Log, Input, DataTable, Static
+from textual.containers import Horizontal, Vertical
+from textual import work
+
+class MagistrateDashboard(App):
+    """Magistrate Presidential Console Terminal Dashboard."""
+    
+    CSS = """
+    #left-panel {
+        width: 35%;
+        border: solid green;
+        padding: 1;
+    }
+    #right-panel {
+        width: 65%;
+        border: solid blue;
+        padding: 1;
+    }
+    Input {
+        dock: bottom;
+        margin: 1;
+    }
+    """
+
+    BINDINGS = [("q", "quit", "Quit Console")]
+
+    def __init__(self):
+        super().__init__()
+        self.ws = None
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal():
+            with Vertical(id="left-panel"):
+                yield Static("[b]Active Fleets & Injunctions[/b]\n")
+                yield DataTable(id="fleet-table")
+            with Vertical(id="right-panel"):
+                yield Static("[b]Presidential Secure Log[/b]")
+                yield Log(id="event-log", highlight=True)
+        yield Input(placeholder="Issue Presidential Directive...", id="command-input")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.add_columns("Fleet / Ship", "Status")
+        self.connect_to_broker()
+
+    @work(exclusive=True)
+    async def connect_to_broker(self) -> None:
+        event_log = self.query_one("#event-log", Log)
+        table = self.query_one(DataTable)
+        
+        uri = "ws://localhost:8001/ws/magistrate/"
+        try:
+            event_log.write_line("[bold green]System:[/bold green] Connecting to Magistrate Government Secure Line...")
+            async with websockets.connect(uri) as websocket:
+                self.ws = websocket
+                event_log.write_line("[bold green]System:[/bold green] Connected.")
+                while True:
+                    message = await websocket.recv()
+                    data = json.loads(message)
+                    
+                    if 'message' in data:
+                        msg = data['message']
+                        event_log.write_line(f"[cyan]Broker:[/cyan] {msg}")
+                        
+                        # Very simple heuristic to update the table for the simulation
+                        if "ExecutionRun" in msg and "Started" in msg:
+                            # Extract the run id
+                            parts = msg.split("[")
+                            if len(parts) > 1:
+                                run_id = parts[1].split("]")[0]
+                                table.add_row(f"Fleet-Run-{run_id}", "[green]Operational[/green]")
+                        
+        except Exception as e:
+            event_log.write_line(f"[bold red]Disconnected:[/bold red] {e}")
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        event_log = self.query_one("#event-log", Log)
+        if self.ws and event.value.strip():
+            raw_input = event.value.strip()
+            
+            # Text-Stream Wake Word Detection for iOS Dictation
+            wake_word = "october"
+            lower_input = raw_input.lower()
+            
+            if wake_word in lower_input:
+                # Strip the wake word and any leading/trailing punctuation/spaces
+                wake_idx = lower_input.find(wake_word)
+                cmd = raw_input[wake_idx + len(wake_word):].strip(" ,.!:-")
+                
+                if cmd:
+                    event_log.write_line(f"[yellow]President (Voice):[/yellow] {cmd}")
+                    await self.ws.send(json.dumps({'command': cmd}))
+                else:
+                    event_log.write_line("[yellow]October:[/yellow] Awaiting directive...")
+            else:
+                # Fallback to standard CLI entry
+                cmd = raw_input
+                event_log.write_line(f"[yellow]President:[/yellow] {cmd}")
+                await self.ws.send(json.dumps({'command': cmd}))
+                
+            event.input.value = ""
+
+if __name__ == "__main__":
+    app = MagistrateDashboard()
+    app.run()

@@ -1,7 +1,10 @@
 from django.contrib import admin
-from .models import Agent, Artifact, EventLog, Message
+from .models import UserPresident, Constitution, State, City, Department, Agency, CivilServantAgent
 
-admin.site.register(Agent)
-admin.site.register(Artifact)
-admin.site.register(EventLog)
-admin.site.register(Message)
+admin.site.register(UserPresident)
+admin.site.register(Constitution)
+admin.site.register(State)
+admin.site.register(City)
+admin.site.register(Department)
+admin.site.register(Agency)
+admin.site.register(CivilServantAgent)

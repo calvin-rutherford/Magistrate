@@ -1,0 +1,17 @@
+Django>=4.2
+djangorestframework
+psycopg2-binary
+redis
+celery
+pytest
+pytest-django
+libtmux
+requests
+channels
+daphne
+channels-redis
+websockets
+python-dotenv
+dj-database-url
+rich==13.7.1
+textual==0.76.0

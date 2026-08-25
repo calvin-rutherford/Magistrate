@@ -1,0 +1,105 @@
+import React from 'react';
+import { View, TouchableOpacity, StyleSheet } from 'react-native';
+import { Svg, Path } from 'react-native-svg';
+import { GlassSurface } from './GlassSurface';
+
+interface BottomControlsProps {
+  isRecording?: boolean;
+  onToggleChat: () => void;
+  onToggleVoice: () => void;
+  onToggleGesture: () => void;
+}
+
+export const BottomControls: React.FC<BottomControlsProps> = ({
+  isRecording = false,
+  onToggleChat,
+  onToggleVoice,
+  onToggleGesture
+}) => {
+  return (
+    <View style={styles.fixedOverlayContainer} pointerEvents="box-none">
+      <View style={styles.container}>
+        {/* CHAT WIREFRAME BUTTON */}
+        <TouchableOpacity onPress={onToggleChat} activeOpacity={0.8}>
+          <GlassSurface variant="control" style={styles.sideCircle}>
+            <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+              <Path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </Svg>
+          </GlassSurface>
+        </TouchableOpacity>
+
+        {/* MIC WIREFRAME BUTTON (NAVIGATES TO CHAT + STARTS VOICE RECORDING) */}
+        <TouchableOpacity onPress={onToggleVoice} activeOpacity={0.8}>
+          <View style={[styles.micOuterCircle, isRecording && styles.micRecordingActive]}>
+            <GlassSurface variant="control" style={styles.micInnerSurface}>
+              <Svg width={26} height={26} viewBox="0 0 24 24" fill="none" stroke="#72F5B1" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <Path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
+                <Path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <Path d="M12 19v3" />
+                <Path d="M8 22h8" />
+              </Svg>
+            </GlassSurface>
+          </View>
+        </TouchableOpacity>
+
+        {/* GESTURE WIREFRAME BUTTON */}
+        <TouchableOpacity onPress={onToggleGesture} activeOpacity={0.8}>
+          <GlassSurface variant="control" style={styles.sideCircle}>
+            <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+              <Path d="M18 11V6a2 2 0 0 0-4 0v5" />
+              <Path d="M14 10V4a2 2 0 0 0-4 0v6" />
+              <Path d="M10 10.5V6a2 2 0 0 0-4 0v9" />
+              <Path d="M18 11a2 2 0 0 1 4 0v3c0 5-4 9-9 9h-1c-5 0-9-4-9-9v-2a2 2 0 0 1 4 0" />
+            </Svg>
+          </GlassSurface>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  fixedOverlayContainer: {
+    position: 'absolute',
+    bottom: 20,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+    alignItems: 'center'
+  },
+  container: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    paddingHorizontal: 28
+  },
+  sideCircle: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
+  micOuterCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    borderWidth: 2,
+    borderColor: '#72F5B1',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(114, 245, 177, 0.08)'
+  },
+  micRecordingActive: {
+    backgroundColor: 'rgba(114, 245, 177, 0.25)',
+    borderColor: '#72F5B1'
+  },
+  micInnerSurface: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    justifyContent: 'center',
+    alignItems: 'center'
+  }
+});

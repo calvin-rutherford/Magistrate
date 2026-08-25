@@ -1,0 +1,63 @@
+import pytest
+import asyncio
+from fastapi.testclient import TestClient
+from app.main import app
+from app.db import get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
+from app.providers.github import GitHubProviderAdapter
+from app.github_service import github_service
+
+client = TestClient(app)
+HEADERS = {'X-Magistrate-Token': 'magistrate-device-token-12345'}
+
+def test_health():
+    res = client.get('/api/v1/health', headers=HEADERS)
+    assert res.status_code == 200
+    assert res.json()['status'] == 'healthy'
+
+def test_account_profile_crud():
+    # Get profile
+    res = client.get('/api/v1/account/profile', headers=HEADERS)
+    assert res.status_code == 200
+    prof = res.json()
+    assert prof['user_id'] == 'default_user'
+
+    # Update profile
+    res_up = client.post('/api/v1/account/profile', data={'name': 'Spectre Admin', 'email': 'admin@magistrate.io'}, headers=HEADERS)
+    assert res_up.status_code == 200
+    assert res_up.json()['name'] == 'Spectre Admin'
+
+def test_oauth_providers():
+    res = client.get('/api/v1/auth/providers', headers=HEADERS)
+    assert res.status_code == 200
+    provs = res.json()
+    assert len(provs) >= 4
+    p_names = [p['provider'] for p in provs]
+    assert 'github' in p_names
+    assert 'twitter' in p_names
+
+    # Connect GitHub provider
+    res_conn = client.get('/api/v1/auth/github/connect', headers=HEADERS)
+    assert res_conn.status_code == 200
+    assert res_conn.json()['status'] == 'connected'
+
+    # Disconnect GitHub provider
+    res_dis = client.post('/api/v1/auth/github/disconnect', headers=HEADERS)
+    assert res_dis.status_code == 200
+    assert res_dis.json()['status'] == 'disconnected'
+
+def test_live_github_prs():
+    res = client.get('/api/v1/github/pulls', headers=HEADERS)
+    assert res.status_code == 200
+    prs = res.json()
+    assert isinstance(prs, list)
+    if len(prs) > 0:
+        assert 'title' in prs[0]
+        assert 'repository' in prs[0]
+        assert 'url' in prs[0]
+
+def test_voice_transcribe():
+    res = client.post('/api/v1/voice/transcribe', data={'source': 'iphone'}, headers=HEADERS)
+    assert res.status_code == 200
+    trans = res.json()
+    assert 'text' in trans
+    assert len(trans['text']) > 0

@@ -1,71 +1,65 @@
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 
-class BrokerConsumer(AsyncWebsocketConsumer):
+class MagistrateConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        self.room_group_name = 'broker_events'
+        self.group_name = 'magistrate_events'
 
         # Join room group
         await self.channel_layer.group_add(
-            self.room_group_name,
+            self.group_name,
             self.channel_name
         )
 
         await self.accept()
-        await self.send(text_data=json.dumps({
-            'type': 'system',
-            'message': 'Connected to Omnigent Broker.'
-        }))
 
     async def disconnect(self, close_code):
         # Leave room group
         await self.channel_layer.group_discard(
-            self.room_group_name,
+            self.group_name,
             self.channel_name
         )
 
-    # Receive message from WebSocket
+    # Receive message from WebSocket (from the President/Terminal)
     async def receive(self, text_data):
-        text_data_json = json.loads(text_data)
+        data = json.loads(text_data)
+        command = data.get('command')
         
-        # Check if it's an approval response
-        if text_data_json.get('type') == 'approval_response':
-            import redis
-            from django.conf import settings
-            r = redis.Redis.from_url(settings.CELERY_RESULT_BACKEND)
-            approval_id = text_data_json.get('id')
-            approved = text_data_json.get('approved')
-            status = "approved" if approved else "denied"
-            r.set(f"approval:{approval_id}", status)
+        if not command:
             return
 
-        message = text_data_json.get('message', '')
-        stateful = text_data_json.get('stateful', True)
+        from channels.db import database_sync_to_async
+        from .services.executive import ExecutiveService
+        from .models import CivilServantAgent
 
-        # Echo back the user's message immediately so the UI feels responsive
-        await self.send(text_data=json.dumps({
-            'type': 'event',
-            'message': f"You > {message}"
-        }))
+        @database_sync_to_async
+        def dispatch_fleet():
+            # Get or create a default Captain for MVP
+            captain, _ = CivilServantAgent.objects.get_or_create(
+                name="AutoCaptain",
+                defaults={'clearance_level': 5, 'rank': 'Senior'}
+            )
+            ExecutiveService.launch_fleet(
+                fleet_name=f"Fleet-{command[:10].strip()}",
+                objective=command,
+                captain=captain
+            )
 
-        # Dispatch to Celery to have the BrokerAgent (LLM) process it asynchronously
-        from .tasks import process_broker_message
-        process_broker_message.delay(message, stateful=stateful)
+        try:
+            await dispatch_fleet()
+            await self.send(text_data=json.dumps({
+                'message': f"Fleet Dispatched: {command}"
+            }))
+        except Exception as e:
+            await self.send(text_data=json.dumps({
+                'message': f"Error Dispatching Fleet: {str(e)}"
+            }))
 
-    # Receive message from room group
-    async def broker_event(self, event):
+    # Receive message from room group (from Firstmate/Judicial)
+    async def system_event(self, event):
         message = event['message']
 
         # Send message to WebSocket
         await self.send(text_data=json.dumps({
-            'type': 'event',
             'message': message
-        }))
-        
-    async def approval_request(self, event):
-        # Send approval request to WebSocket
-        await self.send(text_data=json.dumps({
-            'type': 'approval_request',
-            'approval_id': event['approval_id'],
-            'command': event['command']
         }))

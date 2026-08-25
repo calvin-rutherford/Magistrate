@@ -1,25 +1,25 @@
-# Omnigent Changelog
+# Magistrate Changelog
 
-## [Unreleased] - Command Plane Architecture Pivot
-
-### Planned Architecture Changes
-- **Human-in-the-Loop Approvals**: Worker agents that request dangerous actions (e.g., executing bash commands) will send an approval request to a background "Approval Queue" in the REPL. This prevents blocking the main interface, allowing the user to continue working and approve the request asynchronously.
-- **Persistent Sandboxing**: Worker execution will be decoupled from the core orchestration engine. Workers will operate inside isolated, persistent sandboxes (e.g., long-lived Docker containers). Persistence ensures agents do not have to repeatedly reinstall dependencies (like `npm` or `pip`) across sessions.
-- **Statefulness Controls**: The Broker's conversation memory will be fully controllable via two methods:
-  - A global toggle in the UI/settings to switch between stateful and stateless modes.
-  - On-the-fly slash commands (e.g., `/stateless`) to issue one-off commands without pulling historical context.
-- **Fleet Supervision**: New REPL commands (e.g., `!fleet`) to view active agents, queue depth, and resource usage.
-- **Graceful Lifecycle Controls**: Implementation of `!pause` and `!kill` signals backed by Redis flags, ensuring workers safely wind down without leaving orphaned processes.
-
-## [Current Version] - Base Infrastructure Pivot
+## [Unreleased] - The Magistrate Government Pivot
 
 ### Added
-- **Native CLI REPL**: Replaced the rigid Textual TUI with a standard, fluid terminal REPL using `prompt_toolkit` and `rich`. WebSocket events stream gracefully above the permanent bottom prompt bar using `patch_stdout`.
-- **Shell Passthrough**: Retained the `!command` feature to allow local host shell execution directly from the REPL.
+- **Project Rebranding**: Omnigent has been officially renamed to **Magistrate**, completing the transition from a simple multi-agent dashboard to a full AI-native engineering government.
+- **Constitutional Database Models**: Deployed a massive new ORM schema representing the Federal hierarchy, including `UserPresident`, `Constitution`, `Branch`, `Department`, `Agency`, `State`, `City`, and `CivilServantAgent`.
+- **Legislative Branch**: Implemented the `LegislativeService` allowing agents and the President to propose `Laws`, issue `Regulations`, and dictate system-wide `Policies`.
+- **Judicial Branch**: Implemented the `JudicialService` handling `CourtCase` creation and the issuing of `Rulings` to block or allow code execution (replacing the primitive approval queue).
+- **Executive Operations**: Refactored the Broker into the `ExecutiveOffice` powered by Gemini. Added the `ExecutiveService` enabling the President to issue `ExecutiveOrders` and launch `Fleets`, `Ships`, and `Missions`.
+- **Testing Infrastructure**: Added `pytest` and `pytest-django` configurations. Bootstrapped the `backend/tests/` directory with comprehensive unit tests enforcing branch boundaries.
+- **Seed Data Generation**: Added the `seed_government` Django management command to immediately instantiate the foundational Executive, Legislative, and Judicial branches.
 
 ### Changed
-- **Broker Engine**: Completely refactored `BrokerAgent` to use the native `google-generativeai` SDK, utilizing `enable_automatic_function_calling=True` and `start_chat()` for robust, native tool orchestration.
+- **Task Orchestration**: Deprecated the generic `run_agent_loop` in favor of `run_mission_loop`, where isolated `Ships` execute `Missions` guided by their assigned `Captain` and `Crew`.
+- **Documentation**: Overhauled `vision.md` and `architecture.md` to establish the new Federalism and Institutional metaphors. Added `constitution.md`.
 
 ### Removed
-- **LLM Abstraction Layers**: Removed `litellm` dependency to eliminate function-calling translation bugs and stabilize on Gemini as the core orchestration model.
-- **Textual UI**: Deleted the `cli/tui` directory.
+- **Flat Agent Hierarchies**: Eradicated the primitive `Agent` model where all LLMs were peers. Replaced with `CivilServantAgent` enforcing Ranks and Certifications.
+
+## [Legacy] - V1 Control Plane Pivot
+
+### Added
+- **Native CLI REPL**: Replaced the rigid Textual TUI with a standard, fluid terminal REPL using `prompt_toolkit`.
+- **Persistent Sandboxing**: Worker execution decoupled into isolated, persistent `omnigent-sandbox` Docker containers.

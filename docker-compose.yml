@@ -4,14 +4,14 @@ services:
   db:
     image: postgres:15
     environment:
-      POSTGRES_USER: omnigent
+      POSTGRES_USER: magistrate
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: omnigent_db
+      POSTGRES_DB: magistrate_db
     # Port removed so it doesn't conflict with any local postgres on the VPS
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U omnigent -d omnigent_db"]
+      test: ["CMD-SHELL", "pg_isready -U magistrate -d magistrate_db"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -19,7 +19,7 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     environment:
-      RABBITMQ_DEFAULT_USER: omnigent
+      RABBITMQ_DEFAULT_USER: magistrate
       RABBITMQ_DEFAULT_PASS: password
     # Ports removed to prevent conflicts
     healthcheck:
@@ -48,8 +48,8 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgres://omnigent:password@db:5432/omnigent_db
-      - CELERY_BROKER_URL=amqp://omnigent:password@rabbitmq:5672//
+      - DATABASE_URL=postgres://magistrate:password@db:5432/magistrate_db
+      - CELERY_BROKER_URL=amqp://magistrate:password@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CHANNEL_LAYER_REDIS_URL=redis://redis:6379/1
     depends_on:
@@ -69,8 +69,8 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgres://omnigent:password@db:5432/omnigent_db
-      - CELERY_BROKER_URL=amqp://omnigent:password@rabbitmq:5672//
+      - DATABASE_URL=postgres://magistrate:password@db:5432/magistrate_db
+      - CELERY_BROKER_URL=amqp://magistrate:password@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CHANNEL_LAYER_REDIS_URL=redis://redis:6379/1
     depends_on:
@@ -83,7 +83,7 @@ services:
 
   sandbox:
     image: ubuntu:22.04
-    container_name: omnigent-sandbox
+    container_name: magistrate-sandbox
     command: tail -f /dev/null
 
 volumes:

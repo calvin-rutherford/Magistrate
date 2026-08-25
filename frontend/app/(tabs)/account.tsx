@@ -1,0 +1,349 @@
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, TextInput, Alert, ActivityIndicator } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
+import { GlassSurface } from '../../src/components/GlassSurface';
+import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, connectAuthProvider, disconnectAuthProvider, UserProfile, AuthProviderInfo } from '../../src/api/client';
+import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
+import { ttsService } from '../../src/services/TextToSpeechService';
+import { useRouter } from 'expo-router';
+
+export default function AccountScreen() {
+  const router = useRouter();
+
+  const [profile, setProfile] = useState<UserProfile>({
+    user_id: 'default_user',
+    name: 'Spectre Operator',
+    email: 'spectre@magistrate.io',
+    avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=400&auto=format&fit=crop',
+    bio: 'Firstmate Master Operator'
+  });
+
+  const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
+  const [uploading, setUploading] = useState<boolean>(false);
+  const [activeThemeKey, setActiveThemeKey] = useState<WeatherSceneKey>('dusk-mountain');
+  const [bgBlur, setBgBlur] = useState<string>('0.03 (1px)');
+
+  // Voice Settings State
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
+  const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
+  const [speechRate, setSpeechRate] = useState<number>(1.0);
+  const [autoListen, setAutoListen] = useState<boolean>(true);
+
+  const loadAccountData = async () => {
+    try {
+      const [prof, provs] = await Promise.all([
+        fetchUserProfile().catch(() => null),
+        fetchAuthProviders().catch(() => [])
+      ]);
+      if (prof && prof.name) {
+        if (prof.avatar_url && prof.avatar_url.startsWith('/uploads')) {
+          prof.avatar_url = 'http://100.84.181.23:8000' + prof.avatar_url;
+        }
+        setProfile(prof);
+      }
+      if (provs && provs.length > 0) {
+        setProviders(provs);
+      }
+    } catch (e) {
+      console.error('Error loading account data:', e);
+    }
+  };
+
+  useEffect(() => {
+    loadAccountData();
+  }, []);
+
+  const handlePickAvatar = async () => {
+    const permResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permResult.granted) {
+      Alert.alert('Permission Required', 'Media library access is needed to upload a profile photo.');
+      return;
+    }
+
+    const pickerResult = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.85
+    });
+
+    if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
+      const selectedUri = pickerResult.assets[0].uri;
+      setUploading(true);
+      try {
+        const res = await uploadUserAvatar(selectedUri);
+        if (res.avatar_url) {
+          let fullUrl = res.avatar_url;
+          if (fullUrl.startsWith('/uploads')) {
+            fullUrl = 'http://100.84.181.23:8000' + fullUrl;
+          }
+          setProfile(prev => ({ ...prev, avatar_url: fullUrl }));
+        }
+      } catch (e) {
+        console.error('Avatar upload error:', e);
+        Alert.alert('Upload Error', 'Failed to upload profile photo to server.');
+      } finally {
+        setUploading(false);
+      }
+    }
+  };
+
+  const handlePickCustomBackground = async () => {
+    const permResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permResult.granted) {
+      Alert.alert('Permission Required', 'Media library access is needed to select a custom background photo.');
+      return;
+    }
+
+    const pickerResult = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      quality: 0.85
+    });
+
+    if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
+      const customUri = pickerResult.assets[0].uri;
+      setActiveThemeKey('custom');
+      setActiveBackground('custom', customUri);
+    }
+  };
+
+  const handleSelectBackground = (key: WeatherSceneKey) => {
+    setActiveThemeKey(key);
+    setActiveBackground(key);
+  };
+
+  const handleToggleOAuth = async (providerName: string, currentStatus: string) => {
+    try {
+      if (currentStatus === 'connected') {
+        await disconnectAuthProvider(providerName);
+      } else {
+        await connectAuthProvider(providerName);
+      }
+      loadAccountData();
+    } catch (e) {
+      console.error('OAuth connect toggle error:', e);
+    }
+  };
+
+  const handleToggleVoiceOutput = (enabled: boolean) => {
+    setVoiceEnabled(enabled);
+    ttsService.setSettings({ enabled });
+  };
+
+  const handleRestartApp = () => {
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
+  };
+
+  return (
+    <EnvironmentBackground>
+      <View style={styles.headerRow}>
+        <TouchableOpacity onPress={() => router.back()}>
+          <GlassSurface variant="control" style={styles.headerCircleBtn}>
+            <Text style={styles.backText}>←</Text>
+          </GlassSurface>
+        </TouchableOpacity>
+
+        <Text style={styles.headerTitle}>ACCOUNT & SETTINGS</Text>
+
+        <View style={{ width: 36 }} />
+      </View>
+
+      <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 120 }}>
+        {/* PROFILE SECTION */}
+        <GlassSurface variant="card" style={styles.profileCard}>
+          <View style={styles.avatarRow}>
+            <TouchableOpacity onPress={handlePickAvatar} activeOpacity={0.8} style={styles.avatarTouch}>
+              <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
+              {uploading ? (
+                <View style={styles.avatarOverlay}>
+                  <ActivityIndicator color="#72F5B1" />
+                </View>
+              ) : (
+                <View style={styles.avatarBadge}>
+                  <Text style={styles.avatarBadgeText}>📷</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+
+            <View style={styles.profileInfo}>
+              <Text style={styles.profileName}>{profile.name}</Text>
+              <Text style={styles.profileEmail}>{profile.email}</Text>
+              <TouchableOpacity onPress={handlePickAvatar} style={styles.uploadBtn}>
+                <Text style={styles.uploadBtnText}>CHANGE PHOTO ↗</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </GlassSurface>
+
+        {/* VOICE & AUDIO SETTINGS */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>VOICE & SPEECH SYNTHESIS</Text>
+        </View>
+
+        <GlassSurface variant="card" style={styles.settingsCard}>
+          <View style={styles.settingToggleRow}>
+            <Text style={styles.settingToggleLabel}>VOICE OUTPUT</Text>
+            <TouchableOpacity
+              style={[styles.toggleBtn, voiceEnabled ? styles.toggleBtnActive : undefined]}
+              onPress={() => handleToggleVoiceOutput(!voiceEnabled)}
+            >
+              <Text style={[styles.toggleBtnText, voiceEnabled ? styles.toggleBtnTextActive : undefined]}>
+                {voiceEnabled ? 'ON ✓' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.settingToggleRow}>
+            <Text style={styles.settingToggleLabel}>AUTO-SPEAK FIRSTMATE</Text>
+            <TouchableOpacity
+              style={[styles.toggleBtn, autoSpeak ? styles.toggleBtnActive : undefined]}
+              onPress={() => setAutoSpeak(!autoSpeak)}
+            >
+              <Text style={[styles.toggleBtnText, autoSpeak ? styles.toggleBtnTextActive : undefined]}>
+                {autoSpeak ? 'ON ✓' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.settingToggleRow}>
+            <Text style={styles.settingToggleLabel}>CONTINUOUS LISTEN AFTER RESPONSE</Text>
+            <TouchableOpacity
+              style={[styles.toggleBtn, autoListen ? styles.toggleBtnActive : undefined]}
+              onPress={() => setAutoListen(!autoListen)}
+            >
+              <Text style={[styles.toggleBtnText, autoListen ? styles.toggleBtnTextActive : undefined]}>
+                {autoListen ? 'ON ✓' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </GlassSurface>
+
+        {/* CONNECTED OAUTH PROVIDERS */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>CONNECTED OAUTH PROVIDERS</Text>
+        </View>
+
+        <GlassSurface variant="card" style={styles.socialCard}>
+          {(providers.length > 0 ? providers : [
+            { provider: 'github', status: 'connected', username: 'calvin-rutherford', capabilities: ['read_prs', 'manage_repos'], auth_url: '' },
+            { provider: 'twitter', status: 'connected', username: '@spectre_dev', capabilities: ['read_feed', 'post_content'], auth_url: '' },
+            { provider: 'discord', status: 'connected', username: 'spectre#1337', capabilities: ['send_notifications'], auth_url: '' },
+            { provider: 'google', status: 'disconnected', username: '', capabilities: ['cloud_access'], auth_url: '' },
+            { provider: 'jira', status: 'connected', username: 'calvin@eversana.com', capabilities: ['read_assigned_issues'], auth_url: '' },
+            { provider: 'teams', status: 'connected', username: 'calvin.rutherford@eversana.com', capabilities: ['read_mentions'], auth_url: '' }
+          ]).map(s => (
+            <View key={s.provider} style={styles.socialRow}>
+              <View style={styles.providerLeft}>
+                <Text style={styles.socialName}>{s.provider.toUpperCase()}</Text>
+                <Text style={styles.socialHandle}>
+                  {s.username ? s.username : (s.capabilities ? s.capabilities.join(' • ') : 'No capabilities')}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.socialToggleBtn, s.status === 'connected' ? styles.socialBtnConnected : undefined]}
+                onPress={() => handleToggleOAuth(s.provider, s.status)}
+              >
+                <Text style={[styles.socialBtnText, s.status === 'connected' ? styles.socialBtnTextConnected : undefined]}>
+                  {s.status === 'connected' ? 'CONNECTED ✓' : 'CONNECT +'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+        </GlassSurface>
+
+        {/* SYSTEM SETTINGS & BACKGROUNDS */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>BACKGROUNDS & APPEARANCE</Text>
+        </View>
+
+        <GlassSurface variant="card" style={styles.settingsCard}>
+          <Text style={styles.settingLabel}>SELECTABLE BACKGROUND THEME</Text>
+          <View style={styles.themeRow}>
+            {[
+              { key: 'dusk-mountain', label: 'Dusk Mountain' },
+              { key: 'clear-day', label: 'Clear Day' },
+              { key: 'clear-night', label: 'Clear Night' },
+              { key: 'clouds', label: 'Cloudy Sky' },
+              { key: 'rain', label: 'Rain Storm' },
+              { key: 'sunset', label: 'Sunset Glow' },
+              { key: 'minimal-dark', label: 'Minimal Dark' }
+            ].map(t => (
+              <TouchableOpacity key={t.key} onPress={() => handleSelectBackground(t.key as WeatherSceneKey)}>
+                <GlassSurface variant="control" style={[styles.themePill, activeThemeKey === t.key ? styles.themePillActive : undefined]}>
+                  <Text style={[styles.themeText, activeThemeKey === t.key ? styles.themeTextActive : undefined]}>{t.label}</Text>
+                </GlassSurface>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <TouchableOpacity style={styles.customBgBtn} onPress={handlePickCustomBackground}>
+            <Text style={styles.customBgBtnText}>UPLOAD CUSTOM PHOTO 📷</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.restartBtn} onPress={handleRestartApp}>
+            <Text style={styles.restartBtnText}>RESTART APP & GATEWAY ↺</Text>
+          </TouchableOpacity>
+        </GlassSurface>
+      </ScrollView>
+    </EnvironmentBackground>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, paddingHorizontal: 16 },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    marginBottom: 8
+  },
+  headerTitle: { fontFamily: 'monospace', fontSize: 14, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 2 },
+  headerCircleBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  backText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
+  profileCard: { padding: 18, marginVertical: 8, borderRadius: 18 },
+  avatarRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  avatarTouch: { position: 'relative' },
+  avatarImage: { width: 68, height: 68, borderRadius: 34, borderWidth: 2, borderColor: '#72F5B1' },
+  avatarOverlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 34, justifyContent: 'center', alignItems: 'center' },
+  avatarBadge: { position: 'absolute', bottom: -2, right: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: '#72F5B1', justifyContent: 'center', alignItems: 'center' },
+  avatarBadgeText: { fontSize: 11 },
+  profileInfo: { flex: 1 },
+  profileName: { fontSize: 16, fontWeight: 'bold', color: '#FFFFFF' },
+  profileEmail: { fontSize: 12, color: 'rgba(255, 255, 255, 0.65)', marginTop: 2 },
+  uploadBtn: { marginTop: 6 },
+  uploadBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#72F5B1', letterSpacing: 0.8 },
+  sectionHeader: { marginTop: 14, marginBottom: 6 },
+  sectionTitle: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', letterSpacing: 1.4 },
+  socialCard: { padding: 16, borderRadius: 18, gap: 12 },
+  socialRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  providerLeft: { flex: 1, paddingRight: 10 },
+  socialName: { fontSize: 13.5, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 0.5 },
+  socialHandle: { fontSize: 11, color: 'rgba(255, 255, 255, 0.5)', marginTop: 2 },
+  socialToggleBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.2)' },
+  socialBtnConnected: { backgroundColor: 'rgba(114, 245, 177, 0.2)', borderColor: '#72F5B1' },
+  socialBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.7)' },
+  socialBtnTextConnected: { color: '#72F5B1' },
+  settingsCard: { padding: 18, borderRadius: 18 },
+  settingLabel: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', marginBottom: 8 },
+  settingToggleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 6 },
+  settingToggleLabel: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: '#FFFFFF' },
+  toggleBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.2)' },
+  toggleBtnActive: { backgroundColor: 'rgba(114, 245, 177, 0.2)', borderColor: '#72F5B1' },
+  toggleBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)' },
+  toggleBtnTextActive: { color: '#72F5B1' },
+  themeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  themePill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },
+  themePillActive: { backgroundColor: 'rgba(114, 245, 177, 0.25)', borderColor: '#72F5B1' },
+  themeText: { fontFamily: 'monospace', fontSize: 11, color: 'rgba(255, 255, 255, 0.7)' },
+  themeTextActive: { color: '#72F5B1', fontWeight: 'bold' },
+  customBgBtn: { marginTop: 14, backgroundColor: 'rgba(114, 245, 177, 0.15)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: '#72F5B1', alignItems: 'center' },
+  customBgBtnText: { fontFamily: 'monospace', color: '#72F5B1', fontWeight: 'bold', fontSize: 11 },
+  restartBtn: { marginTop: 16, backgroundColor: 'rgba(239, 68, 68, 0.2)', paddingVertical: 12, borderRadius: 12, borderWidth: 1, borderColor: '#EF4444', alignItems: 'center' },
+  restartBtnText: { fontFamily: 'monospace', color: '#EF4444', fontWeight: 'bold', fontSize: 12 }
+});

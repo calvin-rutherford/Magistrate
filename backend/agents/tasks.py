@@ -1,112 +1,143 @@
+import json
 import time
-import uuid
 import subprocess
-import redis
-import os
-from django.conf import settings
 from celery import shared_task
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from django.conf import settings
+import redis
 import google.generativeai as genai
-from .models import Agent, EventLog, Message
+from .models import Ship, Mission, EventLog
 
-# Connect to Redis for approvals
-r = redis.Redis.from_url(settings.CELERY_RESULT_BACKEND)
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
-def execute_bash(command: str) -> str:
-    """Executes a bash command inside the persistent isolated sandbox.
-    Requires human approval before execution.
+redis_client = redis.Redis(host='redis', port=6379, db=0)
+
+def execute_bash_in_sandbox(command: str, ship_id: str) -> str:
+    """Executes a bash command inside the secure Ubuntu sandbox but requires Presidential Approval."""
+    # Drop the approval request into Redis
+    approval_id = f"approval:{ship_id}_{int(time.time())}"
+    redis_client.set(approval_id, 'pending')
     
-    Args:
-        command: The bash command to execute (e.g. 'ls -la' or 'python test.py')
-    """
-    approval_id = str(uuid.uuid4())[:8]
-    r.set(f"approval:{approval_id}", "pending")
-    
-    # Broadcast approval request to UI
-    from channels.layers import get_channel_layer
-    from asgiref.sync import async_to_sync
+    # Send WebSocket alert to the President (UI)
     channel_layer = get_channel_layer()
     async_to_sync(channel_layer.group_send)(
-        'broker_events',
+        'chat_default',
         {
             'type': 'approval_request',
             'approval_id': approval_id,
-            'command': command
+            'command': command,
+            'ship_id': ship_id
         }
     )
     
-    # Polling loop
+    # Wait for the President's ruling
     while True:
-        status = r.get(f"approval:{approval_id}")
+        status = redis_client.get(approval_id)
         if status:
             status = status.decode('utf-8')
-            if status == "approved":
+            if status == 'approved':
                 break
-            elif status == "denied":
-                return f"Error: The user DENIED permission to run '{command}'."
+            elif status == 'denied':
+                return "Command execution DENIED by the President."
         time.sleep(1)
         
-    # Execute in sandbox using docker exec
+    # Execute safely in the sandbox container
     try:
-        # We assume the sandbox container is named 'omnigent-sandbox'
         result = subprocess.run(
-            ["docker", "exec", "omnigent-sandbox", "bash", "-c", command],
-            capture_output=True, text=True, timeout=120
+            ["docker", "exec", "magistrate-sandbox", "bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=60
         )
         return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     except Exception as e:
-        return f"Execution Failed: {str(e)}"
+        return f"Sandbox execution failed: {str(e)}"
 
 @shared_task
-def run_agent_loop(agent_id, initial_task):
+def run_mission_loop(ship_id: str):
+    """The core operational loop for a Ship undertaking a Mission."""
     try:
-        agent = Agent.objects.get(id=agent_id)
-        agent.status = 'Running'
-        agent.save()
-
-        EventLog.objects.create(agent=agent, event_type='TaskAssigned', payload={'task': initial_task})
-        Message.objects.create(agent=agent, role='user', content=initial_task)
-        
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY is not set.")
+        ship = Ship.objects.get(id=ship_id)
+        mission = ship.missions.last()
+        if not mission:
+            return
             
-        genai.configure(api_key=api_key)
-        model_name = os.getenv('DEFAULT_LLM_MODEL', 'gemini-1.5-pro').replace('gemini/', '')
-        
-        sys_prompt = f"You are an AI Agent named {agent.name} with scope {agent.scope}. Solve the task. Use the execute_bash tool to run commands in your secure Ubuntu sandbox."
-        model = genai.GenerativeModel(model_name=model_name, system_instruction=sys_prompt, tools=[execute_bash])
-        
-        chat = model.start_chat(enable_automatic_function_calling=True)
-        response = chat.send_message(initial_task)
-        
-        Message.objects.create(agent=agent, role='model', content=response.text)
-        
-        EventLog.objects.create(agent=agent, event_type='TaskCompleted', payload={'result': response.text})
-        agent.status = 'Complete'
-        agent.save()
-        return "Task Completed"
+        mission.status = 'Underway'
+        mission.save()
 
+        # Alert the President
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            'chat_default',
+            {
+                'type': 'chat_message',
+                'message': f"Fleet Command > Ship '{ship.name}' is now underway on mission: {mission.objective}"
+            }
+        )
+
+        model = genai.GenerativeModel(
+            model_name=settings.DEFAULT_LLM_MODEL,
+            tools=[execute_bash_in_sandbox]
+        )
+        
+        sys_prompt = f"You are the Crew of the Ship '{ship.name}'. Your mission is: {mission.objective}. Use the execute_bash_in_sandbox tool to run commands in your secure Ubuntu worktree."
+        
+        chat = model.start_chat()
+        response = chat.send_message(sys_prompt)
+        
+        while True:
+            response_text = response.text
+            
+            if response_text:
+                async_to_sync(channel_layer.group_send)(
+                    'chat_default',
+                    {
+                        'type': 'chat_message',
+                        'message': f"Ship {ship.name} > {response_text}"
+                    }
+                )
+            
+            if "MISSION ACCOMPLISHED" in (response_text or ""):
+                mission.status = 'Completed'
+                mission.save()
+                break
+
+            if response.parts:
+                for part in response.parts:
+                    if part.function_call:
+                        fc = part.function_call
+                        if fc.name == 'execute_bash_in_sandbox':
+                            args = {k: v for k, v in fc.args.items()}
+                            args['ship_id'] = ship_id
+                            result = execute_bash_in_sandbox(**args)
+                            
+                            response = chat.send_message(
+                                genai.types.Part.from_function_response(
+                                    name="execute_bash_in_sandbox",
+                                    response={"result": result}
+                                )
+                            )
+                            continue
+            break
+            
     except Exception as e:
-        if 'agent' in locals():
-            agent.status = 'Error'
-            agent.save()
-            EventLog.objects.create(agent=agent, event_type='Error', payload={'error': str(e)})
-        return f"Failed: {str(e)}"
+        if 'mission' in locals():
+            mission.status = 'Failed'
+            mission.save()
+        print(f"Mission error: {e}")
 
 @shared_task
-def process_broker_message(user_text: str, stateful: bool = True):
-    from .broker_agent import BrokerAgent
-    from channels.layers import get_channel_layer
-    from asgiref.sync import async_to_sync
-
-    broker = BrokerAgent()
-    response_text = broker.process_message(user_text, stateful=stateful)
+def process_directive_message(message: str, stateful: bool):
+    from .broker_agent import ExecutiveOffice
+    executive = ExecutiveOffice()
+    response = async_to_sync(executive.process_directive)(message, stateful)
     
     channel_layer = get_channel_layer()
     async_to_sync(channel_layer.group_send)(
-        'broker_events',
+        'chat_default',
         {
-            'type': 'broker_event',
-            'message': f"Broker > {response_text}"
+            'type': 'chat_message',
+            'message': f"Executive Office > {response}"
         }
     )

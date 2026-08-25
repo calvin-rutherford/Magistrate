@@ -1,0 +1,23 @@
+2026-07-16 02:35:49,304 INFO     Starting server at tcp:port=8001:interface=0.0.0.0
+2026-07-16 02:35:49,305 INFO     HTTP/2 support not enabled (install the http2 and tls Twisted extras)
+2026-07-16 02:35:49,305 INFO     Configuring endpoint tcp:port=8001:interface=0.0.0.0
+2026-07-16 02:35:49,305 INFO     Listening on TCP address 0.0.0.0:8001
+Preparing worktree (new branch 'magistrate-exec-e3c96266')
+HEAD is now at 8934c17 fix: derive bearings from authoritative secondmate state (#555)
+2026-07-16 02:36:16,830 INFO     session created
+Preparing worktree (new branch 'magistrate-exec-35e778f4')
+HEAD is now at 8934c17 fix: derive bearings from authoritative secondmate state (#555)
+2026-07-16 02:36:18,919 INFO     session created
+Preparing worktree (new branch 'magistrate-exec-204f5b34')
+HEAD is now at 8934c17 fix: derive bearings from authoritative secondmate state (#555)
+2026-07-16 02:36:21,119 INFO     session created
+Preparing worktree (new branch 'magistrate-exec-498d5295')
+HEAD is now at 8934c17 fix: derive bearings from authoritative secondmate state (#555)
+2026-07-16 02:36:22,749 INFO     session created
+Preparing worktree (new branch 'magistrate-exec-de520705')
+HEAD is now at 8934c17 fix: derive bearings from authoritative secondmate state (#555)
+2026-07-16 02:36:25,108 INFO     session created
+2026-07-20 02:10:08,735 INFO     Killed 0 pending application instances
+127.0.0.1:58306 - - [16/Jul/2026:02:36:06] "WSCONNECTING /ws/magistrate/" - -
+127.0.0.1:58306 - - [16/Jul/2026:02:36:06] "WSCONNECT /ws/magistrate/" - -
+127.0.0.1:58306 - - [16/Jul/2026:02:36:18] "WSDISCONNECT /ws/magistrate/" - -

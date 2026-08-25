@@ -44,7 +44,7 @@ async def run_repl():
     uri = "ws://localhost:8000/ws/broker/"
     session = PromptSession()
     
-    console.print("[bold green]Starting Omnigent CLI...[/bold green]")
+    console.print("[bold green]Starting Magistrate CLI...[/bold green]")
     
     try:
         async with websockets.connect(uri, ping_interval=None) as websocket:
