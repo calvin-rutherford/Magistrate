@@ -232,14 +232,19 @@ export async function fetchGitHubPR(number: number, refresh = false): Promise<Gi
   return checkedJson<GitHubPR>(res);
 }
 
-export async function transcribeVoiceAudio(audioUri?: string): Promise<{ text: string }> {
+async function requireOk(res: Response): Promise<any> {
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload.detail || payload.error || `Gateway request failed (${res.status})`);
+  return payload;
+}
+
+export async function transcribeVoiceAudio(audioUri: string, mimeType: string, filename: string): Promise<{ text: string; is_final: boolean }> {
   const formData = new FormData();
-  if (audioUri) {
-    formData.append('file', {
-      uri: audioUri,
-      name: 'speech.wav',
-      type: 'audio/wav'
-    } as any);
+  if (typeof window !== 'undefined') {
+    const audioResponse = await fetch(audioUri);
+    formData.append('file', await audioResponse.blob(), filename);
+  } else {
+    formData.append('file', { uri: audioUri, name: filename, type: mimeType } as any);
   }
   const res = await fetch(GATEWAY_URL + '/voice/transcribe', {
     method: 'POST',
@@ -248,7 +253,24 @@ export async function transcribeVoiceAudio(audioUri?: string): Promise<{ text: s
     },
     body: formData
   });
-  return res.json();
+  return requireOk(res);
+}
+
+export interface VoiceMoveResult {
+  move_id: string;
+  status: 'ready' | 'confirmation_required' | 'confirmation_expired' | 'prohibited' | 'completed' | 'error';
+  target: string; intent: string; impact: string; requires_confirmation: boolean;
+  confirmation_token?: string; confirmation_message?: string; response?: string; error?: string;
+}
+
+export async function submitVoiceMove(utterance: string, target: string, idempotencyKey: string,
+  execute = false, confirmationToken?: string): Promise<VoiceMoveResult> {
+  const res = await fetch(GATEWAY_URL + '/voice/moves', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify({ schema_version: 'voice-move.v1', utterance, target, source: 'voice-page',
+      idempotency_key: idempotencyKey, execute, confirmation_token: confirmationToken })
+  });
+  return requireOk(res);
 }
 
 // Herdr exposes its read count as uint32 and bounds retained history separately

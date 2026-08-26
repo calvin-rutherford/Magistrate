@@ -5,6 +5,7 @@
   "dependencies": {
     "@expo/ui": "~57.0.4",
     "expo": "~57.0.4",
+    "expo-audio": "~57.0.4",
     "expo-av": "^16.0.8",
     "expo-blur": "~57.0.2",
     "expo-constants": "~57.0.3",
@@ -47,8 +48,9 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test:chat": "node --test tests/chat-terminal.web.test.js",
+    "test:voice": "npx tsx --test tests/voice-session.test.ts && node --test tests/voice-page.web.test.js",
     "test:github": "node --test tests/github-prs.web.test.js",
-    "test:ambient": "node --test tests/ambient-source.test.js"
+    "test:ambient": "node --test tests/ambient-source.test.js" 
   },
   "private": true
 }
