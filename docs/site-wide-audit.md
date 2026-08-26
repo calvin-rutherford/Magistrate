@@ -1,6 +1,6 @@
 # Magistrate site-wide audit
 
-> Status: evidence inventory and baseline checks recorded on 2026-08-26. Findings remain to be added in subsequent audit iterations. This document does not yet represent a completed audit.
+> Status: evidence inventory, baseline checks, and an initial security/privacy and operations finding set were recorded on 2026-08-26. Other audit dimensions remain incomplete, so this document does not yet represent a completed audit.
 
 ## Audit method and claim standard
 
@@ -67,7 +67,51 @@ Refs compared: `origin/main`, `origin/fm/ambient-backgrounds-b5`, `origin/fm/ter
 
 ## Findings
 
-Not yet populated. Subsequent iterations must add evidence-backed confirmed defects and separately labeled validation risks/opportunities, then link every high-priority item to acceptance criteria in `docs/site-wide-task-list.md`.
+### Confirmed defects
+
+#### SEC-01 — A shipped shared token does not provide an effective authorization boundary (high)
+
+**Evidence.** `frontend/src/api/client.ts` embeds both the gateway address and `DEVICE_TOKEN = 'magistrate-device-token-12345'` in client code and sends that value to account, fleet, agent-control, terminal, notification, voice, and provider endpoints. `frontend/src/realtime/socket.ts` also embeds the same token in a WebSocket URL. `gateway/app/auth.py` accepts that exact value by default when `MAGISTRATE_TOKEN` is unset and accepts credentials in either `X-Magistrate-Token` or the `token` query parameter. A web bundle or installed client necessarily exposes a client-side constant, so anyone who can obtain the client can reproduce this credential. The gateway's broad CORS policy in `gateway/app/main.py` (`allow_origins`, methods, and headers all wildcarded) does not restore an identity or per-device authorization boundary.
+
+**Impact.** This is a confirmed design-level authorization defect, not a claim that the audited host is publicly reachable. If an attacker can reach the configured gateway, the shipped credential can authorize sensitive reads and actions including captain prompts and agent key input. Deployment reachability and network controls still require validation.
+
+**Required outcome.** Remove production reliance on a credential distributed with the client; establish server-verifiable user/device identity, scoped authorization for sensitive operations, credential rotation/revocation, and an explicit allowed-origin policy. Preserve a clearly gated local-development mode if needed. The eventual task package must include negative authorization tests for every sensitive endpoint family and must revalidate PRs #4 and #5 because both change `frontend/src/api/client.ts` and `gateway/app/main.py`.
+
+#### SEC-02 — OAuth state and callback redirects are attacker-controlled (high)
+
+**Evidence.** `gateway/app/main.py` builds OAuth `state` as the unsigned string `f"{user_id}::{redirect_uri}"` in `connect_oauth_provider`; the caller supplies both values. The callback has no `verify_token` dependency, splits the received state, trusts its first component as the database user and its second component as the redirect target, then stores exchanged credentials for that user and redirects to that target. There is no random nonce, server-side transaction record, expiry, signature, one-time consumption, or redirect allowlist. The source comment itself says a real flow would generate state to prevent CSRF, confirming the current flow is a simulation rather than a completed protection.
+
+**Impact.** The missing binding permits forged or replayed callback state and makes the callback an open-redirect surface. Whether a provider's authorization-code binding blocks a particular account-linking attack depends on that provider and must not be assumed; the absent CSRF/replay control and redirect validation are directly demonstrated.
+
+**Required outcome.** Generate cryptographically random, expiring, single-use OAuth transactions bound server-side to the initiating authenticated principal, provider, and an allowlisted app redirect; reject missing, malformed, mismatched, expired, or replayed state before token exchange or persistence. Add provider-independent tests for each rejection case and a successful callback. PR #5 changes shared gateway/auth-adjacent surfaces and must be rebased or revalidated after this work.
+
+#### SEC-03 — The backend command WebSocket accepts unauthenticated fleet-dispatch commands (high)
+
+**Evidence.** `backend/og_broker/asgi.py` routes WebSockets directly through `URLRouter` without `AuthMiddlewareStack` or another authentication middleware. `backend/agents/routing.py` exposes `ws/magistrate/`, and `MagistrateConsumer.connect` in `backend/agents/consumers.py` unconditionally joins the shared event group and calls `accept()`. Its `receive` method accepts an arbitrary JSON `command`, creates or retrieves the default captain, and calls `ExecutiveService.launch_fleet`. There is no origin, identity, permission, schema/length, or rate check in this path.
+
+**Impact.** Any client able to reach the backend WebSocket can observe shared events and request fleet creation. Network exposure remains deployment-dependent, but the application-layer absence of authorization is confirmed. The broker is published on host port 8000 by `docker-compose.yml`, increasing the importance of an explicit boundary.
+
+**Required outcome.** Authenticate before accepting the socket, authorize command dispatch separately from event observation, validate and bound command payloads, enforce an origin policy where browsers are supported, and close unauthorized connections with a documented code. Add Channels communicator tests covering anonymous rejection, insufficient privilege, authorized dispatch, malformed/oversized payloads, and group isolation.
+
+#### SEC-04 — OAuth credential encryption has a public default key and silently accepts plaintext (high)
+
+**Evidence.** `gateway/app/db.py` defaults `MAGISTRATE_SECRET_KEY` to the repository-visible string `magistrate_super_secret_fernet_key_32bytes_len=` and deterministically derives the Fernet key from it. `decrypt_token` catches every decryption exception and returns the stored database value unchanged. Consequently, a deployment missing the environment variable uses a known encryption key, while corrupt or legacy plaintext is indistinguishable to callers from successfully decrypted secret material.
+
+**Impact.** A copied database from a default-configured deployment does not have meaningful at-rest protection, and fail-open decryption can propagate unencrypted or corrupt credential content. This finding does not claim disk encryption is the only required control or that any production database was exposed.
+
+**Required outcome.** Fail startup outside an explicit development mode when a suitably generated key is absent; version encrypted values; fail closed on authentication/decryption errors; define rotation/migration and secret-storage procedures; and test missing/invalid keys, ciphertext tampering, legacy migration, and rotation without logging secret values.
+
+### Validation risks and opportunities
+
+#### OPS-01 — Production-safety configuration is permissive by default (medium risk; validate deployment)
+
+`backend/og_broker/settings.py` defaults to a committed Django secret, enables `DEBUG` unless explicitly disabled, and sets `ALLOWED_HOSTS = ['*']`. `docker-compose.yml` uses literal `password` credentials for Postgres and RabbitMQ and publishes the broker on `0.0.0.0:8000`. These defaults are directly confirmed, but actual production overrides, firewalling, TLS termination, and deployment topology were not available in the repository evidence. Validate the deployed environment before describing this as an externally exploitable defect. The target state is fail-closed production configuration, secret injection/rotation, constrained hosts, TLS at the documented boundary, and an automated deployment check that rejects development defaults.
+
+#### SEC-05 — Avatar and voice uploads lack explicit application-level resource bounds (medium risk; validate infrastructure)
+
+In `gateway/app/main.py`, `upload_account_avatar` and `transcribe_voice_input` call `await file.read()` with no declared content-length, streaming, media-type, or file-size enforcement; avatar content is written using a client-derived filename and served from `/uploads`. This confirms missing application-level bounds, but reverse-proxy limits and the practical memory/disk impact were not inspected. Validate infrastructure caps and malformed-file behavior, then add bounded streaming, filename generation independent of user input, media validation/decoding, safe storage permissions, and rejection tests if those controls are not already guaranteed upstream.
+
+The future `docs/site-wide-task-list.md` must link each high-priority finding above to independently testable acceptance criteria. No implementation is recommended inside the active PR boundaries without the stated merge-order revalidation.
 
 ## Baseline verification
 
