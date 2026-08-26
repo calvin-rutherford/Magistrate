@@ -27,8 +27,10 @@ class AttentionService:
                     'subtitle': att.get('subtitle', 'Agent blocked or decision needed'),
                     'priority': 'HIGH',
                     'status': att.get('status', 'blocked'),
-                    'url': '/chat',
-                    'requires_action': True
+                    'url': att.get('url', '/attention'),
+                    'requires_action': True,
+                    'notification_kind': att.get('type'),
+                    'revision': att.get('revision')
                 })
         except Exception as e:
             print('Error fetching Firstmate attention:', e)
@@ -37,16 +39,20 @@ class AttentionService:
         try:
             prs = await github_service.get_pull_requests()
             for pr in prs:
-                if pr.get('requires_attention') or pr.get('review_status') == 'REVIEW_REQUIRED':
+                if pr.get('merge_decision_required') is True:
+                    item_id = f'github-pr-{pr.get("pr_number")}'
                     items.append({
-                        'id': f'github-pr-{pr.get("pr_number")}',
+                        'id': item_id,
                         'provider': 'github',
-                        'title': f'PR #{pr.get("pr_number")} Review Required',
+                        'title': f'PR #{pr.get("pr_number")} is ready',
                         'subtitle': f'{pr.get("title")} ({pr.get("repository")})',
                         'priority': 'MEDIUM',
-                        'status': 'review_required',
-                        'url': pr.get('url', 'https://github.com/melkezic/firstmate/pulls'),
-                        'requires_action': True
+                        'status': 'merge_decision_required',
+                        'url': f'/attention?item={item_id}',
+                        'external_url': pr.get('url'),
+                        'requires_action': True,
+                        'notification_kind': 'pr_ready',
+                        'revision': pr.get('head_sha')
                     })
         except Exception as e:
             print('Error fetching GitHub attention:', e)

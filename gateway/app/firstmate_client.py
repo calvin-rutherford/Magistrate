@@ -51,43 +51,43 @@ class FirstmateClient:
         snapshot = await self.get_snapshot()
         attention_items = []
 
-        if herdr_agents:
-            for ag in herdr_agents:
-                if ag.get('status') == 'blocked':
-                    attention_items.append({
-                        'id': 'herdr-blocked-' + str(ag.get('id')),
-                        'title': 'Agent ' + str(ag.get('name', ag.get('id'))) + ' is Blocked',
-                        'subtitle': 'Herdr agent requires captain decision or input',
-                        'type': 'agent_blocked',
-                        'status': 'blocked',
-                        'target_id': ag.get('id'),
-                        'project': ag.get('name', 'Firstmate')
-                    })
-
         tasks = snapshot.get('tasks', [])
         for task in tasks:
             t_status = str(task.get('status', '')).lower()
-            if 'blocked' in t_status or 'decision' in t_status or 'attention' in t_status:
+            attention = task.get('attention') if isinstance(task.get('attention'), dict) else {}
+            attention_kind = attention.get('kind') or task.get('attention_kind')
+            needs_captain = task.get('requires_captain') is True or attention.get('requires_captain') is True
+            # A generic "blocked" state often means infrastructure or an external wait. Only
+            # Firstmate's explicit captain-attention contract is actionable enough to notify.
+            if needs_captain and attention_kind in ('question', 'decision', 'awaiting_answer'):
+                target_id = task.get('id') or task.get('name')
                 attention_items.append({
-                    'id': 'task-blocked-' + str(task.get('id', task.get('name'))),
+                    'id': 'captain-question-' + str(target_id),
                     'title': task.get('title') or task.get('name') or 'Blocked Task',
-                    'subtitle': task.get('summary') or 'Task requires captain decision',
-                    'type': 'task_blocked',
-                    'status': 'blocked',
-                    'target_id': task.get('id'),
-                    'project': task.get('project', 'Firstmate')
+                    'subtitle': attention.get('summary') or task.get('summary') or 'Your answer is needed to continue.',
+                    'type': 'captain_question',
+                    'status': 'needs-decision' if attention_kind == 'decision' else 'awaiting_answer',
+                    'target_id': target_id,
+                    'project': task.get('project', 'Firstmate'),
+                    'revision': attention.get('revision') or task.get('updated_at') or t_status,
+                    'url': f'/attention?item=captain-question-{target_id}'
                 })
 
             pr = task.get('pr') or task.get('pr_url')
-            if pr and ('ready' in t_status or 'review' in t_status):
+            # Firstmate owns this readiness signal. Do not infer it from task status text.
+            merge_ready = task.get('pr_merge_ready') is True or task.get('merge_decision_required') is True
+            if pr and merge_ready:
+                target_id = task.get('id') or pr
                 attention_items.append({
-                    'id': 'pr-ready-' + str(task.get('id')),
+                    'id': 'pr-ready-' + str(target_id),
                     'title': 'PR Ready: ' + str(task.get('title', 'Pull Request')),
-                    'subtitle': 'PR ' + str(pr) + ' ready for captain review',
+                    'subtitle': 'Checks and review are complete. Your merge decision is needed.',
                     'type': 'pr_ready',
                     'status': 'ready',
                     'target_id': pr,
-                    'project': task.get('project', 'Firstmate')
+                    'project': task.get('project', 'Firstmate'),
+                    'revision': task.get('pr_head_sha') or task.get('updated_at') or pr,
+                    'url': f'/attention?item=pr-ready-{target_id}'
                 })
 
         return attention_items

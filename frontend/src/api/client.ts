@@ -34,12 +34,44 @@ export interface AttentionItem {
   project: string;
 }
 
+export interface NotificationEvent extends AttentionItem {
+  notification_kind: 'captain_question' | 'pr_ready';
+  url: string;
+  revision?: string;
+}
+
+export async function fetchNotificationEvents(foreground: boolean): Promise<{ events: NotificationEvent[] }> {
+  const hour = new Date().getHours();
+  const res = await fetch(`${GATEWAY_URL}/notifications/events?foreground=${foreground}&local_hour=${hour}`, {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  if (!res.ok) throw new Error(`Notification events failed: ${res.status}`);
+  return res.json();
+}
+
+export async function acknowledgeNotificationEvents(itemIds: string[]): Promise<void> {
+  const res = await fetch(GATEWAY_URL + '/notifications/events/ack', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify({ item_ids: itemIds })
+  });
+  if (!res.ok) throw new Error(`Notification acknowledgement failed: ${res.status}`);
+}
+
+export async function updateNotificationPreferences(enabled: boolean, quietHours: boolean): Promise<void> {
+  const res = await fetch(GATEWAY_URL + '/notifications/preferences', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify({ enabled, quiet_start: quietHours ? 22 : null, quiet_end: quietHours ? 7 : null })
+  });
+  if (!res.ok) throw new Error(`Notification preferences failed: ${res.status}`);
+}
+
 export interface UserProfile {
   user_id: string;
   name: string;
   email: string;
   avatar_url: string;
   bio: string;
+  active_theme?: string;
 }
 
 export interface AuthProviderInfo {
@@ -106,6 +138,18 @@ export async function fetchUserProfile(): Promise<UserProfile> {
   const res = await fetch(GATEWAY_URL + '/account/profile', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
+  return res.json();
+}
+
+export async function updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
+  const formData = new FormData();
+  Object.entries(profile).forEach(([key, value]) => {
+    if (value != null) formData.append(key, String(value));
+  });
+  const res = await fetch(GATEWAY_URL + '/account/profile', {
+    method: 'POST', headers: { 'X-Magistrate-Token': DEVICE_TOKEN }, body: formData
+  });
+  if (!res.ok) throw new Error(`Profile update failed: ${res.status}`);
   return res.json();
 }
 
