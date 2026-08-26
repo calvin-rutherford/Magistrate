@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # Load environment variables from .env file
 load_dotenv()
@@ -102,6 +103,22 @@ CHANNEL_LAYERS = {
         "BACKEND": "channels.layers.InMemoryChannelLayer"
     },
 }
+
+# Browser WebSocket connections must opt into an explicit origin.  Native and
+# service clients do not send an Origin header, so this does not affect them.
+_websocket_origins = tuple(
+    origin.strip()
+    for origin in os.getenv(
+        'WEBSOCKET_ALLOWED_ORIGINS',
+        'http://localhost:8000,http://127.0.0.1:8000',
+    ).split(',')
+    if origin.strip()
+)
+if '*' in _websocket_origins:
+    raise ImproperlyConfigured(
+        'WEBSOCKET_ALLOWED_ORIGINS must not contain the wildcard origin'
+    )
+WEBSOCKET_ALLOWED_ORIGINS = _websocket_origins
 
 # Celery Configuration Options
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "amqp://magistrate:password@localhost:5672//")
