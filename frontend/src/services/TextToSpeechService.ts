@@ -2,7 +2,6 @@ import * as Speech from 'expo-speech';
 
 export interface TTSSettings {
   enabled: boolean;
-  autoSpeak: boolean;
   voice?: string;
   rate: number;
   pitch: number;
@@ -11,7 +10,6 @@ export interface TTSSettings {
 export class TextToSpeechService {
   private settings: TTSSettings = {
     enabled: true,
-    autoSpeak: true,
     rate: 1.0,
     pitch: 1.0
   };
@@ -51,7 +49,7 @@ export class TextToSpeechService {
     this.speakChunk(newChunk, onDone);
   }
 
-  speakChunk(text: string, onDone?: () => void): void {
+  speakChunk(text: string, onDone?: () => void, onError?: (message: string) => void): void {
     if (!this.settings.enabled || !text.trim()) {
       if (onDone) onDone();
       return;
@@ -69,13 +67,14 @@ export class TextToSpeechService {
         },
         onError: () => {
           this.isSpeakingFlag = false;
-          if (onDone) onDone();
+          onError?.('Speech output failed. Captions remain available on screen.');
         }
       });
     } catch (e) {
       console.error('TTS Speak error:', e);
       this.isSpeakingFlag = false;
-      if (onDone) onDone();
+      onError?.('Speech output is unavailable. Captions remain available on screen.');
+      if (!onError && onDone) onDone();
     }
   }
 

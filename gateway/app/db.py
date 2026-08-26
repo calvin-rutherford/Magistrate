@@ -83,6 +83,20 @@ def init_db():
     )
     ''')
 
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS voice_audit_events (
+        event_id TEXT PRIMARY KEY,
+        actor_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        move_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL,
+        status TEXT NOT NULL,
+        utterance_digest TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )
+    ''')
+
     cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = 'default_user'")
     if not cursor.fetchone():
         now = int(time.time())
@@ -229,6 +243,43 @@ def disconnect_account(user_id: str, provider: str) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+def record_voice_audit(
+    *, event_id: str, actor_id: str, session_id: str, move_id: str,
+    action: str, target: str, status: str, utterance_digest: str,
+) -> None:
+    """Persist a minimal Voice audit record; raw audio is never stored."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''
+        INSERT OR REPLACE INTO voice_audit_events
+        (event_id, actor_id, session_id, move_id, action, target, status, utterance_digest, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (event_id, actor_id, session_id, move_id, action, target, status, utterance_digest, int(time.time())))
+    conn.commit()
+    conn.close()
+
+
+def get_voice_audit_events(actor_id: str, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    if session_id:
+        rows = conn.execute('''
+            SELECT event_id, move_id, action, target, status, utterance_digest, created_at
+            FROM voice_audit_events WHERE actor_id = ? AND session_id = ? ORDER BY created_at
+        ''', (actor_id, session_id)).fetchall()
+    else:
+        rows = conn.execute('''
+            SELECT event_id, move_id, action, target, status, utterance_digest, created_at
+            FROM voice_audit_events WHERE actor_id = ? ORDER BY created_at
+        ''', (actor_id,)).fetchall()
+    conn.close()
+    return [
+        {'event_id': row[0], 'move_id': row[1], 'action': row[2], 'target': row[3],
+         'status': row[4], 'utterance_digest': row[5], 'created_at': row[6]}
+        for row in rows
+    ]
 
 init_db()
 print('Database initialized successfully at:', DB_PATH)

@@ -8,14 +8,14 @@ import asyncio
 import time
 from typing import Optional, List
 
-from app.auth import verify_token, MAGISTRATE_TOKEN
+from app.auth import verify_token, AuthenticatedActor
 from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.contracts import (UniversalInputContract, GestureInputContract,
                            NotificationAckContract, NotificationPreferencesContract,
-                           VoiceMoveRequest)
+                           VoiceMoveRequest, VoiceMoveCancelRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
-from app.voice_moves import VoiceMoveService
+from app.voice_moves import VoiceMoveService, IdempotencyConflict
 from app.db import init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
 from app.github_service import github_service
 from app.attention_service import attention_service
@@ -258,9 +258,18 @@ async def put_notification_preferences(contract: NotificationPreferencesContract
 
 # VOICE STT TRANSCRIPTION ENDPOINT
 @app.post('/api/v1/voice/transcribe')
-async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source: str = Form('iphone'), token: str = Depends(verify_token)):
+async def transcribe_voice_input(
+    file: Optional[UploadFile] = File(None), source: str = Form('iphone'), session_id: Optional[str] = Form(None),
+    actor: AuthenticatedActor = Depends(verify_token),
+):
     if not file:
         raise HTTPException(status_code=400, detail='A microphone recording is required.')
+    if not session_id:
+        raise HTTPException(status_code=422, detail='A valid Voice session is required.')
+    session_id = session_id.strip()
+    if len(session_id) < 16 or len(session_id) > 120:
+        raise HTTPException(status_code=422, detail='A valid Voice session is required.')
+    voice_move_service.bind_session(actor.actor_id, session_id)
     content = await file.read(25 * 1024 * 1024 + 1)
     try:
         return await stt_adapter.transcribe_audio(content, source=source,
@@ -269,11 +278,35 @@ async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 @app.post('/api/v1/voice/moves')
-async def create_voice_move(request: VoiceMoveRequest, token: str = Depends(verify_token)):
+async def create_voice_move(request: VoiceMoveRequest, actor: AuthenticatedActor = Depends(verify_token)):
     try:
-        return await voice_move_service.handle(request)
+        return await voice_move_service.handle(request, actor.actor_id)
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get('/api/v1/voice/moves/{move_id}')
+async def get_voice_move_result(
+    move_id: str, session_id: str = Query(..., min_length=16, max_length=120),
+    actor: AuthenticatedActor = Depends(verify_token),
+):
+    try:
+        return await voice_move_service.get_result(move_id, actor.actor_id, session_id.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post('/api/v1/voice/moves/{move_id}/cancel')
+async def cancel_voice_move(
+    move_id: str, request: VoiceMoveCancelRequest,
+    actor: AuthenticatedActor = Depends(verify_token),
+):
+    try:
+        return await voice_move_service.cancel(move_id, actor.actor_id, request.session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 # FLEET, ATTENTION & AGENTS
 @app.get('/api/v1/agents')

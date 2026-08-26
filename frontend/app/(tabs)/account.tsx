@@ -26,8 +26,6 @@ export default function AccountScreen() {
   const [activeThemeKey, setActiveThemeKey] = useState<WeatherSceneKey>('dusk-mountain');
 
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
-  const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
-  const [autoListen, setAutoListen] = useState<boolean>(true);
   const [attentionNotifications, setAttentionNotifications] = useState<boolean>(true);
   const [quietHours, setQuietHours] = useState<boolean>(true);
 
@@ -246,25 +244,7 @@ export default function AccountScreen() {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.settingToggleRow}>
-            <Text style={styles.settingToggleLabel}>AUTO-SPEAK FIRSTMATE</Text>
-            <TouchableOpacity
-              style={[styles.toggleBtn, autoSpeak ? styles.toggleBtnActive : undefined]}
-              onPress={() => setAutoSpeak(!autoSpeak)}
-            >
-              <Text style={styles.toggleBtnText}>{autoSpeak ? 'ON ✓' : 'OFF'}</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.settingToggleRow}>
-            <Text style={styles.settingToggleLabel}>CONTINUOUS LISTEN AFTER RESPONSE</Text>
-            <TouchableOpacity
-              style={[styles.toggleBtn, autoListen ? styles.toggleBtnActive : undefined]}
-              onPress={() => setAutoListen(!autoListen)}
-            >
-              <Text style={styles.toggleBtnText}>{autoListen ? 'ON ✓' : 'OFF'}</Text>
-            </TouchableOpacity>
-          </View>
+          <Text style={styles.settingHint}>Voice Mode speaks only concise, non-sensitive summaries. Microphone capture always requires an explicit action.</Text>
         </GlassSurface>
 
         {/* CONNECTED OAUTH PROVIDERS */}

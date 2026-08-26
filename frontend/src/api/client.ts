@@ -1,5 +1,9 @@
-const GATEWAY_URL = 'http://100.84.181.23:8000/api/v1';
-const DEVICE_TOKEN = 'magistrate-device-token-12345';
+const GATEWAY_URL = process.env.EXPO_PUBLIC_GATEWAY_URL || 'http://100.84.181.23:8000/api/v1';
+const DEVICE_TOKEN = (process.env.EXPO_PUBLIC_MAGISTRATE_TOKEN || '').trim();
+
+function authHeaders(): Record<string, string> {
+  return DEVICE_TOKEN ? { Authorization: `Bearer ${DEVICE_TOKEN}` } : {};
+}
 
 export interface AgentInfo {
   id: string;
@@ -43,7 +47,7 @@ export interface NotificationEvent extends AttentionItem {
 export async function fetchNotificationEvents(foreground: boolean): Promise<{ events: NotificationEvent[] }> {
   const hour = new Date().getHours();
   const res = await fetch(`${GATEWAY_URL}/notifications/events?foreground=${foreground}&local_hour=${hour}`, {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   if (!res.ok) throw new Error(`Notification events failed: ${res.status}`);
   return res.json();
@@ -51,7 +55,7 @@ export async function fetchNotificationEvents(foreground: boolean): Promise<{ ev
 
 export async function acknowledgeNotificationEvents(itemIds: string[]): Promise<void> {
   const res = await fetch(GATEWAY_URL + '/notifications/events/ack', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ item_ids: itemIds })
   });
   if (!res.ok) throw new Error(`Notification acknowledgement failed: ${res.status}`);
@@ -59,7 +63,7 @@ export async function acknowledgeNotificationEvents(itemIds: string[]): Promise<
 
 export async function updateNotificationPreferences(enabled: boolean, quietHours: boolean): Promise<void> {
   const res = await fetch(GATEWAY_URL + '/notifications/preferences', {
-    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    method: 'PUT', headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ enabled, quiet_start: quietHours ? 22 : null, quiet_end: quietHours ? 7 : null })
   });
   if (!res.ok) throw new Error(`Notification preferences failed: ${res.status}`);
@@ -114,42 +118,42 @@ export interface GitHubPRPage {
 
 export async function fetchHealth() {
   const res = await fetch(GATEWAY_URL + '/health', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
 
 export async function fetchRuntime() {
   const res = await fetch(GATEWAY_URL + '/runtime', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
 
 export async function fetchAgents(): Promise<AgentInfo[]> {
   const res = await fetch(GATEWAY_URL + '/agents', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
-  return res.json();
+  return checkedJson<AgentInfo[]>(res);
 }
 
 export async function fetchFleet() {
   const res = await fetch(GATEWAY_URL + '/fleet', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
 
 export async function fetchAttention(): Promise<AttentionItem[]> {
   const res = await fetch(GATEWAY_URL + '/attention', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
 
 export async function fetchUserProfile(): Promise<UserProfile> {
   const res = await fetch(GATEWAY_URL + '/account/profile', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
@@ -160,7 +164,7 @@ export async function updateUserProfile(profile: Partial<UserProfile>): Promise<
     if (value != null) formData.append(key, String(value));
   });
   const res = await fetch(GATEWAY_URL + '/account/profile', {
-    method: 'POST', headers: { 'X-Magistrate-Token': DEVICE_TOKEN }, body: formData
+    method: 'POST', headers: authHeaders(), body: formData
   });
   if (!res.ok) throw new Error(`Profile update failed: ${res.status}`);
   return res.json();
@@ -183,7 +187,7 @@ export async function uploadUserAvatar(imageUri: string, mimeType: string = 'ima
   const res = await fetch(GATEWAY_URL + '/account/avatar', {
     method: 'POST',
     headers: {
-      'X-Magistrate-Token': DEVICE_TOKEN
+      ...authHeaders()
     },
     body: formData
   });
@@ -192,14 +196,14 @@ export async function uploadUserAvatar(imageUri: string, mimeType: string = 'ima
 
 export async function fetchAuthProviders(): Promise<AuthProviderInfo[]> {
   const res = await fetch(GATEWAY_URL + '/auth/providers', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
 
 export async function connectAuthProvider(provider: string): Promise<any> {
   const res = await fetch(GATEWAY_URL + '/auth/' + provider + '/connect', {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
@@ -207,7 +211,7 @@ export async function connectAuthProvider(provider: string): Promise<any> {
 export async function disconnectAuthProvider(provider: string): Promise<any> {
   const res = await fetch(GATEWAY_URL + '/auth/' + provider + '/disconnect', {
     method: 'POST',
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
@@ -220,14 +224,14 @@ async function checkedJson<T>(res: Response): Promise<T> {
 
 export async function fetchGitHubPRs(page = 1, refresh = false): Promise<GitHubPRPage> {
   const res = await fetch(GATEWAY_URL + `/github/pulls?page=${page}&per_page=20&refresh=${refresh}`, {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return checkedJson<GitHubPRPage>(res);
 }
 
 export async function fetchGitHubPR(number: number, refresh = false): Promise<GitHubPR> {
   const res = await fetch(GATEWAY_URL + `/github/pulls/${number}?refresh=${refresh}`, {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return checkedJson<GitHubPR>(res);
 }
@@ -238,8 +242,9 @@ async function requireOk(res: Response): Promise<any> {
   return payload;
 }
 
-export async function transcribeVoiceAudio(audioUri: string, mimeType: string, filename: string): Promise<{ text: string; is_final: boolean }> {
+export async function transcribeVoiceAudio(audioUri: string, mimeType: string, filename: string, sessionId: string, signal?: AbortSignal): Promise<{ text: string; is_final: boolean; provider?: string }> {
   const formData = new FormData();
+  formData.append('session_id', sessionId);
   if (typeof window !== 'undefined') {
     const audioResponse = await fetch(audioUri);
     formData.append('file', await audioResponse.blob(), filename);
@@ -248,27 +253,42 @@ export async function transcribeVoiceAudio(audioUri: string, mimeType: string, f
   }
   const res = await fetch(GATEWAY_URL + '/voice/transcribe', {
     method: 'POST',
-    headers: {
-      'X-Magistrate-Token': DEVICE_TOKEN
-    },
-    body: formData
+    headers: authHeaders(), body: formData, signal
   });
   return requireOk(res);
 }
 
 export interface VoiceMoveResult {
   move_id: string;
-  status: 'ready' | 'confirmation_required' | 'confirmation_expired' | 'prohibited' | 'completed' | 'error';
+  status: 'ready' | 'confirmation_required' | 'confirmation_expired' | 'prohibited' | 'unsupported' | 'acknowledged' | 'completed' | 'cancelled' | 'error';
   target: string; intent: string; impact: string; requires_confirmation: boolean;
-  confirmation_token?: string; confirmation_message?: string; response?: string; error?: string;
+  session_id?: string; action?: string; arguments?: { target: string; utterance: string }; result_url?: string; result_status?: string;
+  confirmation_token?: string; confirmation_message?: string; confirmation_expires_at?: number;
+  response?: string; acknowledgement?: string; error?: string; poll_after_ms?: number;
 }
 
 export async function submitVoiceMove(utterance: string, target: string, idempotencyKey: string,
-  execute = false, confirmationToken?: string): Promise<VoiceMoveResult> {
+  execute = false, confirmationToken?: string, sessionId?: string, signal?: AbortSignal): Promise<VoiceMoveResult> {
+  if (!sessionId?.trim()) throw new Error('Voice session is unavailable. Reopen Voice Mode and try again.');
   const res = await fetch(GATEWAY_URL + '/voice/moves', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, signal,
     body: JSON.stringify({ schema_version: 'voice-move.v1', utterance, target, source: 'voice-page',
-      idempotency_key: idempotencyKey, execute, confirmation_token: confirmationToken })
+      session_id: sessionId, idempotency_key: idempotencyKey, execute, confirmation_token: confirmationToken })
+  });
+  return requireOk(res);
+}
+
+export async function pollVoiceMove(moveId: string, sessionId: string, signal?: AbortSignal): Promise<VoiceMoveResult> {
+  const res = await fetch(`${GATEWAY_URL}/voice/moves/${encodeURIComponent(moveId)}?session_id=${encodeURIComponent(sessionId)}`, {
+    headers: authHeaders(), signal
+  });
+  return requireOk(res);
+}
+
+export async function cancelVoiceMove(moveId: string, sessionId: string, signal?: AbortSignal): Promise<VoiceMoveResult> {
+  const res = await fetch(`${GATEWAY_URL}/voice/moves/${encodeURIComponent(moveId)}/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, signal,
+    body: JSON.stringify({ session_id: sessionId })
   });
   return requireOk(res);
 }
@@ -279,7 +299,7 @@ export const HERDR_MAX_READ_LINES = 0xFFFFFFFF;
 
 export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
   const res = await fetch(GATEWAY_URL + '/captain/output?lines=' + lines, {
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
@@ -289,7 +309,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Magistrate-Token': DEVICE_TOKEN
+      ...authHeaders()
     },
     body: JSON.stringify({
       source,
@@ -305,7 +325,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
 export async function interruptAgent(agentId: string) {
   const res = await fetch(GATEWAY_URL + '/agents/' + agentId + '/interrupt', {
     method: 'POST',
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
@@ -313,7 +333,7 @@ export async function interruptAgent(agentId: string) {
 export async function sendAgentKey(agentId: string = 'captain', key: string = 'Enter') {
   const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/send-key?key=' + encodeURIComponent(key), {
     method: 'POST',
-    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+    headers: authHeaders()
   });
   return res.json();
 }
