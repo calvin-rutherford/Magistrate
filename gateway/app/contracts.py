@@ -1,5 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from enum import Enum
+from pydantic import BaseModel, Field
+from typing import Optional, Literal, List
 
 class UniversalInputContract(BaseModel):
     source: str = 'iphone'
@@ -19,3 +20,18 @@ class NotificationPreferencesContract(BaseModel):
     enabled: bool = True
     quiet_start: Optional[int] = None
     quiet_end: Optional[int] = None
+
+class VoiceImpact(str, Enum):
+    READ = 'read'
+    PROMPT = 'prompt'
+    CONTROL = 'control'
+    PROHIBITED = 'prohibited'
+
+class VoiceMoveRequest(BaseModel):
+    schema_version: Literal['voice-move.v1'] = 'voice-move.v1'
+    utterance: str = Field(min_length=1, max_length=4000)
+    target: str = Field(default='captain', min_length=1, max_length=200)
+    source: str = Field(default='voice-page', max_length=50)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    execute: bool = False
+    confirmation_token: Optional[str] = None

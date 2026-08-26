@@ -40,6 +40,13 @@
       "expo-router",
       "expo-notifications",
       [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Magistrate to capture audio only while you use Voice Mode.",
+          "enableBackgroundRecording": false
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "backgroundColor": "#208AEF",

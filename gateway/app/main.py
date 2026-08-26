@@ -11,8 +11,11 @@ from typing import Optional, List
 from app.auth import verify_token, MAGISTRATE_TOKEN
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
-from app.contracts import UniversalInputContract, GestureInputContract, NotificationAckContract, NotificationPreferencesContract
-from app.stt_adapter import VoiceInputAdapter
+from app.contracts import (UniversalInputContract, GestureInputContract,
+                           NotificationAckContract, NotificationPreferencesContract,
+                           VoiceMoveRequest)
+from app.stt_adapter import VoiceInputAdapter, TranscriptionError
+from app.voice_moves import VoiceMoveService
 from app.db import init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
 from app.github_service import github_service
 from app.attention_service import attention_service
@@ -47,6 +50,7 @@ app.mount('/uploads', StaticFiles(directory='/home/spectre/Magistrate/gateway/up
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
 stt_adapter = VoiceInputAdapter()
+voice_move_service = VoiceMoveService(herdr_client)
 
 jira_adapter = JiraProviderAdapter()
 teams_adapter = TeamsProviderAdapter()
@@ -245,11 +249,21 @@ async def put_notification_preferences(contract: NotificationPreferencesContract
 # VOICE STT TRANSCRIPTION ENDPOINT
 @app.post('/api/v1/voice/transcribe')
 async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source: str = Form('iphone'), token: str = Depends(verify_token)):
-    content = b''
-    if file:
-        content = await file.read()
-    result = await stt_adapter.transcribe_audio(content, source=source)
-    return result
+    if not file:
+        raise HTTPException(status_code=400, detail='A microphone recording is required.')
+    content = await file.read(25 * 1024 * 1024 + 1)
+    try:
+        return await stt_adapter.transcribe_audio(content, source=source,
+            content_type=file.content_type or 'application/octet-stream', filename=file.filename or 'speech.m4a')
+    except TranscriptionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+@app.post('/api/v1/voice/moves')
+async def create_voice_move(request: VoiceMoveRequest, token: str = Depends(verify_token)):
+    try:
+        return await voice_move_service.handle(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 # FLEET, ATTENTION & AGENTS
 @app.get('/api/v1/agents')

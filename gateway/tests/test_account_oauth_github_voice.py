@@ -56,7 +56,5 @@ def test_live_github_prs():
 
 def test_voice_transcribe():
     res = client.post('/api/v1/voice/transcribe', data={'source': 'iphone'}, headers=HEADERS)
-    assert res.status_code == 200
-    trans = res.json()
-    assert 'text' in trans
-    assert len(trans['text']) > 0
+    assert res.status_code == 400
+    assert res.json()['detail'] == 'A microphone recording is required.'
