@@ -11,6 +11,14 @@ export interface AgentInfo {
   workspace_id?: string;
 }
 
+export interface AgentControlResult {
+  status: string;
+  target?: string;
+  key?: string;
+  response?: string;
+  error?: string | null;
+}
+
 export interface HealthInfo {
   status: string;
   service: string;
@@ -344,18 +352,18 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
   return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);
 }
 
-export async function interruptAgent(agentId: string) {
-  const res = await fetch(GATEWAY_URL + '/agents/' + agentId + '/interrupt', {
+export async function interruptAgent(agentId: string): Promise<AgentControlResult> {
+  const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/interrupt', {
     method: 'POST',
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return res.json();
+  return checkedJson<AgentControlResult>(res);
 }
 
-export async function sendAgentKey(agentId: string = 'captain', key: string = 'Enter') {
+export async function sendAgentKey(agentId: string = 'captain', key: string = 'Enter'): Promise<AgentControlResult> {
   const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/send-key?key=' + encodeURIComponent(key), {
     method: 'POST',
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return checkedJson<{ status: string; target?: string; key?: string; response?: string; error?: string }>(res);
+  return checkedJson<AgentControlResult>(res);
 }
