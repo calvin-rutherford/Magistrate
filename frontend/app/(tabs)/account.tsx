@@ -2,9 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Alert, ActivityIndicator } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as WebBrowser from 'expo-web-browser';
+import * as Linking from 'expo-linking';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, UserProfile, AuthProviderInfo } from '../../src/api/client';
+import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, updateUserProfile, UserProfile, AuthProviderInfo } from '../../src/api/client';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
@@ -34,9 +35,13 @@ export default function AccountScreen() {
         fetchUserProfile().catch(() => null),
         fetchAuthProviders().catch(() => [])
       ]);
-      if (prof && prof.name) {
+      if (prof) {
         if (prof.avatar_url && prof.avatar_url.startsWith('/uploads')) {
           prof.avatar_url = 'http://100.84.181.23:8000' + prof.avatar_url;
+        }
+                if (prof.active_theme) {
+          setActiveThemeKey(prof.active_theme as any);
+          setActiveBackground(prof.active_theme as any);
         }
         setProfile(prof);
       }
@@ -107,20 +112,29 @@ export default function AccountScreen() {
     }
   };
 
-  const handleSelectBackground = (key: WeatherSceneKey) => {
+  const handleSelectBackground = async (key: WeatherSceneKey) => {
     setActiveThemeKey(key);
     setActiveBackground(key);
+    try {
+      await updateUserProfile({ active_theme: key });
+    } catch (e) {
+      console.error('Failed to save background theme');
+    }
   };
 
   // REAL OAUTH BROWSER AUTHENTICATION FLOW WITH AUTO DISMISSAL
   const handleRealOAuthConnect = async (providerInfo: any) => {
-    const authUrl = providerInfo.auth_url || `http://100.84.181.23:8000/api/v1/auth/${providerInfo.provider}/connect`;
-    const redirectUrl = 'http://100.84.181.23:8000/account';
+    const returnUrl = Linking.createURL('/account');
+    const authUrl = `http://100.84.181.23:8000/api/v1/auth/${providerInfo.provider}/connect?token=dummy&redirect_uri=${encodeURIComponent(returnUrl)}`;
 
     try {
-      const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
-      WebBrowser.dismissBrowser();
-      loadAccountData();
+      const result = await WebBrowser.openAuthSessionAsync(authUrl, returnUrl);
+      // The browser automatically dismisses when the returnUrl is hit.
+      if (result.type === 'success') {
+        loadAccountData();
+      } else {
+        WebBrowser.dismissBrowser();
+      }
     } catch (e) {
       console.error('OAuth browser error:', e);
       WebBrowser.dismissBrowser();
@@ -216,14 +230,9 @@ export default function AccountScreen() {
         </View>
 
         <GlassSurface variant="card" style={styles.socialCard}>
-          {(providers.length > 0 ? providers : [
-            { provider: 'github', status: 'connected', username: 'calvin-rutherford', capabilities: ['read_prs', 'manage_repos'], auth_url: '' },
-            { provider: 'twitter', status: 'connected', username: '@spectre_dev', capabilities: ['read_feed', 'post_content'], auth_url: '' },
-            { provider: 'discord', status: 'connected', username: 'spectre#1337', capabilities: ['send_notifications'], auth_url: '' },
-            { provider: 'google', status: 'disconnected', username: '', capabilities: ['cloud_access'], auth_url: '' },
-            { provider: 'jira', status: 'connected', username: 'calvin@eversana.com', capabilities: ['read_assigned_issues'], auth_url: '' },
-            { provider: 'teams', status: 'connected', username: 'calvin.rutherford@eversana.com', capabilities: ['read_mentions'], auth_url: '' }
-          ]).map(s => (
+          {providers.length === 0 ? (
+          <Text style={{ fontFamily: 'monospace', color: 'rgba(255,255,255,0.5)', fontSize: 11, textAlign: 'center', marginVertical: 10 }}>No integrations connected.</Text>
+        ) : providers.map(s => (
             <View key={s.provider} style={styles.socialRow}>
               <View style={styles.providerLeft}>
                 <Text style={styles.socialName}>{s.provider.toUpperCase()}</Text>

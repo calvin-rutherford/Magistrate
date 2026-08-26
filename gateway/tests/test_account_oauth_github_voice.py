@@ -35,10 +35,9 @@ def test_oauth_providers():
     assert 'github' in p_names
     assert 'twitter' in p_names
 
-    # Connect GitHub provider
-    res_conn = client.get('/api/v1/auth/github/connect', headers=HEADERS)
-    assert res_conn.status_code == 200
-    assert res_conn.json()['status'] == 'connected'
+    # Connect GitHub provider (redirects to OAuth)
+    res_conn = client.get('/api/v1/auth/github/connect', headers=HEADERS, follow_redirects=False)
+    assert res_conn.status_code in [302, 303, 307]
 
     # Disconnect GitHub provider
     res_dis = client.post('/api/v1/auth/github/disconnect', headers=HEADERS)

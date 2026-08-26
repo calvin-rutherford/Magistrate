@@ -21,7 +21,14 @@ class GitHubService:
                 raw_prs = json.loads(stdout.decode('utf-8'))
                 formatted_prs = []
                 for pr in raw_prs:
-                    author_name = pr.get('author', {}).get('login', 'Codex')
+                    author_name = pr.get('author', {}).get('login', 'Firstmate')
+                    branch = pr.get('headRefName', 'main')
+                    
+                    # Only show PRs made by firstmate/subagents
+                    is_agent = 'agent' in author_name.lower() or 'firstmate' in author_name.lower() or 'bot' in author_name.lower() or branch.startswith('agent/') or branch.startswith('firstmate/')
+                    if not is_agent:
+                        continue
+                        
                     state_str = 'draft' if pr.get('isDraft') else pr.get('state', 'OPEN').lower()
                     review_str = pr.get('reviewDecision', 'APPROVED') or 'APPROVED'
                     formatted_prs.append({
@@ -30,7 +37,7 @@ class GitHubService:
                         'title': pr.get('title', 'Pull Request'),
                         'repository': self.repo,
                         'author': author_name,
-                        'agent': 'Codex',
+                        'agent': 'Firstmate',
                         'branch': pr.get('headRefName', 'main'),
                         'state': state_str,
                         'review_status': review_str,
@@ -45,39 +52,4 @@ class GitHubService:
             print('GitHubService error:', e)
 
         # Fallback to authentic repo telemetry structure if gh CLI has no open PRs
-        return [
-            {
-                'id': 142,
-                'pr_number': 142,
-                'title': 'Add passkey authentication flow',
-                'repository': 'melkezic/firstmate',
-                'author': 'auth-service',
-                'agent': 'Codex',
-                'branch': 'agent/auth-passkeys',
-                'state': 'ready',
-                'review_status': 'APPROVED',
-                'checks': 'passing',
-                'mergeable': 'MERGEABLE',
-                'summary': 'Passkey authentication implementation for Magistrate API',
-                'requires_attention': False,
-                'url': 'https://github.com/melkezic/firstmate/pulls'
-            },
-            {
-                'id': 87,
-                'pr_number': 87,
-                'title': 'Create voice-first mobile command shell',
-                'repository': 'melkezic/firstmate',
-                'author': 'mobile-shell',
-                'agent': 'Claude Code',
-                'branch': 'agent/voice-shell',
-                'state': 'draft',
-                'review_status': 'PENDING',
-                'checks': 'passing',
-                'mergeable': 'MERGEABLE',
-                'summary': 'Voice command surface and waveform visualizer for Magistrate mobile',
-                'requires_attention': True,
-                'url': 'https://github.com/melkezic/firstmate/pulls'
-            }
-        ]
-
-github_service = GitHubService()
+        return []

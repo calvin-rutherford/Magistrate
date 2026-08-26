@@ -24,7 +24,7 @@ export const GlassSurface: React.FC<GlassSurfaceProps> = ({
   children,
   style,
   variant = 'card',
-  intensity = 40
+  intensity = 15
 }) => {
   const borderRadius =
     variant === 'circle' || variant === 'control'
@@ -46,7 +46,7 @@ export const GlassSurface: React.FC<GlassSurfaceProps> = ({
         <BlurViewComponent intensity={intensity} tint="dark" style={[StyleSheet.absoluteFill, { borderRadius }]} />
       )}
       <LinearGradient
-        colors={['rgba(255, 255, 255, 0.28)', 'rgba(255, 255, 255, 0.04)', 'rgba(255, 255, 255, 0.10)']}
+        colors={['rgba(255, 255, 255, 0.15)', 'rgba(255, 255, 255, 0.01)', 'rgba(255, 255, 255, 0.05)']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={[StyleSheet.absoluteFill, { borderRadius, opacity: 0.85 }]}
@@ -59,9 +59,9 @@ export const GlassSurface: React.FC<GlassSurfaceProps> = ({
 const styles = StyleSheet.create({
   container: {
     overflow: 'hidden',
-    backgroundColor: 'rgba(15, 30, 45, 0.28)',
+    backgroundColor: 'rgba(255, 255, 255, 0.02)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.20)',
+    borderColor: 'rgba(255, 255, 255, 0.12)',
     elevation: 0
   },
   content: {

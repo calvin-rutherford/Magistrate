@@ -41,6 +41,7 @@ def init_db():
         email TEXT NOT NULL,
         avatar_url TEXT,
         bio TEXT,
+        active_theme TEXT,
         created_at INTEGER,
         updated_at INTEGER
     )
@@ -86,8 +87,8 @@ def init_db():
     if not cursor.fetchone():
         now = int(time.time())
         cursor.execute('''
-        INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, created_at, updated_at)
-        VALUES ('default_user', 'Spectre Operator', 'spectre@magistrate.io', '/uploads/avatars/default_avatar.png', 'Firstmate Master Operator', ?, ?)
+        INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
+        VALUES ('default_user', 'Spectre Operator', 'spectre@magistrate.io', '/uploads/avatars/default_avatar.png', 'Firstmate Master Operator', 'dusk-mountain', ?, ?)
         ''', (now, now))
 
     conn.commit()
@@ -97,31 +98,33 @@ def get_profile(user_id: str = 'default_user') -> Dict[str, Any]:
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT user_id, name, email, avatar_url, bio, created_at, updated_at FROM user_profiles WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at FROM user_profiles WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
     conn.close()
 
     if row:
         return {
             'user_id': row[0],
-            'name': row[1],
-            'email': row[2],
+            'name': row[1] or '',
+            'email': row[2] or '',
             'avatar_url': row[3] or '/uploads/avatars/default_avatar.png',
             'bio': row[4] or '',
-            'created_at': row[5],
-            'updated_at': row[6]
+            'active_theme': row[5] or 'dusk-mountain',
+            'created_at': row[6],
+            'updated_at': row[7]
         }
     return {
         'user_id': user_id,
-        'name': 'Spectre Operator',
-        'email': 'spectre@magistrate.io',
+        'name': '',
+        'email': '',
         'avatar_url': '/uploads/avatars/default_avatar.png',
-        'bio': 'Firstmate Master Operator',
+        'bio': '',
+        'active_theme': 'dusk-mountain',
         'created_at': int(time.time()),
         'updated_at': int(time.time())
     }
 
-def update_profile(user_id: str = 'default_user', name: Optional[str] = None, email: Optional[str] = None, avatar_url: Optional[str] = None, bio: Optional[str] = None) -> Dict[str, Any]:
+def update_profile(user_id: str = 'default_user', name: Optional[str] = None, email: Optional[str] = None, avatar_url: Optional[str] = None, bio: Optional[str] = None, active_theme: Optional[str] = None) -> Dict[str, Any]:
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -132,17 +135,19 @@ def update_profile(user_id: str = 'default_user', name: Optional[str] = None, em
     new_email = email if email is not None else curr['email']
     new_avatar = avatar_url if avatar_url is not None else curr['avatar_url']
     new_bio = bio if bio is not None else curr['bio']
+    new_theme = active_theme if active_theme is not None else curr.get('active_theme', 'dusk-mountain')
 
     cursor.execute('''
-    INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
         name=excluded.name,
         email=excluded.email,
         avatar_url=excluded.avatar_url,
         bio=excluded.bio,
+        active_theme=excluded.active_theme,
         updated_at=excluded.updated_at
-    ''', (user_id, new_name, new_email, new_avatar, new_bio, now, now))
+    ''', (user_id, new_name, new_email, new_avatar, new_bio, new_theme, now, now))
 
     conn.commit()
     conn.close()

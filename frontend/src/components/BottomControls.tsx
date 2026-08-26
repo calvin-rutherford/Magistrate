@@ -1,22 +1,26 @@
 import React from 'react';
-import { View, StyleSheet, TouchableOpacity, Text } from 'react-native';
+import { View, TouchableOpacity, StyleSheet, Text } from 'react-native';
+import { Svg, Path } from 'react-native-svg';
 import { GlassSurface } from './GlassSurface';
-import { useRouter } from 'expo-router';
+import { useRouter, usePathname } from 'expo-router';
 
-export function BottomControls() {
+export const BottomControls: React.FC = () => {
   const router = useRouter();
+  const pathname = usePathname();
 
   return (
     <View style={styles.fixedContainer} pointerEvents="box-none">
-      <GlassSurface variant="control" intensity={75} style={styles.barSurface}>
+      <GlassSurface variant="card" style={styles.barSurface}>
         <View style={styles.controlsRow}>
-          {/* CHAT TERMINAL BUTTON */}
+          {/* CHAT WIREFRAME BUTTON */}
           <TouchableOpacity
             style={styles.iconBtn}
             onPress={() => router.push('/chat' as any)}
             activeOpacity={0.7}
           >
-            <Text style={styles.iconText}>💬</Text>
+            <Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={pathname === '/chat' ? "#72F5B1" : "#FFFFFF"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+              <Path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </Svg>
           </TouchableOpacity>
 
           {/* CENTRAL VOICE MODE BUTTON */}
@@ -25,7 +29,12 @@ export function BottomControls() {
             onPress={() => router.push('/voice' as any)}
             activeOpacity={0.8}
           >
-            <Text style={styles.centerMicIcon}>🎙️</Text>
+            <Svg width={24} height={24} viewBox="0 0 24 24" fill="none" stroke={pathname === '/voice' ? "#72F5B1" : "#FFFFFF"} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <Path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
+              <Path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <Path d="M12 19v3" />
+              <Path d="M8 22h8" />
+            </Svg>
           </TouchableOpacity>
 
           {/* GESTURE / AR GLASSES BUTTON */}
@@ -34,7 +43,12 @@ export function BottomControls() {
             onPress={() => router.push('/gesture' as any)}
             activeOpacity={0.7}
           >
-            <Text style={styles.iconText}>👓</Text>
+            <Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={pathname === '/gesture' ? "#72F5B1" : "#FFFFFF"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+              <Path d="M18 11V6a2 2 0 0 0-4 0v5" />
+              <Path d="M14 10V4a2 2 0 0 0-4 0v6" />
+              <Path d="M10 10.5V6a2 2 0 0 0-4 0v9" />
+              <Path d="M18 11a2 2 0 0 1 4 0v3c0 5-4 9-9 9h-1c-5 0-9-4-9-9v-2a2 2 0 0 1 4 0" />
+            </Svg>
           </TouchableOpacity>
         </View>
       </GlassSurface>
@@ -76,9 +90,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center'
   },
-  iconText: {
-    fontSize: 18
-  },
   centerMicBtn: {
     width: 52,
     height: 52,
@@ -88,8 +99,5 @@ const styles = StyleSheet.create({
     borderColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center'
-  },
-  centerMicIcon: {
-    fontSize: 22
   }
 });

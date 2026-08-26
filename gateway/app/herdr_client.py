@@ -72,7 +72,7 @@ class HerdrClient:
             status = ag.get('agent_status', {}).get('state', 'unknown') if isinstance(ag.get('agent_status'), dict) else str(ag.get('agent_status', 'unknown'))
             formatted_agents.append({
                 'id': ag.get('pane_id') or ag.get('id') or ag.get('name', 'unknown'),
-                'name': ag.get('name') or ag.get('label') or 'captain',
+                'name': ag.get('name') or ag.get('label') or 'firstmate',
                 'harness': ag.get('agent') or ag.get('harness') or 'codex',
                 'status': status,
                 'pane_id': ag.get('pane_id'),
@@ -82,7 +82,7 @@ class HerdrClient:
         return formatted_agents
 
     async def resolve_target(self, target: str) -> str:
-        if target in ('captain', 'codex'):
+        if target in ('captain', 'codex', 'firstmate'):
             agents = await self.list_agents()
             if agents:
                 for ag in agents:

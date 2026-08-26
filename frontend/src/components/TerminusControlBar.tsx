@@ -10,7 +10,7 @@ interface TerminusControlBarProps {
 }
 
 export const TerminusControlBar: React.FC<TerminusControlBarProps> = ({
-  target = 'captain',
+  target = 'firstmate',
   onKeySent
 }) => {
   const handlePressKey = async (key: string) => {
@@ -23,40 +23,30 @@ export const TerminusControlBar: React.FC<TerminusControlBarProps> = ({
   };
 
   const keys = [
-    { label: 'ENTER ↵', value: 'Enter', primary: true },
-    { label: 'Y (YES)', value: 'Y', primary: false },
-    { label: 'N (NO)', value: 'N', primary: false },
-    { label: 'ESC', value: 'Escape', primary: false },
-    { label: '▲ UP', value: 'Up', primary: false },
-    { label: '▼ DOWN', value: 'Down', primary: false },
-    { label: 'CTRL+C', value: 'C-c', danger: true },
-    { label: 'TAB', value: 'Tab', primary: false },
+    { label: 'ENTER', value: 'Enter' },
+    { label: 'Y (YES)', value: 'Y' },
+    { label: 'N (NO)', value: 'N' },
+    { label: 'ESC', value: 'Escape' },
+    { label: '▲', value: 'Up' },
+    { label: '▼', value: 'Down' },
+    { label: 'CTRL+C', value: 'C-c' },
+    { label: 'TAB', value: 'Tab' },
   ];
 
   return (
     <View style={styles.container}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        {keys.map((k) => (
-          <TouchableOpacity key={k.label} onPress={() => handlePressKey(k.value)} activeOpacity={0.75}>
-            <GlassSurface
-              variant="control"
-              style={[
-                styles.keyPill,
-                k.primary ? styles.keyPrimary : null,
-                k.danger ? styles.keyDanger : null
-              ]}
-            >
-              <Text style={[
-                styles.keyText,
-                k.primary ? styles.keyTextPrimary : null,
-                k.danger ? styles.keyTextDanger : null
-              ]}>
-                {k.label}
-              </Text>
-            </GlassSurface>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+      <GlassSurface variant="control" style={styles.unifiedPill}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+          {keys.map((k, index) => (
+            <React.Fragment key={k.label}>
+              <TouchableOpacity onPress={() => handlePressKey(k.value)} activeOpacity={0.5} style={styles.btnHitbox}>
+                <Text style={styles.keyText}>{k.label}</Text>
+              </TouchableOpacity>
+              {index < keys.length - 1 && <View style={styles.divider} />}
+            </React.Fragment>
+          ))}
+        </ScrollView>
+      </GlassSurface>
     </View>
   );
 };
@@ -64,39 +54,36 @@ export const TerminusControlBar: React.FC<TerminusControlBarProps> = ({
 const styles = StyleSheet.create({
   container: {
     paddingVertical: 6,
-    marginVertical: 4
+    marginVertical: 4,
+    alignItems: 'center'
+  },
+  unifiedPill: {
+    borderRadius: 24,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderWidth: 1,
+    overflow: 'hidden',
+    height: 38
   },
   scrollContent: {
-    gap: 8,
-    paddingHorizontal: 2
+    alignItems: 'center',
+    paddingHorizontal: 8
   },
-  keyPill: {
+  btnHitbox: {
     paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 14,
-    minWidth: 54,
-    alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.12)'
+    alignItems: 'center'
   },
-  keyPrimary: {
-    backgroundColor: 'rgba(114, 245, 177, 0.25)',
-    borderColor: '#72F5B1'
-  },
-  keyDanger: {
-    backgroundColor: 'rgba(239, 68, 68, 0.25)',
-    borderColor: '#EF4444'
+  divider: {
+    width: 1,
+    height: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)'
   },
   keyText: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: 'bold',
-    color: GlassTokens.colors.textPrimary,
+    color: '#FFFFFF',
     letterSpacing: 0.8
-  },
-  keyTextPrimary: {
-    color: '#72F5B1'
-  },
-  keyTextDanger: {
-    color: '#EF4444'
   }
 });

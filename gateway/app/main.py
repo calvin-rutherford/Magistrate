@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, Query, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 import os
 import json
 import asyncio
@@ -104,10 +104,11 @@ async def post_account_profile(
     name: Optional[str] = Form(None),
     email: Optional[str] = Form(None),
     bio: Optional[str] = Form(None),
+    active_theme: Optional[str] = Form(None),
     user_id: str = 'default_user',
     token: str = Depends(verify_token)
 ):
-    return update_profile(user_id=user_id, name=name, email=email, bio=bio)
+    return update_profile(user_id=user_id, name=name, email=email, bio=bio, active_theme=active_theme)
 
 @app.post('/api/v1/account/avatar')
 async def upload_account_avatar(
@@ -141,13 +142,54 @@ async def list_auth_providers(user_id: str = 'default_user', token: str = Depend
     return result
 
 @app.get('/api/v1/auth/{provider}/connect')
-async def connect_oauth_provider(provider: str, user_id: str = 'default_user', token: str = Depends(verify_token)):
+async def connect_oauth_provider(provider: str, redirect_uri: str = Query('magistrate://account'), user_id: str = 'default_user', token: str = Depends(verify_token)):
     if provider not in providers:
         raise HTTPException(status_code=404, detail='Provider not supported')
     adapter = providers[provider]
-    profile = await adapter.get_user_profile('demo_token')
-    acc = upsert_connected_account(user_id=user_id, provider=provider, provider_username=profile.get('username', f'@{provider}_user'), status='connected', scopes=adapter.default_scopes(), access_token='demo_token')
-    return {'status': 'connected', 'account': acc, 'redirect_url': adapter.get_authorization_url()}
+    # For a real flow, you generate a state parameter to prevent CSRF, and append the mobile app's redirect_uri to it.
+    state = f"{user_id}::{redirect_uri}"
+    auth_url = adapter.get_authorization_url() + f"&state={state}" if '?' in adapter.get_authorization_url() else adapter.get_authorization_url() + f"?state={state}"
+    return RedirectResponse(url=auth_url)
+
+@app.get('/api/v1/auth/{provider}/callback')
+async def oauth_callback(provider: str, code: str = Query(None), state: str = Query(None), error: str = Query(None)):
+    if not state:
+        return JSONResponse({'error': 'Missing state'}, status_code=400)
+    
+    parts = state.split('::')
+    user_id = parts[0]
+    app_redirect_uri = parts[1] if len(parts) > 1 else 'magistrate://account'
+
+    if error:
+        return RedirectResponse(url=f"{app_redirect_uri}?error={error}")
+
+    if provider not in providers:
+        return RedirectResponse(url=f"{app_redirect_uri}?error=unsupported_provider")
+    
+    adapter = providers[provider]
+    
+    # In a fully real flow, adapter.exchange_code(code) makes an HTTP request to the provider.
+    # We will simulate the exchange here to allow the UI to work seamlessly if .env keys are missing.
+    try:
+        if hasattr(adapter, 'exchange_code'):
+            access_token = await adapter.exchange_code(code)
+        else:
+            access_token = f"mock_token_{code}"
+            
+        profile = await adapter.get_user_profile(access_token)
+        username = profile.get('username', f'@{provider}_user')
+        
+        upsert_connected_account(
+            user_id=user_id, 
+            provider=provider, 
+            provider_username=username, 
+            status='connected', 
+            scopes=adapter.default_scopes(), 
+            access_token=access_token
+        )
+        return RedirectResponse(url=f"{app_redirect_uri}?status=success")
+    except Exception as e:
+        return RedirectResponse(url=f"{app_redirect_uri}?error={str(e)}")
 
 @app.post('/api/v1/auth/{provider}/disconnect')
 async def disconnect_oauth_provider(provider: str, user_id: str = 'default_user', token: str = Depends(verify_token)):
