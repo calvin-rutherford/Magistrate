@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking, Platform, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
@@ -11,33 +11,28 @@ export default function PRsScreen() {
   const [prs, setPrs] = useState<GitHubPR[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
 
-  const loadPRs = async () => {
+  const loadPRs = async (nextPage = 1, refresh = false) => {
     setLoading(true);
+    setError(null);
     try {
-      const data = await fetchGitHubPRs();
-      if (data && Array.isArray(data)) {
-        setPrs(data);
-      }
+      const data = await fetchGitHubPRs(nextPage, refresh);
+      setPrs(current => nextPage === 1 ? data.items : [...current, ...data.items]);
+      setPage(nextPage);
+      setHasMore(data.has_more);
     } catch (e) {
-      console.error('Error fetching GitHub PRs:', e);
+      setError(e instanceof Error ? e.message : 'GitHub pull requests could not be loaded.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadPRs();
+    loadPRs(1);
   }, []);
-
-  const openPR = (url: string) => {
-    const targetUrl = url || 'https://github.com/melkezic/firstmate/pulls';
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      window.open(targetUrl, '_blank');
-    } else {
-      Linking.openURL(targetUrl).catch(() => {});
-    }
-  };
 
   const handleNavigate = (route: string) => {
     if (route === 'prs') return;
@@ -65,18 +60,20 @@ export default function PRsScreen() {
       <ScrollView
         style={styles.container}
         contentContainerStyle={{ paddingBottom: 110 }}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={loadPRs} tintColor="#72F5B1" />}
+        refreshControl={<RefreshControl refreshing={loading} onRefresh={() => loadPRs(1, true)} tintColor="#72F5B1" />}
       >
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>PULL REQUESTS ({prs.length})</Text>
         </View>
 
+        {error && <GlassSurface variant="card" style={styles.prCard}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={() => loadPRs(1, true)}><Text style={styles.linkText}>TRY AGAIN</Text></TouchableOpacity></GlassSurface>}
+        {!error && !loading && prs.length === 0 && <GlassSurface variant="card" style={styles.prCard}><Text style={styles.prSummary}>No open pull requests.</Text></GlassSurface>}
         {prs.map(pr => (
-          <TouchableOpacity key={pr.id || pr.pr_number} onPress={() => openPR(pr.url)} activeOpacity={0.85}>
+          <TouchableOpacity key={pr.id} onPress={() => router.push(`/pr-detail?number=${pr.number}` as any)} activeOpacity={0.85}>
             <GlassSurface variant="card" style={styles.prCard}>
               <View style={styles.prHeaderRow}>
                 <View style={styles.prTagGroup}>
-                  <Text style={styles.prNumber}>PR #{pr.pr_number || pr.id}</Text>
+                  <Text style={styles.prNumber}>PR #{pr.number}</Text>
                   <Text style={styles.prRepo}>{pr.repository}</Text>
                 </View>
                 <View style={[styles.badge, pr.review_status === 'APPROVED' ? styles.badgeApproved : styles.badgePending]}>
@@ -91,13 +88,14 @@ export default function PRsScreen() {
 
               <View style={styles.prFooterRow}>
                 <Text style={styles.prMeta}>
-                  Branch: <Text style={styles.metaHighlight}>{pr.branch}</Text> • Author: <Text style={styles.metaHighlight}>{pr.author}</Text>
+                  {pr.branch ? <>Branch: <Text style={styles.metaHighlight}>{pr.branch}</Text> • </> : null}Author: <Text style={styles.metaHighlight}>{pr.author}</Text>
                 </Text>
-                <Text style={styles.linkText}>VIEW ON GITHUB ↗</Text>
+                <Text style={styles.linkText}>DETAILS →</Text>
               </View>
             </GlassSurface>
           </TouchableOpacity>
         ))}
+        {hasMore && <TouchableOpacity onPress={() => loadPRs(page + 1)} disabled={loading}><Text style={styles.loadMore}>LOAD MORE</Text></TouchableOpacity>}
       </ScrollView>
 
       <GlassDrawer
@@ -143,5 +141,7 @@ const styles = StyleSheet.create({
   prFooterRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderTopColor: 'rgba(255, 255, 255, 0.08)', paddingTop: 8 },
   prMeta: { fontSize: 10.5, color: 'rgba(255, 255, 255, 0.5)' },
   metaHighlight: { color: 'rgba(255, 255, 255, 0.85)', fontWeight: '500' },
-  linkText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#72F5B1' }
+  linkText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#72F5B1' },
+  errorText: { color: '#FCA5A5', fontSize: 12, marginBottom: 8 },
+  loadMore: { color: '#72F5B1', textAlign: 'center', padding: 18, fontFamily: 'monospace', fontWeight: 'bold' }
 });

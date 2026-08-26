@@ -47,6 +47,7 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test:chat": "node --test tests/chat-terminal.web.test.js",
+    "test:github": "node --test tests/github-prs.web.test.js",
     "test:ambient": "node --test tests/ambient-source.test.js"
   },
   "private": true

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent, Platform } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
@@ -50,6 +50,18 @@ export default function ChatScreen() {
     const interval = setInterval(loadOutput, 2000);
     return () => clearInterval(interval);
   }, [loadOutput]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const terminal = document.querySelector<HTMLElement>('[data-testid="terminal-scroll"]');
+    if (!terminal) return;
+    const handleWheel = (event: WheelEvent) => {
+      isScrolledUpRef.current = true;
+      terminal.scrollTop += event.deltaY;
+    };
+    terminal.addEventListener('wheel', handleWheel, { passive: true });
+    return () => terminal.removeEventListener('wheel', handleWheel);
+  }, []);
 
 
 

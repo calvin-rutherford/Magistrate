@@ -198,8 +198,18 @@ async def disconnect_oauth_provider(provider: str, user_id: str = 'default_user'
 
 # LIVE GITHUB PR ENDPOINTS
 @app.get('/api/v1/github/pulls')
-async def list_github_pulls(token: str = Depends(verify_token)):
-    return await github_service.get_pull_requests()
+async def list_github_pulls(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50), refresh: bool = Query(False), token: str = Depends(verify_token)):
+    try:
+        return await github_service.get_pull_requests(page, per_page, refresh)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+@app.get('/api/v1/github/pulls/{number}')
+async def get_github_pull(number: int, refresh: bool = Query(False), token: str = Depends(verify_token)):
+    try:
+        return await github_service.get_pull_request(number, refresh)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 # JIRA & TEAMS ENDPOINTS
 @app.get('/api/v1/jira/issues')

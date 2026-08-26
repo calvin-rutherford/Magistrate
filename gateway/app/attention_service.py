@@ -37,22 +37,22 @@ class AttentionService:
 
         # 2. GITHUB PULL REQUESTS
         try:
-            prs = await github_service.get_pull_requests()
-            for pr in prs:
-                if pr.get('merge_decision_required') is True:
-                    item_id = f'github-pr-{pr.get("pr_number")}'
+            page = await github_service.get_pull_requests()
+            for pr in page['items']:
+                if pr.get('requires_attention') or pr.get('review_status') == 'REVIEW_REQUIRED':
+                    item_id = f'github-pr-{pr.get("number")}'
                     items.append({
                         'id': item_id,
                         'provider': 'github',
-                        'title': f'PR #{pr.get("pr_number")} is ready',
+                        'title': f'PR #{pr.get("number")} Review Required',
                         'subtitle': f'{pr.get("title")} ({pr.get("repository")})',
                         'priority': 'MEDIUM',
-                        'status': 'merge_decision_required',
-                        'url': f'/attention?item={item_id}',
-                        'external_url': pr.get('url'),
+                        'status': 'review_required',
+                        'url': f'/pr-detail?number={pr.get("number")}',
                         'requires_action': True,
-                        'notification_kind': 'pr_ready',
-                        'revision': pr.get('head_sha')
+                        'external_url': pr.get('url'),
+                        'notification_kind': 'pr_ready' if pr.get('merge_decision_required') is True else None,
+                        'revision': pr.get('head_sha') or pr.get('updated_at')
                     })
         except Exception as e:
             print('Error fetching GitHub attention:', e)
