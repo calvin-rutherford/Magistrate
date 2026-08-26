@@ -8,6 +8,8 @@ class UniversalInputContract(BaseModel):
     type: str = 'prompt'
     text: Optional[str] = None
     target: str = 'captain'
+    harness: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    model: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
 
 class GestureInputContract(BaseModel):
     action: str

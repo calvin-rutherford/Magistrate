@@ -68,6 +68,19 @@ async function openChat(viewport) {
           headers: { 'Content-Type': 'application/json' }
         }));
       }
+      if (url.includes('/api/v1/execution/capabilities')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          harnesses: [
+            { id: 'codex', label: 'Codex CLI', verified: true, models: [{ id: 'gpt-5', label: 'GPT-5' }, { id: 'gpt-5-mini', label: 'GPT-5 Mini' }] },
+            { id: 'reviewer', label: 'Reviewer', verified: true, models: [{ id: 'review-model', label: 'Review Model' }] }
+          ],
+          source: 'test',
+          configured: true
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (url.includes('/api/v1/agents')) {
+        return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/')) {
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
         return Promise.resolve(new Response('{}', {
@@ -84,6 +97,7 @@ async function openChat(viewport) {
     const element = document.querySelector(selector);
     return element && element.scrollHeight > element.clientHeight && element.scrollTop > 0;
   }, {}, '[data-testid="terminal-scroll"]');
+  await page.waitForSelector('[data-testid="harness-select-field"]');
   return page;
 }
 
@@ -221,5 +235,37 @@ test('composer exposes a send action and restores a failed prompt for retry', as
   await page.waitForSelector('[data-testid="captain-send-error"]');
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'retry this command');
   assert.match(await page.$eval('[data-testid="captain-send-error"]', element => element.textContent), /Captain is unavailable/);
+  await page.close();
+});
+
+test('execution dropdowns update together and submit the verified selection', async () => {
+  const page = await openChat({ width: 1100, height: 760 });
+  await page.waitForFunction(() => document.body.innerText.includes('Codex CLI'));
+  await page.click('[data-testid="harness-select-field"]');
+  await page.click('[data-testid="harness-select-option-reviewer"]');
+  await page.click('[data-testid="model-select-field"]');
+  await page.click('[data-testid="model-select-option-review-model"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="model-select-field"]')?.textContent?.includes('Review Model'));
+  await page.focus('[data-testid="captain-prompt"]');
+  await page.keyboard.sendCharacter('review the latest output');
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'review the latest output');
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForFunction(() => window.__magistrateApiCalls.some(call => call.url.includes('/captain/prompt')) || document.querySelector('[data-testid="captain-send-error"]'));
+  assert.equal(await page.$('[data-testid="captain-send-error"]'), null);
+  const promptCall = await page.evaluate(() => window.__magistrateApiCalls.find(call => call.url.includes('/captain/prompt')));
+  const body = JSON.parse(promptCall.body);
+  assert.equal(body.harness, 'reviewer');
+  assert.equal(body.model, 'review-model');
+  await page.close();
+});
+
+test('chat navigation buttons are accessible, active, and route to existing screens', async () => {
+  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
+  for (const id of ['home', 'agents', 'attention', 'prs', 'chat']) {
+    assert.ok(await page.$(`[data-testid="chat-nav-${id}"]`));
+  }
+  assert.equal(await page.$eval('[data-testid="chat-nav-chat"]', element => element.getAttribute('aria-current')), 'page');
+  await page.click('[data-testid="chat-nav-agents"]');
+  await page.waitForFunction(() => location.pathname.includes('/agents'));
   await page.close();
 });

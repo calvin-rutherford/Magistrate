@@ -97,9 +97,15 @@ class HerdrClient:
                 return agents[0].get('pane_id') or agents[0].get('id')
         return target
 
-    async def prompt_agent(self, target: str, text: str) -> Dict[str, Any]:
+    async def prompt_agent(self, target: str, text: str, harness: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)
-        cmd = ['herdr', 'agent', 'prompt', resolved_target, text]
+        submitted_text = text
+        if harness and model:
+            # Herdr's prompt command has no launch-time selection flags. Carry
+            # the validated selection to Firstmate as structured prompt context
+            # while leaving its full-permissions launch behavior unchanged.
+            submitted_text = f'[Magistrate execution: harness={harness}; model={model}]\n{text}'
+        cmd = ['herdr', 'agent', 'prompt', resolved_target, submitted_text]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -110,9 +116,9 @@ class HerdrClient:
         err_str = stderr.decode('utf-8') if stderr else ''
 
         if proc.returncode == 0:
-            return {'status': 'submitted', 'target': resolved_target, 'response': output_str.strip()}
+            return {'status': 'submitted', 'target': resolved_target, 'response': output_str.strip(), 'harness': harness, 'model': model}
         else:
-            return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip()}
+            return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(), 'harness': harness, 'model': model}
 
     async def read_agent_output(self, target: str, lines: int = HERDR_MAX_READ_LINES, source: str = 'recent-unwrapped') -> str:
         resolved_target = await self.resolve_target(target)

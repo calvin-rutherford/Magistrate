@@ -19,6 +19,24 @@ export interface HealthInfo {
   firstmate_tasks_count?: number;
 }
 
+export interface ExecutionModel {
+  id: string;
+  label: string;
+}
+
+export interface ExecutionHarness {
+  id: string;
+  label: string;
+  verified: boolean;
+  models: ExecutionModel[];
+}
+
+export interface ExecutionCapabilities {
+  harnesses: ExecutionHarness[];
+  source: string;
+  configured: boolean;
+}
+
 export interface TaskInfo {
   id: string;
   name?: string;
@@ -205,6 +223,13 @@ export async function fetchAuthProviders(): Promise<AuthProviderInfo[]> {
   return res.json();
 }
 
+export async function fetchExecutionCapabilities(): Promise<ExecutionCapabilities> {
+  const res = await fetch(GATEWAY_URL + '/execution/capabilities', {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  return checkedJson<ExecutionCapabilities>(res);
+}
+
 export async function connectAuthProvider(provider: string): Promise<any> {
   const res = await fetch(GATEWAY_URL + '/auth/' + provider + '/connect', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
@@ -300,7 +325,7 @@ export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
   return checkedJson<{ output?: string }>(res);
 }
 
-export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain') {
+export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string) {
   const res = await fetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
     headers: {
@@ -312,7 +337,8 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       modality: 'text',
       type: 'prompt',
       text,
-      target
+      target,
+      ...(harness && model ? { harness, model } : {})
     })
   });
   return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);
