@@ -143,6 +143,7 @@ export default function HomeScreen() {
           <Text style={styles.sectionTitle}>PULL REQUESTS ({prs.length})</Text>
         </View>
 
+        {loading && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>Loading live pull requests…</Text></GlassSurface>}
         {prError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{prs.length ? `Showing last known pull requests. ${prError}` : prError}</Text></GlassSurface>}
         {!prError && !loading && prs.length === 0 && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>No open pull requests need your attention.</Text></GlassSurface>}
         {prs.map(pr => (

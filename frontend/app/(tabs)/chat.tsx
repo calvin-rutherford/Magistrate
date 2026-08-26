@@ -1,14 +1,24 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent, Platform } from 'react-native';
+import { View, Text, StyleSheet, FlatList, ScrollView, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent, Platform } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { TerminusControlBar } from '../../src/components/TerminusControlBar';
-import { fetchCaptainOutput, sendCaptainPrompt, sendAgentKey } from '../../src/api/client';
-import { useRouter } from 'expo-router';
+import { CapabilitySelect } from '../../src/components/CapabilitySelect';
+import { ExecutionHarness, fetchCaptainOutput, fetchExecutionCapabilities, sendCaptainPrompt, sendAgentKey } from '../../src/api/client';
+import { usePathname, useRouter } from 'expo-router';
+
+const CHAT_NAV_ITEMS = [
+  { id: 'home', label: 'HOME', route: '/' },
+  { id: 'agents', label: 'AGENTS', route: '/agents' },
+  { id: 'attention', label: 'ATTENTION', route: '/attention' },
+  { id: 'prs', label: 'PULL REQUESTS', route: '/prs' },
+  { id: 'chat', label: 'CHAT', route: '/chat' }
+];
 
 export default function ChatScreen() {
   const router = useRouter();
+  const pathname = usePathname();
 
   const [outputLines, setOutputLines] = useState<string[]>([]);
   const [promptText, setPromptText] = useState<string>('');
@@ -17,6 +27,11 @@ export default function ChatScreen() {
   const [hasNewMessages, setHasNewMessages] = useState<boolean>(false);
   const [isThinking, setIsThinking] = useState<boolean>(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [harnesses, setHarnesses] = useState<ExecutionHarness[]>([]);
+  const [selectedHarness, setSelectedHarness] = useState('');
+  const [selectedModel, setSelectedModel] = useState('');
+  const [capabilityLoading, setCapabilityLoading] = useState(true);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
 
   const scrollRef = useRef<FlatList<string>>(null);
   const inputRef = useRef<TextInput>(null);
@@ -52,6 +67,27 @@ export default function ChatScreen() {
     const interval = setInterval(loadOutput, 2000);
     return () => clearInterval(interval);
   }, [loadOutput]);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchExecutionCapabilities()
+      .then(data => {
+        if (!Array.isArray(data.harnesses)) throw new Error('Gateway returned an invalid execution inventory.');
+        const verifiedHarnesses = data.harnesses.filter(harness => harness.verified);
+        if (!mounted) return;
+        setHarnesses(verifiedHarnesses);
+        const firstHarness = verifiedHarnesses[0];
+        setSelectedHarness(firstHarness?.id || '');
+        setSelectedModel(firstHarness?.models[0]?.id || '');
+      })
+      .catch(error => {
+        if (mounted) setCapabilityError(error instanceof Error ? error.message : 'Execution options could not be loaded.');
+      })
+      .finally(() => {
+        if (mounted) setCapabilityLoading(false);
+      });
+    return () => { mounted = false; };
+  }, []);
 
   const handleTerminalWheel = (event: any) => {
     if (Platform.OS !== 'web') return;
@@ -128,11 +164,24 @@ export default function ChatScreen() {
       return;
     }
 
+    if (capabilityLoading) {
+      setSendError('Execution options are still loading.');
+      return;
+    }
+    if (capabilityError) {
+      setSendError('Execution options are unavailable.');
+      return;
+    }
+    if (!selectedHarness || !selectedModel) {
+      setSendError('Select a verified harness and model before sending.');
+      return;
+    }
+
     setPromptText('');
     setSendError(null);
     setIsThinking(true);
     try {
-      const response = await sendCaptainPrompt(text, 'iphone', 'captain');
+      const response = await sendCaptainPrompt(text, 'iphone', 'captain', selectedHarness, selectedModel);
       if (response?.status === 'error' || response?.error) {
         throw new Error(response.error || 'The prompt was not accepted.');
       }
@@ -153,6 +202,9 @@ export default function ChatScreen() {
     if (route === 'chat') return;
     router.push('/' + route as any);
   };
+
+  const selectedHarnessOption = harnesses.find(harness => harness.id === selectedHarness);
+  const models = selectedHarnessOption?.models || [];
 
   return (
     <EnvironmentBackground>
@@ -236,6 +288,58 @@ export default function ChatScreen() {
           </View>
         </GlassSurface>
 
+        <View style={styles.navigationRow}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.navigationContent}>
+            {CHAT_NAV_ITEMS.map(item => {
+              const active = item.route === pathname || (item.route === '/' && (pathname === '/' || pathname === '/(tabs)'));
+              return (
+                <TouchableOpacity
+                  key={item.id}
+                  testID={`chat-nav-${item.id}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Navigate to ${item.label.toLowerCase()}`}
+                  accessibilityState={{ selected: active }}
+                  {...({ 'aria-current': active ? 'page' : undefined } as any)}
+                  onPress={() => router.push(item.route as any)}
+                  style={[styles.navigationButton, active ? styles.navigationButtonActive : undefined]}
+                >
+                  <Text style={[styles.navigationButtonText, active ? styles.navigationButtonTextActive : undefined]}>{item.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+
+        <View style={styles.executionSelection}>
+          <CapabilitySelect
+            testID="harness-select"
+            label="HARNESS"
+            value={selectedHarness}
+            options={harnesses.map(harness => ({ id: harness.id, label: harness.label }))}
+            loading={capabilityLoading}
+            error={capabilityError}
+            emptyMessage="No verified harnesses configured."
+            disabled={isThinking}
+            onChange={value => {
+              const harness = harnesses.find(option => option.id === value);
+              setSelectedHarness(value);
+              setSelectedModel(harness?.models[0]?.id || '');
+              setSendError(null);
+            }}
+          />
+          <CapabilitySelect
+            testID="model-select"
+            label="MODEL"
+            value={selectedModel}
+            options={models}
+            loading={capabilityLoading}
+            error={capabilityError || (selectedHarness && harnesses.length > 0 && models.length === 0 ? 'No models are available for this harness.' : null)}
+            emptyMessage={selectedHarness ? 'No models available for this harness.' : 'Select a harness first.'}
+            disabled={isThinking || !selectedHarness}
+            onChange={value => { setSelectedModel(value); setSendError(null); }}
+          />
+        </View>
+
         <TerminusControlBar target="captain" onKeySent={() => setTimeout(loadOutput, 400)} />
 
         <View style={styles.inputComposerRow}>
@@ -306,6 +410,13 @@ const styles = StyleSheet.create({
   scrollBadgeSurface: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16, backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF', borderWidth: 1 },
   scrollBadgeText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 10, letterSpacing: 0.8 },
   inputComposerRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
+  navigationRow: { marginTop: 2, marginBottom: 2 },
+  navigationContent: { gap: 6, paddingVertical: 2 },
+  navigationButton: { minHeight: 40, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.18)', backgroundColor: 'rgba(255, 255, 255, 0.06)', justifyContent: 'center' },
+  navigationButtonActive: { borderColor: '#72F5B1', backgroundColor: 'rgba(114, 245, 177, 0.16)' },
+  navigationButtonText: { color: 'rgba(255, 255, 255, 0.62)', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold', letterSpacing: 0.8 },
+  navigationButtonTextActive: { color: '#72F5B1' },
+  executionSelection: { flexDirection: 'row', gap: 8, marginTop: 4, marginBottom: 2 },
   inputWrapper: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', paddingHorizontal: 12, paddingVertical: 8 },
   textInputInner: { flex: 1, color: '#FFFFFF', fontSize: 14, paddingVertical: 4 },
   inputAccessories: { flexDirection: 'row', gap: 6, marginLeft: 8 },

@@ -11,6 +11,7 @@ from typing import Optional, List
 from app.auth import verify_token, MAGISTRATE_TOKEN
 from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient
 from app.firstmate_client import FirstmateClient
+from app.execution_capabilities import get_execution_capabilities, validate_execution_selection
 from app.contracts import (UniversalInputContract, GestureInputContract,
                            NotificationAckContract, NotificationPreferencesContract,
                            VoiceMoveRequest)
@@ -276,6 +277,14 @@ async def create_voice_move(request: VoiceMoveRequest, token: str = Depends(veri
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 # FLEET, ATTENTION & AGENTS
+@app.get('/api/v1/execution/capabilities')
+async def get_execution_capability_inventory(token: str = Depends(verify_token)):
+    try:
+        return get_execution_capabilities()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+
+
 @app.get('/api/v1/agents')
 async def list_agents(token: str = Depends(verify_token)):
     return await herdr_client.list_agents()
@@ -298,7 +307,15 @@ async def get_captain_output(
 
 @app.post('/api/v1/captain/prompt')
 async def send_captain_prompt(contract: UniversalInputContract, token: str = Depends(verify_token)):
-    return await herdr_client.prompt_agent(contract.target, contract.text)
+    selection = None
+    if contract.harness or contract.model:
+        if not contract.harness or not contract.model:
+            raise HTTPException(status_code=422, detail='A harness and model must be selected together.')
+        try:
+            selection = validate_execution_selection(contract.harness, contract.model)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await herdr_client.prompt_agent(contract.target, contract.text, **(selection or {}))
 
 @app.post('/api/v1/agents/{agent_id}/send-key')
 async def send_agent_key(agent_id: str, key: str = Query('Enter'), token: str = Depends(verify_token)):
