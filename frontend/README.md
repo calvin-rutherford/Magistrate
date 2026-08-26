@@ -1,5 +1,9 @@
 # Welcome to your Expo app 👋
 
+## Ambient environment configuration
+
+Background assets are bundled and select themselves from local device time. Weather is opt-in: set `EXPO_PUBLIC_WEATHER_LATITUDE` and `EXPO_PUBLIC_WEATHER_LONGITUDE` to coarse coordinates (rounded to two decimals before requesting Open-Meteo). Without both values, or while offline, time-only backgrounds remain functional. Set `EXPO_PUBLIC_AMBIENT_DATA_SAVER=true` to disable requests. Conditions refresh at most every 30 minutes and when the app returns to the foreground.
+
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
 ## Get started

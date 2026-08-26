@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Modal, ScrollView, Linking } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Modal, ScrollView } from 'react-native';
 import { GlassSurface } from './GlassSurface';
 import { GlassTokens } from '../theme/glass';
 
@@ -62,8 +62,8 @@ export const GlassDrawer: React.FC<GlassDrawerProps> = ({
                 )}
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.menuItem} onPress={() => { Linking.openURL('https://github.com/melkezic/firstmate/pulls').catch(() => onNavigate('prs')); onClose(); }}>
-                <Text style={styles.menuItemText}>Pull Requests (GitHub)</Text>
+              <TouchableOpacity style={styles.menuItem} onPress={() => { onNavigate('prs'); onClose(); }}>
+                <Text style={styles.menuItemText}>Pull Requests</Text>
                 <View style={[styles.badge, { backgroundColor: GlassTokens.colors.prs }]}>
                   <Text style={styles.badgeText}>{prsCount}</Text>
                 </View>

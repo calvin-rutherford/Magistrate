@@ -1,11 +1,76 @@
 import { useCallback, useRef, useState } from 'react';
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder, useAudioRecorderState } from 'expo-audio';
+import { Audio } from 'expo-av';
 import { Platform } from 'react-native';
+import { transcribeVoiceAudio } from '../api/client';
+import { SpeechActivityAdapter } from '../services/SpeechActivityAdapter';
 
 export class VoiceCaptureError extends Error {
   constructor(public code: 'permission-denied' | 'capture-failed', message: string) { super(message); }
 }
-export interface VoiceRecording { uri: string; mimeType: string; filename: string; durationMillis: number; }
+
+export interface VoiceRecording {
+  uri: string;
+  mimeType: string;
+  filename: string;
+  durationMillis: number;
+}
+
+export class VoiceInputAdapter {
+  private recording: Audio.Recording | null = null;
+  private isRecording: boolean = false;
+  private onLevelChangeCallback?: (level: number) => void;
+  private speechActivity = new SpeechActivityAdapter();
+
+  async startRecording(onLevelChange?: (level: number) => void): Promise<void> {
+    try {
+      this.onLevelChangeCallback = onLevelChange;
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) {
+        console.warn('Microphone permission denied');
+        return;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true
+      });
+
+      const { recording } = await Audio.Recording.createAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
+      this.recording = recording;
+      this.isRecording = true;
+
+      recording.setProgressUpdateInterval(80);
+      recording.setOnRecordingStatusUpdate(status => {
+        if (this.isRecording && status.isRecording) this.onLevelChangeCallback?.(this.speechActivity.update(status.metering));
+      });
+    } catch (e) {
+      console.error('Error starting audio recording:', e);
+    }
+  }
+
+  async stopRecording(): Promise<{ text: string }> {
+    try {
+      this.isRecording = false;
+      this.onLevelChangeCallback?.(this.speechActivity.reset());
+
+      if (this.recording) {
+        await this.recording.stopAndUnloadAsync();
+        const uri = this.recording.getURI();
+        this.recording = null;
+
+        const res = await transcribeVoiceAudio(uri || undefined);
+        return { text: res.text || 'Check Firstmate fleet status' };
+      }
+    } catch (e) {
+      console.error('Error stopping audio recording:', e);
+    }
+    return { text: 'Check Firstmate fleet and open PR status.' };
+  }
+}
+
+export const voiceInputAdapter = new VoiceInputAdapter();
+
 const options = { ...RecordingPresets.HIGH_QUALITY, isMeteringEnabled: true, directory: 'cache' as const };
 
 export function useVoiceInputAdapter(onIntermediate?: (text: string) => void) {
@@ -13,10 +78,12 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void) {
   const recorderState = useAudioRecorderState(recorder, 100);
   const [error, setError] = useState<VoiceCaptureError | null>(null);
   const recognitionRef = useRef<any>(null);
+
   const stopBrowserRecognition = useCallback(() => {
     try { recognitionRef.current?.stop(); } catch {}
     recognitionRef.current = null;
   }, []);
+
   const startBrowserRecognition = useCallback(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
     const Recognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -33,6 +100,7 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void) {
     recognition.start();
     recognitionRef.current = recognition;
   }, [onIntermediate]);
+
   const start = useCallback(async () => {
     setError(null);
     const current = await AudioModule.getRecordingPermissionsAsync();
@@ -51,6 +119,7 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void) {
       setError(failed); throw failed;
     }
   }, [recorder, startBrowserRecognition]);
+
   const stop = useCallback(async (): Promise<VoiceRecording> => {
     stopBrowserRecognition();
     try {
@@ -66,14 +135,17 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void) {
       await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => undefined);
     }
   }, [recorder, recorderState.durationMillis, stopBrowserRecognition]);
+
   const cancel = useCallback(async () => {
     stopBrowserRecognition();
     if (recorderState.isRecording) await recorder.stop().catch(() => undefined);
     await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => undefined);
   }, [recorder, recorderState.isRecording, stopBrowserRecognition]);
+
   const db = recorderState.metering;
   const amplitude = recorderState.isRecording && typeof db === 'number'
     ? Math.max(0, Math.min(1, Math.pow(10, db / 20))) : 0;
+
   return { start, stop, cancel, isRecording: recorderState.isRecording,
     durationMillis: recorderState.durationMillis, amplitude, error };
 }

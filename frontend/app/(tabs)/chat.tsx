@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent, Platform } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
@@ -10,36 +10,57 @@ import { useRouter } from 'expo-router';
 export default function ChatScreen() {
   const router = useRouter();
 
-  const [output, setOutput] = useState<string>('');
+  const [outputLines, setOutputLines] = useState<string[]>([]);
   const [promptText, setPromptText] = useState<string>('');
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
   const [isScrolledUp, setIsScrolledUp] = useState<boolean>(false);
   const [hasNewMessages, setHasNewMessages] = useState<boolean>(false);
   const [isThinking, setIsThinking] = useState<boolean>(false);
 
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<FlatList<string>>(null);
   const inputRef = useRef<TextInput>(null);
   const isScrolledUpRef = useRef(false);
+  const requestInFlightRef = useRef(false);
 
-  const loadOutput = async () => {
+  const loadOutput = useCallback(async () => {
+    if (requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
     try {
-      const data = await fetchCaptainOutput(25);
+      const data = await fetchCaptainOutput();
       const newText = data?.output || 'No output.';
-      setOutput(prev => {
-        if (prev !== newText) {
+      const newLines = newText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+      if (newLines.length > 1 && newLines[newLines.length - 1] === '') newLines.pop();
+      setOutputLines(prev => {
+        const unchanged = prev.length === newLines.length && prev.every((line, index) => line === newLines[index]);
+        if (!unchanged) {
           if (isScrolledUpRef.current) setHasNewMessages(true);
+          return newLines;
         }
-        return newText;
+        return prev;
       });
     } catch (e) {
       console.error('Chat output load error:', e);
+    } finally {
+      requestInFlightRef.current = false;
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadOutput();
     const interval = setInterval(loadOutput, 2000);
     return () => clearInterval(interval);
+  }, [loadOutput]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const terminal = document.querySelector<HTMLElement>('[data-testid="terminal-scroll"]');
+    if (!terminal) return;
+    const handleWheel = (event: WheelEvent) => {
+      isScrolledUpRef.current = true;
+      terminal.scrollTop += event.deltaY;
+    };
+    terminal.addEventListener('wheel', handleWheel, { passive: true });
+    return () => terminal.removeEventListener('wheel', handleWheel);
   }, []);
 
 
@@ -57,10 +78,12 @@ export default function ChatScreen() {
   };
 
   const scrollToBottom = () => {
-    scrollRef.current?.scrollToEnd({ animated: true });
     isScrolledUpRef.current = false;
     setIsScrolledUp(false);
     setHasNewMessages(false);
+    // A non-animated jump avoids intermediate scroll events switching follow
+    // mode back off while a virtualized list is measuring its final rows.
+    scrollRef.current?.scrollToEnd({ animated: false });
   };
 
   const handleSend = async () => {
@@ -124,27 +147,42 @@ export default function ChatScreen() {
           </View>
 
           <View style={styles.terminalScrollContainer}>
-            <ScrollView
+            <FlatList
               ref={scrollRef}
               testID="terminal-scroll"
               style={styles.terminalScroll}
               contentContainerStyle={styles.terminalScrollContent}
+              data={outputLines}
+              renderItem={({ item }) => <Text style={styles.terminalText}>{item || ' '}</Text>}
+              keyExtractor={(_, index) => String(index)}
+              initialNumToRender={40}
+              maxToRenderPerBatch={40}
+              updateCellsBatchingPeriod={25}
+              windowSize={15}
               onScroll={handleScroll}
               scrollEventThrottle={16}
               nestedScrollEnabled
               keyboardShouldPersistTaps="handled"
               accessibilityLabel="Captain terminal output"
+              // Makes the web terminal keyboard-scrollable without changing
+              // touch or native accessibility behavior.
+              {...({ tabIndex: 0 } as any)}
               onContentSizeChange={() => {
                 if (!isScrolledUpRef.current) {
                   scrollRef.current?.scrollToEnd({ animated: false });
                 }
               }}
-            >
-              <Text style={styles.terminalText}>{output}</Text>
-            </ScrollView>
+            />
 
             {(hasNewMessages || isScrolledUp) ? (
-              <TouchableOpacity style={styles.scrollBadgeBtn} onPress={scrollToBottom} activeOpacity={0.8}>
+              <TouchableOpacity
+                testID="jump-to-latest"
+                accessibilityRole="button"
+                accessibilityLabel="Jump to latest terminal output"
+                style={styles.scrollBadgeBtn}
+                onPress={scrollToBottom}
+                activeOpacity={0.8}
+              >
                 <GlassSurface variant="control" style={styles.scrollBadgeSurface}>
                   <Text style={styles.scrollBadgeText}>
                     {hasNewMessages ? '↓ NEW MESSAGES (TAP TO SCROLL)' : '↓ SCROLL TO BOTTOM'}

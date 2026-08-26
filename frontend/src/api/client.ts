@@ -84,19 +84,32 @@ export interface AuthProviderInfo {
 
 export interface GitHubPR {
   id: number;
-  pr_number: number;
+  number: number;
   title: string;
   repository: string;
   author: string;
-  agent: string;
-  branch: string;
+  branch: string | null;
   state: string;
+  is_draft: boolean;
   review_status: string;
-  checks: string;
+  checks: { status: string; passed: number; failed: number; pending: number; summary: string };
   mergeable: string;
   summary: string;
+  body: string;
+  reviews: Array<{ author: string; state: string; submitted_at?: string }>;
+  created_at: string | null;
+  updated_at: string | null;
+  merged_at: string | null;
   requires_attention: boolean;
   url: string;
+}
+
+export interface GitHubPRPage {
+  items: GitHubPR[];
+  page: number;
+  per_page: number;
+  has_more: boolean;
+  cached: boolean;
 }
 
 export async function fetchHealth() {
@@ -199,11 +212,24 @@ export async function disconnectAuthProvider(provider: string): Promise<any> {
   return res.json();
 }
 
-export async function fetchGitHubPRs(): Promise<GitHubPR[]> {
-  const res = await fetch(GATEWAY_URL + '/github/pulls', {
+async function checkedJson<T>(res: Response): Promise<T> {
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.detail || `Request failed (${res.status})`);
+  return data as T;
+}
+
+export async function fetchGitHubPRs(page = 1, refresh = false): Promise<GitHubPRPage> {
+  const res = await fetch(GATEWAY_URL + `/github/pulls?page=${page}&per_page=20&refresh=${refresh}`, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return res.json();
+  return checkedJson<GitHubPRPage>(res);
+}
+
+export async function fetchGitHubPR(number: number, refresh = false): Promise<GitHubPR> {
+  const res = await fetch(GATEWAY_URL + `/github/pulls/${number}?refresh=${refresh}`, {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  return checkedJson<GitHubPR>(res);
 }
 
 async function requireOk(res: Response): Promise<any> {
@@ -247,7 +273,11 @@ export async function submitVoiceMove(utterance: string, target: string, idempot
   return requireOk(res);
 }
 
-export async function fetchCaptainOutput(lines: number = 100) {
+// Herdr exposes its read count as uint32 and bounds retained history separately
+// through advanced.scrollback_limit_bytes. This asks for all retained rows.
+export const HERDR_MAX_READ_LINES = 0xFFFFFFFF;
+
+export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
   const res = await fetch(GATEWAY_URL + '/captain/output?lines=' + lines, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });

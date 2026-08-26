@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Platform } from 'react-native';
-import * as Linking from 'expo-linking';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { StatusRing } from '../../src/components/StatusRing';
@@ -13,16 +12,18 @@ export default function HomeScreen() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [prs, setPrs] = useState<GitHubPR[]>([]);
   const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [prError, setPrError] = useState<string | null>(null);
 
-  const loadData = async () => {
+  const loadData = async (forceRefresh = false) => {
     setRefreshing(true);
+    setPrError(null);
     try {
       const [agentData, prData] = await Promise.all([
         fetchAgents().catch(() => []),
-        fetchGitHubPRs().catch(() => [])
+        fetchGitHubPRs(1, forceRefresh).catch((error) => { setPrError(error.message); return { items: [] }; })
       ]);
       setAgents(agentData);
-      setPrs(prData);
+      setPrs(prData.items.filter(pr => pr.requires_attention));
     } catch (e) {
       console.error('Home load error:', e);
     } finally {
@@ -31,17 +32,8 @@ export default function HomeScreen() {
   };
 
   useEffect(() => {
-    loadData();
+    loadData(false);
   }, []);
-
-  const openPR = (url?: string) => {
-    if (!url) return;
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      window.open(url, '_blank');
-    } else {
-      Linking.openURL(url).catch(() => {});
-    }
-  };
 
   const activeAgents = agents.filter((a: any) => a.status === 'working' || a.status === 'RUNNING' || !a.status);
   const blockedAgents = agents.filter((a: any) => a.status === 'blocked' || a.status === 'BLOCKED');
@@ -56,7 +48,7 @@ export default function HomeScreen() {
       <ScrollView
         style={styles.container}
         contentContainerStyle={{ paddingBottom: 110 }}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={loadData} tintColor="#FFFFFF" />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadData(true)} tintColor="#FFFFFF" />}
       >
         <View style={styles.sphereContainer}>
           <TouchableOpacity onPress={() => router.push('/status' as any)} activeOpacity={0.85}>
@@ -124,19 +116,21 @@ export default function HomeScreen() {
           <Text style={styles.sectionTitle}>PULL REQUESTS ({prs.length})</Text>
         </View>
 
+        {prError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{prError}</Text></GlassSurface>}
+        {!prError && !refreshing && prs.length === 0 && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>No open pull requests need your attention.</Text></GlassSurface>}
         {prs.map(pr => (
-          <TouchableOpacity key={pr.pr_number} onPress={() => openPR(pr.url)} activeOpacity={0.85}>
+          <TouchableOpacity key={pr.number} onPress={() => router.push(`/pr-detail?number=${pr.number}` as any)} activeOpacity={0.85}>
             <GlassSurface variant="card" style={styles.card}>
               <View style={styles.cardHeader}>
-                <Text style={styles.prNumber}>PR #{pr.pr_number}</Text>
+                <Text style={styles.prNumber}>PR #{pr.number}</Text>
                 <View style={styles.prBadge}>
                   <Text style={styles.prBadgeText}>{pr.review_status}</Text>
                 </View>
               </View>
               <Text style={styles.prTitle}>{pr.title}</Text>
-              <Text style={styles.prRepo}>{pr.repository} • {pr.branch}</Text>
+              <Text style={styles.prRepo}>{pr.repository}{pr.branch ? ` • ${pr.branch}` : ''}</Text>
               <View style={styles.prFooter}>
-                <Text style={styles.prLinkText}>VIEW ON GITHUB ↗</Text>
+                <Text style={styles.prLinkText}>VIEW DETAILS →</Text>
               </View>
             </GlassSurface>
           </TouchableOpacity>
@@ -163,6 +157,7 @@ const styles = StyleSheet.create({
   harnessText: { fontFamily: 'monospace', fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginTop: 8 },
   emptyCard: { padding: 14, borderRadius: 14, marginVertical: 4 },
   emptyText: { fontSize: 12, color: 'rgba(255, 255, 255, 0.5)' },
+  errorText: { fontSize: 12, color: '#FCA5A5' },
   prNumber: { fontFamily: 'monospace', fontSize: 12, fontWeight: 'bold', color: '#FFFFFF' },
   prBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   prBadgeText: { fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold', color: '#FFFFFF' },
