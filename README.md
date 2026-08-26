@@ -1,107 +1,74 @@
-# 🌌 Magistrate 🚀
-```text
-  ____                    _                    _   
- / __ \                  (_)                  | |  
-| |  | | _ __ ___   _ __  _   __ _   ___  __  | |_ 
-| |  | || '_ ` _ \ | '_ \| | / _` | / _ \ '_ \| __|
-| |__| || | | | | || | | | || (_| ||  __/ | | | |_ 
- \____/ |_| |_| |_||_| |_|_| \__, | \___|_| |_|\__|
-                              __/ |                
-                             |___/                 
-```
-**The ultimate command center for your AI worker fleet.**
+# Magistrate
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org)
-[![Django](https://img.shields.io/badge/Django-5.0-092E20.svg)](https://www.djangoproject.com)
-[![Celery](https://img.shields.io/badge/Celery-Distributed_Task_Queue-37814A.svg)](https://docs.celeryq.dev/)
-[![Textual](https://img.shields.io/badge/Textual-TUI-purple.svg)](https://textual.textualize.io/)
+**Magistrate** is a unified command center designed for multi-agent software development. 
 
----
+## Vision
 
-## 🤔 Why Magistrate?
+The broader goal of Magistrate is to make multi-agent software engineering accessible, steerable, and highly observable. Rather than juggling isolated chat windows or opaque background scripts, Magistrate provides a central interface to monitor and direct a coordinated crew of AI agents. 
 
-Are you tired of juggling 15 different browser tabs just to chat with your AI coding assistants? Do you lose track of context, forget which prompt you pasted where, and feel the chaos taking over? 🌪️
+Magistrate ensures that agentic workflows are:
+- **Simple**: A single point of interaction for the human engineer, with meaningful escalations only when necessary.
+- **Safe**: Work is isolated, operations are guarded, and merge approvals are explicitly required.
+- **Observable**: Every agent's state, terminal output, and blockages remain highly visible in real-time.
+- **Scalable**: Capable of supervising persistent, long-running agent domains as the fleet expands.
 
-**Welcome to Magistrate.** (Formerly known as Agent Top).
+## Core Architecture
 
-Magistrate gives you a calm, inspectable, `htop`-style terminal dashboard to monitor, steer, and manage multiple AI sessions simultaneously. You don't just chat anymore; you **command a fleet**. 🧑‍✈️
-
----
-
-## ✨ Features
-
-- **🤖 Intelligent Broker:** Type natural language into the TUI, and the Broker Agent automatically spins up specialized sub-agents to do the heavy lifting!
-- **💻 Calm TUI & CLI:** A beautiful, non-flashing terminal UI built with Textual, complete with an `omni` CLI tool.
-- **⚡ Local Shell Passthrough:** Run commands like `!docker compose ps` straight from the TUI to execute them locally on your host machine without opening another terminal!
-- **📦 Any LLM You Want:** Powered by LiteLLM, you can use Gemini, OpenAI, Anthropic, or even your own Local LLaMA!
-- **📜 Event-Driven History:** Every task, message, and artifact is logged to an append-only PostgreSQL database.
-
-## 🏗️ How It Works
+Magistrate acts as the integration layer between the human operator (via mobile and web interfaces) and the backend agent runners.
 
 ```mermaid
 graph TD
-    User([👨‍💻 You]) -->|Type commands| TUI[🖥️ TUI Dashboard]
-    TUI <-->|⚡ WebSockets| Django[🧠 Django Broker]
-    
-    subgraph "Your VPS / Local Server"
-        Django -->|Task Dispatch| RMQ[🐇 RabbitMQ]
-        Django <--> BrokerAgent[🕵️‍♂️ Broker AI Agent]
-        
-        RMQ --> Celery1[👷 Celery Worker: Frontend]
-        RMQ --> Celery2[👷 Celery Worker: Backend]
-    end
-    
-    BrokerAgent --> LiteLLM[🔌 Universal API]
-    Celery1 --> LiteLLM
-    Celery2 --> LiteLLM
+    Client[Client Interfaces] --> Gateway[Magistrate API Gateway]
+    Gateway --> Multiplexer[Herdr Tmux Multiplexer]
+    Gateway --> GitHub[GitHub API]
+    Multiplexer --> Firstmate[Firstmate Central Agent]
+    Firstmate --> Subagents[Specialized Sub-agents]
+    Subagents --> Host[Host Filesystem & Tools]
 ```
 
----
+### Component Breakdown
 
-## 🚀 Quick Start (VPS Deployment)
+| Component | Technology | Responsibility |
+|-----------|------------|----------------|
+| **Frontend** | React Native / Expo | Provides the cross-platform UI (iOS/Web) for observing agent state, reviewing PRs, and issuing commands. |
+| **Gateway** | FastAPI / Python | Serves as the central API, routing requests, handling authentication, and polling backend systems. |
+| **Multiplexer** | Herdr / Tmux | Manages the lifecycle and terminal sessions of the background agents, allowing Magistrate to read standard output and inject keystrokes. |
+| **Agents** | Claude Code / Codex | The actual autonomous entities executing commands, orchestrated by the primary `firstmate` agent. |
 
-Magistrate uses a production-grade backend (Django, PostgreSQL, RabbitMQ, Redis). The best way to run it is on a dedicated Linux VPS or a robust local dev machine with Docker! 🐳
+## Getting Started
 
-1. **Clone the repository:**
+### Prerequisites
+
+- Python 3.10+
+- Node.js 18+ and npm
+- [gh CLI](https://cli.github.com/) (authenticated for PR data)
+- Herdr (configured with active tmux sessions)
+
+### Running Locally
+
+1. **Clone the Repository**
    ```bash
-   git clone https://github.com/yourusername/magistrate.git
-   cd magistrate
+   git clone https://github.com/melkezic/Magistrate.git
+   cd Magistrate
    ```
 
-2. **Run the magic setup script! 🪄**
+2. **Start the API Gateway**
+   The gateway relies on FastAPI and Uvicorn. Ensure your virtual environment is active.
    ```bash
-   bash setup.sh
+   cd gateway
+   pip install -r requirements.txt
+   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
+   *Note: Ensure `.env` is configured with any necessary environment variables.*
 
-3. **Configure your API Keys 🗝️:**
-   Open the newly generated `.env` file and plug in your favorite LLM key:
-   ```env
-   # Use whichever you like!
-   GEMINI_API_KEY=your_key_here
-   OPENAI_API_KEY=your_key_here
-   DEFAULT_LLM_MODEL=gemini/gemini-1.5-pro
-   ```
-
-4. **Launch the TUI Dashboard 🎛️:**
+3. **Start the Frontend Client**
+   The frontend can be run as a local web application or exported statically.
    ```bash
-   source venv/bin/activate
-   magistrate top
+   cd ../frontend
+   npm install
+   npx expo start --web
    ```
 
-Now, just type `"Analyze the authentication system and create a test plan"` into the bottom bar and watch the Broker spawn an agent to do it for you!
+## Development & Deployment
 
----
-
-## 📚 Documentation
-For a deeper dive into the philosophy and technical design, check out:
-- [📖 Vision & Philosophy](docs/vision.md)
-- [🏗️ Architectural Design](docs/architecture.md)
-
----
-
-## 🔮 Future Roadmap
-- 🐳 **Containerized Agents:** One agent = one isolated Docker container.
-- 🎙️ **Voice Integration:** Control your fleet via smartphone SSH and voice-to-text.
-- 💾 **Context Packs:** Easily share specific repo folders with specific agents.
-
-*Built with ❤️ for developers who want less chaos and more code.*
+For deployment, the gateway is managed via `systemd` (e.g., `magistrate-gateway.service`), and the frontend is exported statically (`npx expo export -p web`) and served via an HTTP server or CDN.
