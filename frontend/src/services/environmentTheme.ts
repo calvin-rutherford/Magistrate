@@ -1,39 +1,20 @@
+import { ImageSourcePropType } from 'react-native';
+
 export type TimePeriod = 'dawn' | 'day' | 'dusk' | 'night';
-export type WeatherSceneKey = 'dusk-mountain' | 'clear-day' | 'clear-night' | 'clouds' | 'rain' | 'storm' | 'sunset' | 'minimal-dark' | 'custom';
+export type WeatherKind = 'clear' | 'cloudy' | 'rain' | 'snow' | 'storm';
+export type WeatherSceneKey = 'auto' | 'dusk-mountain' | 'clear-day' | 'clear-night' | 'clouds' | 'rain' | 'storm' | 'sunset' | 'minimal-dark' | 'custom';
+export interface EnvironmentTheme { timePeriod: TimePeriod; sceneKey: WeatherSceneKey; sceneImage: ImageSourcePropType; weather: WeatherKind; customUri?: string; dimOpacity: number }
 
-export interface EnvironmentTheme {
-  timePeriod: TimePeriod;
-  sceneKey: WeatherSceneKey;
-  sceneImageUri: string;
-  gradientColors: [string, string, string];
-  glassOverlay: string;
-  accentGlow: string;
-  customUri?: string;
-  dimOpacity: number;
-}
-
-const DUSK_MOUNTAIN_URI = 'https://images.unsplash.com/photo-1519681393784-d120267933ba?q=80&w=1600&auto=format&fit=crop';
-
-export const SCENE_IMAGES: Record<WeatherSceneKey, string> = {
-  'dusk-mountain': DUSK_MOUNTAIN_URI,
-  'clear-day': 'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?q=80&w=1600&auto=format&fit=crop',
-  'clear-night': 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?q=80&w=1600&auto=format&fit=crop',
-  'clouds': 'https://images.unsplash.com/photo-1534088568595-a066f410bcda?q=80&w=1600&auto=format&fit=crop',
-  'rain': 'https://images.unsplash.com/photo-1515694346937-94d85e41e6f0?q=80&w=1600&auto=format&fit=crop',
-  'storm': 'https://images.unsplash.com/photo-1511285560929-80b456fea0bc?q=80&w=1600&auto=format&fit=crop',
-  'sunset': 'https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?q=80&w=1600&auto=format&fit=crop',
-  'minimal-dark': 'https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=1600&auto=format&fit=crop',
-  'custom': DUSK_MOUNTAIN_URI
+export const TIME_IMAGES: Record<TimePeriod, ImageSourcePropType> = {
+  dawn: require('../../assets/images/environment/dawn.png'),
+  day: require('../../assets/images/environment/day.png'),
+  dusk: require('../../assets/images/environment/dusk.png'),
+  night: require('../../assets/images/environment/night.png'),
 };
 
-let activeSceneKey: WeatherSceneKey = 'dusk-mountain';
-let customImageUri: string = '';
-
-export function setActiveBackground(sceneKey: WeatherSceneKey, customUri?: string) {
-  activeSceneKey = sceneKey;
-  if (customUri) customImageUri = customUri;
-}
-
+let activeSceneKey: WeatherSceneKey = 'auto';
+let customImageUri = '';
+export function setActiveBackground(sceneKey: WeatherSceneKey, customUri?: string) { activeSceneKey = sceneKey; if (customUri) customImageUri = customUri; }
 export function getCurrentTimePeriod(date: Date = new Date()): TimePeriod {
   const hours = date.getHours();
   if (hours >= 5 && hours < 8) return 'dawn';
@@ -41,21 +22,21 @@ export function getCurrentTimePeriod(date: Date = new Date()): TimePeriod {
   if (hours >= 17 && hours < 20) return 'dusk';
   return 'night';
 }
-
-export function getEnvironmentTheme(
-  timePeriod: TimePeriod = getCurrentTimePeriod(),
-  weatherScene: WeatherSceneKey = activeSceneKey
-): EnvironmentTheme {
-  const imageUri = (weatherScene === 'custom' && customImageUri) ? customImageUri : (SCENE_IMAGES[weatherScene] || DUSK_MOUNTAIN_URI);
-
-  return {
-    timePeriod,
-    sceneKey: weatherScene,
-    sceneImageUri: imageUri,
-    gradientColors: ['rgba(30, 20, 45, 0.40)', 'rgba(15, 30, 50, 0.30)', 'rgba(10, 15, 26, 0.50)'],
-    glassOverlay: 'rgba(15, 25, 40, 0.32)',
-    accentGlow: '#34D399',
-    customUri: customImageUri,
-    dimOpacity: 0.22
-  };
+export function weatherCodeToKind(code: number): WeatherKind {
+  if ([95, 96, 99].includes(code)) return 'storm';
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return 'snow';
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return 'rain';
+  if ([1, 2, 3, 45, 48].includes(code)) return 'cloudy';
+  return 'clear';
+}
+function selectedWeather(fetched: WeatherKind): WeatherKind {
+  if (activeSceneKey === 'clouds') return 'cloudy';
+  if (activeSceneKey === 'rain') return 'rain';
+  if (activeSceneKey === 'storm') return 'storm';
+  return fetched;
+}
+export function getEnvironmentTheme(weather: WeatherKind = 'clear', date: Date = new Date()): EnvironmentTheme {
+  const timePeriod = getCurrentTimePeriod(date);
+  const isCustom = activeSceneKey === 'custom' && !!customImageUri;
+  return { timePeriod, sceneKey: activeSceneKey, sceneImage: isCustom ? { uri: customImageUri } : TIME_IMAGES[timePeriod], weather: selectedWeather(weather), customUri: customImageUri || undefined, dimOpacity: timePeriod === 'day' ? 0.48 : 0.34 };
 }

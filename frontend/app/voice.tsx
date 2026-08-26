@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
+import { AccessibilityInfo, View, Text, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
 import Svg, { Polygon, Line, Circle } from 'react-native-svg';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import { GlassSurface } from '../src/components/GlassSurface';
@@ -14,24 +14,28 @@ const CANVAS_SIZE = Math.min(width - 40, 320);
 export default function VoiceScreen() {
   const router = useRouter();
   const [voiceState, setVoiceState] = useState<VoiceState>('IDLE');
-  const [micLevel, setMicLevel] = useState<number>(0.2);
+  const [micLevel, setMicLevel] = useState<number>(0);
   const [rotation, setRotation] = useState<number>(0);
+  const [reducedMotion, setReducedMotion] = useState(false);
 
   useEffect(() => {
     const unsub = voiceStateMachine.subscribe((st) => setVoiceState(st));
+    AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
+    const motion = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
     startRecordingSession();
-
-    // 3D rotation animation loop
-    const interval = setInterval(() => {
-      setRotation(prev => (prev + 0.05) % (Math.PI * 2));
-    }, 30);
 
     return () => {
       unsub();
-      clearInterval(interval);
+      motion.remove();
       voiceInputAdapter.stopRecording();
     };
   }, []);
+
+  useEffect(() => {
+    if (reducedMotion) { setRotation(0); return; }
+    const interval = setInterval(() => setRotation(prev => (prev + 0.05) % (Math.PI * 2)), 30);
+    return () => clearInterval(interval);
+  }, [reducedMotion]);
 
   const startRecordingSession = async () => {
     if (ttsService.isSpeaking()) {
@@ -64,7 +68,8 @@ export default function VoiceScreen() {
   // 3D Tetrahedron projection geometry with audio wave displacement
   const cx = CANVAS_SIZE / 2;
   const cy = CANVAS_SIZE / 2;
-  const r = 85 + micLevel * 45; // Audio reactive size expansion
+  const ripple = reducedMotion ? 0 : micLevel;
+  const r = 85 + ripple * 28;
 
   // 4 Vertices of Tetrahedron projected into 2D canvas space
   const v0 = { x: cx + r * Math.cos(rotation), y: cy - r * 0.8 };
@@ -94,9 +99,10 @@ export default function VoiceScreen() {
         </GlassSurface>
 
         {/* 3D TETRAHEDRON WAVING ANIMATION CANVAS */}
-        <TouchableOpacity onPress={toggleRecording} activeOpacity={0.9} style={styles.canvasTouch}>
+        <TouchableOpacity onPress={toggleRecording} activeOpacity={0.9} style={styles.canvasTouch} accessibilityRole="button" accessibilityLabel={`Voice mode: ${voiceState.toLowerCase()}`} accessibilityHint="Starts or stops voice transmission">
           <GlassSurface variant="surface" intensity={40} style={styles.canvasSurface}>
             <Svg width={CANVAS_SIZE} height={CANVAS_SIZE}>
+              {ripple > 0.02 && [0, 1, 2].map(index => <Circle key={index} cx={cx} cy={cy} r={92 + index * 18 + ripple * 18} fill="none" stroke="#72F5B1" strokeWidth={1 + ripple * 2} opacity={Math.max(0, ripple * (0.46 - index * 0.1))} />)}
               {/* Triangular Faces */}
               <Polygon
                 points={`${v0.x},${v0.y} ${v1.x},${v1.y} ${v2.x},${v2.y}`}
@@ -123,10 +129,10 @@ export default function VoiceScreen() {
               <Line x1={v2.x} y1={v2.y} x2={v3.x} y2={v3.y} stroke="rgba(255, 255, 255, 0.5)" strokeDasharray="4,4" />
 
               {/* Audio Reactive Vertices */}
-              <Circle cx={v0.x} cy={v0.y} r={4 + micLevel * 6} fill="#FFFFFF" />
-              <Circle cx={v1.x} cy={v1.y} r={3 + micLevel * 5} fill="#FFFFFF" />
-              <Circle cx={v2.x} cy={v2.y} r={3 + micLevel * 5} fill="#FFFFFF" />
-              <Circle cx={v3.x} cy={v3.y} r={3 + micLevel * 4} fill="rgba(255, 255, 255, 0.7)" />
+              <Circle cx={v0.x} cy={v0.y} r={4 + ripple * 6} fill={reducedMotion && voiceState === 'LISTENING' ? '#72F5B1' : '#FFFFFF'} />
+              <Circle cx={v1.x} cy={v1.y} r={3 + ripple * 5} fill="#FFFFFF" />
+              <Circle cx={v2.x} cy={v2.y} r={3 + ripple * 5} fill="#FFFFFF" />
+              <Circle cx={v3.x} cy={v3.y} r={3 + ripple * 4} fill="rgba(255, 255, 255, 0.7)" />
             </Svg>
           </GlassSurface>
         </TouchableOpacity>
