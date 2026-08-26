@@ -1,35 +1,307 @@
 import os
 import sqlite3
-import json
 import base64
 import time
-from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
+from typing import Callable, Dict, Any, List, Optional, Tuple
 from cryptography.fernet import Fernet
+from cryptography.fernet import InvalidToken
 
 DB_PATH = os.getenv('MAGISTRATE_DB_PATH', '/home/spectre/Magistrate/gateway/magistrate.db')
-SECRET_KEY = os.getenv('MAGISTRATE_SECRET_KEY', 'magistrate_super_secret_fernet_key_32bytes_len=')
+DEFAULT_CIPHERTEXT_VERSION = 'v1'
+DEVELOPMENT_MODES = frozenset({'dev', 'development', 'test', 'testing'})
+LEGACY_MIGRATION_FLAG = 'MAGISTRATE_ALLOW_LEGACY_MIGRATION'
+ROTATION_FLAG = 'MAGISTRATE_KEY_ROTATION_ENABLED'
+MAX_ROTATION_ROWS = 1_000
+
+
+class SecretConfigurationError(RuntimeError):
+    """Raised when credential encryption is not safely configured."""
+
+
+class SecretDecryptionError(RuntimeError):
+    """Raised when an encrypted credential cannot be authenticated."""
+
+
+class SecretMigrationError(RuntimeError):
+    """Raised when an explicitly requested legacy migration cannot proceed."""
+
+
+class SecretRotationError(RuntimeError):
+    """Raised when a bounded credential rotation cannot proceed."""
+
+
+@dataclass(frozen=True)
+class _SecretSettings:
+    key_material: str
+    fernet: Fernet
+    version: str
+    previous_fernet: Optional[Fernet]
+    previous_version: Optional[str]
+    rotation_enabled: bool
+
+
+_EPHEMERAL_TEST_KEY = Fernet.generate_key().decode('ascii')
+
+
+def _is_truthy(value: Optional[str]) -> bool:
+    return (value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _environment() -> str:
+    return os.getenv('MAGISTRATE_ENV', '').strip().lower()
+
+
+def _validate_version(value: str, setting_name: str) -> str:
+    version = value.strip()
+    if not version.startswith('v') or not version[1:].isdigit() or int(version[1:]) < 1:
+        raise SecretConfigurationError(f'{setting_name} must be a positive version such as v1')
+    return version
+
+
+def _fernet_from_key(key_material: str, setting_name: str) -> Fernet:
+    key = key_material
+    # Fernet.generate_key() produces a 44-character URL-safe base64 key. Do
+    # not normalize, pad, truncate, or otherwise make weak configuration work.
+    if len(key) != 44 or any(char.isspace() for char in key):
+        raise SecretConfigurationError(f'{setting_name} must be a generated Fernet key')
+    try:
+        return Fernet(key.encode('ascii'))
+    except (UnicodeEncodeError, ValueError, TypeError) as exc:
+        raise SecretConfigurationError(f'{setting_name} must be a generated Fernet key') from exc
+
+
+def _load_secret_settings() -> _SecretSettings:
+    environment = _environment()
+    key_material = os.getenv('MAGISTRATE_SECRET_KEY', '')
+    if not key_material:
+        if environment in DEVELOPMENT_MODES:
+            key_material = _EPHEMERAL_TEST_KEY
+        else:
+            raise SecretConfigurationError(
+                'MAGISTRATE_SECRET_KEY is required outside explicit development/test mode'
+            )
+    current_version = _validate_version(
+        os.getenv('MAGISTRATE_SECRET_KEY_VERSION', DEFAULT_CIPHERTEXT_VERSION),
+        'MAGISTRATE_SECRET_KEY_VERSION',
+    )
+    current_fernet = _fernet_from_key(key_material, 'MAGISTRATE_SECRET_KEY')
+
+    previous_key = os.getenv('MAGISTRATE_PREVIOUS_SECRET_KEY', '')
+    previous_version = os.getenv('MAGISTRATE_PREVIOUS_SECRET_KEY_VERSION', '') or None
+    previous_fernet = None
+    if previous_key or previous_version:
+        if not previous_key or not previous_version:
+            raise SecretConfigurationError(
+                'MAGISTRATE_PREVIOUS_SECRET_KEY and MAGISTRATE_PREVIOUS_SECRET_KEY_VERSION must be set together'
+            )
+        previous_version = _validate_version(
+            previous_version, 'MAGISTRATE_PREVIOUS_SECRET_KEY_VERSION'
+        )
+        if previous_version == current_version:
+            raise SecretConfigurationError('previous and current secret versions must differ')
+        previous_fernet = _fernet_from_key(
+            previous_key, 'MAGISTRATE_PREVIOUS_SECRET_KEY'
+        )
+
+    rotation_enabled = _is_truthy(os.getenv(ROTATION_FLAG))
+    if rotation_enabled and previous_fernet is None:
+        raise SecretConfigurationError(
+            f'{ROTATION_FLAG}=true requires a previous secret key and version'
+        )
+
+    return _SecretSettings(
+        key_material=key_material,
+        fernet=current_fernet,
+        version=current_version,
+        previous_fernet=previous_fernet,
+        previous_version=previous_version,
+        rotation_enabled=rotation_enabled,
+    )
+
+
+def validate_secret_configuration() -> None:
+    """Validate the encryption contract at process startup or before persistence."""
+    _load_secret_settings()
+
 
 def _get_fernet() -> Fernet:
-    key_bytes = SECRET_KEY.encode('utf-8')
-    key_b64 = base64.urlsafe_b64encode(key_bytes.ljust(32)[:32])
-    return Fernet(key_b64)
+    return _load_secret_settings().fernet
+
+
+def _encrypt_with(fernet: Fernet, version: str, plain_token: str) -> str:
+    return f'{version}:{fernet.encrypt(plain_token.encode("utf-8")).decode("ascii")}'
+
 
 def encrypt_token(plain_token: str) -> str:
     if not plain_token:
         return ''
-    f = _get_fernet()
-    return f.encrypt(plain_token.encode('utf-8')).decode('utf-8')
+    settings = _load_secret_settings()
+    return _encrypt_with(settings.fernet, settings.version, plain_token)
+
+
+def _split_ciphertext(
+    cipher_token: str, error_type: type[Exception] = SecretDecryptionError
+) -> Tuple[str, str]:
+    if not isinstance(cipher_token, str):
+        raise error_type('Encrypted credential has an invalid format')
+    version, separator, payload = cipher_token.partition(':')
+    if not separator or not payload or not version.startswith('v') or not version[1:].isdigit():
+        raise error_type('Encrypted credential has an invalid format')
+    return version, payload
+
+
+def _decrypt_with(fernet: Fernet, payload: str, error_type: type[Exception]) -> str:
+    try:
+        return fernet.decrypt(payload.encode('ascii')).decode('utf-8')
+    except (InvalidToken, UnicodeDecodeError, UnicodeEncodeError, ValueError, TypeError):
+        raise error_type('Encrypted credential could not be authenticated') from None
+
 
 def decrypt_token(cipher_token: str) -> str:
+    """Decrypt only current, authenticated ciphertext; never return input on failure."""
     if not cipher_token:
         return ''
+    settings = _load_secret_settings()
+    version, payload = _split_ciphertext(cipher_token)
+    if version != settings.version:
+        raise SecretDecryptionError('Encrypted credential uses a non-current key version')
+    return _decrypt_with(settings.fernet, payload, SecretDecryptionError)
+
+
+def _legacy_fernet(legacy_key_material: str) -> Fernet:
+    """Reproduce the pre-versioning derivation only for explicit migration."""
+    if not legacy_key_material or not legacy_key_material.strip():
+        raise SecretMigrationError('An explicit legacy secret is required for migration')
+    key_bytes = legacy_key_material.encode('utf-8')
+    legacy_key = base64.urlsafe_b64encode(key_bytes.ljust(32, b'\0')[:32])
     try:
-        f = _get_fernet()
-        return f.decrypt(cipher_token.encode('utf-8')).decode('utf-8')
-    except Exception:
+        return Fernet(legacy_key)
+    except (ValueError, TypeError) as exc:
+        raise SecretMigrationError('The supplied legacy secret cannot decrypt legacy values') from exc
+
+
+def migrate_legacy_ciphertext(
+    cipher_token: str,
+    *,
+    legacy_key: Optional[str] = None,
+    allow_legacy: bool = False,
+) -> str:
+    """Return a versioned value after an explicitly authorized legacy rewrite."""
+    if not cipher_token:
+        return ''
+    if not (allow_legacy or _is_truthy(os.getenv(LEGACY_MIGRATION_FLAG))):
+        raise SecretMigrationError(
+            f'legacy migration requires {LEGACY_MIGRATION_FLAG}=true or allow_legacy=True'
+        )
+
+    settings = _load_secret_settings()
+    version, payload = (
+        _split_ciphertext(cipher_token, SecretMigrationError)
+        if cipher_token.startswith('v')
+        else ('legacy', cipher_token)
+    )
+    if version != 'legacy':
+        if version != settings.version:
+            raise SecretMigrationError('Only unversioned legacy values may be migrated')
+        _decrypt_with(settings.fernet, payload, SecretMigrationError)
         return cipher_token
 
+    configured_legacy_key = legacy_key or os.getenv('MAGISTRATE_LEGACY_SECRET_KEY', '')
+    plain_token = _decrypt_with(
+        _legacy_fernet(configured_legacy_key), payload, SecretMigrationError
+    )
+    return _encrypt_with(settings.fernet, settings.version, plain_token)
+
+
+def rotate_encrypted_token(cipher_token: str) -> str:
+    """Rewrite one current/previous-version value without accepting plaintext."""
+    if not cipher_token:
+        return ''
+    settings = _load_secret_settings()
+    version, payload = _split_ciphertext(cipher_token, SecretRotationError)
+    if version == settings.version:
+        _decrypt_with(settings.fernet, payload, SecretRotationError)
+        return cipher_token
+    if not settings.rotation_enabled or not settings.previous_fernet or version != settings.previous_version:
+        raise SecretRotationError('Credential is not eligible for the configured key rotation')
+    plain_token = _decrypt_with(settings.previous_fernet, payload, SecretRotationError)
+    return _encrypt_with(settings.fernet, settings.version, plain_token)
+
+
+@dataclass(frozen=True)
+class CredentialRewriteReport:
+    scanned: int
+    rewritten: int
+
+
+def _rewrite_oauth_credentials(
+    transform: Callable[[str], str],
+    *,
+    limit: int = MAX_ROTATION_ROWS,
+    apply: bool = False,
+) -> CredentialRewriteReport:
+    if limit < 1 or limit > MAX_ROTATION_ROWS:
+        raise SecretRotationError(f'limit must be between 1 and {MAX_ROTATION_ROWS}')
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            'SELECT id, access_token_enc, refresh_token_enc FROM oauth_credentials LIMIT ?',
+            (limit + 1,),
+        ).fetchall()
+        if len(rows) > limit:
+            raise SecretRotationError(
+                f'credential rewrite exceeds the bounded limit of {limit} rows'
+            )
+
+        updates = []
+        for credential_id, access_token_enc, refresh_token_enc in rows:
+            new_access = transform(access_token_enc)
+            new_refresh = transform(refresh_token_enc) if refresh_token_enc else refresh_token_enc
+            if new_access != access_token_enc or new_refresh != refresh_token_enc:
+                updates.append((new_access, new_refresh, credential_id))
+
+        if apply:
+            # sqlite rolls this transaction back automatically if the batch
+            # write fails, so a partial rotation cannot be committed.
+            with conn:
+                conn.executemany(
+                    'UPDATE oauth_credentials SET access_token_enc = ?, refresh_token_enc = ? WHERE id = ?',
+                    updates,
+                )
+        else:
+            conn.rollback()
+        return CredentialRewriteReport(scanned=len(rows), rewritten=len(updates))
+    finally:
+        conn.close()
+
+
+def migrate_legacy_oauth_credentials(
+    *,
+    legacy_key: Optional[str] = None,
+    allow_legacy: bool = False,
+    limit: int = MAX_ROTATION_ROWS,
+    apply: bool = False,
+) -> CredentialRewriteReport:
+    return _rewrite_oauth_credentials(
+        lambda value: migrate_legacy_ciphertext(
+            value, legacy_key=legacy_key, allow_legacy=allow_legacy
+        ),
+        limit=limit,
+        apply=apply,
+    )
+
+
+def rotate_oauth_credentials(
+    *,
+    limit: int = MAX_ROTATION_ROWS,
+    apply: bool = False,
+) -> CredentialRewriteReport:
+    return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
+
 def init_db():
+    validate_secret_configuration()
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -231,4 +503,3 @@ def disconnect_account(user_id: str, provider: str) -> bool:
     return True
 
 init_db()
-print('Database initialized successfully at:', DB_PATH)
