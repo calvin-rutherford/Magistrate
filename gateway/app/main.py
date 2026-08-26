@@ -7,6 +7,7 @@ import json
 import asyncio
 import time
 from typing import Optional, List
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.auth import verify_token, MAGISTRATE_TOKEN
 from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient
@@ -26,6 +27,7 @@ from app.providers.discord import DiscordProviderAdapter
 from app.providers.google import GoogleProviderAdapter
 from app.providers.jira import JiraProviderAdapter
 from app.providers.teams import TeamsProviderAdapter
+from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
 
 init_db()
 
@@ -63,6 +65,7 @@ providers = {
     'jira': jira_adapter,
     'teams': teams_adapter
 }
+oauth_transaction_store = OAuthTransactionStore()
 
 # HEALTH & RUNTIME
 
@@ -150,50 +153,67 @@ async def connect_oauth_provider(provider: str, redirect_uri: str = Query('magis
     if provider not in providers:
         raise HTTPException(status_code=404, detail='Provider not supported')
     adapter = providers[provider]
-    # For a real flow, you generate a state parameter to prevent CSRF, and append the mobile app's redirect_uri to it.
-    state = f"{user_id}::{redirect_uri}"
-    auth_url = adapter.get_authorization_url() + f"&state={state}" if '?' in adapter.get_authorization_url() else adapter.get_authorization_url() + f"?state={state}"
+    try:
+        state = oauth_transaction_store.create(
+            principal_id=user_id,
+            provider=provider,
+            redirect_uri=redirect_uri,
+        )
+    except OAuthTransactionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    auth_url = adapter.get_authorization_url(state=state)
     return RedirectResponse(url=auth_url)
 
 @app.get('/api/v1/auth/{provider}/callback')
 async def oauth_callback(provider: str, code: str = Query(None), state: str = Query(None), error: str = Query(None)):
-    if not state:
+    if provider not in providers:
+        return JSONResponse({'error': 'Unsupported provider'}, status_code=400)
+
+    if state is None:
         return JSONResponse({'error': 'Missing state'}, status_code=400)
-    
-    parts = state.split('::')
-    user_id = parts[0]
-    app_redirect_uri = parts[1] if len(parts) > 1 else 'magistrate://account'
+    try:
+        transaction = oauth_transaction_store.consume(state, provider)
+    except OAuthTransactionError as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400)
 
     if error:
-        return RedirectResponse(url=f"{app_redirect_uri}?error={error}")
+        return RedirectResponse(url=_oauth_redirect(transaction.redirect_uri, error=error))
+    if not code:
+        return JSONResponse({'error': 'Missing authorization code'}, status_code=400)
 
-    if provider not in providers:
-        return RedirectResponse(url=f"{app_redirect_uri}?error=unsupported_provider")
-    
     adapter = providers[provider]
-    
-    # In a fully real flow, adapter.exchange_code(code) makes an HTTP request to the provider.
-    # We will simulate the exchange here to allow the UI to work seamlessly if .env keys are missing.
     try:
-        if hasattr(adapter, 'exchange_code'):
-            access_token = await adapter.exchange_code(code)
+        exchange_result = await adapter.exchange_code(code)
+        if isinstance(exchange_result, dict):
+            access_token = exchange_result.get('access_token')
         else:
-            access_token = f"mock_token_{code}"
-            
+            access_token = exchange_result
+        if not isinstance(access_token, str) or not access_token:
+            raise ValueError('Provider did not return an access token')
+
         profile = await adapter.get_user_profile(access_token)
         username = profile.get('username', f'@{provider}_user')
-        
+
         upsert_connected_account(
-            user_id=user_id, 
-            provider=provider, 
-            provider_username=username, 
-            status='connected', 
-            scopes=adapter.default_scopes(), 
+            user_id=transaction.principal_id,
+            provider=provider,
+            provider_username=username,
+            status='connected',
+            scopes=adapter.default_scopes(),
             access_token=access_token
         )
-        return RedirectResponse(url=f"{app_redirect_uri}?status=success")
-    except Exception as e:
-        return RedirectResponse(url=f"{app_redirect_uri}?error={str(e)}")
+        return RedirectResponse(url=_oauth_redirect(transaction.redirect_uri, status='success'))
+    except Exception:
+        return RedirectResponse(url=_oauth_redirect(transaction.redirect_uri, error='oauth_failed'))
+
+
+def _oauth_redirect(redirect_uri: str, **params: str) -> str:
+    """Append encoded callback status without allowing provider text into URLs."""
+
+    parsed = urlsplit(redirect_uri)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    query.extend((key, value) for key, value in params.items() if value)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ''))
 
 @app.post('/api/v1/auth/{provider}/disconnect')
 async def disconnect_oauth_provider(provider: str, user_id: str = 'default_user', token: str = Depends(verify_token)):
