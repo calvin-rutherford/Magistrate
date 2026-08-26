@@ -1,6 +1,6 @@
 # Magistrate site-wide audit
 
-> Status: evidence inventory, baseline checks, and an initial security/privacy and operations finding set were recorded on 2026-08-26. Other audit dimensions remain incomplete, so this document does not yet represent a completed audit.
+> Status: evidence inventory, baseline checks, and initial UX, accessibility, security/privacy, and operations finding sets were recorded on 2026-08-26. Reliability, performance, mobile/web consistency, and test-coverage review remain incomplete, so this document does not yet represent a completed audit.
 
 ## Audit method and claim standard
 
@@ -69,6 +69,24 @@ Refs compared: `origin/main`, `origin/fm/ambient-backgrounds-b5`, `origin/fm/ter
 
 ### Confirmed defects
 
+#### UX-01 — Home reports a phantom active agent and substitutes fixed agent details (medium; defer overlapping Home work to PR #5)
+
+- **Evidence:** `frontend/app/(tabs)/index.tsx`, `HomeScreen`, renders `ACTIVE AGENTS ({activeAgents.length || 1})`, while its adjacent empty branch renders `No active agents.` when `activeAgents.length === 0`. The same agent-card branch renders `Firstmate Autonomous Control Loop` for every agent and uses `Claude 3.7 Sonnet` whenever `a.harness` is absent rather than exposing an unknown state.
+- **Impact:** The same screen can simultaneously state that one agent is active and that no agents are active, and can present invented task/model details as observed fleet state. That undermines the Situation Room's primary status-summary purpose.
+- **Boundary:** The contradictory empty count and fixed agent metadata are confirmed on the checked-out baseline by source inspection. PR #5 changes this Home route and its data presentation, so implementation should not race that work: revalidate after PR #5 merges and retain only behavior it does not correct.
+
+#### A11Y-01 — Shared icon-only navigation controls have no accessible names or state (medium)
+
+- **Evidence:** `frontend/src/components/BottomControls.tsx`, `BottomControls`, creates the Chat, Voice Mode, and Gesture controls as `TouchableOpacity` elements whose only children are SVG paths. None supplies `accessible`, `accessibilityRole`, `accessibilityLabel`, `accessibilityHint`, or `accessibilityState`; the current route is communicated only by changing the SVG stroke color. The component's styles also set the two outer hit targets to `40x40`, below the commonly used 44-point mobile target, while the center control is `52x52`.
+- **Impact:** Screen-reader users cannot reliably identify the three primary destinations or determine which one is active. The outer targets also present a touch-target risk that needs device-level measurement because React Native hit slop and platform behavior are not established by this source inspection.
+- **Boundary:** The missing semantic properties are a confirmed source defect; inadequate effective target size is a validation risk, not a confirmed failure. PR #3 changes the Voice Mode surface but not this shared component in its recorded diff, so semantic remediation can remain independent; recheck the voice control after PR #3 merges.
+
+#### A11Y-02 — Voice Mode continuously animates without a baseline reduced-motion path (medium; defer implementation to PR #3)
+
+- **Evidence:** `frontend/app/voice.tsx`, `VoiceScreen`, starts a 30 ms `setInterval` on mount and continuously changes the tetrahedron projection's rotation until unmount. The route does not query a reduced-motion preference or offer a pause control.
+- **Impact:** Users who request reduced motion still receive persistent motion on a core interaction screen.
+- **Boundary:** This is confirmed for the checked-out baseline by the unconditional interval. PR #3 explicitly changes the Voice Mode visualization and includes reduced-motion treatment, so no parallel implementation should be scheduled; verify the preference on native and web after PR #3 merges.
+
 #### SEC-01 — A shipped shared token does not provide an effective authorization boundary (high)
 
 **Evidence.** `frontend/src/api/client.ts` embeds both the gateway address and `DEVICE_TOKEN = 'magistrate-device-token-12345'` in client code and sends that value to account, fleet, agent-control, terminal, notification, voice, and provider endpoints. `frontend/src/realtime/socket.ts` also embeds the same token in a WebSocket URL. `gateway/app/auth.py` accepts that exact value by default when `MAGISTRATE_TOKEN` is unset and accepts credentials in either `X-Magistrate-Token` or the `token` query parameter. A web bundle or installed client necessarily exposes a client-side constant, so anyone who can obtain the client can reproduce this credential. The gateway's broad CORS policy in `gateway/app/main.py` (`allow_origins`, methods, and headers all wildcarded) does not restore an identity or per-device authorization boundary.
@@ -102,6 +120,12 @@ Refs compared: `origin/main`, `origin/fm/ambient-backgrounds-b5`, `origin/fm/ter
 **Required outcome.** Fail startup outside an explicit development mode when a suitably generated key is absent; version encrypted values; fail closed on authentication/decryption errors; define rotation/migration and secret-storage procedures; and test missing/invalid keys, ciphertext tampering, legacy migration, and rotation without logging secret values.
 
 ### Validation risks and opportunities
+
+#### UX-02 — Voice Mode begins microphone capture on route entry (medium risk; validate consent expectations and PR #3)
+
+- **Evidence:** `frontend/app/voice.tsx`, `VoiceScreen`, calls `startRecordingSession()` from its mount effect; that function immediately sets `LISTENING` and awaits `voiceInputAdapter.startRecording(...)`. The first explicit press of the tetrahedron stops/transmits an already-running session rather than initiating it.
+- **Risk:** Automatic capture can surprise users who interpret entering the route as navigation rather than consent to record. Whether the operating-system permission prompt, prior product disclosure, and intended hands-free workflow make this acceptable requires UX/privacy validation and runtime testing.
+- **Boundary:** Treat this as a risk, not proof of unlawful or undisclosed recording. PR #3 changes `voice.tsx` and recorder behavior; resolve the intended consent model there or perform post-merge revalidation rather than creating a competing Voice Mode package.
 
 #### OPS-01 — Production-safety configuration is permissive by default (medium risk; validate deployment)
 
