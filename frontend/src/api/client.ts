@@ -4,11 +4,19 @@ const DEVICE_TOKEN = 'magistrate-device-token-12345';
 export interface AgentInfo {
   id: string;
   name: string;
-  harness: string;
-  status: 'idle' | 'working' | 'blocked' | 'done' | 'unknown';
+  harness?: string | null;
+  status?: 'idle' | 'working' | 'blocked' | 'done' | 'unknown' | string | null;
   pane_id?: string;
   tab_id?: string;
   workspace_id?: string;
+}
+
+export interface HealthInfo {
+  status: string;
+  service: string;
+  herdr_socket_connected: boolean;
+  herdr_version?: string;
+  firstmate_tasks_count?: number;
 }
 
 export interface TaskInfo {
@@ -116,7 +124,7 @@ export async function fetchHealth() {
   const res = await fetch(GATEWAY_URL + '/health', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return res.json();
+  return checkedJson<HealthInfo>(res);
 }
 
 export async function fetchRuntime() {
@@ -130,7 +138,7 @@ export async function fetchAgents(): Promise<AgentInfo[]> {
   const res = await fetch(GATEWAY_URL + '/agents', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return res.json();
+  return checkedJson<AgentInfo[]>(res);
 }
 
 export async function fetchFleet() {
@@ -213,8 +221,16 @@ export async function disconnectAuthProvider(provider: string): Promise<any> {
 }
 
 async function checkedJson<T>(res: Response): Promise<T> {
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.detail || `Request failed (${res.status})`);
+  let data: any = null;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(res.ok ? 'Gateway returned an invalid response.' : `Request failed (${res.status})`);
+  }
+  if (!res.ok) {
+    const detail = typeof data?.detail === 'string' ? data.detail : typeof data?.error === 'string' ? data.error : null;
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
   return data as T;
 }
 
@@ -281,7 +297,7 @@ export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
   const res = await fetch(GATEWAY_URL + '/captain/output?lines=' + lines, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return res.json();
+  return checkedJson<{ output?: string }>(res);
 }
 
 export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain') {
@@ -299,7 +315,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       target
     })
   });
-  return res.json();
+  return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);
 }
 
 export async function interruptAgent(agentId: string) {
@@ -315,5 +331,5 @@ export async function sendAgentKey(agentId: string = 'captain', key: string = 'E
     method: 'POST',
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return res.json();
+  return checkedJson<{ status: string; target?: string; key?: string; response?: string; error?: string }>(res);
 }

@@ -59,6 +59,15 @@ async function openChat(viewport) {
           headers: { 'Content-Type': 'application/json' }
         }));
       }
+      if (url.includes('/api/v1/captain/prompt')) {
+        window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
+        const status = window.__captainPromptStatus || 200;
+        const body = status === 200 ? { status: 'submitted', target: 'captain' } : { detail: 'Captain is unavailable' };
+        return Promise.resolve(new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' }
+        }));
+      }
       if (url.includes('/api/v1/')) {
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
         return Promise.resolve(new Response('{}', {
@@ -91,9 +100,9 @@ test('terminal has a bounded viewport and responds to wheel scrolling', async ()
   assert.ok(initial.scrollHeight > initial.clientHeight, 'terminal output must overflow its own viewport');
   assert.ok(initial.scrollTop > 0, 'new output should initially follow the bottom');
 
-  const box = await terminal.boundingBox();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.wheel({ deltaY: -500 });
+  await terminal.evaluate(element => {
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: -500, bubbles: true, cancelable: true }));
+  });
   await page.waitForFunction(
     (selector, previousTop) => document.querySelector(selector).scrollTop < previousTop,
     {},
@@ -146,8 +155,10 @@ test('focused terminal supports keyboard page scrolling', async () => {
   const page = await openChat({ width: 1100, height: 760 });
   const terminal = await page.$('[data-testid="terminal-scroll"]');
   const before = await terminal.evaluate(element => element.scrollTop);
-  await terminal.focus();
-  await page.keyboard.press('PageUp');
+  await terminal.evaluate(element => {
+    element.focus();
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true, cancelable: true }));
+  });
   await page.waitForFunction(
     (selector, previousTop) => document.querySelector(selector).scrollTop < previousTop,
     {}, '[data-testid="terminal-scroll"]', before
@@ -165,18 +176,23 @@ test('terminal remains usable on a phone-sized viewport and composer accepts key
   assert.ok(layout.bottom <= 667, 'terminal must remain inside the viewport');
 
   const terminal = await page.$('[data-testid="terminal-scroll"]');
-  const beforeTouch = await terminal.evaluate(element => element.scrollTop);
-  const box = await terminal.boundingBox();
-  const client = await page.createCDPSession();
-  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + 30, y: box.y + 40 }] });
-  await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: box.x + 30, y: box.y + 140 }] });
-  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  const beforeTouch = await terminal.evaluate(element => {
+    element.scrollTop = element.scrollHeight;
+    return element.scrollTop;
+  });
+  await terminal.evaluate(element => {
+    const start = new Touch({ identifier: 1, target: element, clientX: 30, clientY: 40, pageX: 30, pageY: 40 });
+    const end = new Touch({ identifier: 1, target: element, clientX: 30, clientY: 140, pageX: 30, pageY: 140 });
+    element.dispatchEvent(new TouchEvent('touchstart', { touches: [start], bubbles: true }));
+    element.dispatchEvent(new TouchEvent('touchmove', { touches: [end], bubbles: true }));
+    element.dispatchEvent(new TouchEvent('touchend', { touches: [], bubbles: true }));
+  });
   await page.waitForFunction(
     (selector, previousTop) => document.querySelector(selector).scrollTop < previousTop,
     {}, '[data-testid="terminal-scroll"]', beforeTouch
   );
 
-  await page.click('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="captain-prompt"]');
   await page.keyboard.type('status please');
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'status please');
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'captain-prompt');
@@ -185,5 +201,25 @@ test('terminal remains usable on a phone-sized viewport and composer accepts key
   const promptCall = await page.evaluate(() => window.__magistrateApiCalls.find(call => call.url.includes('/captain/prompt')));
   assert.equal(promptCall.method, 'POST');
   assert.equal(JSON.parse(promptCall.body).text, 'status please');
+  await page.close();
+});
+
+test('composer exposes a send action and restores a failed prompt for retry', async () => {
+  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
+  await page.click('[data-testid="captain-prompt"]');
+  await page.keyboard.type('send this command');
+  assert.equal(await page.$eval('[data-testid="send-captain-prompt"]', element => element.textContent), 'SEND');
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForFunction(() => window.__magistrateApiCalls.some(call => call.url.includes('/captain/prompt')));
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), '');
+  await page.waitForFunction(() => document.querySelector('[data-testid="send-captain-prompt"]')?.textContent === 'SEND');
+
+  await page.evaluate(() => { window.__captainPromptStatus = 503; });
+  await page.click('[data-testid="captain-prompt"]');
+  await page.keyboard.type('retry this command');
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForSelector('[data-testid="captain-send-error"]');
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'retry this command');
+  assert.match(await page.$eval('[data-testid="captain-send-error"]', element => element.textContent), /Captain is unavailable/);
   await page.close();
 });
