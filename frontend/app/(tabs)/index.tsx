@@ -5,8 +5,7 @@ import { GlassSurface } from '../../src/components/GlassSurface';
 import { StatusRing } from '../../src/components/StatusRing';
 import { fetchAgents, fetchGitHubPRs, fetchHealth, AgentInfo, GitHubPR, HealthInfo } from '../../src/api/client';
 import { useRouter } from 'expo-router';
-
-const isStatus = (agent: AgentInfo, ...statuses: string[]) => statuses.includes(String(agent.status || '').toLowerCase());
+import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
@@ -61,16 +60,13 @@ export default function HomeScreen() {
     loadData(false);
   }, []);
 
-  const activeAgents = agents.filter(a => isStatus(a, 'working', 'running'));
-  const blockedAgents = agents.filter(a => isStatus(a, 'blocked'));
-  const onHoldAgents = agents.filter(a => isStatus(a, 'idle', 'paused', 'queued'));
-  const otherAgents = agents.filter(a => !activeAgents.includes(a) && !blockedAgents.includes(a) && !onHoldAgents.includes(a));
+  const fleet = summarizeAgents(agents);
 
   const healthStatus = loading ? 'CONNECTING' : healthError ? 'UNAVAILABLE' : health?.status === 'healthy' ? (health.herdr_socket_connected ? 'OPERATIONAL' : 'DEGRADED') : (health?.status || 'UNKNOWN').toUpperCase();
   const healthColor = healthError || healthStatus === 'UNAVAILABLE' ? '#FCA5A5' : healthStatus === 'OPERATIONAL' ? '#34D399' : '#F59E0B';
   const healthSubtext = loading ? 'Loading gateway status' : healthError ? 'Gateway status unavailable' : health?.herdr_socket_connected ? 'Gateway and Herdr connected' : 'Gateway reachable; Herdr unavailable';
 
-  const renderAgentCard = (agent: AgentInfo) => (
+  const renderAgentCard = ({ agent, displayStatus }: ReturnType<typeof summarizeAgents>['ordered'][number]) => (
     <TouchableOpacity
       key={agent.id}
       testID={`agent-card-${agent.id}`}
@@ -79,9 +75,9 @@ export default function HomeScreen() {
     >
       <GlassSurface variant="card" style={styles.card}>
         <View style={styles.cardHeader}>
-          <Text style={styles.agentName}>{agent.name || agent.id}</Text>
+          <Text testID={`agent-name-${agent.id}`} style={styles.agentName}>{agent.name || agent.id}</Text>
           <View style={styles.statusBadge}>
-            <Text style={styles.statusBadgeText}>{String(agent.status || 'UNKNOWN').toUpperCase()}</Text>
+          <Text style={styles.statusBadgeText}>{displayAgentStatus(displayStatus)}</Text>
           </View>
         </View>
         {agent.harness ? <Text style={styles.harnessText}>Harness: {agent.harness}</Text> : null}
@@ -90,7 +86,7 @@ export default function HomeScreen() {
     </TouchableOpacity>
   );
 
-  const renderAgentGroup = (items: AgentInfo[], emptyMessage: string) => {
+  const renderAgentGroup = (items: ReturnType<typeof summarizeAgents>['ordered'], emptyMessage: string) => {
     if (loading) return <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>Loading live agent data…</Text></GlassSurface>;
     if (items.length === 0) return <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>{emptyMessage}</Text></GlassSurface>;
     return items.map(renderAgentCard);
@@ -115,29 +111,13 @@ export default function HomeScreen() {
         </View>
 
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>ACTIVE AGENTS ({activeAgents.length})</Text>
+          <Text style={styles.sectionTitle}>AGENT FLEET ({fleet.ordered.length})</Text>
+          <Text testID="fleet-summary" style={styles.fleetSummary}>
+            {fleet.activeCount} active · {fleet.idleCount} idle{fleet.blockedCount ? ` · ${fleet.blockedCount} blocked` : ''}{fleet.unavailableCount ? ` · ${fleet.unavailableCount} unavailable` : ''}
+          </Text>
         </View>
         {agentError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{agents.length ? `Showing last known agents. ${agentError}` : agentError}</Text></GlassSurface>}
-        {renderAgentGroup(activeAgents, 'No active agents reported by Herdr.')}
-
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>NEEDS ATTENTION ({blockedAgents.length})</Text>
-        </View>
-
-        {renderAgentGroup(blockedAgents, 'No blocked agents reported by Herdr.')}
-
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>ON HOLD ({onHoldAgents.length})</Text>
-        </View>
-
-        {renderAgentGroup(onHoldAgents, 'No idle, paused, or queued agents reported by Herdr.')}
-
-        {otherAgents.length > 0 && <>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>OTHER AGENTS ({otherAgents.length})</Text>
-          </View>
-          {otherAgents.map(renderAgentCard)}
-        </>}
+        {renderAgentGroup(fleet.ordered, 'No live agent sessions reported by Herdr.')}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>PULL REQUESTS ({prs.length})</Text>
@@ -176,6 +156,7 @@ const styles = StyleSheet.create({
   sphereHint: { fontFamily: 'monospace', fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginTop: 8, letterSpacing: 1 },
   sectionHeader: { marginTop: 14, marginBottom: 8 },
   sectionTitle: { fontFamily: 'monospace', fontSize: 12, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1.5 },
+  fleetSummary: { color: 'rgba(255, 255, 255, 0.58)', fontFamily: 'monospace', fontSize: 10, marginTop: 4 },
   card: { padding: 16, borderRadius: 18, marginVertical: 4 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   agentName: { fontSize: 14, fontWeight: 'bold', color: '#FFFFFF' },
