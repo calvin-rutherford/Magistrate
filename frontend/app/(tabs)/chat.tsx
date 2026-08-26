@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
@@ -17,7 +17,7 @@ export default function ChatScreen() {
   const [hasNewMessages, setHasNewMessages] = useState<boolean>(false);
   const [isThinking, setIsThinking] = useState<boolean>(false);
 
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
 
   const loadOutput = async () => {
@@ -41,15 +41,11 @@ export default function ChatScreen() {
     return () => clearInterval(interval);
   }, [isScrolledUp]);
 
-  useEffect(() => {
-    if (!isScrolledUp) {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    }
-  }, [output]);
+
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
-    const isAtBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 35;
+    const { contentOffset } = event.nativeEvent;
+    const isAtBottom = contentOffset.y <= 35;
     if (isAtBottom) {
       setIsScrolledUp(false);
       setHasNewMessages(false);
@@ -59,7 +55,7 @@ export default function ChatScreen() {
   };
 
   const scrollToBottom = () => {
-    scrollRef.current?.scrollToEnd({ animated: true });
+    scrollRef.current?.scrollToOffset({ offset: 0, animated: true });
     setIsScrolledUp(false);
     setHasNewMessages(false);
   };
@@ -144,19 +140,23 @@ export default function ChatScreen() {
         <TerminusControlBar target="captain" onKeySent={() => setTimeout(loadOutput, 400)} />
 
         <View style={styles.inputComposerRow}>
-          <TextInput
-            ref={inputRef}
-            style={styles.textInput}
-            placeholder="Command Codex Captain..."
-            placeholderTextColor="rgba(255, 255, 255, 0.45)"
-            value={promptText}
-            onChangeText={setPromptText}
-            onSubmitEditing={() => handleSend()}
-          />
+          <View style={styles.inputWrapper}>
+            <TextInput
+              ref={inputRef}
+              style={styles.textInputInner}
+              placeholder="Ask AI to generate a command"
+              placeholderTextColor="rgba(255, 255, 255, 0.45)"
+              value={promptText}
+              onChangeText={setPromptText}
+              onSubmitEditing={() => handleSend()}
+            />
+            <View style={styles.inputAccessories}>
+              <View style={styles.inputPill}><Text style={styles.inputPillText}>Paste</Text></View>
+              <View style={styles.inputPill}><Text style={styles.inputPillText}>AI</Text></View>
+            </View>
+          </View>
 
-          <TouchableOpacity style={styles.sendBtn} onPress={() => handleSend()}>
-            <Text style={styles.sendBtnText}>SEND ↵</Text>
-          </TouchableOpacity>
+
         </View>
       </View>
 
@@ -190,6 +190,11 @@ const styles = StyleSheet.create({
   scrollBadgeSurface: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16, backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF', borderWidth: 1 },
   scrollBadgeText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 10, letterSpacing: 0.8 },
   inputComposerRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
+    inputWrapper: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', paddingHorizontal: 12, paddingVertical: 8 },
+  textInputInner: { flex: 1, color: '#FFFFFF', fontSize: 14, paddingVertical: 4, outlineStyle: 'none' },
+  inputAccessories: { flexDirection: 'row', gap: 6, marginLeft: 8 },
+  inputPill: { backgroundColor: 'rgba(255, 255, 255, 0.15)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  inputPillText: { fontSize: 10, color: 'rgba(255, 255, 255, 0.7)' },
   textInput: { flex: 1, backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.2)', paddingHorizontal: 12, paddingVertical: 10, color: '#FFFFFF', fontSize: 14 },
   sendBtn: { backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 11, paddingHorizontal: 14 },
   sendBtnText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 12 }
