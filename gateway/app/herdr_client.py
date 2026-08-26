@@ -5,6 +5,7 @@ import subprocess
 from typing import Dict, Any, List, Optional
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
+HERDR_MAX_READ_LINES = 2**32 - 1
 
 class HerdrClient:
     def __init__(self, socket_path: str = HERDR_SOCKET_PATH):
@@ -108,9 +109,16 @@ class HerdrClient:
         else:
             return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip()}
 
-    async def read_agent_output(self, target: str, lines: int = 100, source: str = 'recent-unwrapped') -> str:
+    async def read_agent_output(self, target: str, lines: int = HERDR_MAX_READ_LINES, source: str = 'recent-unwrapped') -> str:
         resolved_target = await self.resolve_target(target)
-        cmd = ['herdr', 'agent', 'read', resolved_target, '--source', source, '--lines', str(lines)]
+        # Herdr's API models lines as an unsigned 32-bit value. Asking for its
+        # maximum returns every row still retained by the configured byte-sized
+        # scrollback buffer without imposing a second, arbitrary gateway cap.
+        lines = min(max(lines, 0), HERDR_MAX_READ_LINES)
+        cmd = [
+            'herdr', 'agent', 'read', resolved_target,
+            '--source', source, '--lines', str(lines), '--format', 'text'
+        ]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
