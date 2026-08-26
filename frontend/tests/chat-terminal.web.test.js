@@ -220,7 +220,7 @@ test('terminal remains usable on a phone-sized viewport and composer accepts key
 
 test('composer exposes a send action and restores a failed prompt for retry', async () => {
   const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
-  await page.click('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="captain-prompt"]');
   await page.keyboard.type('send this command');
   assert.equal(await page.$eval('[data-testid="send-captain-prompt"]', element => element.textContent), 'SEND');
   await page.click('[data-testid="send-captain-prompt"]');
@@ -229,7 +229,7 @@ test('composer exposes a send action and restores a failed prompt for retry', as
   await page.waitForFunction(() => document.querySelector('[data-testid="send-captain-prompt"]')?.textContent === 'SEND');
 
   await page.evaluate(() => { window.__captainPromptStatus = 503; });
-  await page.click('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="captain-prompt"]');
   await page.keyboard.type('retry this command');
   await page.click('[data-testid="send-captain-prompt"]');
   await page.waitForSelector('[data-testid="captain-send-error"]');
@@ -259,13 +259,14 @@ test('execution dropdowns update together and submit the verified selection', as
   await page.close();
 });
 
-test('chat navigation buttons are accessible, active, and route to existing screens', async () => {
+test('workspace rail replaces route-button navigation and opens an in-shell destination', async () => {
   const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
-  for (const id of ['home', 'agents', 'attention', 'prs', 'chat']) {
-    assert.ok(await page.$(`[data-testid="chat-nav-${id}"]`));
-  }
-  assert.equal(await page.$eval('[data-testid="chat-nav-chat"]', element => element.getAttribute('aria-current')), 'page');
-  await page.click('[data-testid="chat-nav-agents"]');
-  await page.waitForFunction(() => location.pathname.includes('/agents'));
+  assert.equal(await page.$('[data-testid="chat-nav-home"]'), null);
+  await page.click('[data-testid="mobile-rail-toggle"]');
+  await page.waitForSelector('[data-testid="workspace-rail"]');
+  await page.click('[data-testid="rail-fleet"]');
+  await page.waitForSelector('[data-testid="workspace-panel"]');
+  assert.match(new globalThis.URL(page.url()).search, /section=fleet/);
+  assert.ok(await page.$('[data-testid="terminal-scroll"]'));
   await page.close();
 });

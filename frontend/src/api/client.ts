@@ -181,6 +181,25 @@ export async function fetchAttention(): Promise<AttentionItem[]> {
   return res.json();
 }
 
+export interface UnifiedAttentionRecord {
+  id: string;
+  provider: string;
+  title: string;
+  subtitle: string;
+  priority?: string;
+  status?: string;
+  url: string;
+  requires_action?: boolean;
+  external_url?: string;
+}
+
+export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]> {
+  const res = await fetch(GATEWAY_URL + '/attention/unified', {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  return checkedJson<UnifiedAttentionRecord[]>(res);
+}
+
 export async function fetchUserProfile(): Promise<UserProfile> {
   const res = await fetch(GATEWAY_URL + '/account/profile', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
