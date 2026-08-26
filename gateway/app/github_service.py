@@ -11,7 +11,7 @@ class GitHubService:
         try:
             proc = await asyncio.create_subprocess_exec(
                 'gh', 'pr', 'list', '--repo', self.repo, '--json',
-                'number,title,author,headRefName,state,reviewDecision,url,isDraft,mergeable,commits',
+                'number,title,author,headRefName,state,reviewDecision,url,isDraft,mergeable,commits,statusCheckRollup',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -30,7 +30,19 @@ class GitHubService:
                         continue
                         
                     state_str = 'draft' if pr.get('isDraft') else pr.get('state', 'OPEN').lower()
-                    review_str = pr.get('reviewDecision', 'APPROVED') or 'APPROVED'
+                    review_str = pr.get('reviewDecision') or 'REVIEW_REQUIRED'
+                    checks = pr.get('statusCheckRollup') or []
+                    checks_complete = bool(checks) and all(
+                        (check.get('conclusion') or check.get('state')) in ('SUCCESS', 'NEUTRAL', 'SKIPPED')
+                        for check in checks
+                    )
+                    merge_ready = (
+                        state_str == 'open'
+                        and not pr.get('isDraft')
+                        and pr.get('mergeable') == 'MERGEABLE'
+                        and review_str == 'APPROVED'
+                        and checks_complete
+                    )
                     formatted_prs.append({
                         'id': pr.get('number'),
                         'pr_number': pr.get('number'),
@@ -41,10 +53,12 @@ class GitHubService:
                         'branch': pr.get('headRefName', 'main'),
                         'state': state_str,
                         'review_status': review_str,
-                        'checks': 'passing',
+                        'checks': 'passing' if checks_complete else 'pending',
                         'mergeable': pr.get('mergeable', 'MERGEABLE'),
                         'summary': pr.get('title', 'GitHub Pull Request'),
-                        'requires_attention': review_str == 'REVIEW_REQUIRED',
+                        'requires_attention': merge_ready,
+                        'merge_decision_required': merge_ready,
+                        'head_sha': (pr.get('commits') or [{}])[-1].get('oid'),
                         'url': pr.get('url', f'https://github.com/{self.repo}/pulls')
                     })
                 return formatted_prs
@@ -53,3 +67,5 @@ class GitHubService:
 
         # Fallback to authentic repo telemetry structure if gh CLI has no open PRs
         return []
+
+github_service = GitHubService()

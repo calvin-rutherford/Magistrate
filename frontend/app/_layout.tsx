@@ -6,9 +6,8 @@ import { ErrorBoundary } from '../src/components/ErrorBoundary';
 
 export default function RootLayout() {
   useEffect(() => {
-    notificationManager.requestPermissions().then(() => {
-      notificationManager.startMonitoring();
-    });
+    notificationManager.startMonitoring();
+    return () => notificationManager.stopMonitoring();
   }, []);
 
   return (

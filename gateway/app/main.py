@@ -11,12 +11,12 @@ from typing import Optional, List
 from app.auth import verify_token, MAGISTRATE_TOKEN
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
-from app.contracts import UniversalInputContract, GestureInputContract
+from app.contracts import UniversalInputContract, GestureInputContract, NotificationAckContract, NotificationPreferencesContract
 from app.stt_adapter import VoiceInputAdapter
 from app.db import init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
 from app.github_service import github_service
 from app.attention_service import attention_service
-from app.notifications import register_push_token, send_push_notification
+from app.notifications import register_push_token, reconcile_notification_events, acknowledge_notification_events, update_notification_preferences
 from app.providers.github import GitHubProviderAdapter
 from app.providers.twitter import TwitterProviderAdapter
 from app.providers.discord import DiscordProviderAdapter
@@ -219,6 +219,28 @@ async def get_unified_attention(token: str = Depends(verify_token)):
 @app.post('/api/v1/notifications/register')
 async def register_notifications(push_token: str = Form(...), platform: str = Form('ios'), user_id: str = 'default_user', token: str = Depends(verify_token)):
     return register_push_token(user_id=user_id, push_token=push_token, platform=platform)
+
+@app.get('/api/v1/notifications/events')
+async def get_notification_events(
+    foreground: bool = False,
+    local_hour: Optional[int] = None,
+    user_id: str = 'default_user',
+    token: str = Depends(verify_token),
+):
+    items = await attention_service.get_unified_attention_items()
+    return reconcile_notification_events(user_id, items, foreground=foreground, local_hour=local_hour)
+
+@app.post('/api/v1/notifications/events/ack')
+async def ack_notification_events(contract: NotificationAckContract, user_id: str = 'default_user', token: str = Depends(verify_token)):
+    acknowledge_notification_events(user_id, contract.item_ids)
+    return {'status': 'acknowledged', 'item_ids': contract.item_ids}
+
+@app.put('/api/v1/notifications/preferences')
+async def put_notification_preferences(contract: NotificationPreferencesContract, user_id: str = 'default_user', token: str = Depends(verify_token)):
+    try:
+        return update_notification_preferences(user_id, contract.enabled, contract.quiet_start, contract.quiet_end)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 # VOICE STT TRANSCRIPTION ENDPOINT
 @app.post('/api/v1/voice/transcribe')

@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking, Platform
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 
 export interface UnifiedAttentionItem {
   id: string;
@@ -14,10 +14,12 @@ export interface UnifiedAttentionItem {
   status: string;
   url: string;
   requires_action: boolean;
+  external_url?: string;
 }
 
 export default function AttentionScreen() {
   const router = useRouter();
+  const { item: focusedItem } = useLocalSearchParams<{ item?: string }>();
   const [items, setItems] = useState<UnifiedAttentionItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
@@ -44,6 +46,10 @@ export default function AttentionScreen() {
   }, []);
 
   const openItem = (item: UnifiedAttentionItem) => {
+    if (item.external_url) {
+      Linking.openURL(item.external_url).catch(() => {});
+      return;
+    }
     if (item.url.startsWith('/')) {
       router.push(item.url as any);
     } else {
@@ -92,11 +98,11 @@ export default function AttentionScreen() {
           <Text style={styles.sectionTitle}>UNIFIED ATTENTION QUEUE ({items.length})</Text>
         </View>
 
-        {items.map(item => {
+        {[...items].sort((a, b) => Number(b.id === focusedItem) - Number(a.id === focusedItem)).map(item => {
           const badgeColor = getProviderColor(item.provider);
           return (
             <TouchableOpacity key={item.id} onPress={() => openItem(item)} activeOpacity={0.85}>
-              <GlassSurface variant="card" style={styles.card}>
+              <GlassSurface variant="card" style={[styles.card, item.id === focusedItem ? styles.focusedCard : undefined]}>
                 <View style={styles.cardHeader}>
                   <View style={styles.providerBadgeGroup}>
                     <View style={[styles.providerDot, { backgroundColor: badgeColor }]} />
@@ -147,6 +153,7 @@ const styles = StyleSheet.create({
   sectionHeader: { marginTop: 14, marginBottom: 8 },
   sectionTitle: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', letterSpacing: 1.4 },
   card: { padding: 16, marginVertical: 6, borderRadius: 18, backgroundColor: 'rgba(12, 22, 34, 0.35)', borderColor: 'rgba(255, 255, 255, 0.15)' },
+  focusedCard: { borderColor: '#72F5B1', borderWidth: 2 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   providerBadgeGroup: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   providerDot: { width: 6, height: 6, borderRadius: 3 },
