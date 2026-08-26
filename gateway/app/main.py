@@ -9,7 +9,7 @@ import time
 from typing import Optional, List
 
 from app.auth import verify_token, MAGISTRATE_TOKEN
-from app.herdr_client import HerdrClient
+from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.contracts import UniversalInputContract, GestureInputContract, NotificationAckContract, NotificationPreferencesContract
 from app.stt_adapter import VoiceInputAdapter
@@ -265,7 +265,10 @@ async def get_attention(token: str = Depends(verify_token)):
     return await attention_service.get_unified_attention_items()
 
 @app.get('/api/v1/captain/output')
-async def get_captain_output(lines: int = Query(100), token: str = Depends(verify_token)):
+async def get_captain_output(
+    lines: int = Query(HERDR_MAX_READ_LINES, ge=0, le=HERDR_MAX_READ_LINES),
+    token: str = Depends(verify_token),
+):
     output = await herdr_client.read_agent_output('captain', lines=lines)
     return {'output': output}
 

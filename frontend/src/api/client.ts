@@ -225,7 +225,11 @@ export async function transcribeVoiceAudio(audioUri?: string): Promise<{ text: s
   return res.json();
 }
 
-export async function fetchCaptainOutput(lines: number = 100) {
+// Herdr exposes its read count as uint32 and bounds retained history separately
+// through advanced.scrollback_limit_bytes. This asks for all retained rows.
+export const HERDR_MAX_READ_LINES = 0xFFFFFFFF;
+
+export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
   const res = await fetch(GATEWAY_URL + '/captain/output?lines=' + lines, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
