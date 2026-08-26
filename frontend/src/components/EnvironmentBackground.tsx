@@ -5,7 +5,7 @@ import { getWeather, WEATHER_REFRESH_MS } from '../services/weather';
 import { BottomControls } from './BottomControls';
 import { usePathname, useRouter } from 'expo-router';
 
-export function EnvironmentBackground({ children }: { children: React.ReactNode }) {
+export function EnvironmentBackground({ children, hideBottomControls = false }: { children: React.ReactNode; hideBottomControls?: boolean }) {
   const router = useRouter(); const pathname = usePathname();
   const [weather, setWeather] = React.useState<WeatherKind>('clear');
   const [clock, setClock] = React.useState(() => new Date());
@@ -36,7 +36,7 @@ export function EnvironmentBackground({ children }: { children: React.ReactNode 
         <WeatherOverlay kind={theme.weather} />
         <View style={[styles.darkDimOverlay, { opacity: highContrast ? 0.78 : theme.dimOpacity }]} />
         <View style={styles.contentArea}>{children}</View>
-        {pathname !== '/chat' ? <BottomControls /> : null}
+        {!hideBottomControls && pathname !== '/chat' ? <BottomControls /> : null}
       </ImageBackground>
     </Animated.View>
   </View>;
