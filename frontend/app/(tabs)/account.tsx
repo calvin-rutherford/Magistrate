@@ -5,7 +5,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, updateUserProfile, UserProfile, AuthProviderInfo } from '../../src/api/client';
+import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, updateUserProfile, updateNotificationPreferences, UserProfile, AuthProviderInfo } from '../../src/api/client';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
@@ -28,6 +28,8 @@ export default function AccountScreen() {
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
   const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
   const [autoListen, setAutoListen] = useState<boolean>(true);
+  const [attentionNotifications, setAttentionNotifications] = useState<boolean>(true);
+  const [quietHours, setQuietHours] = useState<boolean>(true);
 
   const loadAccountData = async () => {
     try {
@@ -146,6 +148,16 @@ export default function AccountScreen() {
     ttsService.setSettings({ enabled });
   };
 
+  const saveNotificationSettings = async (enabled: boolean, quiet: boolean) => {
+    setAttentionNotifications(enabled);
+    setQuietHours(quiet);
+    try {
+      await updateNotificationPreferences(enabled, quiet);
+    } catch {
+      Alert.alert('Settings unavailable', 'Notification preferences could not be saved.');
+    }
+  };
+
   return (
     <EnvironmentBackground>
       <View style={styles.headerRow}>
@@ -184,6 +196,37 @@ export default function AccountScreen() {
                 <Text style={styles.uploadBtnText}>CHANGE PHOTO ↗</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </GlassSurface>
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>CAPTAIN ATTENTION NOTIFICATIONS</Text>
+        </View>
+
+        <GlassSurface variant="card" style={styles.settingsCard}>
+          <View style={styles.settingToggleRow}>
+            <View style={styles.settingCopy}>
+              <Text style={styles.settingToggleLabel}>ACTIONABLE ITEMS</Text>
+              <Text style={styles.settingHint}>Questions and PR merge decisions only</Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.toggleBtn, attentionNotifications ? styles.toggleBtnActive : undefined]}
+              onPress={() => saveNotificationSettings(!attentionNotifications, quietHours)}
+            >
+              <Text style={styles.toggleBtnText}>{attentionNotifications ? 'ON ✓' : 'OFF'}</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.settingToggleRow}>
+            <View style={styles.settingCopy}>
+              <Text style={styles.settingToggleLabel}>QUIET HOURS</Text>
+              <Text style={styles.settingHint}>10 PM–7 AM, device local time</Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.toggleBtn, quietHours ? styles.toggleBtnActive : undefined]}
+              onPress={() => saveNotificationSettings(attentionNotifications, !quietHours)}
+            >
+              <Text style={styles.toggleBtnText}>{quietHours ? 'ON ✓' : 'OFF'}</Text>
+            </TouchableOpacity>
           </View>
         </GlassSurface>
 
@@ -325,6 +368,8 @@ const styles = StyleSheet.create({
   settingLabel: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', marginBottom: 8 },
   settingToggleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 6 },
   settingToggleLabel: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: '#FFFFFF' },
+  settingCopy: { flex: 1, paddingRight: 12 },
+  settingHint: { marginTop: 3, fontSize: 10, color: 'rgba(255, 255, 255, 0.55)' },
   toggleBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   toggleBtnActive: { backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF' },
   toggleBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },

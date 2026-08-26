@@ -6,7 +6,8 @@ const puppeteer = require('puppeteer-core');
 
 const PORT = 8091;
 const URL = `http://127.0.0.1:${PORT}/chat`;
-const terminalOutput = Array.from({ length: 180 }, (_, index) => `terminal line ${index + 1}`).join('\n');
+const HISTORY_LINES = 1_000;
+const terminalOutput = Array.from({ length: HISTORY_LINES }, (_, index) => `terminal line ${index + 1}`).join('\n');
 
 let server;
 let browser;
@@ -46,10 +47,14 @@ async function openChat(viewport) {
   await page.evaluateOnNewDocument(output => {
     const nativeFetch = window.fetch.bind(window);
     window.__magistrateApiCalls = [];
+    window.__terminalOutput = output;
+    window.__terminalPolls = 0;
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/captain/output')) {
-        return Promise.resolve(new Response(JSON.stringify({ output }), {
+        window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
+        window.__terminalPolls += 1;
+        return Promise.resolve(new Response(JSON.stringify({ output: window.__terminalOutput }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         }));
@@ -66,11 +71,10 @@ async function openChat(viewport) {
   }, terminalOutput);
   await page.goto(URL, { waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="terminal-scroll"]');
-  await page.waitForFunction(
-    expected => document.body.innerText.includes(expected),
-    {},
-    'terminal line 180'
-  );
+  await page.waitForFunction(selector => {
+    const element = document.querySelector(selector);
+    return element && element.scrollHeight > element.clientHeight && element.scrollTop > 0;
+  }, {}, '[data-testid="terminal-scroll"]');
   return page;
 }
 
@@ -99,6 +103,58 @@ test('terminal has a bounded viewport and responds to wheel scrolling', async ()
   await page.close();
 });
 
+test('history beyond the old limit remains reachable without duplicate polling output', async () => {
+  const page = await openChat({ width: 1100, height: 760 });
+  assert.equal(
+    await page.evaluate(() => new URL(window.__magistrateApiCalls.find(call => call.url.includes('/captain/output'))?.url || location.href).searchParams.get('lines')),
+    '4294967295'
+  );
+  await page.$eval('[data-testid="terminal-scroll"]', element => { element.scrollTop = 0; });
+  await page.waitForFunction(() => document.body.innerText.includes('terminal line 1'));
+  assert.equal(await page.evaluate(() => (document.body.innerText.match(/terminal line 1\n/g) || []).length), 1);
+  await page.waitForFunction(() => window.__terminalPolls >= 2, { timeout: 5_000 });
+  assert.equal(await page.evaluate(() => (document.body.innerText.match(/terminal line 1\n/g) || []).length), 1);
+  await page.close();
+});
+
+test('polling preserves an older viewport and jump-to-latest resumes following', async () => {
+  const page = await openChat({ width: 1100, height: 760 });
+  const terminal = await page.$('[data-testid="terminal-scroll"]');
+  await terminal.evaluate(element => { element.scrollTop = Math.floor(element.scrollHeight / 2); });
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+  const before = await terminal.evaluate(element => element.scrollTop);
+
+  await page.evaluate(line => { window.__terminalOutput += `\nterminal line ${line}`; }, HISTORY_LINES + 1);
+  await page.waitForFunction(() => document.body.innerText.includes('NEW MESSAGES'), { timeout: 5_000 });
+  const after = await terminal.evaluate(element => element.scrollTop);
+  assert.ok(Math.abs(after - before) < 20, `older viewport moved from ${before} to ${after}`);
+
+  await page.click('[data-testid="jump-to-latest"]');
+  await page.waitForFunction(selector => {
+    const element = document.querySelector(selector);
+    return element.scrollHeight - element.clientHeight - element.scrollTop < 40;
+  }, {}, '[data-testid="terminal-scroll"]');
+  await page.evaluate(line => { window.__terminalOutput += `\nterminal line ${line}`; }, HISTORY_LINES + 2);
+  await page.waitForFunction(selector => {
+    const element = document.querySelector(selector);
+    return element.scrollHeight - element.clientHeight - element.scrollTop < 40;
+  }, { timeout: 5_000 }, '[data-testid="terminal-scroll"]');
+  await page.close();
+});
+
+test('focused terminal supports keyboard page scrolling', async () => {
+  const page = await openChat({ width: 1100, height: 760 });
+  const terminal = await page.$('[data-testid="terminal-scroll"]');
+  const before = await terminal.evaluate(element => element.scrollTop);
+  await terminal.focus();
+  await page.keyboard.press('PageUp');
+  await page.waitForFunction(
+    (selector, previousTop) => document.querySelector(selector).scrollTop < previousTop,
+    {}, '[data-testid="terminal-scroll"]', before
+  );
+  await page.close();
+});
+
 test('terminal remains usable on a phone-sized viewport and composer accepts keyboard input', async () => {
   const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
   const layout = await page.$eval('[data-testid="terminal-scroll"]', element => ({
@@ -107,6 +163,18 @@ test('terminal remains usable on a phone-sized viewport and composer accepts key
   }));
   assert.ok(layout.height >= 100, 'responsive layout must preserve a usable terminal viewport');
   assert.ok(layout.bottom <= 667, 'terminal must remain inside the viewport');
+
+  const terminal = await page.$('[data-testid="terminal-scroll"]');
+  const beforeTouch = await terminal.evaluate(element => element.scrollTop);
+  const box = await terminal.boundingBox();
+  const client = await page.createCDPSession();
+  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + 30, y: box.y + 40 }] });
+  await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: box.x + 30, y: box.y + 140 }] });
+  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForFunction(
+    (selector, previousTop) => document.querySelector(selector).scrollTop < previousTop,
+    {}, '[data-testid="terminal-scroll"]', beforeTouch
+  );
 
   await page.click('[data-testid="captain-prompt"]');
   await page.keyboard.type('status please');

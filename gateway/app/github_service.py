@@ -159,5 +159,4 @@ class GitHubService:
             self._cache[key] = _CacheEntry(time.monotonic() + self.cache_ttl, value)
             return value
 
-
 github_service = GitHubService()
