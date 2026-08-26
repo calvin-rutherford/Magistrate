@@ -5,7 +5,8 @@ const test = require('node:test');
 const puppeteer = require('puppeteer-core');
 
 const PORT = 8091;
-const URL = `http://127.0.0.1:${PORT}/chat`;
+const ORIGIN = `http://127.0.0.1:${PORT}`;
+const URL = `${ORIGIN}/chat`;
 const HISTORY_LINES = 1_000;
 const terminalOutput = Array.from({ length: HISTORY_LINES }, (_, index) => `terminal line ${index + 1}`).join('\n');
 
@@ -51,13 +52,22 @@ async function openChat(viewport) {
     window.__terminalPolls = 0;
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
-      if (url.includes('/api/v1/captain/output')) {
+      if (url.includes('/api/v1/agents/') && url.includes('/output')) {
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
         window.__terminalPolls += 1;
         return Promise.resolve(new Response(JSON.stringify({ output: window.__terminalOutput }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         }));
+      }
+      if (url.endsWith('/api/v1/agents')) {
+        return Promise.resolve(new Response(JSON.stringify([
+          { id: 'w1:p2', pane_id: 'w1:p2', workspace_id: 'w1', tab_id: 'w1:t2', name: 'firstmate', terminal_title: 'firstmate', harness: 'codex', status: 'working' },
+          { id: 'w1:p7', pane_id: 'w1:p7', workspace_id: 'w1', tab_id: 'w1:t7', name: 'reviewer', terminal_title: 'Magistrate', harness: 'codex', status: 'idle' }
+        ]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (url.includes('/api/v1/github/pulls')) {
+        return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/')) {
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
@@ -69,7 +79,7 @@ async function openChat(viewport) {
       return nativeFetch(resource, options);
     };
   }, terminalOutput);
-  await page.goto(URL, { waitUntil: 'networkidle0' });
+  await page.goto(ORIGIN + (viewport.path || '/chat'), { waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="terminal-scroll"]');
   await page.waitForFunction(selector => {
     const element = document.querySelector(selector);
@@ -106,7 +116,7 @@ test('terminal has a bounded viewport and responds to wheel scrolling', async ()
 test('history beyond the old limit remains reachable without duplicate polling output', async () => {
   const page = await openChat({ width: 1100, height: 760 });
   assert.equal(
-    await page.evaluate(() => new URL(window.__magistrateApiCalls.find(call => call.url.includes('/captain/output'))?.url || location.href).searchParams.get('lines')),
+    await page.evaluate(() => new URL(window.__magistrateApiCalls.find(call => call.url.includes('/output'))?.url || location.href).searchParams.get('lines')),
     '4294967295'
   );
   await page.$eval('[data-testid="terminal-scroll"]', element => { element.scrollTop = 0; });
@@ -114,6 +124,47 @@ test('history beyond the old limit remains reachable without duplicate polling o
   assert.equal(await page.evaluate(() => (document.body.innerText.match(/terminal line 1\n/g) || []).length), 1);
   await page.waitForFunction(() => window.__terminalPolls >= 2, { timeout: 5_000 });
   assert.equal(await page.evaluate(() => (document.body.innerText.match(/terminal line 1\n/g) || []).length), 1);
+  await page.close();
+});
+
+test('pane tabs switch the exact Herdr target and honor a deep-linked pane', async () => {
+  const page = await openChat({ width: 1100, height: 760, path: '/chat?pane=w1%3Ap7' });
+  assert.equal(await page.$eval('[data-testid="pane-tab-w1:p7"]', element => element.getAttribute('aria-selected')), 'true');
+  assert.ok(await page.evaluate(() => window.__magistrateApiCalls.some(call => call.url.includes('/agents/w1%3Ap7/output'))));
+
+  await page.click('[data-testid="pane-tab-w1:p2"]');
+  await page.waitForFunction(() => new URL(location.href).searchParams.get('pane') === 'w1:p2');
+  await page.waitForFunction(() => window.__magistrateApiCalls.some(call => call.url.includes('/agents/w1%3Ap2/output')));
+  assert.equal(await page.$eval('[data-testid="pane-tab-w1:p2"]', element => element.textContent), 'Firstmate');
+  await page.close();
+});
+
+test('Home agent links deep-link Chat to the exact pane', async () => {
+  const page = await openChat({ width: 1100, height: 760 });
+  await page.goto(`${ORIGIN}/`, { waitUntil: 'networkidle0' });
+  await page.click('[aria-label="Open reviewer pane in Chat"]');
+  await page.waitForFunction(() => location.pathname === '/chat' && new URL(location.href).searchParams.get('pane') === 'w1:p7');
+  await page.close();
+});
+
+test('terminal controls expose only the captain set and send exact keys to the selected pane', async () => {
+  const page = await openChat({ width: 1100, height: 760, path: '/chat?pane=w1%3Ap7' });
+  const controls = await page.$$eval('[data-testid^="terminal-control-"]', elements => elements.map(element => element.textContent));
+  assert.deepEqual(controls, ['Enter', '↑', '↓', 'Yes', 'No']);
+
+  for (const [testId, encodedKey] of [
+    ['terminal-control-enter', 'Enter'],
+    ['terminal-control-up', 'Up'],
+    ['terminal-control-down', 'Down'],
+    ['terminal-control-y', 'y'],
+    ['terminal-control-n', 'n'],
+  ]) {
+    await page.click(`[data-testid="${testId}"]`);
+    await page.waitForFunction(
+      (key) => window.__magistrateApiCalls.some(call => call.url.includes(`/agents/w1%3Ap7/send-key?key=${key}`)),
+      {}, encodeURIComponent(encodedKey)
+    );
+  }
   await page.close();
 });
 

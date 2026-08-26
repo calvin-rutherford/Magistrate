@@ -9,6 +9,7 @@ export interface AgentInfo {
   pane_id?: string;
   tab_id?: string;
   workspace_id?: string;
+  terminal_title?: string;
 }
 
 export interface TaskInfo {
@@ -189,6 +190,14 @@ export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
   const res = await fetch(GATEWAY_URL + '/captain/output?lines=' + lines, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
+  return res.json();
+}
+
+export async function fetchAgentOutput(agentId: string, lines: number = HERDR_MAX_READ_LINES) {
+  const res = await fetch(
+    GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/output?lines=' + lines,
+    { headers: { 'X-Magistrate-Token': DEVICE_TOKEN } }
+  );
   return res.json();
 }
 

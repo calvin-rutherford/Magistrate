@@ -73,12 +73,13 @@ class HerdrClient:
             status = ag.get('agent_status', {}).get('state', 'unknown') if isinstance(ag.get('agent_status'), dict) else str(ag.get('agent_status', 'unknown'))
             formatted_agents.append({
                 'id': ag.get('pane_id') or ag.get('id') or ag.get('name', 'unknown'),
-                'name': ag.get('name') or ag.get('label') or 'firstmate',
+                'name': ag.get('name') or ag.get('display_agent') or ag.get('terminal_title_stripped') or ag.get('label') or ag.get('agent') or 'agent',
                 'harness': ag.get('agent') or ag.get('harness') or 'codex',
                 'status': status,
                 'pane_id': ag.get('pane_id'),
                 'tab_id': ag.get('tab_id'),
-                'workspace_id': ag.get('workspace_id')
+                'workspace_id': ag.get('workspace_id'),
+                'terminal_title': ag.get('terminal_title_stripped') or ag.get('terminal_title'),
             })
         return formatted_agents
 

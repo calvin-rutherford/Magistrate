@@ -43,6 +43,13 @@ export default function HomeScreen() {
     }
   };
 
+  const openAgentChat = (agent: AgentInfo) => {
+    router.push({
+      pathname: '/chat',
+      params: { pane: agent.pane_id || agent.id },
+    } as any);
+  };
+
   const activeAgents = agents.filter((a: any) => a.status === 'working' || a.status === 'RUNNING' || !a.status);
   const blockedAgents = agents.filter((a: any) => a.status === 'blocked' || a.status === 'BLOCKED');
   const onHoldAgents = agents.filter((a: any) => a.status === 'idle' || a.status === 'IDLE');
@@ -74,16 +81,18 @@ export default function HomeScreen() {
             <Text style={styles.emptyText}>No active agents.</Text>
           </GlassSurface>
         ) : activeAgents.map((a: any) => (
-          <GlassSurface key={a.id} variant="card" style={styles.card}>
-            <View style={styles.cardHeader}>
-              <Text style={styles.agentName}>{a.name}</Text>
-              <View style={styles.statusBadge}>
-                <Text style={styles.statusBadgeText}>ACTIVE ✓</Text>
+          <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Open ${a.name} pane in Chat`} key={a.id} onPress={() => openAgentChat(a)} activeOpacity={0.85}>
+            <GlassSurface variant="card" style={styles.card}>
+              <View style={styles.cardHeader}>
+                <Text style={styles.agentName}>{a.name}</Text>
+                <View style={styles.statusBadge}>
+                  <Text style={styles.statusBadgeText}>ACTIVE ✓</Text>
+                </View>
               </View>
-            </View>
-            <Text style={styles.taskText}>Firstmate Autonomous Control Loop</Text>
-            <Text style={styles.harnessText}>Harness: {a.harness || 'Claude 3.7 Sonnet'}</Text>
-          </GlassSurface>
+              <Text style={styles.taskText}>Firstmate Autonomous Control Loop</Text>
+              <Text style={styles.harnessText}>Harness: {a.harness || 'Claude 3.7 Sonnet'}</Text>
+            </GlassSurface>
+          </TouchableOpacity>
         ))}
 
         <View style={styles.sectionHeader}>
@@ -96,10 +105,12 @@ export default function HomeScreen() {
           </GlassSurface>
         ) : (
           blockedAgents.map((a: any) => (
-            <GlassSurface key={a.id} variant="card" style={styles.card}>
-              <Text style={styles.agentName}>{a.name}</Text>
-              <Text style={styles.taskText}>Blocked waiting for input</Text>
-            </GlassSurface>
+            <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Open ${a.name} pane in Chat`} key={a.id} onPress={() => openAgentChat(a)} activeOpacity={0.85}>
+              <GlassSurface variant="card" style={styles.card}>
+                <Text style={styles.agentName}>{a.name}</Text>
+                <Text style={styles.taskText}>Blocked waiting for input</Text>
+              </GlassSurface>
+            </TouchableOpacity>
           ))
         )}
 
@@ -113,10 +124,12 @@ export default function HomeScreen() {
           </GlassSurface>
         ) : (
           onHoldAgents.map((a: any) => (
-            <GlassSurface key={a.id} variant="card" style={styles.card}>
-              <Text style={styles.agentName}>{a.name}</Text>
-              <Text style={styles.taskText}>Queued idle worker</Text>
-            </GlassSurface>
+            <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Open ${a.name} pane in Chat`} key={a.id} onPress={() => openAgentChat(a)} activeOpacity={0.85}>
+              <GlassSurface variant="card" style={styles.card}>
+                <Text style={styles.agentName}>{a.name}</Text>
+                <Text style={styles.taskText}>Queued idle worker</Text>
+              </GlassSurface>
+            </TouchableOpacity>
           ))
         )}
 

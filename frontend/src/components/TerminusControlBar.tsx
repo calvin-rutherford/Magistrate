@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { sendAgentKey } from '../api/client';
 
 interface TerminusControlBarProps {
@@ -21,26 +21,30 @@ export const TerminusControlBar: React.FC<TerminusControlBarProps> = ({
   };
 
   const keys = [
-    { label: 'shift tab', value: 'Shift-Tab' },
-    { label: '?', value: '?' },
-    { label: '/', value: '/' },
-    { label: '|', value: '|' },
-    { label: 'esc', value: 'Escape' },
-    { label: 'tab', value: 'Tab' },
-    { label: 'ctrl', value: 'Ctrl' },
-    { label: 'alt', value: 'Alt' },
-    { label: '^C', value: 'C-c' }
+    { label: 'Enter', value: 'Enter', accessibilityLabel: 'Send Enter' },
+    { label: '↑', value: 'Up', accessibilityLabel: 'Send Up arrow' },
+    { label: '↓', value: 'Down', accessibilityLabel: 'Send Down arrow' },
+    { label: 'Yes', value: 'y', accessibilityLabel: 'Send Yes' },
+    { label: 'No', value: 'n', accessibilityLabel: 'Send No' },
   ];
 
   return (
     <View style={styles.container}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+      <View style={styles.controlRow}>
         {keys.map((k) => (
-          <TouchableOpacity key={k.label} onPress={() => handlePressKey(k.value)} activeOpacity={0.5} style={styles.btnHitbox}>
+          <TouchableOpacity
+            key={k.label}
+            testID={`terminal-control-${k.value.toLowerCase()}`}
+            accessibilityRole="button"
+            accessibilityLabel={k.accessibilityLabel}
+            onPress={() => handlePressKey(k.value)}
+            activeOpacity={0.6}
+            style={styles.btnHitbox}
+          >
             <Text style={styles.keyText}>{k.label}</Text>
           </TouchableOpacity>
         ))}
-      </ScrollView>
+      </View>
     </View>
   );
 };
@@ -51,19 +55,21 @@ const styles = StyleSheet.create({
     marginVertical: 4,
     alignItems: 'center'
   },
-  scrollContent: {
+  controlRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    gap: 16
+    justifyContent: 'center',
+    gap: 18,
   },
   btnHitbox: {
-    paddingVertical: 4,
+    minWidth: 32,
+    minHeight: 32,
     justifyContent: 'center',
     alignItems: 'center'
   },
   keyText: {
     fontSize: 12,
     fontWeight: '500',
-    color: '#20C20E'
+    color: '#FFFFFF'
   }
 });

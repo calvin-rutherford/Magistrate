@@ -250,6 +250,15 @@ async def get_captain_output(
     output = await herdr_client.read_agent_output('captain', lines=lines)
     return {'output': output}
 
+@app.get('/api/v1/agents/{agent_id}/output')
+async def get_agent_output(
+    agent_id: str,
+    lines: int = Query(HERDR_MAX_READ_LINES, ge=0, le=HERDR_MAX_READ_LINES),
+    token: str = Depends(verify_token),
+):
+    output = await herdr_client.read_agent_output(agent_id, lines=lines)
+    return {'output': output, 'target': agent_id}
+
 @app.post('/api/v1/captain/prompt')
 async def send_captain_prompt(contract: UniversalInputContract, token: str = Depends(verify_token)):
     return await herdr_client.prompt_agent(contract.target, contract.text)
