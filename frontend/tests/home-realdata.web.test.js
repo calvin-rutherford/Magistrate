@@ -1,0 +1,120 @@
+const assert = require('node:assert/strict');
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const test = require('node:test');
+const puppeteer = require('puppeteer-core');
+
+const PORT = 8094;
+const BASE = `http://127.0.0.1:${PORT}`;
+let server;
+let browser;
+
+async function waitForServer() {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    try {
+      if ((await fetch(BASE)).ok) return;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw new Error('Expo web server did not become ready');
+}
+
+test.before(async () => {
+  server = spawn(path.join(process.cwd(), 'node_modules', '.bin', 'expo'), ['start', '--web', '--port', String(PORT)], {
+    cwd: process.cwd(),
+    env: { ...process.env, CI: '1' },
+    stdio: 'ignore'
+  });
+  await waitForServer();
+  browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+});
+
+test.after(async () => {
+  await browser?.close();
+  server?.kill('SIGTERM');
+});
+
+async function openHome({ agentsStatus = 200 } = {}) {
+  const page = await browser.newPage();
+  await page.evaluateOnNewDocument(status => {
+    const agent = {
+      id: 'w1:p7',
+      name: 'Live captain',
+      harness: 'codex',
+      status: 'working',
+      pane_id: 'w1:p7',
+      tab_id: 'w1:t7',
+      workspace_id: 'w1'
+    };
+    const pr = {
+      id: 42,
+      number: 42,
+      title: 'Real pull request',
+      repository: 'acme/ship',
+      author: 'captain',
+      branch: 'fix/nav',
+      state: 'OPEN',
+      is_draft: false,
+      mergeable: 'MERGEABLE',
+      review_status: 'REVIEW_REQUIRED',
+      checks: { status: 'PASSING', passed: 2, failed: 0, pending: 0, summary: '2 passed, 0 failed' },
+      reviews: [],
+      created_at: '2026-08-26T10:00:00Z',
+      updated_at: '2026-08-26T11:00:00Z',
+      merged_at: null,
+      summary: 'Summary',
+      body: 'Body',
+      requires_attention: true,
+      url: 'https://github.com/acme/ship/pull/42'
+    };
+    window.fetch = resource => {
+      const requestUrl = typeof resource === 'string' ? resource : resource.url;
+      if (requestUrl.includes('/agents')) {
+        return Promise.resolve(new Response(JSON.stringify(status === 200 ? [agent] : { detail: 'Agent service unavailable' }), {
+          status,
+          headers: { 'Content-Type': 'application/json' }
+        }));
+      }
+      if (requestUrl.includes('/health')) {
+        return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'magistrate-gateway', herdr_socket_connected: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }));
+      }
+      if (requestUrl.includes('/github/pulls')) {
+        return Promise.resolve(new Response(JSON.stringify({ items: [pr], page: 1, per_page: 20, has_more: false, cached: false }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }));
+      }
+      return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    };
+  }, agentsStatus);
+  await page.goto(BASE, { waitUntil: 'networkidle0' });
+  return page;
+}
+
+test('Home renders live agent identity and makes the agent card actionable', async () => {
+  const page = await openHome();
+  await page.waitForFunction(() => document.body.innerText.includes('ACTIVE AGENTS (1)'));
+  const body = await page.evaluate(() => document.body.innerText);
+  assert.match(body, /Live captain/);
+  assert.match(body, /Harness: codex/);
+  assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
+
+  await page.locator('::-p-text(Live captain)').click();
+  await page.waitForFunction(() => location.pathname.includes('/agents') && document.body.innerText.includes('LIVE AGENT SESSIONS (1)'));
+  assert.match(await page.evaluate(() => document.body.innerText), /Live captain/);
+  await page.close();
+});
+
+test('Home reports an agent error instead of inventing an empty or active state', async () => {
+  const page = await openHome({ agentsStatus: 503 });
+  await page.waitForFunction(() => document.body.innerText.includes('Agent service unavailable'));
+  const body = await page.evaluate(() => document.body.innerText);
+  assert.match(body, /Agent service unavailable/);
+  assert.match(body, /ACTIVE AGENTS \(0\)/);
+  assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
+  await page.close();
+});

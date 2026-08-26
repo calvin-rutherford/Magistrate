@@ -3,41 +3,98 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } 
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { StatusRing } from '../../src/components/StatusRing';
-import { fetchAgents, fetchGitHubPRs, AgentInfo, GitHubPR } from '../../src/api/client';
+import { fetchAgents, fetchGitHubPRs, fetchHealth, AgentInfo, GitHubPR, HealthInfo } from '../../src/api/client';
 import { useRouter } from 'expo-router';
+
+const isStatus = (agent: AgentInfo, ...statuses: string[]) => statuses.includes(String(agent.status || '').toLowerCase());
+
+const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
 export default function HomeScreen() {
   const router = useRouter();
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [prs, setPrs] = useState<GitHubPR[]>([]);
+  const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
   const [prError, setPrError] = useState<string | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
 
   const loadData = async (forceRefresh = false) => {
+    if (!agents.length && !prs.length && !health) setLoading(true);
     setRefreshing(true);
+    setAgentError(null);
     setPrError(null);
-    try {
-      const [agentData, prData] = await Promise.all([
-        fetchAgents().catch(() => []),
-        fetchGitHubPRs(1, forceRefresh).catch((error) => { setPrError(error.message); return { items: [] }; })
-      ]);
-      setAgents(agentData);
-      setPrs(prData.items.filter(pr => pr.requires_attention));
-    } catch (e) {
-      console.error('Home load error:', e);
-    } finally {
-      setRefreshing(false);
+    setHealthError(null);
+
+    const [agentResult, prResult, healthResult] = await Promise.allSettled([
+      fetchAgents(),
+      fetchGitHubPRs(1, forceRefresh),
+      fetchHealth()
+    ]);
+
+    if (agentResult.status === 'fulfilled') {
+      setAgents(agentResult.value);
+    } else {
+      setAgentError(errorText(agentResult.reason, 'Agent data could not be loaded.'));
     }
+
+    if (prResult.status === 'fulfilled') {
+      setPrs(prResult.value.items.filter(pr => pr.requires_attention));
+    } else {
+      setPrError(errorText(prResult.reason, 'Pull requests could not be loaded.'));
+    }
+
+    if (healthResult.status === 'fulfilled') {
+      setHealth(healthResult.value);
+    } else {
+      setHealthError(errorText(healthResult.reason, 'Gateway status could not be loaded.'));
+    }
+
+    setLoading(false);
+    setRefreshing(false);
   };
 
   useEffect(() => {
     loadData(false);
   }, []);
 
-  const activeAgents = agents.filter((a: any) => a.status === 'working' || a.status === 'RUNNING' || !a.status);
-  const blockedAgents = agents.filter((a: any) => a.status === 'blocked' || a.status === 'BLOCKED');
-  const onHoldAgents = agents.filter((a: any) => a.status === 'idle' || a.status === 'IDLE');
+  const activeAgents = agents.filter(a => isStatus(a, 'working', 'running'));
+  const blockedAgents = agents.filter(a => isStatus(a, 'blocked'));
+  const onHoldAgents = agents.filter(a => isStatus(a, 'idle', 'paused', 'queued'));
+  const otherAgents = agents.filter(a => !activeAgents.includes(a) && !blockedAgents.includes(a) && !onHoldAgents.includes(a));
+
+  const healthStatus = loading ? 'CONNECTING' : healthError ? 'UNAVAILABLE' : health?.status === 'healthy' ? (health.herdr_socket_connected ? 'OPERATIONAL' : 'DEGRADED') : (health?.status || 'UNKNOWN').toUpperCase();
+  const healthColor = healthError || healthStatus === 'UNAVAILABLE' ? '#FCA5A5' : healthStatus === 'OPERATIONAL' ? '#34D399' : '#F59E0B';
+  const healthSubtext = loading ? 'Loading gateway status' : healthError ? 'Gateway status unavailable' : health?.herdr_socket_connected ? 'Gateway and Herdr connected' : 'Gateway reachable; Herdr unavailable';
+
+  const renderAgentCard = (agent: AgentInfo) => (
+    <TouchableOpacity
+      key={agent.id}
+      testID={`agent-card-${agent.id}`}
+      onPress={() => router.push({ pathname: '/agents', params: { agentId: agent.id } } as any)}
+      activeOpacity={0.85}
+    >
+      <GlassSurface variant="card" style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.agentName}>{agent.name || agent.id}</Text>
+          <View style={styles.statusBadge}>
+            <Text style={styles.statusBadgeText}>{String(agent.status || 'UNKNOWN').toUpperCase()}</Text>
+          </View>
+        </View>
+        {agent.harness ? <Text style={styles.harnessText}>Harness: {agent.harness}</Text> : null}
+        <Text style={styles.agentLinkText}>VIEW AGENT DETAILS →</Text>
+      </GlassSurface>
+    </TouchableOpacity>
+  );
+
+  const renderAgentGroup = (items: AgentInfo[], emptyMessage: string) => {
+    if (loading) return <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>Loading live agent data…</Text></GlassSurface>;
+    if (items.length === 0) return <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>{emptyMessage}</Text></GlassSurface>;
+    return items.map(renderAgentCard);
+  };
 
   return (
     <EnvironmentBackground>
@@ -52,72 +109,42 @@ export default function HomeScreen() {
       >
         <View style={styles.sphereContainer}>
           <TouchableOpacity onPress={() => router.push('/status' as any)} activeOpacity={0.85}>
-            <StatusRing statusText="OPERATIONAL" subText="All Systems Operational" />
+            <StatusRing statusText={healthStatus} statusColor={healthColor} subText={healthSubtext} />
           </TouchableOpacity>
           <Text style={styles.sphereHint}>TAP SPHERE FOR SYSTEM TELEMETRY ↗</Text>
         </View>
 
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>ACTIVE AGENTS ({activeAgents.length || 1})</Text>
+          <Text style={styles.sectionTitle}>ACTIVE AGENTS ({activeAgents.length})</Text>
         </View>
-
-        {activeAgents.length === 0 ? (
-          <GlassSurface variant="card" style={styles.emptyCard}>
-            <Text style={styles.emptyText}>No active agents.</Text>
-          </GlassSurface>
-        ) : activeAgents.map((a: any) => (
-          <GlassSurface key={a.id} variant="card" style={styles.card}>
-            <View style={styles.cardHeader}>
-              <Text style={styles.agentName}>{a.name}</Text>
-              <View style={styles.statusBadge}>
-                <Text style={styles.statusBadgeText}>ACTIVE ✓</Text>
-              </View>
-            </View>
-            <Text style={styles.taskText}>Firstmate Autonomous Control Loop</Text>
-            <Text style={styles.harnessText}>Harness: {a.harness || 'Claude 3.7 Sonnet'}</Text>
-          </GlassSurface>
-        ))}
+        {agentError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{agents.length ? `Showing last known agents. ${agentError}` : agentError}</Text></GlassSurface>}
+        {renderAgentGroup(activeAgents, 'No active agents reported by Herdr.')}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>NEEDS ATTENTION ({blockedAgents.length})</Text>
         </View>
 
-        {blockedAgents.length === 0 ? (
-          <GlassSurface variant="card" style={styles.emptyCard}>
-            <Text style={styles.emptyText}>No blocked agents or pending decisions.</Text>
-          </GlassSurface>
-        ) : (
-          blockedAgents.map((a: any) => (
-            <GlassSurface key={a.id} variant="card" style={styles.card}>
-              <Text style={styles.agentName}>{a.name}</Text>
-              <Text style={styles.taskText}>Blocked waiting for input</Text>
-            </GlassSurface>
-          ))
-        )}
+        {renderAgentGroup(blockedAgents, 'No blocked agents reported by Herdr.')}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>ON HOLD ({onHoldAgents.length})</Text>
         </View>
 
-        {onHoldAgents.length === 0 ? (
-          <GlassSurface variant="card" style={styles.emptyCard}>
-            <Text style={styles.emptyText}>No queued or paused agents.</Text>
-          </GlassSurface>
-        ) : (
-          onHoldAgents.map((a: any) => (
-            <GlassSurface key={a.id} variant="card" style={styles.card}>
-              <Text style={styles.agentName}>{a.name}</Text>
-              <Text style={styles.taskText}>Queued idle worker</Text>
-            </GlassSurface>
-          ))
-        )}
+        {renderAgentGroup(onHoldAgents, 'No idle, paused, or queued agents reported by Herdr.')}
+
+        {otherAgents.length > 0 && <>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>OTHER AGENTS ({otherAgents.length})</Text>
+          </View>
+          {otherAgents.map(renderAgentCard)}
+        </>}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>PULL REQUESTS ({prs.length})</Text>
         </View>
 
-        {prError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{prError}</Text></GlassSurface>}
-        {!prError && !refreshing && prs.length === 0 && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>No open pull requests need your attention.</Text></GlassSurface>}
+        {prError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{prs.length ? `Showing last known pull requests. ${prError}` : prError}</Text></GlassSurface>}
+        {!prError && !loading && prs.length === 0 && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>No open pull requests need your attention.</Text></GlassSurface>}
         {prs.map(pr => (
           <TouchableOpacity key={pr.number} onPress={() => router.push(`/pr-detail?number=${pr.number}` as any)} activeOpacity={0.85}>
             <GlassSurface variant="card" style={styles.card}>
@@ -153,8 +180,8 @@ const styles = StyleSheet.create({
   agentName: { fontSize: 14, fontWeight: 'bold', color: '#FFFFFF' },
   statusBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   statusBadgeText: { fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold', color: '#FFFFFF' },
-  taskText: { fontSize: 12, color: 'rgba(255, 255, 255, 0.7)', lineHeight: 16 },
   harnessText: { fontFamily: 'monospace', fontSize: 10, color: 'rgba(255, 255, 255, 0.5)', marginTop: 8 },
+  agentLinkText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#72F5B1', marginTop: 12 },
   emptyCard: { padding: 14, borderRadius: 14, marginVertical: 4 },
   emptyText: { fontSize: 12, color: 'rgba(255, 255, 255, 0.5)' },
   errorText: { fontSize: 12, color: '#FCA5A5' },

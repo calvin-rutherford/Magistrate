@@ -16,10 +16,12 @@ export default function ChatScreen() {
   const [isScrolledUp, setIsScrolledUp] = useState<boolean>(false);
   const [hasNewMessages, setHasNewMessages] = useState<boolean>(false);
   const [isThinking, setIsThinking] = useState<boolean>(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const scrollRef = useRef<FlatList<string>>(null);
   const inputRef = useRef<TextInput>(null);
   const isScrolledUpRef = useRef(false);
+  const touchYRef = useRef<number | null>(null);
   const requestInFlightRef = useRef(false);
 
   const loadOutput = useCallback(async () => {
@@ -51,19 +53,43 @@ export default function ChatScreen() {
     return () => clearInterval(interval);
   }, [loadOutput]);
 
-  useEffect(() => {
+  const handleTerminalWheel = (event: any) => {
     if (Platform.OS !== 'web') return;
-    const terminal = document.querySelector<HTMLElement>('[data-testid="terminal-scroll"]');
+    const terminal = event.currentTarget as HTMLElement | null;
+    const deltaY = event.nativeEvent?.deltaY ?? event.deltaY;
+    if (!terminal || typeof deltaY !== 'number') return;
+    event.preventDefault?.();
+    isScrolledUpRef.current = true;
+    terminal.scrollTop += deltaY;
+  };
+
+  const handleTerminalKeyDown = (event: any) => {
+    if (Platform.OS !== 'web' || !['PageUp', 'PageDown'].includes(event.key)) return;
+    const terminal = event.currentTarget as HTMLElement | null;
     if (!terminal) return;
-    const handleWheel = (event: WheelEvent) => {
-      isScrolledUpRef.current = true;
-      terminal.scrollTop += event.deltaY;
-    };
-    terminal.addEventListener('wheel', handleWheel, { passive: true });
-    return () => terminal.removeEventListener('wheel', handleWheel);
-  }, []);
+    event.preventDefault?.();
+    isScrolledUpRef.current = true;
+    const direction = event.key === 'PageUp' ? -1 : 1;
+    terminal.scrollTop = Math.max(0, Math.min(terminal.scrollHeight - terminal.clientHeight, terminal.scrollTop + direction * terminal.clientHeight));
+  };
 
+  const handleTerminalTouchStart = (event: any) => {
+    const touch = event.nativeEvent?.touches?.[0] ?? event.nativeEvent?.changedTouches?.[0] ?? event.touches?.[0];
+    const touchY = touch?.pageY ?? touch?.clientY;
+    touchYRef.current = typeof touchY === 'number' ? touchY : null;
+  };
 
+  const handleTerminalTouchMove = (event: any) => {
+    const terminal = (event.currentTarget || event.target) as HTMLElement | null;
+    const touch = event.nativeEvent?.touches?.[0] ?? event.nativeEvent?.changedTouches?.[0] ?? event.touches?.[0];
+    const touchY = touch?.pageY ?? touch?.clientY;
+    if (!terminal || typeof touchY !== 'number' || touchYRef.current === null) return;
+    const deltaY = touchYRef.current - touchY;
+    if (deltaY === 0) return;
+    touchYRef.current = touchY;
+    isScrolledUpRef.current = true;
+    terminal.scrollTop = Math.max(0, Math.min(terminal.scrollHeight - terminal.clientHeight, terminal.scrollTop + deltaY));
+  };
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -89,15 +115,27 @@ export default function ChatScreen() {
   const handleSend = async () => {
     const text = promptText.trim();
     if (!text) {
-      await sendAgentKey('captain', 'Enter');
-      loadOutput();
+      try {
+        const response = await sendAgentKey('captain', 'Enter');
+        if (response?.status === 'error' || response?.error) {
+          throw new Error(response.error || 'The terminal did not accept Enter.');
+        }
+        setSendError(null);
+        await loadOutput();
+      } catch (e) {
+        setSendError(e instanceof Error ? e.message : 'The terminal did not accept Enter.');
+      }
       return;
     }
 
     setPromptText('');
+    setSendError(null);
     setIsThinking(true);
     try {
-      await sendCaptainPrompt(text, 'iphone', 'captain');
+      const response = await sendCaptainPrompt(text, 'iphone', 'captain');
+      if (response?.status === 'error' || response?.error) {
+        throw new Error(response.error || 'The prompt was not accepted.');
+      }
       setTimeout(() => {
         loadOutput();
         setIsThinking(false);
@@ -105,6 +143,8 @@ export default function ChatScreen() {
       }, 600);
     } catch (e) {
       console.error('Send prompt error:', e);
+      setPromptText(text);
+      setSendError(e instanceof Error ? e.message : 'The prompt could not be sent.');
       setIsThinking(false);
     }
   };
@@ -167,6 +207,9 @@ export default function ChatScreen() {
               // Makes the web terminal keyboard-scrollable without changing
               // touch or native accessibility behavior.
               {...({ tabIndex: 0 } as any)}
+              {...({ onWheel: handleTerminalWheel } as any)}
+              {...({ onKeyDown: handleTerminalKeyDown } as any)}
+              {...({ onTouchStart: handleTerminalTouchStart, onTouchMove: handleTerminalTouchMove } as any)}
               onContentSizeChange={() => {
                 if (!isScrolledUpRef.current) {
                   scrollRef.current?.scrollToEnd({ animated: false });
@@ -206,16 +249,29 @@ export default function ChatScreen() {
               placeholderTextColor="rgba(255, 255, 255, 0.45)"
               value={promptText}
               onChangeText={setPromptText}
-              onSubmitEditing={() => handleSend()}
+              onSubmitEditing={handleSend}
+              returnKeyType="send"
+              editable={!isThinking}
             />
             <View style={styles.inputAccessories}>
               <View style={styles.inputPill}><Text style={styles.inputPillText}>Paste</Text></View>
               <View style={styles.inputPill}><Text style={styles.inputPillText}>AI</Text></View>
             </View>
           </View>
-
-
+          <TouchableOpacity
+            testID="send-captain-prompt"
+            accessibilityRole="button"
+            accessibilityLabel="Send command to captain"
+            accessibilityState={{ disabled: isThinking, busy: isThinking }}
+            onPress={handleSend}
+            disabled={isThinking}
+            style={[styles.sendBtn, isThinking ? styles.sendBtnDisabled : undefined]}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.sendBtnText}>{isThinking ? '…' : 'SEND'}</Text>
+          </TouchableOpacity>
         </View>
+        {sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}
       </View>
 
       <GlassDrawer
@@ -250,12 +306,14 @@ const styles = StyleSheet.create({
   scrollBadgeSurface: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16, backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF', borderWidth: 1 },
   scrollBadgeText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 10, letterSpacing: 0.8 },
   inputComposerRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
-  inputWrapper: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', paddingHorizontal: 12, paddingVertical: 8 },
+  inputWrapper: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', paddingHorizontal: 12, paddingVertical: 8 },
   textInputInner: { flex: 1, color: '#FFFFFF', fontSize: 14, paddingVertical: 4 },
   inputAccessories: { flexDirection: 'row', gap: 6, marginLeft: 8 },
   inputPill: { backgroundColor: 'rgba(255, 255, 255, 0.15)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
   inputPillText: { fontSize: 10, color: 'rgba(255, 255, 255, 0.7)' },
   textInput: { flex: 1, backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.2)', paddingHorizontal: 12, paddingVertical: 10, color: '#FFFFFF', fontSize: 14 },
-  sendBtn: { backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 11, paddingHorizontal: 14 },
-  sendBtnText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 12 }
+  sendBtn: { minWidth: 60, minHeight: 44, backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 11, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center' },
+  sendBtnDisabled: { opacity: 0.55 },
+  sendBtnText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 12 },
+  sendError: { color: '#FCA5A5', fontSize: 12, marginTop: 6, marginHorizontal: 4 }
 });

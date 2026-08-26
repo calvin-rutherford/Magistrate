@@ -70,11 +70,16 @@ class HerdrClient:
         agents = snapshot.get('agents', [])
         formatted_agents = []
         for ag in agents:
-            status = ag.get('agent_status', {}).get('state', 'unknown') if isinstance(ag.get('agent_status'), dict) else str(ag.get('agent_status', 'unknown'))
+            raw_status = ag.get('agent_status')
+            status = raw_status.get('state') if isinstance(raw_status, dict) else raw_status
+            status = status or 'unknown'
+            agent_id = ag.get('pane_id') or ag.get('id') or ag.get('name')
+            if not agent_id:
+                continue
             formatted_agents.append({
-                'id': ag.get('pane_id') or ag.get('id') or ag.get('name', 'unknown'),
-                'name': ag.get('name') or ag.get('label') or 'firstmate',
-                'harness': ag.get('agent') or ag.get('harness') or 'codex',
+                'id': agent_id,
+                'name': ag.get('name') or ag.get('label') or ag.get('terminal_title_stripped') or agent_id,
+                'harness': ag.get('agent') or ag.get('harness'),
                 'status': status,
                 'pane_id': ag.get('pane_id'),
                 'tab_id': ag.get('tab_id'),
