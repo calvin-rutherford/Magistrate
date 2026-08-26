@@ -1,6 +1,6 @@
 # Magistrate site-wide audit
 
-> Status: evidence inventory started on 2026-08-26. Findings and baseline-check results remain to be added in subsequent audit iterations. This document does not yet represent a completed audit.
+> Status: evidence inventory and baseline checks recorded on 2026-08-26. Findings remain to be added in subsequent audit iterations. This document does not yet represent a completed audit.
 
 ## Audit method and claim standard
 
@@ -24,7 +24,7 @@ The repository contains three runtime surfaces that require separate review:
 2. `gateway/`: FastAPI service with account/auth, GitHub, Jira, Teams, unified attention, notifications, voice transcription, fleet/agent, captain terminal, and agent key-input endpoints in `gateway/app/main.py`; it also exposes the AR WebSocket router in `gateway/app/ar_glasses.py`. Its package and Python constraints are in `gateway/pyproject.toml` and lock state in `gateway/uv.lock`.
 3. `backend/`: Django/Channels/Celery government and agent domain. HTTP routing is in `backend/og_broker/urls.py`, the Magistrate WebSocket route is in `backend/agents/routing.py`, and models/services/tasks live under `backend/agents/`.
 
-Configuration and operational entry points inspected include `README.md`, `docs/architecture.md`, `docker-compose.yml`, root and component dependency manifests, `Dockerfile`, `start_magistrate.sh`, `magistrate.sh`, `setup.sh`, `setup_server.sh`, `push_to_vps.sh`, and `pull_migrations.sh`. Test inventory includes `frontend/tests/`, `gateway/tests/`, `backend/tests/`, and `tests/e2e_live_test.py`. Detailed source review and check execution are pending; their results must be recorded before this audit is complete.
+Configuration and operational entry points inspected include `README.md`, `docs/architecture.md`, `docker-compose.yml`, root and component dependency manifests, `Dockerfile`, `start_magistrate.sh`, `magistrate.sh`, `setup.sh`, `setup_server.sh`, `push_to_vps.sh`, and `pull_migrations.sh`. Test inventory includes `frontend/tests/`, `gateway/tests/`, `backend/tests/`, and `tests/e2e_live_test.py`. Detailed source review is pending; baseline check results are recorded below.
 
 ## Active work and overlap boundaries
 
@@ -71,4 +71,15 @@ Not yet populated. Subsequent iterations must add evidence-backed confirmed defe
 
 ## Baseline verification
 
-Not yet run. Subsequent iterations must record exact commands, results, and any environmental blockers without treating active-PR validation claims as baseline results.
+Checks were run independently on the checked-out baseline; active-PR validation claims were not counted. No long-running process remained after the commands completed.
+
+| Surface | Exact command | Result | Interpretation / blocker |
+| --- | --- | --- | --- |
+| Frontend types | `cd frontend && npx tsc --noEmit` | Passed (exit 0). | The baseline type-checks with the installed dependencies. |
+| Frontend terminal web test | `cd frontend && npm run test:chat` | Passed: 2 tests, 0 failures (exit 0). | Covers a bounded terminal viewport/wheel interaction and phone-sized composer input; it is not a site-wide browser suite. |
+| Frontend lint | `cd frontend && npm run lint` | Failed: 7 errors and 11 warnings (exit 1). | No ESLint config was committed, so Expo first generated `frontend/eslint.config.js`; the generated file was removed immediately to preserve documentation-only scope. Reported errors include `react-hooks/set-state-in-effect` in the Account, Attention, Home, and PR routes and web color-scheme hook; `react-hooks/immutability` in `app/voice.tsx`; and `react-hooks/refs` in `EnvironmentBackground`. These are confirmed check failures, but each underlying user impact still requires source/behavior review before it becomes a prioritized defect. |
+| Gateway tests, initial invocation | `cd gateway && uv run pytest -q` | Blocked during collection: 5 modules failed with `ModuleNotFoundError: No module named 'app'` (exit 2). | The project does not configure its local `app` import path for a plain pytest invocation. The corrected invocation below establishes the actual test baseline; this initial failure is still an operational/test-runner setup risk. |
+| Gateway tests, corrected import path | `cd gateway && PYTHONPATH=. uv run pytest -q` | Passed: 23 tests, 1 warning (exit 0). | The warning is a Starlette deprecation from `fastapi.testclient`: use of `httpx` through that module is deprecated in favor of `httpx2`. |
+| Backend tests | `cd backend && python3 -m pytest -q` | Blocked immediately: `/usr/bin/python3: No module named pytest` (exit 1). | No ready backend test environment was present. Installing dependencies would exceed this documentation-only iteration and could mutate environment/lock state; backend test status is therefore unknown, not passing. |
+
+The frontend lint bootstrap created the only non-documentation artifact observed during checking; after removing it, `git status --short` showed only this audit document as changed. Full Expo web/native builds and the live end-to-end test were not run in this bounded baseline-check iteration and must not be inferred from the passing typecheck or terminal test.
