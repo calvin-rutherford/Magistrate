@@ -35,8 +35,8 @@ class AttentionService:
 
         # 2. GITHUB PULL REQUESTS
         try:
-            prs = await github_service.get_pull_requests()
-            for pr in prs:
+            page = await github_service.get_pull_requests()
+            for pr in page['items']:
                 if pr.get('requires_attention') or pr.get('review_status') == 'REVIEW_REQUIRED':
                     items.append({
                         'id': f'github-pr-{pr.get("pr_number")}',
@@ -45,7 +45,7 @@ class AttentionService:
                         'subtitle': f'{pr.get("title")} ({pr.get("repository")})',
                         'priority': 'MEDIUM',
                         'status': 'review_required',
-                        'url': pr.get('url', 'https://github.com/melkezic/firstmate/pulls'),
+                        'url': f'/pr-detail?number={pr.get("number")}',
                         'requires_action': True
                     })
         except Exception as e:

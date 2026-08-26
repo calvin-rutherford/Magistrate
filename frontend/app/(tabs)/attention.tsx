@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking, Platform, RefreshControl } from 'react-native';
+import { Alert, View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } from 'react-native';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { useRouter } from 'expo-router';
+import { openExternalUrl } from '../../src/utils/externalLinks';
 
 export interface UnifiedAttentionItem {
   id: string;
@@ -43,15 +44,12 @@ export default function AttentionScreen() {
     loadAttention();
   }, []);
 
-  const openItem = (item: UnifiedAttentionItem) => {
+  const openItem = async (item: UnifiedAttentionItem) => {
     if (item.url.startsWith('/')) {
       router.push(item.url as any);
     } else {
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        window.open(item.url, '_blank');
-      } else {
-        Linking.openURL(item.url).catch(() => {});
-      }
+      const result = await openExternalUrl(item.url);
+      if (!result.ok) Alert.alert('Unable to open link', result.message);
     }
   };
 

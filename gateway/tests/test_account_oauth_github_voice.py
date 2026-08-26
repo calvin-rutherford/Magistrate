@@ -48,11 +48,9 @@ def test_live_github_prs():
     res = client.get('/api/v1/github/pulls', headers=HEADERS)
     assert res.status_code == 200
     prs = res.json()
-    assert isinstance(prs, list)
-    if len(prs) > 0:
-        assert 'title' in prs[0]
-        assert 'repository' in prs[0]
-        assert 'url' in prs[0]
+    assert 'items' in prs
+    assert isinstance(prs['items'], list)
+    assert 'has_more' in prs
 
 def test_voice_transcribe():
     res = client.post('/api/v1/voice/transcribe', data={'source': 'iphone'}, headers=HEADERS)
