@@ -1,11 +1,12 @@
 import { Audio } from 'expo-av';
 import { transcribeVoiceAudio } from '../api/client';
+import { SpeechActivityAdapter } from '../services/SpeechActivityAdapter';
 
 export class VoiceInputAdapter {
   private recording: Audio.Recording | null = null;
   private isRecording: boolean = false;
   private onLevelChangeCallback?: (level: number) => void;
-  private intervalId: any = null;
+  private speechActivity = new SpeechActivityAdapter();
 
   async startRecording(onLevelChange?: (level: number) => void): Promise<void> {
     try {
@@ -21,19 +22,14 @@ export class VoiceInputAdapter {
         playsInSilentModeIOS: true
       });
 
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
+      const { recording } = await Audio.Recording.createAsync({ ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true });
       this.recording = recording;
       this.isRecording = true;
 
-      // Simulated/Live amplitude level tracking
-      this.intervalId = setInterval(() => {
-        if (this.isRecording && this.onLevelChangeCallback) {
-          const fakeLevel = Math.random() * 0.8 + 0.2;
-          this.onLevelChangeCallback(fakeLevel);
-        }
-      }, 100);
+      recording.setProgressUpdateInterval(80);
+      recording.setOnRecordingStatusUpdate(status => {
+        if (this.isRecording && status.isRecording) this.onLevelChangeCallback?.(this.speechActivity.update(status.metering));
+      });
     } catch (e) {
       console.error('Error starting audio recording:', e);
     }
@@ -42,10 +38,7 @@ export class VoiceInputAdapter {
   async stopRecording(): Promise<{ text: string }> {
     try {
       this.isRecording = false;
-      if (this.intervalId) {
-        clearInterval(this.intervalId);
-        this.intervalId = null;
-      }
+      this.onLevelChangeCallback?.(this.speechActivity.reset());
 
       if (this.recording) {
         await this.recording.stopAndUnloadAsync();
