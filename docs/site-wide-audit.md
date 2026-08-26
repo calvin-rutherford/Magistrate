@@ -1,6 +1,6 @@
 # Magistrate site-wide audit
 
-> Status: evidence inventory, baseline checks, and initial UX, accessibility, security/privacy, and operations finding sets were recorded on 2026-08-26. Reliability, performance, mobile/web consistency, and test-coverage review remain incomplete, so this document does not yet represent a completed audit.
+> Status: evidence inventory, baseline checks, and initial UX, accessibility, reliability, security/privacy, and operations finding sets were recorded on 2026-08-26. Performance, mobile/web consistency, and test-coverage review remain incomplete, so this document does not yet represent a completed audit.
 
 ## Audit method and claim standard
 
@@ -24,7 +24,7 @@ The repository contains three runtime surfaces that require separate review:
 2. `gateway/`: FastAPI service with account/auth, GitHub, Jira, Teams, unified attention, notifications, voice transcription, fleet/agent, captain terminal, and agent key-input endpoints in `gateway/app/main.py`; it also exposes the AR WebSocket router in `gateway/app/ar_glasses.py`. Its package and Python constraints are in `gateway/pyproject.toml` and lock state in `gateway/uv.lock`.
 3. `backend/`: Django/Channels/Celery government and agent domain. HTTP routing is in `backend/og_broker/urls.py`, the Magistrate WebSocket route is in `backend/agents/routing.py`, and models/services/tasks live under `backend/agents/`.
 
-Configuration and operational entry points inspected include `README.md`, `docs/architecture.md`, `docker-compose.yml`, root and component dependency manifests, `Dockerfile`, `start_magistrate.sh`, `magistrate.sh`, `setup.sh`, `setup_server.sh`, `push_to_vps.sh`, and `pull_migrations.sh`. Test inventory includes `frontend/tests/`, `gateway/tests/`, `backend/tests/`, and `tests/e2e_live_test.py`. Detailed source review is pending; baseline check results are recorded below.
+Configuration and operational entry points inspected include `README.md`, `docs/architecture.md`, `docker-compose.yml`, root and component dependency manifests, `Dockerfile`, `start_magistrate.sh`, `magistrate.sh`, `setup.sh`, `setup_server.sh`, `push_to_vps.sh`, and `pull_migrations.sh`. Test inventory includes `frontend/tests/`, `gateway/tests/`, `backend/tests/`, and `tests/e2e_live_test.py`. Performance, mobile/web consistency, and test-coverage source review is pending; baseline check results are recorded below.
 
 ## Active work and overlap boundaries
 
@@ -87,6 +87,12 @@ Refs compared: `origin/main`, `origin/fm/ambient-backgrounds-b5`, `origin/fm/ter
 - **Impact:** Users who request reduced motion still receive persistent motion on a core interaction screen.
 - **Boundary:** This is confirmed for the checked-out baseline by the unconditional interval. PR #3 explicitly changes the Voice Mode visualization and includes reduced-motion treatment, so no parallel implementation should be scheduled; verify the preference on native and web after PR #3 merges.
 
+#### REL-01 — Shared API calls accept HTTP errors as successful application data (medium; coordinate with PRs #4 and #5)
+
+- **Evidence:** In `frontend/src/api/client.ts`, the notification functions and `updateUserProfile` explicitly reject non-2xx responses with `if (!res.ok)`, but `fetchHealth`, `fetchRuntime`, `fetchAgents`, `fetchFleet`, `fetchAttention`, `fetchUserProfile`, `uploadUserAvatar`, all provider operations, `fetchGitHubPRs`, `transcribeVoiceAudio`, `fetchCaptainOutput`, `sendCaptainPrompt`, `interruptAgent`, and `sendAgentKey` immediately return `res.json()` without checking status. `frontend/app/(tabs)/chat.tsx`, `handleSend`, therefore clears the entered prompt before awaiting `sendCaptainPrompt` and schedules the success-path refresh for any JSON response, including FastAPI's JSON error bodies. `HomeScreen.loadData` in `frontend/app/(tabs)/index.tsx` converts rejected agent and PR requests to empty arrays, so transport and parsing failures are rendered as legitimate empty states with no user-visible degraded/error state.
+- **Impact:** Rejected commands can appear submitted, and unavailable or unauthorized reads can be presented as valid empty data. This loses user input and obscures outages or authentication failures even though the server responded with an error.
+- **Required outcome:** Centralize status-aware response handling with bounded, user-safe error information; preserve retryable user input; and give data surfaces distinct loading, empty, stale/degraded, and error states. Add client and screen tests for representative 401, 403, 500, non-JSON, network-failure, and successful responses. PRs #4 and #5 both modify `frontend/src/api/client.ts`, while PR #5 modifies Home/GitHub error handling; avoid a parallel conflicting implementation and revalidate or rebase this package after those PRs merge.
+
 #### SEC-01 — A shipped shared token does not provide an effective authorization boundary (high)
 
 **Evidence.** `frontend/src/api/client.ts` embeds both the gateway address and `DEVICE_TOKEN = 'magistrate-device-token-12345'` in client code and sends that value to account, fleet, agent-control, terminal, notification, voice, and provider endpoints. `frontend/src/realtime/socket.ts` also embeds the same token in a WebSocket URL. `gateway/app/auth.py` accepts that exact value by default when `MAGISTRATE_TOKEN` is unset and accepts credentials in either `X-Magistrate-Token` or the `token` query parameter. A web bundle or installed client necessarily exposes a client-side constant, so anyone who can obtain the client can reproduce this credential. The gateway's broad CORS policy in `gateway/app/main.py` (`allow_origins`, methods, and headers all wildcarded) does not restore an identity or per-device authorization boundary.
@@ -134,6 +140,10 @@ Refs compared: `origin/main`, `origin/fm/ambient-backgrounds-b5`, `origin/fm/ter
 #### SEC-05 — Avatar and voice uploads lack explicit application-level resource bounds (medium risk; validate infrastructure)
 
 In `gateway/app/main.py`, `upload_account_avatar` and `transcribe_voice_input` call `await file.read()` with no declared content-length, streaming, media-type, or file-size enforcement; avatar content is written using a client-derived filename and served from `/uploads`. This confirms missing application-level bounds, but reverse-proxy limits and the practical memory/disk impact were not inspected. Validate infrastructure caps and malformed-file behavior, then add bounded streaming, filename generation independent of user input, media validation/decoding, safe storage permissions, and rejection tests if those controls are not already guaranteed upstream.
+
+#### REL-02 — Realtime reconnect timers have no explicit ownership or cancellation (medium risk; validate runtime use)
+
+`frontend/src/realtime/socket.ts`, `RealtimeClient.connect`, creates a new socket whenever it is called and schedules another `connect()` with a fixed three-second delay on every close. The class has no disconnect method, timer handle, connection-in-progress guard, exponential backoff, or duplicate-connect protection. This is a source-level lifecycle risk rather than a confirmed user-facing defect because no current import or invocation of the exported `realtimeClient` was found outside that module. Before activating this client, define a single owner, cancellable reconnect/backoff behavior, offline/app-state handling, and tests proving repeated `connect()` calls and unmount/disconnect cannot leave duplicate sockets or reconnect timers.
 
 The future `docs/site-wide-task-list.md` must link each high-priority finding above to independently testable acceptance criteria. No implementation is recommended inside the active PR boundaries without the stated merge-order revalidation.
 
