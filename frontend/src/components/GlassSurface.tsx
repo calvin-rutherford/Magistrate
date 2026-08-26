@@ -16,6 +16,7 @@ try {
 interface GlassSurfaceProps {
   children?: React.ReactNode;
   style?: StyleProp<ViewStyle>;
+  contentStyle?: StyleProp<ViewStyle>;
   variant?: 'surface' | 'card' | 'control' | 'alert' | 'circle';
   intensity?: number;
 }
@@ -23,6 +24,7 @@ interface GlassSurfaceProps {
 export const GlassSurface: React.FC<GlassSurfaceProps> = ({
   children,
   style,
+  contentStyle,
   variant = 'card',
   intensity = 15
 }) => {
@@ -51,7 +53,7 @@ export const GlassSurface: React.FC<GlassSurfaceProps> = ({
         end={{ x: 1, y: 1 }}
         style={[StyleSheet.absoluteFill, { borderRadius, opacity: 0.85 }]}
       />
-      <View style={styles.content}>{children}</View>
+      <View style={[styles.content, contentStyle]}>{children}</View>
     </View>
   );
 };
