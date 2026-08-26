@@ -49,7 +49,9 @@
     "lint": "expo lint",
     "test:chat": "node --test tests/chat-terminal.web.test.js",
     "test:home": "node --test tests/home-realdata.web.test.js",
+    "test:agent-status": "npx tsx --test tests/agent-status.test.ts",
     "test:voice": "npx tsx --test tests/voice-session.test.ts && node --test tests/voice-page.web.test.js",
+    "test:notifications": "node --test tests/notifications.web.test.js",
     "test:github": "node --test tests/github-prs.web.test.js",
     "test:ambient": "node --test tests/ambient-source.test.js"
   },

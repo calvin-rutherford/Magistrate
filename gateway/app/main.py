@@ -341,6 +341,10 @@ async def send_captain_prompt(contract: UniversalInputContract, token: str = Dep
 async def send_agent_key(agent_id: str, key: str = Query('Enter'), token: str = Depends(verify_token)):
     return await herdr_client.send_agent_key(agent_id, key=key)
 
+@app.post('/api/v1/agents/{agent_id}/interrupt')
+async def interrupt_agent(agent_id: str, token: str = Depends(verify_token)):
+    return await herdr_client.interrupt_agent(agent_id)
+
 # STATIC SPA FALLBACK FOR DIRECT DEEP LINKS
 DIST_DIR = '/home/spectre/Magistrate/frontend/dist'
 if os.path.exists(DIST_DIR):

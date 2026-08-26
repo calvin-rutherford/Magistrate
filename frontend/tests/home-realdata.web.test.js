@@ -35,9 +35,9 @@ test.after(async () => {
   server?.kill('SIGTERM');
 });
 
-async function openHome({ agentsStatus = 200 } = {}) {
+async function openHome({ agentsStatus = 200, agents = null } = {}) {
   const page = await browser.newPage();
-  await page.evaluateOnNewDocument(status => {
+  await page.evaluateOnNewDocument(({ agentsStatus, agents }) => {
     const agent = {
       id: 'w1:p7',
       name: 'Live captain',
@@ -71,8 +71,8 @@ async function openHome({ agentsStatus = 200 } = {}) {
     window.fetch = resource => {
       const requestUrl = typeof resource === 'string' ? resource : resource.url;
       if (requestUrl.includes('/agents')) {
-        return Promise.resolve(new Response(JSON.stringify(status === 200 ? [agent] : { detail: 'Agent service unavailable' }), {
-          status,
+        return Promise.resolve(new Response(JSON.stringify(agentsStatus === 200 ? (agents || [agent]) : { detail: 'Agent service unavailable' }), {
+          status: agentsStatus,
           headers: { 'Content-Type': 'application/json' }
         }));
       }
@@ -90,17 +90,18 @@ async function openHome({ agentsStatus = 200 } = {}) {
       }
       return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
     };
-  }, agentsStatus);
+  }, { agentsStatus, agents });
   await page.goto(BASE, { waitUntil: 'networkidle0' });
   return page;
 }
 
 test('Home renders live agent identity and makes the agent card actionable', async () => {
   const page = await openHome();
-  await page.waitForFunction(() => document.body.innerText.includes('ACTIVE AGENTS (1)'));
+  await page.waitForFunction(() => document.body.innerText.includes('AGENT FLEET (1)'));
   const body = await page.evaluate(() => document.body.innerText);
   assert.match(body, /Live captain/);
   assert.match(body, /Harness: codex/);
+  assert.match(body, /1 active · 0 idle/);
   assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
 
   await page.locator('::-p-text(Live captain)').click();
@@ -109,12 +110,27 @@ test('Home renders live agent identity and makes the agent card actionable', asy
   await page.close();
 });
 
+test('Home derives live status counts and orders active before idle deterministically', async () => {
+  const page = await openHome({ agents: [
+    { id: 'idle-z', name: 'Zulu', status: 'paused', harness: 'codex' },
+    { id: 'active-b', name: 'Bravo', status: 'working', harness: 'codex' },
+    { id: 'active-a', name: 'Alpha', status: 'running', harness: 'codex' },
+    { id: 'unknown', name: 'Mystery', status: 'mystery', harness: 'codex' }
+  ] });
+  await page.waitForFunction(() => document.body.innerText.includes('2 active · 1 idle · 1 unavailable'));
+  const cards = await page.$$('[data-testid^="agent-card-"]');
+  const names = await Promise.all(cards.map(card => card.$eval('[data-testid^="agent-name-"]', node => node.textContent).catch(() => '')));
+  assert.deepEqual(names, ['Alpha', 'Bravo', 'Zulu', 'Mystery']);
+  assert.match(await page.$eval('[data-testid="agent-card-unknown"]', element => element.textContent), /UNAVAILABLE/);
+  await page.close();
+});
+
 test('Home reports an agent error instead of inventing an empty or active state', async () => {
   const page = await openHome({ agentsStatus: 503 });
   await page.waitForFunction(() => document.body.innerText.includes('Agent service unavailable'));
   const body = await page.evaluate(() => document.body.innerText);
   assert.match(body, /Agent service unavailable/);
-  assert.match(body, /ACTIVE AGENTS \(0\)/);
+  assert.match(body, /AGENT FLEET \(0\)/);
   assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
   await page.close();
 });

@@ -5,16 +5,18 @@ import { useRouter } from 'expo-router';
 
 interface FleetMetricProps {
   runningCount?: number;
+  idleCount?: number;
   blockedCount?: number;
   prsOpenCount?: number;
   needsYouCount?: number;
 }
 
 export function FleetMetric({
-  runningCount = 1,
-  blockedCount = 0,
-  prsOpenCount = 2,
-  needsYouCount = 0
+  runningCount,
+  idleCount,
+  blockedCount,
+  prsOpenCount,
+  needsYouCount
 }: FleetMetricProps) {
   const router = useRouter();
 
@@ -23,7 +25,7 @@ export function FleetMetric({
       <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
-            <Text style={styles.valueText}>{runningCount}</Text>
+            <Text style={styles.valueText}>{runningCount ?? '—'}</Text>
             <Text style={styles.labelText}>RUNNING</Text>
           </View>
         </GlassSurface>
@@ -32,7 +34,16 @@ export function FleetMetric({
       <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
-            <Text style={styles.valueText}>{blockedCount}</Text>
+            <Text style={styles.valueText}>{idleCount ?? '—'}</Text>
+            <Text style={styles.labelText}>IDLE</Text>
+          </View>
+        </GlassSurface>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+        <GlassSurface variant="card" intensity={10} style={styles.card}>
+          <View style={styles.cardInner}>
+            <Text style={styles.valueText}>{blockedCount ?? '—'}</Text>
             <Text style={styles.labelText}>BLOCKED</Text>
           </View>
         </GlassSurface>
@@ -41,7 +52,7 @@ export function FleetMetric({
       <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
-            <Text style={styles.valueText}>{prsOpenCount}</Text>
+            <Text style={styles.valueText}>{prsOpenCount ?? '—'}</Text>
             <Text style={styles.labelText}>PRS OPEN</Text>
           </View>
         </GlassSurface>
@@ -50,7 +61,7 @@ export function FleetMetric({
       <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
-            <Text style={styles.valueText}>{needsYouCount}</Text>
+            <Text style={styles.valueText}>{needsYouCount ?? '—'}</Text>
             <Text style={styles.labelText}>NEEDS YOU</Text>
           </View>
         </GlassSurface>
