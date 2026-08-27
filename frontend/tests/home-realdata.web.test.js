@@ -35,9 +35,9 @@ test.after(async () => {
   server?.kill('SIGTERM');
 });
 
-async function openHome({ agentsStatus = 200, agents = null } = {}) {
+async function openHome({ agentsStatus = 200, agents = null, attention = [] } = {}) {
   const page = await browser.newPage();
-  await page.evaluateOnNewDocument(({ agentsStatus, agents }) => {
+  await page.evaluateOnNewDocument(({ agentsStatus, agents, attention }) => {
     const agent = {
       id: 'w1:p7',
       name: 'Live captain',
@@ -88,9 +88,12 @@ async function openHome({ agentsStatus = 200, agents = null } = {}) {
           headers: { 'Content-Type': 'application/json' }
         }));
       }
+      if (requestUrl.includes('/attention/unified')) {
+        return Promise.resolve(new Response(JSON.stringify(attention), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
     };
-  }, { agentsStatus, agents });
+  }, { agentsStatus, agents, attention });
   await page.goto(BASE, { waitUntil: 'networkidle0' });
   return page;
 }
@@ -105,8 +108,8 @@ test('Home renders live agent identity and makes the agent card actionable', asy
   assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
 
   await page.locator('::-p-text(Live captain)').click();
-  await page.waitForFunction(() => location.pathname.includes('/agents') && document.body.innerText.includes('LIVE AGENT SESSIONS (1)'));
-  assert.match(await page.evaluate(() => document.body.innerText), /Live captain/);
+  await page.waitForFunction(() => location.pathname === '/chat' && document.body.innerText.includes('Live captain'));
+  assert.match(await page.$eval('[data-testid="chat-target"]', node => node.textContent), /Live captain|w1:p7/);
   await page.close();
 });
 
@@ -132,5 +135,13 @@ test('Home reports an agent error instead of inventing an empty or active state'
   assert.match(body, /Agent service unavailable/);
   assert.match(body, /AGENT FLEET \(0\)/);
   assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
+  await page.close();
+});
+
+test('Home shows live attention items and dismisses them through the notification contract', async () => {
+  const page = await openHome({ attention: [{ id: 'question-1', provider: 'firstmate', title: 'Choose a rollout', subtitle: 'A decision is waiting.', status: 'needs-decision', url: '/attention?item=question-1', requires_action: true }] });
+  await page.waitForSelector('[data-testid="attention-item-question-1"]');
+  await page.click('[data-testid="attention-dismiss-question-1"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="attention-item-question-1"]'));
   await page.close();
 });

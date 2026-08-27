@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent, Platform } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
+import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { TerminusControlBar } from '../../src/components/TerminusControlBar';
 import { CapabilitySelect } from '../../src/components/CapabilitySelect';
-import { ExecutionHarness, fetchCaptainOutput, fetchExecutionCapabilities, sendCaptainPrompt, sendAgentKey } from '../../src/api/client';
-const WorkspaceShell = React.lazy(() => import('../../src/components/WorkspaceShell').then(module => ({ default: module.WorkspaceShell })));
+import { ExecutionHarness, fetchAgents, fetchCaptainOutput, fetchExecutionCapabilities, fetchGitHubPRs, fetchUnifiedAttention, sendCaptainPrompt, sendAgentKey } from '../../src/api/client';
+import { summarizeAgents } from '../../src/services/AgentStatus';
 
 export function ChatCanvas({ target = 'captain' }: { target?: string }) {
 
@@ -371,10 +374,49 @@ export function ChatCanvas({ target = 'captain' }: { target?: string }) {
 }
 
 export default function ChatScreen() {
-  return <React.Suspense fallback={null}><WorkspaceShell /></React.Suspense>;
+  const router = useRouter();
+  const { agentId } = useLocalSearchParams<{ agentId?: string | string[] }>();
+  const target = Array.isArray(agentId) ? agentId[0] : agentId;
+  const [showDrawer, setShowDrawer] = React.useState(false);
+  const [drawerCounts, setDrawerCounts] = React.useState({ activeAgents: 0, attention: 0, prs: 0 });
+  React.useEffect(() => {
+    Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchGitHubPRs()]).then(([agentsResult, attentionResult, prsResult]) => {
+      setDrawerCounts({
+        activeAgents: agentsResult.status === 'fulfilled' ? summarizeAgents(agentsResult.value).activeCount : 0,
+        attention: attentionResult.status === 'fulfilled' ? attentionResult.value.filter(item => item.requires_action !== false).length : 0,
+        prs: prsResult.status === 'fulfilled' ? prsResult.value.items.length : 0
+      });
+    });
+  }, []);
+  const handleNavigate = (route: string) => {
+    if (route === 'chat') return;
+    router.push((route === 'index' ? '/' : '/' + route) as any);
+  };
+  return (
+    <EnvironmentBackground hideBottomControls>
+      <View style={styles.page}>
+        <View style={styles.pageHeader}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Back" onPress={() => router.back()}>
+            <GlassSurface variant="control" style={styles.headerCircleBtn}><Text style={styles.backText}>←</Text></GlassSurface>
+          </TouchableOpacity>
+          <Text style={styles.pageTitle}>FIRSTMATE CHAT</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open navigation" onPress={() => setShowDrawer(true)}>
+            <GlassSurface variant="control" style={styles.headerCircleBtn}><Text style={styles.backText}>≡</Text></GlassSurface>
+          </TouchableOpacity>
+        </View>
+        <ChatCanvas target={target || 'captain'} />
+      </View>
+      <GlassDrawer visible={showDrawer} onClose={() => setShowDrawer(false)} onNavigate={handleNavigate} activeAgentsCount={drawerCounts.activeAgents} attentionCount={drawerCounts.attention} prsCount={drawerCounts.prs} />
+    </EnvironmentBackground>
+  );
 }
 
 const styles = StyleSheet.create({
+  page: { flex: 1, minWidth: 0 },
+  pageHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 12, marginBottom: 6 },
+  pageTitle: { fontFamily: 'monospace', fontSize: 14, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 2 },
+  headerCircleBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  backText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
   canvas: { flex: 1, minWidth: 0 },
   chatContainer: { flex: 1, paddingHorizontal: 16, paddingBottom: 16, minWidth: 0 },
   canvasTitleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 4, paddingBottom: 10, gap: 10 },
