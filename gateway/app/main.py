@@ -6,6 +6,7 @@ import os
 import json
 import asyncio
 import time
+from pathlib import Path
 from typing import Optional, List
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -346,7 +347,10 @@ async def interrupt_agent(agent_id: str, token: str = Depends(verify_token)):
     return await herdr_client.interrupt_agent(agent_id)
 
 # STATIC SPA FALLBACK FOR DIRECT DEEP LINKS
-DIST_DIR = '/home/spectre/Magistrate/frontend/dist'
+# Resolve the default from the checkout containing this gateway. Deployments may
+# override it explicitly, but serving a sibling checkout must never be implicit.
+PROJECT_DIR = Path(__file__).resolve().parents[2]
+DIST_DIR = os.getenv('MAGISTRATE_DIST_DIR', str(PROJECT_DIR / 'frontend' / 'dist'))
 if os.path.exists(DIST_DIR):
     app.mount('/_expo', StaticFiles(directory=os.path.join(DIST_DIR, '_expo')), name='expo_static')
     app.mount('/assets', StaticFiles(directory=os.path.join(DIST_DIR, 'assets')), name='assets_static')
