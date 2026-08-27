@@ -73,7 +73,7 @@ async function openAttention({ notificationMode, eventBatch = events } = {}) {
     } else {
       Object.defineProperty(window, 'Notification', { configurable: true, value: undefined });
     }
-  }, { notificationMode, batch: [eventBatch] });
+  }, { mode: notificationMode, batch: [eventBatch] });
   await page.goto(URL, { waitUntil: 'networkidle0' });
   return page;
 }

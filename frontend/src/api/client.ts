@@ -197,7 +197,9 @@ export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]>
   const res = await fetch(GATEWAY_URL + '/attention/unified', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return checkedJson<UnifiedAttentionRecord[]>(res);
+  const data = await checkedJson<unknown>(res);
+  if (!Array.isArray(data)) throw new Error('Gateway returned invalid attention data.');
+  return data as UnifiedAttentionRecord[];
 }
 
 export async function fetchUserProfile(): Promise<UserProfile> {
@@ -290,7 +292,9 @@ export async function fetchGitHubPRs(page = 1, refresh = false): Promise<GitHubP
   const res = await fetch(GATEWAY_URL + `/github/pulls?page=${page}&per_page=20&refresh=${refresh}`, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return checkedJson<GitHubPRPage>(res);
+  const data = await checkedJson<Partial<GitHubPRPage>>(res);
+  if (!Array.isArray(data.items)) throw new Error('Gateway returned invalid pull request data.');
+  return data as GitHubPRPage;
 }
 
 export async function fetchGitHubPR(number: number, refresh = false): Promise<GitHubPR> {

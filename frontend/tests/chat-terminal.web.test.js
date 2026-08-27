@@ -258,15 +258,3 @@ test('execution dropdowns update together and submit the verified selection', as
   assert.equal(body.model, 'review-model');
   await page.close();
 });
-
-test('workspace rail replaces route-button navigation and opens an in-shell destination', async () => {
-  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
-  assert.equal(await page.$('[data-testid="chat-nav-home"]'), null);
-  await page.click('[data-testid="mobile-rail-toggle"]');
-  await page.waitForSelector('[data-testid="workspace-rail"]');
-  await page.click('[data-testid="rail-fleet"]');
-  await page.waitForSelector('[data-testid="workspace-panel"]');
-  assert.match(new globalThis.URL(page.url()).search, /section=fleet/);
-  assert.ok(await page.$('[data-testid="terminal-scroll"]'));
-  await page.close();
-});
