@@ -6,7 +6,7 @@ set -euo pipefail
 DEPLOY_DIR="${MAGISTRATE_DEPLOY_DIR:-/home/spectre/firstmate/projects/Magistrate-deploy}"
 SERVICE="${MAGISTRATE_SERVICE:-magistrate-gateway.service}"
 
-if [[ ! -d "$DEPLOY_DIR/.git" ]]; then
+if [[ ! -e "$DEPLOY_DIR/.git" ]]; then
   echo "deployment checkout not found: $DEPLOY_DIR" >&2
   exit 1
 fi
