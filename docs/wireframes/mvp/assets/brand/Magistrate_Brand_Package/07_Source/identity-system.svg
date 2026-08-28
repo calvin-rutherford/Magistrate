@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1920" height="1200" viewBox="0 0 1920 1200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#05070a"/>
+      <stop offset=".55" stop-color="#090d13"/>
+      <stop offset="1" stop-color="#111722"/>
+    </linearGradient>
+    <linearGradient id="spectral" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#54ff87"/>
+      <stop offset=".32" stop-color="#24d8ff"/>
+      <stop offset=".68" stop-color="#b45cff"/>
+      <stop offset="1" stop-color="#ff3fd1"/>
+    </linearGradient>
+    <filter id="shadow"><feGaussianBlur stdDeviation="28"/></filter>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="11" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="heroClip"><rect x="914" y="72" width="934" height="1056" rx="38"/></clipPath>
+    <g id="magistrate-mark">
+      <path d="M64 112H448L256 444Z"/>
+      <path d="M256 226C270 226 277 241 269 252C257 268 232 261 228 242C222 212 248 189 277 196C316 205 327 248 305 278C276 317 216 307 192 264"/>
+    </g>
+  </defs>
+  <rect width="1920" height="1200" fill="url(#bg)"/>
+  <circle cx="700" cy="220" r="420" fill="#24d8ff" opacity=".025"/>
+
+  <g transform="translate(82 78)">
+    <text x="0" y="0" fill="#8e99aa" font-family="Arial, sans-serif" font-size="17" letter-spacing="5">MAGISTRATE / IDENTITY SYSTEM 02</text>
+    <text x="0" y="76" fill="#f3f1eb" font-family="Georgia, serif" font-size="82">Magistrate</text>
+  </g>
+
+  <g transform="translate(82 280)">
+    <rect width="760" height="460" rx="34" fill="#090d13" stroke="#27313e"/>
+    <text x="34" y="48" fill="#8e99aa" font-family="Arial, sans-serif" font-size="16" letter-spacing="3">CLEAN OPERATIONAL MARK</text>
+    <g transform="translate(200 54) scale(.70)" fill="none" stroke="#f3f1eb" stroke-width="15" stroke-linecap="round" stroke-linejoin="round">
+      <use xlink:href="#magistrate-mark"/>
+    </g>
+    <text x="34" y="402" fill="#c5cbd4" font-family="Arial, sans-serif" font-size="21">One command field. One responsive center.</text>
+    <text x="34" y="433" fill="#6f7a8b" font-family="Arial, sans-serif" font-size="17">A single triangle holds the system together at every scale.</text>
+  </g>
+
+  <g transform="translate(82 774)">
+    <text x="0" y="0" fill="#8e99aa" font-family="Arial, sans-serif" font-size="16" letter-spacing="3">BEHAVIOR</text>
+    <g transform="translate(0 34)">
+      <rect width="238" height="218" rx="26" fill="#090d13" stroke="#27313e"/>
+      <g transform="translate(67 25) scale(.20)" fill="none" stroke="#758091" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#magistrate-mark"/></g>
+      <text x="22" y="164" fill="#f3f1eb" font-family="Arial" font-size="20">Dormant</text>
+      <text x="22" y="194" fill="#687486" font-family="Arial" font-size="15">Quiet, monochrome</text>
+    </g>
+    <g transform="translate(260 34)">
+      <rect width="238" height="218" rx="26" fill="#090d13" stroke="#27313e"/>
+      <g transform="translate(67 25) scale(.20)" fill="none" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+        <g stroke="#ff3fd1" transform="translate(-7 2)"><use xlink:href="#magistrate-mark"/></g>
+        <g stroke="#24d8ff" transform="translate(7 -2)"><use xlink:href="#magistrate-mark"/></g>
+        <g stroke="#f3f1eb" stroke-width="8"><use xlink:href="#magistrate-mark"/></g>
+      </g>
+      <text x="22" y="164" fill="#f3f1eb" font-family="Arial" font-size="20">Listening</text>
+      <text x="22" y="194" fill="#687486" font-family="Arial" font-size="15">Spectrum awakens</text>
+    </g>
+    <g transform="translate(520 34)">
+      <rect width="238" height="218" rx="26" fill="#090d13" stroke="#27313e"/>
+      <g transform="translate(67 25) scale(.20)" fill="none" stroke="url(#spectral)" stroke-width="21" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"><use xlink:href="#magistrate-mark"/></g>
+      <text x="22" y="164" fill="#f3f1eb" font-family="Arial" font-size="20">Executing</text>
+      <text x="22" y="194" fill="#687486" font-family="Arial" font-size="15">Focused spectral flow</text>
+    </g>
+  </g>
+
+  <rect x="902" y="60" width="958" height="1080" rx="48" fill="#000" opacity=".75" filter="url(#shadow)"/>
+  <image x="914" y="72" width="934" height="1056" preserveAspectRatio="xMidYMid slice" xlink:href="../assets/hero/magistrate-organic-active-v1.png" clip-path="url(#heroClip)"/>
+  <rect x="914" y="72" width="934" height="1056" rx="38" fill="none" stroke="#2c3744" stroke-width="2"/>
+  <g transform="translate(962 1050)">
+    <rect width="838" height="48" rx="24" fill="#05070a" opacity=".78"/>
+    <text x="419" y="31" text-anchor="middle" fill="#d8dce3" font-family="Arial" font-size="16" letter-spacing="3">MAGISTRATE / ACTIVE VOICE STATE</text>
+  </g>
+</svg>

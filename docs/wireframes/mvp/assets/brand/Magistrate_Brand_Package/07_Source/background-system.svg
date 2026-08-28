@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1800" height="900" viewBox="0 0 1800 900">
+  <rect width="1800" height="900" fill="#0B1017"/><text x="70" y="75" fill="#8E99AA" font-family="Arial" font-size="17" letter-spacing="5">MAGISTRATE / APPEARANCE</text><text x="70" y="145" fill="#F7F8FA" font-family="'Bodoni Moda','Times New Roman',serif" font-size="62">Atmosphere behind glass.</text><text x="70" y="188" fill="#9AA5B5" font-family="Arial" font-size="20">Automatic, built-in, and custom backgrounds share one adaptive readability layer.</text>
+  <g transform="translate(70 245)" font-family="Arial" font-size="16" fill="#D7DCE3">
+    <g><image width="210" height="455" preserveAspectRatio="xMidYMid slice" xlink:href="../05_Marketing/Backgrounds/PNG/clear.png"/><text x="105" y="492" text-anchor="middle">Clear</text></g>
+    <g transform="translate(240)"><image width="210" height="455" preserveAspectRatio="xMidYMid slice" xlink:href="../05_Marketing/Backgrounds/PNG/cloudy.png"/><text x="105" y="492" text-anchor="middle">Cloudy</text></g>
+    <g transform="translate(480)"><image width="210" height="455" preserveAspectRatio="xMidYMid slice" xlink:href="../05_Marketing/Backgrounds/PNG/rain.png"/><text x="105" y="492" text-anchor="middle">Rain</text></g>
+    <g transform="translate(720)"><image width="210" height="455" preserveAspectRatio="xMidYMid slice" xlink:href="../05_Marketing/Backgrounds/PNG/storm.png"/><text x="105" y="492" text-anchor="middle">Storm</text></g>
+    <g transform="translate(960)"><image width="210" height="455" preserveAspectRatio="xMidYMid slice" xlink:href="../05_Marketing/Backgrounds/PNG/sunset.png"/><text x="105" y="492" text-anchor="middle">Sunset</text></g>
+    <g transform="translate(1200)"><image width="210" height="455" preserveAspectRatio="xMidYMid slice" xlink:href="../05_Marketing/Backgrounds/PNG/night.png"/><text x="105" y="492" text-anchor="middle">Night</text></g>
+    <g transform="translate(1440)"><image width="210" height="455" preserveAspectRatio="xMidYMid slice" xlink:href="../05_Marketing/Backgrounds/PNG/minimal-dark.png"/><text x="105" y="492" text-anchor="middle">Minimal dark</text></g>
+  </g>
+  <text x="70" y="810" fill="#7F8A9A" font-family="Arial" font-size="16">Glass surface: subtle transparency + 22px blur + theme-aware dimming. Custom images must persist durably.</text>
+</svg>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Magistrate active mark">
+  <defs><filter id="g" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+  <rect width="512" height="512" rx="108" fill="#05070A"/>
+  <g fill="none" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" filter="url(#g)" opacity=".72">
+    <g stroke="#FF3FD1" transform="translate(-5 2)"><path d="M64 112H448L256 444Z"/><path d="M256 226C270 226 277 241 269 252C257 268 232 261 228 242C222 212 248 189 277 196C316 205 327 248 305 278C276 317 216 307 192 264"/></g>
+    <g stroke="#24D8FF" transform="translate(5 -2)"><path d="M64 112H448L256 444Z"/><path d="M256 226C270 226 277 241 269 252C257 268 232 261 228 242C222 212 248 189 277 196C316 205 327 248 305 278C276 317 216 307 192 264"/></g>
+    <g stroke="#54FF87"><path d="M64 112H448L256 444Z"/><path d="M256 226C270 226 277 241 269 252C257 268 232 261 228 242C222 212 248 189 277 196C316 205 327 248 305 278C276 317 216 307 192 264"/></g>
+  </g>
+  <g fill="none" stroke="#F7F8FA" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" opacity=".92"><path d="M64 112H448L256 444Z"/><path d="M256 226C270 226 277 241 269 252C257 268 232 261 228 242C222 212 248 189 277 196C316 205 327 248 305 278C276 317 216 307 192 264"/></g>
+</svg>

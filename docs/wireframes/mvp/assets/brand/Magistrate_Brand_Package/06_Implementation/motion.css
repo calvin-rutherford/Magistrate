@@ -1,0 +1,46 @@
+/* Spectrum is reserved for voice input and active agent execution. */
+
+@keyframes magistrate-spectrum-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes magistrate-breathe {
+  0%, 100% { transform: scale(0.985); opacity: 0.82; }
+  50% { transform: scale(1.015); opacity: 1; }
+}
+
+.magistrate-active-spectrum {
+  background: linear-gradient(90deg, #54ff87, #24d8ff, #8b6cff, #ff3fd1, #54ff87);
+  background-size: 300% 300%;
+  animation: magistrate-spectrum-shift 4.8s linear infinite;
+}
+
+/* Default in-conversation voice uses restrained functional color only. */
+.magistrate-functional-voice {
+  background: linear-gradient(90deg, #24d8ff, #8b6cff);
+  background-size: 180% 100%;
+  animation: magistrate-spectrum-shift 3.6s ease-in-out infinite;
+}
+
+.magistrate-voice-mark {
+  animation: magistrate-breathe 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+  transform-origin: center;
+}
+
+.magistrate-voice-takeover {
+  transition: opacity 420ms cubic-bezier(0.2, 0.8, 0.2, 1), transform 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .magistrate-active-spectrum,
+  .magistrate-functional-voice,
+  .magistrate-voice-mark {
+    animation: none;
+  }
+
+  .magistrate-voice-takeover {
+    transition-duration: 1ms;
+  }
+}

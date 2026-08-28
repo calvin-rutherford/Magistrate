@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Magistrate MVP Wireframe</title>
+    <link rel="manifest" href="assets/brand/Magistrate_Brand_Package/02_App_Icons/Web/site.webmanifest">
+    <link rel="icon" href="assets/brand/Magistrate_Brand_Package/02_App_Icons/Web/icon-32.png">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to wireframe</a>
+    <div class="app-shell" data-background="night">
+      <div class="readability-layer"></div>
+
+      <aside class="drawer" id="drawer" aria-label="Magistrate navigation">
+        <div class="brand-row">
+          <img src="assets/brand/Magistrate_Brand_Package/01_Logos/SVG/magistrate-mark-paper.svg" alt="" width="34" height="34">
+          <span class="wordmark">Magistrate</span>
+        </div>
+
+        <nav class="drawer-nav" aria-label="MVP sections">
+          <a class="nav-link" href="#attention" data-route="attention"><span aria-hidden="true">!</span> Attention <b>2</b></a>
+          <button class="nav-link nav-button" type="button" id="fleet-toggle" aria-expanded="true" aria-controls="fleet-list"><span aria-hidden="true">::</span> Fleet Summary <b>4</b></button>
+          <div class="agent-list" id="fleet-list">
+            <a href="#chat" data-route="chat"><span class="dot active"></span> Firstmate <small>Active</small></a>
+            <a href="#agent-auth" data-route="agent-auth"><span class="dot active"></span> fm-auth <small>Active</small></a>
+            <a href="#agent-api" data-route="agent-api"><span class="dot idle"></span> fm-api <small>Idle</small></a>
+            <a href="#agent-ui" data-route="agent-ui"><span class="dot waiting"></span> fm-ui <small>Waiting</small></a>
+            <a href="#agent-blocked" data-route="agent-blocked"><span class="dot blocked"></span> fm-release <small>Blocked</small></a>
+          </div>
+          <a class="nav-link" href="#activity" data-route="activity"><span aria-hidden="true">~</span> Recent Activity</a>
+          <a class="nav-link" href="#connections" data-route="connections"><span aria-hidden="true">&lt;&gt;</span> Connections</a>
+          <a class="nav-link" href="#settings" data-route="settings"><span aria-hidden="true">o</span> Settings</a>
+        </nav>
+
+        <div class="drawer-state">
+          <p class="eyebrow">Static Wireframe</p>
+          <p>Demo states represent intended behavior only. Production surfaces must use real data or honest empty/error/loading states.</p>
+        </div>
+      </aside>
+
+      <main class="phone-frame" id="main" tabindex="-1">
+        <header class="topbar">
+          <button class="icon-button" type="button" id="drawer-button" aria-expanded="true" aria-controls="drawer" aria-label="Toggle drawer">
+            <span></span><span></span><span></span>
+          </button>
+          <a class="title-link" href="#chat" data-route="chat">
+            <span class="wordmark">Magistrate</span>
+          </a>
+          <div class="connection" id="connection-indicator"><span class="dot active"></span><span>Live</span></div>
+        </header>
+
+        <section class="workspace">
+          <div class="chat-column">
+            <section class="screen active" id="chat" aria-labelledby="chat-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow">Firstmate / Conversation</p>
+                  <h1 id="chat-title">Firstmate</h1>
+                </div>
+                <div class="chips" aria-label="Execution selectors">
+                  <button type="button">GPT-5.6</button>
+                  <button type="button">High</button>
+                </div>
+              </div>
+
+              <div class="message-list" aria-live="polite">
+                <article class="message user">Review the authentication work and tell me what needs approval.</article>
+                <article class="message assistant">
+                  <span class="speaker"><span class="dot active"></span>Firstmate</span>
+                  The implementation is ready. One staging deployment needs your approval, and PR #142 is ready for review.
+                </article>
+                <article class="action-card">
+                  <p class="eyebrow warning">Attention</p>
+                  <h2>Firstmate needs approval</h2>
+                  <p>Deploy authentication changes to staging after passing checks.</p>
+                  <div class="card-actions">
+                    <a class="button primary" href="#attention" data-route="attention">Open brief</a>
+                    <button class="button" type="button" data-demo-toast="Dismissed locally; no approval was sent.">Dismiss</button>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section class="screen" id="attention" aria-labelledby="attention-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow warning">Attention</p>
+                  <h1 id="attention-title">Human judgment</h1>
+                </div>
+              </div>
+              <div class="stack">
+                <article class="action-card selected">
+                  <p class="eyebrow">Firstmate approval</p>
+                  <h2>Deploy to staging</h2>
+                  <p>Requesting agent: Firstmate. Impact: staging auth flow update. Checks: passing. Risk: medium, reversible.</p>
+                  <div class="card-actions">
+                    <button class="button primary" type="button" data-demo-toast="Approved in demo state. Production must call the real approval path.">Approve</button>
+                    <button class="button danger" type="button" data-demo-toast="Rejected in demo state. Production must call the real rejection path.">Reject</button>
+                    <button class="button" type="button" data-demo-toast="Dismissed only; not approved or rejected.">Dismiss</button>
+                  </div>
+                </article>
+                <article class="action-card">
+                  <p class="eyebrow cyan">GitHub PR</p>
+                  <h2>PR #142 ready for review</h2>
+                  <p>Repository, PR number, checks, author, branch, and review state are represented as static placeholders for this wireframe.</p>
+                  <div class="card-actions">
+                    <a class="button" href="#pr-brief" data-route="pr-brief">Review brief</a>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section class="screen" id="pr-brief" aria-labelledby="pr-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow cyan">GitHub / Demo PR Brief</p>
+                  <h1 id="pr-title">PR review</h1>
+                </div>
+              </div>
+              <article class="action-card selected">
+                <h2>Authentication callback hardening</h2>
+                <dl class="facts">
+                  <div><dt>Repo</dt><dd>calvin-rutherford/Magistrate</dd></div>
+                  <div><dt>Branch</dt><dd>fm/auth-callback-demo</dd></div>
+                  <div><dt>Checks</dt><dd><span class="dot active"></span> Passing</dd></div>
+                  <div><dt>Review</dt><dd>Needs captain review</dd></div>
+                </dl>
+                <p>This is a static PR brief state. The production app must open the exact live PR URL from GitHub data.</p>
+                <div class="card-actions">
+                  <button class="button primary" type="button" data-demo-toast="Would open the exact GitHub PR URL in production.">Review in GitHub</button>
+                  <a class="button" href="#attention" data-route="attention">Back</a>
+                </div>
+              </article>
+            </section>
+
+            <section class="screen" id="agent-auth" aria-labelledby="agent-auth-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow">Agent Conversation</p>
+                  <h1 id="agent-auth-title">fm-auth</h1>
+                </div>
+                <span class="status-pill"><span class="dot active"></span> Active</span>
+              </div>
+              <div class="message-list">
+                <article class="message user">Review the authentication work and tell me what needs approval.</article>
+                <article class="message assistant"><span class="speaker"><span class="dot active"></span>fm-auth</span>The OAuth callback checks are complete. Staging deployment is waiting on the approval card.</article>
+                <article class="action-card compact">
+                  <h2>Unread update available</h2>
+                  <p>The agent sent one new summary while you were reading earlier history.</p>
+                  <button class="button primary" type="button" data-demo-toast="Jumped to latest demo message.">New message</button>
+                </article>
+              </div>
+            </section>
+
+            <section class="screen" id="agent-api" aria-labelledby="agent-api-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow">Agent Conversation</p>
+                  <h1 id="agent-api-title">fm-api</h1>
+                </div>
+                <span class="status-pill"><span class="dot idle"></span> Idle</span>
+              </div>
+              <div class="empty-state">
+                <h2>No current action</h2>
+                <p>This honest empty state replaces fake activity when no durable conversation or task is available.</p>
+              </div>
+            </section>
+
+            <section class="screen" id="agent-ui" aria-labelledby="agent-ui-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow">Agent Conversation</p>
+                  <h1 id="agent-ui-title">fm-ui</h1>
+                </div>
+                <span class="status-pill warning"><span class="dot waiting"></span> Waiting</span>
+              </div>
+              <div class="empty-state">
+                <h2>Waiting on checks</h2>
+                <p>The agent is deliberately waiting for an external result. It is not blocked and does not need a decision.</p>
+              </div>
+            </section>
+
+            <section class="screen" id="agent-blocked" aria-labelledby="agent-blocked-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow critical">Blocked Agent</p>
+                  <h1 id="agent-blocked-title">fm-release</h1>
+                </div>
+                <span class="status-pill critical"><span class="dot blocked"></span> Blocked</span>
+              </div>
+              <article class="action-card selected">
+                <h2>Release credentials unavailable</h2>
+                <p>The release worker cannot continue without a scoped credential decision. This state belongs in Attention when captain action is required.</p>
+                <div class="card-actions">
+                  <a class="button primary" href="#attention" data-route="attention">Open Attention</a>
+                </div>
+              </article>
+            </section>
+
+            <section class="screen" id="activity" aria-labelledby="activity-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow">Recent Activity</p>
+                  <h1 id="activity-title">Meaningful outcomes</h1>
+                </div>
+              </div>
+              <ol class="timeline">
+                <li><a href="#pr-brief" data-route="pr-brief">PR #142 opened for review</a><time>15m</time></li>
+                <li><a href="#agent-auth" data-route="agent-auth">fm-auth completed callback audit</a><time>21m</time></li>
+                <li><a href="#agent-ui" data-route="agent-ui">fm-ui waiting on browser pass</a><time>34m</time></li>
+                <li><a href="#states" data-route="states">Network recovered after reconnecting</a><time>1h</time></li>
+              </ol>
+            </section>
+
+            <section class="screen" id="connections" aria-labelledby="connections-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow violet">Connections</p>
+                  <h1 id="connections-title">Authenticated services</h1>
+                </div>
+              </div>
+              <div class="stack">
+                <article class="connection-card">
+                  <h2>GitHub</h2>
+                  <p><span class="dot active"></span> Demo connected state; production must use real OAuth/account health.</p>
+                  <button class="button" type="button" data-demo-toast="Reconnect requires a real OAuth flow in production.">Reconnect</button>
+                </article>
+                <article class="connection-card">
+                  <h2>Jira</h2>
+                  <p><span class="dot waiting"></span> Authorization required.</p>
+                  <button class="button primary" type="button" data-demo-toast="Would start scoped OAuth in production.">Connect</button>
+                </article>
+                <article class="connection-card">
+                  <h2>Microsoft Teams</h2>
+                  <p><span class="dot blocked"></span> Permission denied by tenant/admin policy.</p>
+                  <button class="button" type="button" data-demo-toast="Shows permission boundary, not a fake connected toggle.">Details</button>
+                </article>
+                <article class="connection-card">
+                  <h2>OAuth failure</h2>
+                  <p>Callback failed or expired. The user can retry without implying access was granted.</p>
+                  <button class="button" type="button" data-demo-toast="Retry remains a static wireframe state.">Retry OAuth</button>
+                </article>
+              </div>
+            </section>
+
+            <section class="screen" id="settings" aria-labelledby="settings-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow">Settings / Appearance</p>
+                  <h1 id="settings-title">Background</h1>
+                </div>
+                <button class="button" type="button" id="theme-toggle">Light mode</button>
+              </div>
+              <div class="segmented" role="tablist" aria-label="Background mode">
+                <button type="button" class="active" data-mode="automatic">Automatic</button>
+                <button type="button" data-mode="built-in">Built-in</button>
+                <button type="button" data-mode="custom">Custom</button>
+              </div>
+              <div class="background-grid" aria-label="Built-in background choices">
+                <button type="button" data-bg="clear"><img src="assets/brand/Magistrate_Brand_Package/05_Marketing/Backgrounds/PNG/clear.png" alt=""><span>Clear</span></button>
+                <button type="button" data-bg="cloudy"><img src="assets/brand/Magistrate_Brand_Package/05_Marketing/Backgrounds/PNG/cloudy.png" alt=""><span>Cloudy</span></button>
+                <button type="button" data-bg="rain"><img src="assets/brand/Magistrate_Brand_Package/05_Marketing/Backgrounds/PNG/rain.png" alt=""><span>Rain</span></button>
+                <button type="button" data-bg="storm"><img src="assets/brand/Magistrate_Brand_Package/05_Marketing/Backgrounds/PNG/storm.png" alt=""><span>Storm</span></button>
+                <button type="button" data-bg="sunset"><img src="assets/brand/Magistrate_Brand_Package/05_Marketing/Backgrounds/PNG/sunset.png" alt=""><span>Sunset</span></button>
+                <button type="button" data-bg="night"><img src="assets/brand/Magistrate_Brand_Package/05_Marketing/Backgrounds/PNG/night.png" alt=""><span>Night</span></button>
+                <button type="button" data-bg="minimal-dark"><img src="assets/brand/Magistrate_Brand_Package/05_Marketing/Backgrounds/PNG/minimal-dark.png" alt=""><span>Minimal dark</span></button>
+              </div>
+              <article class="action-card compact">
+                <h2>Custom image placeholder</h2>
+                <p>Production must persist uploaded photos durably and keep an adaptive readability layer between image and content.</p>
+                <button class="button" type="button" data-demo-toast="Static custom-upload placeholder.">Choose image</button>
+              </article>
+            </section>
+
+            <section class="screen" id="voice" aria-labelledby="voice-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow cyan">Conversational Voice</p>
+                  <h1 id="voice-title">Listening in chat</h1>
+                </div>
+                <span class="status-pill cyan" id="voice-state">Listening</span>
+              </div>
+              <article class="voice-panel">
+                <img class="voice-mark" src="assets/brand/Magistrate_Brand_Package/01_Logos/SVG/magistrate-mark-active.svg" alt="">
+                <p id="live-transcript">"Deploy it after the tests pass..."</p>
+                <div class="waveform" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                <div class="voice-flow" aria-label="Voice session states">
+                  <span>Listening</span><span>Thinking</span><span>Speaking</span><span>Listening</span>
+                </div>
+              </article>
+              <div class="card-actions">
+                <button class="button primary" type="button" id="cycle-voice">Advance state</button>
+                <a class="button" href="#immersive-voice" data-route="immersive-voice">Voice Call</a>
+                <button class="button danger" type="button" data-demo-toast="End Conversation requires confirmation in production.">End Conversation</button>
+              </div>
+            </section>
+
+            <section class="screen immersive" id="immersive-voice" aria-labelledby="immersive-title">
+              <h1 id="immersive-title">Voice Call</h1>
+              <img src="assets/brand/Magistrate_Brand_Package/05_Marketing/magistrate-organic-active-portrait.png" alt="Active Magistrate voice mark">
+              <div class="waveform immersive-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="card-actions centered">
+                <a class="button primary" href="#voice" data-route="voice">Return to chat voice</a>
+                <a class="button danger" href="#chat" data-route="chat">End Conversation</a>
+              </div>
+            </section>
+
+            <section class="screen" id="states" aria-labelledby="states-title">
+              <div class="screen-head">
+                <div>
+                  <p class="eyebrow">Validation States</p>
+                  <h1 id="states-title">Honest system states</h1>
+                </div>
+              </div>
+              <div class="state-grid">
+                <button type="button" data-state="loading">Loading</button>
+                <button type="button" data-state="reconnecting">Reconnecting</button>
+                <button type="button" data-state="offline">Offline</button>
+                <button type="button" data-state="permission">Permission denied</button>
+                <button type="button" data-state="empty">Empty</button>
+                <button type="button" data-state="clear">Clear</button>
+              </div>
+              <div class="empty-state" id="state-preview">
+                <h2>Choose a state</h2>
+                <p>Each state disables or labels behavior instead of filling the product with fake data.</p>
+              </div>
+            </section>
+          </div>
+
+          <form class="composer" aria-label="Message composer">
+            <button type="button" aria-label="Attach file">+</button>
+            <label class="sr-only" for="message">Message Firstmate</label>
+            <input id="message" name="message" type="text" placeholder="Message Firstmate..." autocomplete="off">
+            <a class="mic-button" href="#voice" data-route="voice" aria-label="Start conversational voice"></a>
+            <button type="button" aria-label="Send message">Send</button>
+          </form>
+        </section>
+      </main>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+    <script src="wireframe.js"></script>
+  </body>
+</html>
