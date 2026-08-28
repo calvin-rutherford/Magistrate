@@ -5,7 +5,7 @@ const test = require('node:test');
 const puppeteer = require('puppeteer-core');
 
 const PORT = 8094;
-const BASE = `http://127.0.0.1:${PORT}`;
+const BASE = `http://127.0.0.1:${PORT}/diagnostics`;
 let server;
 let browser;
 
