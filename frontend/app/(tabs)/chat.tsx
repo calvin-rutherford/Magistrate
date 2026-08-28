@@ -1,62 +1,91 @@
-import React, { useCallback, useEffect, useState, useRef } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput, NativeSyntheticEvent, NativeScrollEvent, Platform } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Image, NativeScrollEvent, NativeSyntheticEvent, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useColorScheme, useWindowDimensions, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
-import { GlassDrawer } from '../../src/components/GlassDrawer';
-import { GlassSurface } from '../../src/components/GlassSurface';
-import { TerminusControlBar } from '../../src/components/TerminusControlBar';
 import { CapabilitySelect } from '../../src/components/CapabilitySelect';
-import { ExecutionHarness, fetchAgents, fetchCaptainOutput, fetchExecutionCapabilities, fetchGitHubPRs, fetchUnifiedAttention, sendCaptainPrompt, sendAgentKey } from '../../src/api/client';
-import { summarizeAgents } from '../../src/services/AgentStatus';
+import { AgentInfo, AuthProviderInfo, ExecutionHarness, fetchAgents, fetchAuthProviders, fetchCaptainOutput, fetchExecutionCapabilities, fetchGitHubPRs, fetchUnifiedAttention, GitHubPR, sendCaptainPrompt, UnifiedAttentionRecord } from '../../src/api/client';
+import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
+import { openExternalUrl } from '../../src/utils/externalLinks';
 
-export function ChatCanvas({ target = 'captain' }: { target?: string }) {
+const markPaper = require('../../assets/images/magistrate-mark-paper-256.png');
+const markInk = require('../../assets/images/magistrate-mark-ink-256.png');
 
-  const [outputLines, setOutputLines] = useState<string[]>([]);
-  const [promptText, setPromptText] = useState<string>('');
-  const [isScrolledUp, setIsScrolledUp] = useState<boolean>(false);
-  const [hasNewMessages, setHasNewMessages] = useState<boolean>(false);
-  const [isThinking, setIsThinking] = useState<boolean>(false);
+const brand = {
+  obsidian: '#05070A',
+  command: '#111722',
+  paper: '#F7F8FA',
+  ink: '#11151B',
+  surfaceGray: '#EEF1F4',
+  mutedDark: '#8E99AA',
+  mutedLight: '#667180',
+  borderDark: '#2A3542',
+  borderLight: '#D5DAE2',
+  cyan: '#24D8FF',
+  violet: '#8B6CFF',
+  success: '#43D17A',
+  attention: '#FFB347',
+  critical: '#FF625F'
+};
+
+type ChatMessage = { id: string; role: 'user' | 'assistant' | 'system'; text: string; meta?: string };
+type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | 'settings' | null;
+
+const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
+const isDarkTheme = (scheme: string | null | undefined) => scheme !== 'light';
+
+function statusColor(status?: string | null) {
+  const normalized = (status || '').toLowerCase();
+  if (['working', 'running', 'active', 'executing'].includes(normalized)) return brand.success;
+  if (['blocked', 'failed', 'error'].includes(normalized)) return brand.critical;
+  if (['waiting', 'paused'].includes(normalized)) return brand.attention;
+  return brand.mutedDark;
+}
+
+function BrandMark({ dark, size = 34 }: { dark: boolean; size?: number }) {
+  return <Image source={dark ? markPaper : markInk} style={{ width: size, height: size }} resizeMode="contain" accessibilityIgnoresInvertColors />;
+}
+
+export function ChatCanvas({ target = 'captain', onDrawerToggle = () => {}, drawerOpen = false }: { target?: string; onDrawerToggle?: () => void; drawerOpen?: boolean }) {
+  const router = useRouter();
+  const colorScheme = useColorScheme();
+  const dark = isDarkTheme(colorScheme);
+  const text = dark ? '#F4F5F7' : brand.ink;
+  const muted = dark ? brand.mutedDark : brand.mutedLight;
+  const userBubble = dark ? 'rgba(17,23,34,0.86)' : brand.surfaceGray;
+  const surface = dark ? 'rgba(10,14,20,0.72)' : 'rgba(255,255,255,0.82)';
+  const border = dark ? brand.borderDark : brand.borderLight;
+
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [promptText, setPromptText] = useState('');
+  const [isThinking, setIsThinking] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [outputPreview, setOutputPreview] = useState<string[]>([]);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
+  const [hasNewMessages, setHasNewMessages] = useState(false);
+  const [micInline, setMicInline] = useState(false);
   const [harnesses, setHarnesses] = useState<ExecutionHarness[]>([]);
   const [selectedHarness, setSelectedHarness] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
   const [capabilityLoading, setCapabilityLoading] = useState(true);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
-
-  const scrollRef = useRef<FlatList<string>>(null);
+  const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
-  const isScrolledUpRef = useRef(false);
-  const touchYRef = useRef<number | null>(null);
-  const requestInFlightRef = useRef(false);
+  const atBottomRef = useRef(true);
 
-  const loadOutput = useCallback(async () => {
-    if (requestInFlightRef.current) return;
-    requestInFlightRef.current = true;
+  const targetLabel = target === 'captain' ? 'Firstmate' : target;
+
+  const loadDiagnostics = useCallback(async () => {
     try {
       const data = await fetchCaptainOutput();
-      const newText = data?.output || 'No output.';
-      const newLines = newText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-      if (newLines.length > 1 && newLines[newLines.length - 1] === '') newLines.pop();
-      setOutputLines(prev => {
-        const unchanged = prev.length === newLines.length && prev.every((line, index) => line === newLines[index]);
-        if (!unchanged) {
-          if (isScrolledUpRef.current) setHasNewMessages(true);
-          return newLines;
-        }
-        return prev;
-      });
-    } catch (e) {
-      console.error('Chat output load error:', e);
-    } finally {
-      requestInFlightRef.current = false;
+      const lines = (data.output || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(Boolean);
+      setOutputPreview(lines.slice(-160));
+    } catch (error) {
+      setOutputPreview([errorText(error, 'Diagnostics could not be loaded.')]);
     }
   }, []);
 
-  useEffect(() => {
-    loadOutput();
-    const interval = setInterval(loadOutput, 2000);
-    return () => clearInterval(interval);
-  }, [loadOutput]);
+  useEffect(() => { void loadDiagnostics(); const interval = setInterval(loadDiagnostics, 5000); return () => clearInterval(interval); }, [loadDiagnostics]);
 
   useEffect(() => {
     let mounted = true;
@@ -70,20 +99,13 @@ export function ChatCanvas({ target = 'captain' }: { target?: string }) {
         setSelectedHarness(firstHarness?.id || '');
         setSelectedModel(firstHarness?.models[0]?.id || '');
       })
-      .catch(error => {
-        if (mounted) setCapabilityError(error instanceof Error ? error.message : 'Execution options could not be loaded.');
-      })
-      .finally(() => {
-        if (mounted) setCapabilityLoading(false);
-      });
+      .catch(error => { if (mounted) setCapabilityError(errorText(error, 'Execution options could not be loaded.')); })
+      .finally(() => { if (mounted) setCapabilityLoading(false); });
     return () => { mounted = false; };
   }, []);
 
   useEffect(() => {
     if (Platform.OS !== 'web') return;
-    // A cold Expo web mount can briefly restore focus to body while the
-    // terminal and sidebar settle. Keep ordinary typing directed to Chat so
-    // the composer remains usable even if that focus handoff occurs.
     const recoverComposerFocus = (event: KeyboardEvent) => {
       const active = document.activeElement;
       if (active && active !== document.body) return;
@@ -93,363 +115,357 @@ export function ChatCanvas({ target = 'captain' }: { target?: string }) {
       event.preventDefault();
     };
     window.addEventListener('keydown', recoverComposerFocus, true);
-    const focusComposer = (event: MouseEvent | PointerEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.getAttribute('data-testid') !== 'captain-prompt') return;
-      requestAnimationFrame(() => target.focus());
-    };
-    document.addEventListener('mousedown', focusComposer, true);
-    document.addEventListener('pointerdown', focusComposer, true);
-    return () => {
-      window.removeEventListener('keydown', recoverComposerFocus, true);
-      document.removeEventListener('mousedown', focusComposer, true);
-      document.removeEventListener('pointerdown', focusComposer, true);
-    };
+    return () => window.removeEventListener('keydown', recoverComposerFocus, true);
   }, []);
-
-  const handleTerminalWheel = (event: any) => {
-    if (Platform.OS !== 'web') return;
-    const terminal = event.currentTarget as HTMLElement | null;
-    const deltaY = event.nativeEvent?.deltaY ?? event.deltaY;
-    if (!terminal || typeof deltaY !== 'number') return;
-    event.preventDefault?.();
-    isScrolledUpRef.current = true;
-    terminal.scrollTop += deltaY;
-  };
-
-  const handleTerminalKeyDown = (event: any) => {
-    if (Platform.OS !== 'web' || !['PageUp', 'PageDown'].includes(event.key)) return;
-    const terminal = event.currentTarget as HTMLElement | null;
-    if (!terminal) return;
-    event.preventDefault?.();
-    isScrolledUpRef.current = true;
-    const direction = event.key === 'PageUp' ? -1 : 1;
-    terminal.scrollTop = Math.max(0, Math.min(terminal.scrollHeight - terminal.clientHeight, terminal.scrollTop + direction * terminal.clientHeight));
-  };
-
-  const handleTerminalTouchStart = (event: any) => {
-    const touch = event.nativeEvent?.touches?.[0] ?? event.nativeEvent?.changedTouches?.[0] ?? event.touches?.[0];
-    const touchY = touch?.pageY ?? touch?.clientY;
-    touchYRef.current = typeof touchY === 'number' ? touchY : null;
-  };
-
-  const handleTerminalTouchMove = (event: any) => {
-    const terminal = (event.currentTarget || event.target) as HTMLElement | null;
-    const touch = event.nativeEvent?.touches?.[0] ?? event.nativeEvent?.changedTouches?.[0] ?? event.touches?.[0];
-    const touchY = touch?.pageY ?? touch?.clientY;
-    if (!terminal || typeof touchY !== 'number' || touchYRef.current === null) return;
-    const deltaY = touchYRef.current - touchY;
-    if (deltaY === 0) return;
-    touchYRef.current = touchY;
-    isScrolledUpRef.current = true;
-    terminal.scrollTop = Math.max(0, Math.min(terminal.scrollHeight - terminal.clientHeight, terminal.scrollTop + deltaY));
-  };
-
-  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const isAtBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 35;
-    isScrolledUpRef.current = !isAtBottom;
-    if (isAtBottom) {
-      setIsScrolledUp(false);
-      setHasNewMessages(false);
-    } else {
-      setIsScrolledUp(true);
-    }
-  };
-
-  const scrollToBottom = () => {
-    isScrolledUpRef.current = false;
-    setIsScrolledUp(false);
-    setHasNewMessages(false);
-    // A non-animated jump avoids intermediate scroll events switching follow
-    // mode back off while a virtualized list is measuring its final rows.
-    scrollRef.current?.scrollToEnd({ animated: false });
-  };
-
-  const handleSend = async () => {
-    const text = promptText.trim();
-    if (!text) {
-      try {
-        const response = await sendAgentKey('captain', 'Enter');
-        if (response?.status === 'error' || response?.error) {
-          throw new Error(response.error || 'The terminal did not accept Enter.');
-        }
-        setSendError(null);
-        await loadOutput();
-      } catch (e) {
-        setSendError(e instanceof Error ? e.message : 'The terminal did not accept Enter.');
-      }
-      return;
-    }
-
-    if (capabilityLoading) {
-      setSendError('Execution options are still loading.');
-      return;
-    }
-    if (capabilityError) {
-      setSendError('Execution options are unavailable.');
-      return;
-    }
-    if (!selectedHarness || !selectedModel) {
-      setSendError('Select a verified harness and model before sending.');
-      return;
-    }
-
-    setPromptText('');
-    setSendError(null);
-    setIsThinking(true);
-    try {
-      const response = await sendCaptainPrompt(text, 'iphone', target, selectedHarness, selectedModel);
-      if (response?.status === 'error' || response?.error) {
-        throw new Error(response.error || 'The prompt was not accepted.');
-      }
-      setTimeout(() => {
-        loadOutput();
-        setIsThinking(false);
-        scrollToBottom();
-      }, 600);
-    } catch (e) {
-      console.error('Send prompt error:', e);
-      setPromptText(text);
-      setSendError(e instanceof Error ? e.message : 'The prompt could not be sent.');
-      setIsThinking(false);
-    }
-  };
 
   const selectedHarnessOption = harnesses.find(harness => harness.id === selectedHarness);
   const models = selectedHarnessOption?.models || [];
 
-  return (
-    <View style={styles.canvas}>
-      <View testID="chat-canvas" style={styles.chatContainer}>
-        <View style={styles.canvasTitleRow}>
-          <View style={styles.canvasTitleGroup}>
-            <Text style={styles.canvasEyebrow}>AI CHAT / COMMAND CONSOLE</Text>
-            <Text testID="chat-target" style={styles.canvasTitle}>{target === 'captain' ? 'Captain' : target}</Text>
-          </View>
-          <View style={styles.targetBadge}><Text style={styles.targetBadgeText}>{target === 'captain' ? 'CAPTAIN' : 'AGENT TARGET'}</Text></View>
-        </View>
-        <GlassSurface
-          variant="surface"
-          intensity={60}
-          style={styles.terminalGlassBox}
-          contentStyle={styles.terminalGlassContent}
-        >
-          <View style={styles.terminalHeaderRow}>
-            <View style={[styles.statusDot, isThinking ? styles.dotThinking : undefined]} />
-            <View>
-              <Text style={styles.terminalTitle}>ACTIVITY / TERMINAL INSPECTOR</Text>
-              <Text style={styles.terminalSubtitle}>Raw Herdr output · not a conversation transcript</Text>
-            </View>
-          </View>
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
+    atBottomRef.current = atBottom;
+    setIsScrolledUp(!atBottom);
+    if (atBottom) setHasNewMessages(false);
+  };
 
-          <View style={styles.terminalScrollContainer}>
-            <FlatList
-              ref={scrollRef}
-              testID="terminal-scroll"
-              style={styles.terminalScroll}
-              contentContainerStyle={styles.terminalScrollContent}
-              data={outputLines}
-              renderItem={({ item }) => <Text style={styles.terminalText}>{item || ' '}</Text>}
-              keyExtractor={(_, index) => String(index)}
-              initialNumToRender={40}
-              maxToRenderPerBatch={40}
-              updateCellsBatchingPeriod={25}
-              windowSize={15}
-              onScroll={handleScroll}
-              scrollEventThrottle={16}
-              nestedScrollEnabled
-              keyboardShouldPersistTaps="handled"
-              accessibilityLabel="Captain terminal output"
-              // Makes the web terminal keyboard-scrollable without changing
-              // touch or native accessibility behavior.
-              {...({ tabIndex: 0 } as any)}
-              {...({ onWheel: handleTerminalWheel } as any)}
-              {...({ onKeyDown: handleTerminalKeyDown } as any)}
-              {...({ onTouchStart: handleTerminalTouchStart, onTouchMove: handleTerminalTouchMove } as any)}
-              onContentSizeChange={() => {
-                if (!isScrolledUpRef.current) {
-                  scrollRef.current?.scrollToEnd({ animated: false });
-                }
+  const appendMessage = (message: ChatMessage) => {
+    setMessages(current => [...current, message]);
+    if (!atBottomRef.current) setHasNewMessages(true);
+    requestAnimationFrame?.(() => { if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: true }); });
+  };
+
+  const handleSend = async () => {
+    const trimmed = promptText.trim();
+    if (!trimmed) {
+      router.push('/voice' as any);
+      return;
+    }
+    if (capabilityLoading) { setSendError('Execution options are still loading.'); return; }
+    if (capabilityError) { setSendError('Execution options are unavailable.'); return; }
+    if (!selectedHarness || !selectedModel) { setSendError('Select a verified harness and model before sending.'); return; }
+    setPromptText('');
+    setSendError(null);
+    setIsThinking(true);
+    appendMessage({ id: `u-${Date.now()}`, role: 'user', text: trimmed });
+    try {
+      const response = await sendCaptainPrompt(trimmed, 'iphone', target, selectedHarness, selectedModel);
+      if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The prompt was not accepted.');
+      appendMessage({ id: `s-${Date.now()}`, role: 'system', meta: 'Submitted', text: 'Sent to Firstmate. Waiting for structured conversation output from the runner.' });
+      void loadDiagnostics();
+    } catch (error) {
+      setPromptText(trimmed);
+      setSendError(errorText(error, 'The prompt could not be sent.'));
+      appendMessage({ id: `e-${Date.now()}`, role: 'system', meta: 'Send failed', text: errorText(error, 'The prompt could not be sent.') });
+    } finally {
+      setIsThinking(false);
+    }
+  };
+
+  const composerIcon = promptText.trim() ? '↑' : '◉';
+
+  return (
+    <View testID="branded-chat-shell" style={styles.canvas}>
+      <View style={styles.shellHeader}>
+        <TouchableOpacity
+          testID="brand-drawer-toggle"
+          accessibilityRole="button"
+          accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'}
+          accessibilityState={{ expanded: drawerOpen }}
+          onPress={onDrawerToggle}
+          style={[styles.logoButton, { backgroundColor: surface }]}
+          activeOpacity={0.8}
+        >
+          <BrandMark dark={dark} size={32} />
+        </TouchableOpacity>
+        <View style={styles.headerControls}>
+          <View style={styles.compactSelectWrap}>
+            <CapabilitySelect
+              testID="harness-select"
+              label="MODEL"
+              value={selectedHarness}
+              options={harnesses.map(harness => ({ id: harness.id, label: harness.label }))}
+              loading={capabilityLoading}
+              error={capabilityError}
+              emptyMessage="No verified models configured."
+              disabled={isThinking}
+              onChange={value => {
+                const harness = harnesses.find(option => option.id === value);
+                setSelectedHarness(value);
+                setSelectedModel(harness?.models[0]?.id || '');
+                setSendError(null);
               }}
             />
-
-            {(hasNewMessages || isScrolledUp) ? (
-              <TouchableOpacity
-                testID="jump-to-latest"
-                accessibilityRole="button"
-                accessibilityLabel="Jump to latest terminal output"
-                style={styles.scrollBadgeBtn}
-                onPress={scrollToBottom}
-                activeOpacity={0.8}
-              >
-                <GlassSurface variant="control" style={styles.scrollBadgeSurface}>
-                  <Text style={styles.scrollBadgeText}>
-                    {hasNewMessages ? '↓ NEW MESSAGES (TAP TO SCROLL)' : '↓ SCROLL TO BOTTOM'}
-                  </Text>
-                </GlassSurface>
-              </TouchableOpacity>
-            ) : null}
           </View>
-        </GlassSurface>
-
-        {capabilityLoading ? (
-          <View testID="capability-loading" style={styles.executionSelection}><Text style={styles.capabilityLoadingText}>Loading verified execution options…</Text></View>
-        ) : <View style={styles.executionSelection}>
-          <CapabilitySelect
-            testID="harness-select"
-            label="HARNESS"
-            value={selectedHarness}
-            options={harnesses.map(harness => ({ id: harness.id, label: harness.label }))}
-            loading={capabilityLoading}
-            error={capabilityError}
-            emptyMessage="No verified harnesses configured."
-            disabled={isThinking}
-            onChange={value => {
-              const harness = harnesses.find(option => option.id === value);
-              setSelectedHarness(value);
-              setSelectedModel(harness?.models[0]?.id || '');
-              setSendError(null);
-            }}
-          />
-          <CapabilitySelect
-            testID="model-select"
-            label="MODEL"
-            value={selectedModel}
-            options={models}
-            loading={capabilityLoading}
-            error={capabilityError || (selectedHarness && harnesses.length > 0 && models.length === 0 ? 'No models are available for this harness.' : null)}
-            emptyMessage={selectedHarness ? 'No models available for this harness.' : 'Select a harness first.'}
-            disabled={isThinking || !selectedHarness}
-            onChange={value => { setSelectedModel(value); setSendError(null); }}
-          />
-        </View>}
-
-        <TerminusControlBar target="captain" onKeySent={() => setTimeout(loadOutput, 400)} />
-
-        <View style={styles.inputComposerRow}>
-          <View style={styles.inputWrapper}>
-            <TextInput
-              ref={inputRef}
-              testID="captain-prompt"
-              style={styles.textInputInner}
-              placeholder={`Message ${target === 'captain' ? 'Captain' : target}`}
-              accessibilityLabel={`Message ${target === 'captain' ? 'Captain' : target}`}
-              placeholderTextColor="rgba(255, 255, 255, 0.45)"
-              value={promptText}
-              onChangeText={setPromptText}
-              onSubmitEditing={handleSend}
-              {...({ onPointerDown: Platform.OS === 'web' ? (event: any) => event.currentTarget.focus() : undefined } as any)}
-              {...({ onTouchStart: Platform.OS === 'web' ? (event: any) => event.currentTarget.focus() : undefined } as any)}
-              {...({ onClick: Platform.OS === 'web' ? (event: any) => event.currentTarget.focus() : undefined } as any)}
-              returnKeyType="send"
-              editable={!isThinking}
+          <View style={styles.compactSelectWrap}>
+            <CapabilitySelect
+              testID="model-select"
+              label="VARIANT"
+              value={selectedModel}
+              options={models}
+              loading={capabilityLoading}
+              error={capabilityError || (selectedHarness && harnesses.length > 0 && models.length === 0 ? 'No variants are available for this model.' : null)}
+              emptyMessage={selectedHarness ? 'No variants available.' : 'Select a model first.'}
+              disabled={isThinking || !selectedHarness}
+              onChange={value => { setSelectedModel(value); setSendError(null); }}
             />
-            <View style={styles.inputAccessories}>
-              <View style={styles.inputPill}><Text style={styles.inputPillText}>Paste</Text></View>
-              <View style={styles.inputPill}><Text style={styles.inputPillText}>AI</Text></View>
-            </View>
           </View>
-          <TouchableOpacity
-            testID="send-captain-prompt"
-            accessibilityRole="button"
-            accessibilityLabel="Send command to captain"
-            accessibilityState={{ disabled: isThinking, busy: isThinking }}
-            // React Native's responder can lose a web click while the
-            // virtualized terminal is settling; keep the browser composer
-            // action explicit without changing native behavior.
-            onPress={handleSend}
-            disabled={isThinking}
-            style={[styles.sendBtn, isThinking ? styles.sendBtnDisabled : undefined]}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.sendBtnText}>{isThinking ? '…' : 'SEND'}</Text>
-          </TouchableOpacity>
+          <View style={[styles.liveChip, { borderColor: border }]}><View style={[styles.tinyDot, { backgroundColor: isThinking ? brand.violet : brand.success }]} /><Text style={[styles.liveText, { color: muted }]}>{isThinking ? 'Thinking' : 'Live'}</Text></View>
         </View>
-        {sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}
       </View>
 
+      <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" accessibilityLabel={`${targetLabel} conversation history`}>
+        {messages.length === 0 ? (
+          <View style={styles.emptyConversation}>
+            <Text style={[styles.conversationEyebrow, { color: muted }]}>Firstmate / Conversation</Text>
+            <Text testID="chat-target" style={[styles.conversationTitle, { color: text }]}>{targetLabel}</Text>
+            <Text style={[styles.emptyCopy, { color: muted }]}>Ask Firstmate anything. Structured replies will appear here when the runner provides them; raw terminal output stays in Diagnostics.</Text>
+          </View>
+        ) : null}
+        {messages.map(message => (
+          <View key={message.id} style={[styles.messageBubble, message.role === 'user' ? styles.userMessage : styles.assistantMessage, { backgroundColor: message.role === 'user' ? userBubble : 'transparent' }]}>
+            {message.role !== 'user' ? <Text style={[styles.messageSpeaker, { color: text }]}><View style={[styles.tinyDot, { backgroundColor: message.role === 'system' ? brand.cyan : brand.success }]} /> {message.meta || targetLabel}</Text> : null}
+            <Text style={[styles.messageText, { color: text }]}>{message.text}</Text>
+          </View>
+        ))}
+        {diagnosticsOpen ? (
+          <View testID="terminal-scroll" style={[styles.diagnosticsBox, { borderColor: border, backgroundColor: dark ? '#05070A' : '#FFFFFF' }]}>
+            <Text style={[styles.diagnosticsTitle, { color: muted }]}>Diagnostics · raw runner output</Text>
+            {outputPreview.length ? outputPreview.map((line, index) => <Text key={`${index}-${line}`} style={[styles.diagnosticsLine, { color: text }]}>{line || ' '}</Text>) : <Text style={[styles.diagnosticsLine, { color: muted }]}>No retained runner output is available.</Text>}
+          </View>
+        ) : null}
+      </ScrollView>
+
+      {(hasNewMessages || isScrolledUp) ? (
+        <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { atBottomRef.current = true; setHasNewMessages(false); setIsScrolledUp(false); scrollRef.current?.scrollToEnd({ animated: true }); }}>
+          <Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text>
+        </TouchableOpacity>
+      ) : null}
+
+      <View style={[styles.composer, { borderColor: border, backgroundColor: surface }]}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Attach file" style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: muted }]}>＋</Text></TouchableOpacity>
+        <TextInput
+          ref={inputRef}
+          testID="captain-prompt"
+          style={[styles.composerInput, { color: text }]}
+          placeholder={`Message ${targetLabel}…`}
+          placeholderTextColor={muted}
+          value={promptText}
+          onChangeText={setPromptText}
+          onSubmitEditing={handleSend}
+          returnKeyType="send"
+          editable={!isThinking}
+          accessibilityLabel={`Message ${targetLabel}`}
+          {...({ onPointerDown: Platform.OS === 'web' ? (event: any) => event.currentTarget.focus() : undefined } as any)}
+        />
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel={micInline ? 'Cancel inline microphone' : 'Start inline microphone'} accessibilityState={{ selected: micInline }} style={styles.composerIconButton} onPress={() => setMicInline(value => !value)}>
+          <Text style={[styles.composerIconText, { color: micInline ? brand.cyan : muted }]}>⌕</Text>
+        </TouchableOpacity>
+        <TouchableOpacity testID="send-captain-prompt" accessibilityRole="button" accessibilityLabel={promptText.trim() ? `Send message to ${targetLabel}` : 'Open voice mode'} accessibilityState={{ disabled: isThinking, busy: isThinking }} onPress={handleSend} disabled={isThinking} style={[styles.sendButton, isThinking ? styles.disabled : undefined]}>
+          <Text style={styles.sendButtonText}>{isThinking ? '…' : composerIcon}</Text>
+        </TouchableOpacity>
+      </View>
+      {micInline ? <View style={styles.inlineMic} accessibilityLabel="Inline microphone levels"><Text style={styles.inlineMicMuted}>×</Text>{[0.35, 0.75, 0.5, 0.95, 0.62, 0.82].map((height, index) => <View key={index} style={[styles.levelBar, { height: 24 * height, backgroundColor: index > 3 ? brand.violet : brand.cyan }]} />)}<Text style={styles.inlineMicMuted}>✓</Text></View> : null}
+      <View style={styles.chatFooterRow}>
+        <TouchableOpacity testID="diagnostics-toggle" accessibilityRole="button" accessibilityLabel={diagnosticsOpen ? 'Hide diagnostics' : 'Show diagnostics'} onPress={() => setDiagnosticsOpen(value => !value)} style={styles.diagnosticsToggle}><Text style={[styles.diagnosticsToggleText, { color: muted }]}>{diagnosticsOpen ? 'Hide diagnostics' : 'Diagnostics'}</Text></TouchableOpacity>
+        {sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}
+      </View>
     </View>
   );
 }
 
-export default function ChatScreen() {
+function DrawerPanel({ open, dark, isNarrow, onToggle, activeSection, setActiveSection, accountActive, setAccountActive, agents, attention, prs, providers, errors, loading }: {
+  open: boolean;
+  dark: boolean;
+  isNarrow: boolean;
+  onToggle: () => void;
+  activeSection: DrawerSection;
+  setActiveSection: (section: DrawerSection) => void;
+  accountActive: boolean;
+  setAccountActive: (active: boolean) => void;
+  agents: AgentInfo[];
+  attention: UnifiedAttentionRecord[];
+  prs: GitHubPR[];
+  providers: AuthProviderInfo[];
+  errors: { agents?: string | null; attention?: string | null; prs?: string | null; providers?: string | null };
+  loading: boolean;
+}) {
   const router = useRouter();
+  const text = dark ? '#F4F5F7' : brand.ink;
+  const muted = dark ? brand.mutedDark : brand.mutedLight;
+  const surface = dark ? 'rgba(10,14,20,0.86)' : 'rgba(255,255,255,0.9)';
+  const border = dark ? brand.borderDark : brand.borderLight;
+  const fleet = summarizeAgents(agents);
+  const activeAttention = attention.filter(item => item.requires_action !== false);
+
+  const toggleSection = (section: DrawerSection) => setActiveSection(activeSection === section ? null : section);
+  const openAttentionItem = async (item: UnifiedAttentionRecord) => {
+    if (item.url?.startsWith('/')) router.push(item.url as any);
+    else {
+      const result = await openExternalUrl(item.external_url || item.url);
+      if (!result.ok) Alert.alert('Unable to open attention item', result.message);
+    }
+  };
+
+  const rows = [
+    { key: 'attention' as const, icon: '!', title: 'Attention', count: activeAttention.length },
+    { key: 'fleet' as const, icon: '::', title: 'Fleet Summary', count: agents.length },
+    { key: 'activity' as const, icon: '⌁', title: 'Recent Activity' },
+    { key: 'connections' as const, icon: '⌘', title: 'Connections' }
+  ];
+
+  return (
+    <View pointerEvents={open ? 'auto' : 'none'} testID="magistrate-drawer" style={[styles.drawer, { width: open ? (isNarrow ? '86%' : 318) : 0, opacity: open ? 1 : 0, backgroundColor: surface, borderColor: border }, isNarrow ? styles.drawerMobile : undefined]}>
+      {open ? <>
+        <View style={styles.drawerBrandRow}>
+          <TouchableOpacity testID="drawer-brand-toggle" accessibilityRole="button" accessibilityLabel="Collapse Magistrate drawer" accessibilityState={{ expanded: open }} onPress={onToggle} style={styles.drawerMarkButton}>
+            <BrandMark dark={dark} size={34} />
+          </TouchableOpacity>
+          <Text style={[styles.drawerWordmark, { color: text }]}>melkezic</Text>
+        </View>
+        <ScrollView style={styles.drawerScroll} contentContainerStyle={styles.drawerScrollContent}>
+          {rows.map(row => (
+            <View key={row.key}>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={`${row.title} section`} accessibilityState={{ expanded: activeSection === row.key }} onPress={() => toggleSection(row.key)} style={styles.drawerRow}>
+                <Text style={[styles.drawerIcon, { color: muted }]}>{row.icon}</Text>
+                <Text style={[styles.drawerRowText, { color: text }]}>{row.title}</Text>
+                {typeof row.count === 'number' ? <Text style={[styles.drawerCount, { color: muted }]}>{row.count}</Text> : null}
+              </TouchableOpacity>
+              {activeSection === row.key ? <View style={styles.sectionPanel}>{row.key === 'attention' ? (
+                loading ? <PanelText text="Loading attention…" muted={muted} /> : errors.attention ? <PanelText text={errors.attention} muted={brand.critical} /> : activeAttention.length === 0 ? <PanelText text="Nothing requires your attention." muted={muted} /> : activeAttention.slice(0, 5).map(item => <TouchableOpacity key={item.id} testID={`attention-item-${item.id}`} onPress={() => void openAttentionItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.provider} · {item.subtitle}</Text></TouchableOpacity>)
+              ) : row.key === 'fleet' ? (
+                loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No live agent sessions reported by Herdr." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <TouchableOpacity key={agent.id} onPress={() => router.push({ pathname: '/chat', params: { agentId: agent.id } } as any)} style={styles.fleetPanelRow}><View style={[styles.tinyDot, { backgroundColor: statusColor(agent.status) }]} /><Text style={[styles.fleetPanelName, { color: text }]}>{agent.name || agent.id}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{displayAgentStatus(displayStatus)}</Text></TouchableOpacity>)
+              ) : row.key === 'activity' ? (
+                errors.prs ? <PanelText text={errors.prs} muted={brand.critical} /> : prs.length === 0 ? <PanelText text="No meaningful recent activity is available from the configured providers." muted={muted} /> : prs.slice(0, 4).map(pr => <TouchableOpacity key={pr.id || pr.number} onPress={() => router.push(`/pr-detail?number=${pr.number}` as any)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>PR #{pr.number}: {pr.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{pr.repository} · {pr.review_status}</Text></TouchableOpacity>)
+              ) : (
+                errors.providers ? <PanelText text={errors.providers} muted={brand.critical} /> : providers.length === 0 ? <PanelText text="No connected account data is available. Configure providers from Account when credentials are ready." muted={muted} /> : providers.map(provider => <View key={provider.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{provider.provider}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{provider.status}{provider.username ? ` · ${provider.username}` : ''}</Text></View>)
+              )}</View> : null}
+            </View>
+          ))}
+        </ScrollView>
+        <View style={styles.drawerBottom}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Account" accessibilityState={{ selected: accountActive }} onPress={() => setAccountActive(!accountActive)} style={styles.drawerRow}>
+            <Text style={[styles.drawerIcon, { color: muted }]}>◌</Text><Text style={[styles.drawerRowText, { color: text }]}>Account</Text>
+          </TouchableOpacity>
+          {accountActive ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Settings" accessibilityState={{ expanded: activeSection === 'settings' }} onPress={() => toggleSection('settings')} style={styles.drawerRow}><Text style={[styles.drawerIcon, { color: muted }]}>⚙</Text><Text style={[styles.drawerRowText, { color: text }]}>Settings</Text></TouchableOpacity> : null}
+          {activeSection === 'settings' ? <View style={styles.sectionPanel}><PanelText text="Settings are present but not expanded into the full MVP here. Backgrounds, voice, notifications, and diagnostics remain future slices." muted={muted} /></View> : null}
+        </View>
+      </> : null}
+    </View>
+  );
+}
+
+function PanelText({ text, muted }: { text: string; muted: string }) { return <Text style={[styles.panelText, { color: muted }]}>{text}</Text>; }
+
+export default function ChatScreen() {
   const { agentId } = useLocalSearchParams<{ agentId?: string | string[] }>();
   const target = Array.isArray(agentId) ? agentId[0] : agentId;
-  const [showDrawer, setShowDrawer] = React.useState(false);
-  const [drawerCounts, setDrawerCounts] = React.useState({ activeAgents: 0, attention: 0, prs: 0 });
-  React.useEffect(() => {
-    Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchGitHubPRs()]).then(([agentsResult, attentionResult, prsResult]) => {
-      setDrawerCounts({
-        activeAgents: agentsResult.status === 'fulfilled' ? summarizeAgents(agentsResult.value).activeCount : 0,
-        attention: attentionResult.status === 'fulfilled' ? attentionResult.value.filter(item => item.requires_action !== false).length : 0,
-        prs: prsResult.status === 'fulfilled' ? prsResult.value.items.length : 0
+  const colorScheme = useColorScheme();
+  const dark = isDarkTheme(colorScheme);
+  const { width } = useWindowDimensions();
+  const isNarrow = width < 720;
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState<DrawerSection>(null);
+  const [accountActive, setAccountActive] = useState(false);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]);
+  const [prs, setPrs] = useState<GitHubPR[]>([]);
+  const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [errors, setErrors] = useState<{ agents?: string | null; attention?: string | null; prs?: string | null; providers?: string | null }>({});
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchGitHubPRs(), fetchAuthProviders()]).then(([agentResult, attentionResult, prsResult, providerResult]) => {
+      if (!mounted) return;
+      setErrors({
+        agents: agentResult.status === 'rejected' ? errorText(agentResult.reason, 'Agent data could not be loaded.') : null,
+        attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null,
+        prs: prsResult.status === 'rejected' ? errorText(prsResult.reason, 'Recent activity could not be loaded.') : null,
+        providers: providerResult.status === 'rejected' ? errorText(providerResult.reason, 'Connections data could not be loaded.') : null
       });
+      if (agentResult.status === 'fulfilled') setAgents(agentResult.value);
+      if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value);
+      if (prsResult.status === 'fulfilled') setPrs(prsResult.value.items);
+      if (providerResult.status === 'fulfilled') setProviders(providerResult.value);
+      setLoading(false);
     });
+    return () => { mounted = false; };
   }, []);
-  const handleNavigate = (route: string) => {
-    if (route === 'chat') return;
-    router.push((route === 'index' ? '/' : '/' + route) as any);
-  };
+
+  const shellShift = useMemo(() => isNarrow && drawerOpen ? [{ translateX: Math.min(width * 0.72, 330) }] : [{ translateX: 0 }], [drawerOpen, isNarrow, width]);
+
   return (
     <EnvironmentBackground hideBottomControls>
       <View style={styles.page}>
-        <View style={styles.pageHeader}>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Back" onPress={() => router.back()}>
-            <GlassSurface variant="control" style={styles.headerCircleBtn}><Text style={styles.backText}>←</Text></GlassSurface>
-          </TouchableOpacity>
-          <Text style={styles.pageTitle}>FIRSTMATE CHAT</Text>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open navigation" onPress={() => setShowDrawer(true)}>
-            <GlassSurface variant="control" style={styles.headerCircleBtn}><Text style={styles.backText}>≡</Text></GlassSurface>
-          </TouchableOpacity>
+        <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} onToggle={() => setDrawerOpen(false)} activeSection={activeSection} setActiveSection={setActiveSection} accountActive={accountActive} setAccountActive={setAccountActive} agents={agents} attention={attention} prs={prs} providers={providers} errors={errors} loading={loading} />
+        <View style={[styles.chatStage, { transform: shellShift }]}>
+          <ChatCanvas target={target || 'captain'} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} />
         </View>
-        <ChatCanvas target={target || 'captain'} />
       </View>
-      <GlassDrawer visible={showDrawer} onClose={() => setShowDrawer(false)} onNavigate={handleNavigate} activeAgentsCount={drawerCounts.activeAgents} attentionCount={drawerCounts.attention} prsCount={drawerCounts.prs} />
     </EnvironmentBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, minWidth: 0 },
-  pageHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 12, marginBottom: 6 },
-  pageTitle: { fontFamily: 'monospace', fontSize: 14, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 2 },
-  headerCircleBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
-  backText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
-  canvas: { flex: 1, minWidth: 0 },
-  chatContainer: { flex: 1, paddingHorizontal: 16, paddingBottom: 16, minWidth: 0 },
-  canvasTitleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 4, paddingBottom: 10, gap: 10 },
-  canvasTitleGroup: { minWidth: 0, flex: 1 },
-  canvasEyebrow: { fontFamily: 'monospace', fontSize: 9, color: 'rgba(255, 255, 255, 0.52)', letterSpacing: 1.4 },
-  canvasTitle: { color: '#FFFFFF', fontSize: 24, fontWeight: '300', marginTop: 3 },
-  targetBadge: { borderColor: '#72F5B1', borderWidth: 1, borderRadius: 12, paddingHorizontal: 9, paddingVertical: 5 },
-  targetBadgeText: { color: '#72F5B1', fontFamily: 'monospace', fontSize: 9, fontWeight: 'bold' },
-  terminalGlassBox: { flex: 1, minHeight: 0, padding: 14, borderRadius: 20, marginBottom: 8 },
-  terminalGlassContent: { flex: 1, minHeight: 0 },
-  terminalHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
-  statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#FFFFFF' },
-  dotThinking: { backgroundColor: '#AAAAAA' },
-  terminalTitle: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1.2 },
-  terminalSubtitle: { fontFamily: 'monospace', fontSize: 9, color: 'rgba(255, 255, 255, 0.48)', marginTop: 3 },
-  terminalScrollContainer: { flex: 1, minHeight: 0, position: 'relative' },
-  terminalScroll: { flex: 1, minHeight: 0, backgroundColor: '#000000', borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
-  terminalScrollContent: { padding: 12 },
-  terminalText: { fontFamily: 'monospace', fontSize: 12, color: '#FFFFFF', lineHeight: 18 },
-  scrollBadgeBtn: { position: 'absolute', bottom: 10, alignSelf: 'center', zIndex: 10 },
-  scrollBadgeSurface: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16, backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF', borderWidth: 1 },
-  scrollBadgeText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 10, letterSpacing: 0.8 },
-  inputComposerRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
-  executionSelection: { flexDirection: 'row', gap: 8, marginTop: 4, marginBottom: 2 },
-  capabilityLoadingText: { color: 'rgba(255,255,255,0.58)', fontFamily: 'monospace', fontSize: 10, paddingVertical: 9 },
-  inputWrapper: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', paddingHorizontal: 12, paddingVertical: 8 },
-  textInputInner: { flex: 1, color: '#FFFFFF', fontSize: 14, paddingVertical: 4 },
-  inputAccessories: { flexDirection: 'row', gap: 6, marginLeft: 8 },
-  inputPill: { backgroundColor: 'rgba(255, 255, 255, 0.15)', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  inputPillText: { fontSize: 10, color: 'rgba(255, 255, 255, 0.7)' },
-  textInput: { flex: 1, backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.2)', paddingHorizontal: 12, paddingVertical: 10, color: '#FFFFFF', fontSize: 14 },
-  sendBtn: { minWidth: 60, minHeight: 44, backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 11, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center' },
-  sendBtnDisabled: { opacity: 0.55 },
-  sendBtnText: { fontFamily: 'monospace', color: '#000000', fontWeight: 'bold', fontSize: 12 },
-  sendError: { color: '#FCA5A5', fontSize: 12, marginTop: 6, marginHorizontal: 4 }
+  page: { flex: 1, minWidth: 0, overflow: 'hidden' },
+  chatStage: { flex: 1, minWidth: 0 },
+  canvas: { flex: 1, minWidth: 0, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 10 },
+  shellHeader: { minHeight: 50, flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, zIndex: 3 },
+  logoButton: { width: 44, height: 44, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  headerControls: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'flex-end', gap: 7 },
+  compactSelectWrap: { width: 132, maxWidth: '32%' },
+  liveChip: { minHeight: 34, borderWidth: 1, borderRadius: 999, paddingHorizontal: 9, flexDirection: 'row', gap: 6, alignItems: 'center', marginTop: 15 },
+  liveText: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
+  tinyDot: { width: 9, height: 9, borderRadius: 5, display: 'inline-block' as any },
+  chatHistory: { flex: 1, minHeight: 0 },
+  chatHistoryContent: { paddingTop: 24, paddingHorizontal: 22, paddingBottom: 24, gap: 12 },
+  emptyConversation: { maxWidth: 600, alignSelf: 'center', width: '100%', paddingTop: 28 },
+  conversationEyebrow: { fontSize: 12, fontWeight: '800', letterSpacing: 1.4, textTransform: 'uppercase', marginBottom: 8 },
+  conversationTitle: { fontSize: 42, lineHeight: 48, fontWeight: '500', marginBottom: 10 },
+  emptyCopy: { maxWidth: 480, fontSize: 15, lineHeight: 22 },
+  messageBubble: { maxWidth: 680, paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22 },
+  userMessage: { alignSelf: 'flex-end' },
+  assistantMessage: { alignSelf: 'flex-start' },
+  messageSpeaker: { fontSize: 14, fontWeight: '800', marginBottom: 6 },
+  messageText: { fontSize: 16, lineHeight: 23 },
+  diagnosticsBox: { marginTop: 8, borderWidth: 1, borderRadius: 18, padding: 14, maxHeight: 320, overflow: 'scroll' as any },
+  diagnosticsTitle: { fontSize: 11, fontWeight: '800', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 },
+  diagnosticsLine: { fontFamily: Platform.select({ web: 'monospace', default: undefined }), fontSize: 11, lineHeight: 16 },
+  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 92, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8 },
+  jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
+  composer: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 64, borderWidth: 1, borderRadius: 28, paddingHorizontal: 10, paddingVertical: 8, marginHorizontal: 8 },
+  composerIconButton: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+  composerIconText: { fontSize: 22, fontWeight: '500' },
+  composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any },
+  sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.cyan },
+  sendButtonText: { color: brand.obsidian, fontSize: 22, fontWeight: '800' },
+  disabled: { opacity: 0.55 },
+  inlineMic: { position: 'absolute', bottom: 78, right: 68, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 999, backgroundColor: 'rgba(17,23,34,0.72)' },
+  inlineMicMuted: { color: 'rgba(255,255,255,0.45)', fontSize: 16 },
+  levelBar: { width: 3, borderRadius: 2 },
+  chatFooterRow: { minHeight: 25, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 },
+  diagnosticsToggle: { paddingVertical: 4, paddingHorizontal: 6 },
+  diagnosticsToggleText: { fontSize: 11, fontWeight: '700' },
+  sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
+  drawer: { position: 'absolute', left: 8, top: 8, bottom: 8, zIndex: 5, borderWidth: 1, borderRadius: 24, padding: 14, overflow: 'hidden' },
+  drawerMobile: { left: '7%', right: '7%' as any, top: 10, bottom: 10 },
+  drawerBrandRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 },
+  drawerMarkButton: { width: 42, height: 42, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  drawerWordmark: { fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 27, lineHeight: 32, fontWeight: '500' },
+  drawerScroll: { flex: 1, minHeight: 0 },
+  drawerScrollContent: { paddingBottom: 16 },
+  drawerRow: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 9, paddingHorizontal: 5 },
+  drawerIcon: { width: 26, fontSize: 15, fontWeight: '800' },
+  drawerRowText: { flex: 1, fontSize: 15, fontWeight: '700' },
+  drawerCount: { fontSize: 12, fontWeight: '800' },
+  sectionPanel: { paddingLeft: 36, paddingRight: 4, paddingBottom: 8, gap: 8 },
+  panelText: { fontSize: 13, lineHeight: 19 },
+  panelItem: { paddingVertical: 7 },
+  panelItemTitle: { fontSize: 13, fontWeight: '800', marginBottom: 2 },
+  panelItemMeta: { fontSize: 12, lineHeight: 17 },
+  fleetPanelRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 7 },
+  fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' },
+  drawerBottom: { paddingTop: 8 }
 });
