@@ -7,6 +7,9 @@ from typing import Dict, Any, List, Optional
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
 HERDR_MAX_READ_LINES = 2**32 - 1
+# Chat only needs enough recent scrollback to seed live-poll deduplication, not
+# the full retained history - keep the default request small.
+DEFAULT_HISTORY_LINES = 400
 
 _HISTORY_MARKER = re.compile(r'^\s*([›❯•⏺●])\s+(.*)$')
 _TOOL_SUMMARY = re.compile(

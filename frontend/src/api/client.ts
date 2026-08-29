@@ -385,17 +385,21 @@ export async function submitVoiceMove(utterance: string, target: string, idempot
 }
 
 // Herdr exposes its read count as uint32 and bounds retained history separately
-// through advanced.scrollback_limit_bytes. This asks for all retained rows.
+// through advanced.scrollback_limit_bytes; this is the theoretical max the gateway allows.
 export const HERDR_MAX_READ_LINES = 0xFFFFFFFF;
 
-export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
+// Chat only needs enough recent scrollback to seed live-poll deduplication
+// (see ChatCanvas), not the full retained history - keep this small.
+export const CHAT_HISTORY_LINES = 400;
+
+export async function fetchCaptainOutput(lines: number = CHAT_HISTORY_LINES) {
   const res = await fetch(GATEWAY_URL + '/captain/output?lines=' + lines, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
   return checkedJson<{ output?: string }>(res);
 }
 
-export async function fetchAgentHistory(agentId: string, lines: number = HERDR_MAX_READ_LINES): Promise<AgentHistoryResult> {
+export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HISTORY_LINES): Promise<AgentHistoryResult> {
   const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/history?lines=' + lines, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });

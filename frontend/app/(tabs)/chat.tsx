@@ -11,8 +11,8 @@ import { AgentInfo, AuthProviderInfo, ExecutionHarness, fetchAgentHistory, fetch
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
-import { AgentHistoryMessage, filterAgentHistory } from '../../src/services/ChatHistory';
-import { appendConversationMessage, clearConversationMessages, ConversationMessage, hydrateConversationMessages, resetConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
+import { filterAgentHistory } from '../../src/services/ChatHistory';
+import { appendConversationMessage, ConversationMessage, getConversationMessages, resetConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, saveChatBackground, saveThemeMode, saveToolCallVisibility, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl } from '../../src/utils/externalLinks';
@@ -146,14 +146,7 @@ function UserMessage({ message, textColor, selectable, onLongPress }: { message:
   </TouchableOpacity>;
 }
 
-const historyMessages = (messages: AgentHistoryMessage[]): ConversationMessage[] => messages.map((message, index) => ({ ...message, id: `history-${index}`, source: 'text' as const }));
-// Rendering the entire thread every time makes a long-lived chat's ScrollView content
-// thousands of pixels tall, so an animated scrollToEnd() from a scrolled-up position has
-// to visually travel across all of it - indistinguishable from a full reload-and-rescroll.
-// Keep only the most recent window mounted by default; scrolling near the top loads more.
-const DEFAULT_VISIBLE_MESSAGES = 40;
-const LOAD_MORE_MESSAGES = 40;
-const NEAR_TOP_THRESHOLD = 120;
+const historyKey = (message: { role: string; kind?: string; text: string }) => `${message.role}|${message.kind || 'conversation'}|${message.text}`;
 function conversationalPromptResponse(response: unknown): string | null {
   if (typeof response !== 'string' || !response.trim()) return null;
   try {
@@ -189,38 +182,35 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [capabilityLoading, setCapabilityLoading] = useState(true);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [webViewportHeight, setWebViewportHeight] = useState<number | null>(null);
-  const [confirmNewSession, setConfirmNewSession] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE_MESSAGES);
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const atBottomRef = useRef(true);
   const historyRequestRef = useRef(0);
-  const messagesRef = useRef(messages);
-  const contentHeightRef = useRef(0);
-  const scrollOffsetRef = useRef(0);
-  const pendingPrependRef = useRef(false);
+  // Keys of messages already known to the live poll (typed locally, or seen in
+  // a prior Herdr history read), so syncFromHistory only appends genuinely new
+  // ones - see the mount effect below, which seeds this without rendering.
+  const knownKeysRef = useRef<Set<string>>(new Set());
   const targetLabel = target === 'captain' ? 'Magistrate' : target;
   const capture = useVoiceInputAdapter();
-  const visibleMessages = useMemo(() => messages.length > visibleCount ? messages.slice(-visibleCount) : messages, [messages, visibleCount]);
-
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   useEffect(() => {
     const request = ++historyRequestRef.current;
-    setSendError(null); setIsThinking(false); setVisibleCount(DEFAULT_VISIBLE_MESSAGES);
-    // The captain thread is shared with Voice Mode (see ConversationSession)
-    // and persisted to disk, so reopening the app replays it from storage
-    // instead of the Herdr terminal transcript, which has no Voice Mode turns.
-    if (target === 'captain') { void hydrateConversationMessages(target); return () => { historyRequestRef.current += 1; }; }
-    resetConversationMessages(target);
-    // A working agent can briefly leave an empty terminal snapshot (redraw or
-    // alternate screen), so retry a few times before accepting an empty history.
+    setSendError(null); setIsThinking(false);
+    // The captain thread is shared with Voice Mode (see ConversationSession),
+    // so switching back to it keeps whatever it already holds in memory for
+    // this session; other targets start each visit with a clean thread.
+    if (target !== 'captain') resetConversationMessages(target, []);
+    knownKeysRef.current = new Set(getConversationMessages(target).map(historyKey));
+    // Seed known-message keys from recent Herdr scrollback so the live poll
+    // below doesn't treat pre-existing history as new and replay it into the
+    // thread - chat only ever shows what happens while it's open.
     const loadHistory = (attempt: number) => {
       fetchAgentHistory(target).then(result => {
         if (request !== historyRequestRef.current) return;
+        // A working agent can briefly leave an empty terminal snapshot (redraw
+        // or alternate screen); retry a few times before accepting it as empty.
         if (result.messages.length === 0 && attempt < 5) { setTimeout(() => loadHistory(attempt + 1), 2000); return; }
-        resetConversationMessages(target, historyMessages(result.messages));
-        requestAnimationFrame?.(() => scrollRef.current?.scrollToEnd({ animated: false }));
+        result.messages.forEach(message => knownKeysRef.current.add(historyKey(message)));
       }).catch(error => { if (request === historyRequestRef.current) setSendError(errorText(error, 'Agent history could not be loaded.')); });
     };
     loadHistory(0);
@@ -277,26 +267,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    scrollOffsetRef.current = contentOffset.y;
-    contentHeightRef.current = contentSize.height;
     const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
     atBottomRef.current = atBottom; setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
-    // Load older history only when the reader scrolls near the top of the buffered
-    // window, not on every poll/append - see DEFAULT_VISIBLE_MESSAGES above.
-    if (contentOffset.y < NEAR_TOP_THRESHOLD && !pendingPrependRef.current && visibleCount < messagesRef.current.length) {
-      pendingPrependRef.current = true;
-      setVisibleCount(count => Math.min(count + LOAD_MORE_MESSAGES, messagesRef.current.length));
-    }
-  };
-  // Prepending older messages grows the content above the viewport, which would
-  // otherwise yank the visible messages down; re-anchor scroll position by the
-  // exact height that was added once the prepended rows have actually laid out.
-  const handleContentSizeChange = (_width: number, height: number) => {
-    if (!pendingPrependRef.current) { contentHeightRef.current = height; return; }
-    const grew = height - contentHeightRef.current;
-    if (grew > 0) scrollRef.current?.scrollTo({ y: scrollOffsetRef.current + grew, animated: false });
-    contentHeightRef.current = height;
-    pendingPrependRef.current = false;
   };
   const addAttachments = (selected: ComposerAttachment[]) => {
     setAttachments(current => [...current, ...selected]);
@@ -331,24 +303,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     } catch (error) { setSendError(errorText(error, 'The file picker could not be opened.')); }
   };
   const appendMessage = (message: ConversationMessage) => {
+    knownKeysRef.current.add(historyKey(message));
     appendConversationMessage(target, message);
     if (!atBottomRef.current) setHasNewMessages(true);
     requestAnimationFrame?.(() => { if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: true }); });
   };
   // Merges anything new in the Herdr transcript into the visible thread.
-  // Messages already in the store (typed locally, replayed from Herdr, or
-  // appended by a prior call) are matched by role+kind+text and skipped, so
-  // this is safe to call repeatedly. Returns whether a new assistant reply
-  // was appended, for callers waiting on one.
+  // Messages already known (typed locally, seeded from history on mount, or
+  // appended by a prior call) are matched by role+kind+text and skipped via
+  // knownKeysRef, so this is safe to call repeatedly. Returns whether a new
+  // assistant reply was appended, for callers waiting on one.
   const syncFromHistory = async (): Promise<boolean> => {
     const result = await fetchAgentHistory(target);
     if (result.messages.length === 0) return false;
-    const known = new Set(messagesRef.current.map(message => `${message.role}|${message.kind || 'conversation'}|${message.text}`));
     let appendedReply = false;
     result.messages.forEach(message => {
-      const key = `${message.role}|${message.kind}|${message.text}`;
-      if (known.has(key)) return;
-      known.add(key);
+      const key = historyKey(message);
+      if (knownKeysRef.current.has(key)) return;
+      knownKeysRef.current.add(key);
       // Herdr's terminal transcript carries no wall-clock time (see AGENTS.md), so a
       // message discovered here - rather than typed locally via handleSend - has no
       // real send time. Stamping it with Date.now() would show "now" instead of when
@@ -418,21 +390,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.784)' : 'rgba(255,255,255,0.8)' }, webViewportHeight ? { height: webViewportHeight } : null]}>
     <View style={styles.shellHeader}>
       <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity>
-      <View style={styles.newSessionControl}>
-        <TouchableOpacity testID="new-session-button" accessibilityRole="button" accessibilityLabel="Start a new session" accessibilityState={{ expanded: confirmNewSession }} onPress={() => setConfirmNewSession(value => !value)} style={styles.newSessionButton} activeOpacity={0.75}>
-          <Text style={[styles.newSessionButtonText, { color: confirmNewSession ? brand.cyan : muted }]}>New session</Text>
-        </TouchableOpacity>
-        {confirmNewSession ? <View testID="new-session-confirm-menu" accessibilityViewIsModal style={[styles.newSessionMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
-          <Text style={[styles.newSessionMenuText, { color: text }]}>Clear this thread and start fresh? History already sent to {targetLabel} is not affected.</Text>
-          <View style={styles.newSessionMenuActions}>
-            <TouchableOpacity testID="new-session-cancel" accessibilityRole="button" onPress={() => setConfirmNewSession(false)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>Cancel</Text></TouchableOpacity>
-            <TouchableOpacity testID="new-session-confirm" accessibilityRole="button" onPress={() => { clearConversationMessages(target); setConfirmNewSession(false); setSendError(null); setIsThinking(false); setEditingMessageId(null); }} style={styles.messageAction}><Text style={[styles.messageActionText, { color: brand.critical }]}>Start new session</Text></TouchableOpacity>
-          </View>
-        </View> : null}
-      </View>
     </View>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} onContentSizeChange={handleContentSizeChange} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
-      {filterAgentHistory(visibleMessages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.text}</Text></View>)}
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
+      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.text}</Text></View>)}
     </ScrollView>
     {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { atBottomRef.current = true; setHasNewMessages(false); setIsScrolledUp(false); scrollRef.current?.scrollToEnd({ animated: true }); }}><Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text></TouchableOpacity> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
@@ -628,8 +588,6 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
   shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-  newSessionControl: { zIndex: 6 }, newSessionButton: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 17 }, newSessionButtonText: { fontSize: 13, fontWeight: '700' },
-  newSessionMenu: { position: 'absolute', right: 0, top: 40, width: 260, borderRadius: 18, padding: 14, gap: 10, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 10 }, newSessionMenuText: { fontSize: 12, lineHeight: 17 }, newSessionMenuActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 6 },
   chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 22, paddingHorizontal: 22, paddingBottom: 20, gap: 14 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 11, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 16, lineHeight: 23 }, messageTimestamp: { color: 'rgba(142,153,170,0.9)', fontSize: 10, marginTop: 6, textAlign: 'right' },
   jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, zIndex: 5 }, jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
