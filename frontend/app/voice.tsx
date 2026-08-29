@@ -1,14 +1,17 @@
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react';
-import { AccessibilityInfo, Animated, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, useColorScheme, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Animated, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { G, Path, Polygon } from 'react-native-svg';
+import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import { submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
 import { appendConversationMessage, useConversationMessages } from '../src/services/ConversationSession';
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
+import { loadChatPreferences, useChatColorScheme } from '../src/services/ChatPreferences';
+import { ACTIVE_MARK_SPIRAL, ACTIVE_MARK_TRIANGLE, audioEnergyScale, clampAudioPeak, waveformBarHeight } from '../src/services/VoiceVisuals';
 
 const brand = {
   obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B',
@@ -31,16 +34,14 @@ const stateCopy: Record<VoiceState, { title: string; detail: string }> = {
 };
 
 function ActiveMark({ size, coreColor }: { size: number; coreColor: string }) {
-  const triangle = '64,112 448,112 256,444';
-  const spiral = 'M256 226C270 226 277 241 269 252C257 268 232 261 228 242C222 212 248 189 277 196C316 205 327 248 305 278C276 317 216 307 192 264';
   return <Svg width={size} height={size} viewBox="0 0 512 512" accessibilityLabel="Magistrate active voice mark">
     <G fill="none" strokeWidth={16} strokeLinecap="round" strokeLinejoin="round" opacity={0.72}>
-      <G stroke={brand.magenta} transform="translate(-5 2)"><Polygon points={triangle} /><Path d={spiral} /></G>
-      <G stroke={brand.cyan} transform="translate(5 -2)"><Polygon points={triangle} /><Path d={spiral} /></G>
-      <G stroke={brand.green}><Polygon points={triangle} /><Path d={spiral} /></G>
+      <G stroke={brand.magenta} transform="translate(-5 2)"><Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} /></G>
+      <G stroke={brand.cyan} transform="translate(5 -2)"><Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} /></G>
+      <G stroke={brand.green}><Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} /></G>
     </G>
     <G fill="none" stroke={coreColor} strokeWidth={7} strokeLinecap="round" strokeLinejoin="round" opacity={0.94}>
-      <Polygon points={triangle} /><Path d={spiral} />
+      <Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} />
     </G>
   </Svg>;
 }
@@ -49,7 +50,7 @@ function Waveform({ samples, listening }: { samples: number[]; listening: boolea
   return <View testID="voice-waveform" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.waveform}>
     {samples.map((sample, index) => {
       const color = [brand.green, brand.cyan, brand.violet, brand.magenta][index % 4];
-      return <View key={index} style={[styles.waveBar, { height: listening ? 4 + sample * 42 : 4, backgroundColor: color, opacity: listening ? 0.92 : 0.24 }]} />;
+      return <View key={index} style={[styles.waveBar, { height: waveformBarHeight(sample, listening), backgroundColor: color, opacity: listening ? 0.92 : 0.24 }]} />;
     })}
   </View>;
 }
@@ -57,7 +58,7 @@ function Waveform({ samples, listening }: { samples: number[]; listening: boolea
 export default function VoiceScreen() {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
-  const dark = useColorScheme() !== 'light';
+  const dark = useChatColorScheme() !== 'light';
   const compact = width < 680 || height < 720;
   const [voiceState, setVoiceState] = useReducer(transitionVoiceState, 'READY' as VoiceState);
   const [intermediate, setIntermediate] = useState('');
@@ -82,6 +83,8 @@ export default function VoiceScreen() {
   const sequenceRef = useRef(0);
   const sessionId = useId().replace(/[^A-Za-z0-9_-]/g, '');
   const [ripple] = useState(() => new Animated.Value(0));
+  const [audioPeak] = useState(() => new Animated.Value(0));
+  const [hoverProgress] = useState(() => new Animated.Value(0));
   useEffect(() => {
     captureRef.current = capture;
     stateRef.current = voiceState;
@@ -90,17 +93,33 @@ export default function VoiceScreen() {
   });
 
   useEffect(() => {
+    // Voice is a deep-linkable page, so apply the persisted account background
+    // here too rather than relying on the chat screen having mounted first.
+    void loadChatPreferences().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
     const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
     return () => subscription.remove();
   }, []);
 
   useEffect(() => {
-    if (reducedMotion) { ripple.setValue(0.34); return; }
+    if (reducedMotion) { ripple.setValue(0.34); audioPeak.setValue(0); return; }
     const animation = Animated.loop(Animated.timing(ripple, { toValue: 1, duration: 2100, useNativeDriver: Platform.OS !== 'web' }));
     ripple.setValue(0); animation.start();
     return () => animation.stop();
-  }, [reducedMotion, ripple]);
+  }, [audioPeak, reducedMotion, ripple]);
+
+  useEffect(() => {
+    if (voiceState !== 'LISTENING' || reducedMotion) audioPeak.setValue(0);
+  }, [audioPeak, reducedMotion, voiceState]);
+
+  const setHover = useCallback((value: number) => {
+    if (reducedMotion) { hoverProgress.setValue(0); return; }
+    Animated.spring(hoverProgress, { toValue: value, damping: 18, stiffness: 180, mass: 0.7, useNativeDriver: Platform.OS !== 'web' }).start();
+  }, [hoverProgress, reducedMotion]);
+  const hoverHandlers = Platform.OS === 'web' ? { onMouseEnter: () => setHover(1), onMouseLeave: () => setHover(0) } : {};
 
   useEffect(() => {
     if (voiceState !== 'LISTENING' || !intermediate.trim()) return;
@@ -180,7 +199,9 @@ export default function VoiceScreen() {
     if (voiceState !== 'LISTENING') return;
     const timer = setInterval(() => {
       const now = Date.now();
-      setWaveSamples(current => [...current.slice(1), Math.min(1, Math.max(0.04, amplitudeRef.current * 7))]);
+      const peak = clampAudioPeak(amplitudeRef.current * 7);
+      setWaveSamples(current => [...current.slice(1), Math.max(0.04, peak)]);
+      if (!reducedMotion) Animated.timing(audioPeak, { toValue: peak, duration: 120, useNativeDriver: false }).start();
       if (amplitudeRef.current > 0.026) {
         heardSpeechRef.current = true;
         lastSpeechAtRef.current = now;
@@ -191,7 +212,7 @@ export default function VoiceScreen() {
           (elapsed >= MAX_TURN_MS && Boolean(intermediateRef.current.trim()))) void finishTurn();
     }, 160);
     return () => clearInterval(timer);
-  }, [finishTurn, voiceState]);
+  }, [audioPeak, finishTurn, reducedMotion, voiceState]);
 
   useEffect(() => {
     const timer = setTimeout(() => { void beginListening(); }, 180);
@@ -237,10 +258,20 @@ export default function VoiceScreen() {
   const markSize = compact ? Math.min(Math.max(width * 0.54, 140), 220) : Math.min(width * 0.28, 270);
   const stageSize = compact ? Math.min(Math.max(width - 34, 200), 360) : Math.min(width * 0.46, 520);
   const visibleMessages = messages.slice(-3);
-  const rippleScale = ripple.interpolate({ inputRange: [0, 1], outputRange: [0.78, 1.34] });
+  const rippleScale = Animated.multiply(
+    ripple.interpolate({ inputRange: [0, 1], outputRange: [0.78, 1.34] }),
+    audioPeak.interpolate({ inputRange: [0, 1], outputRange: [1, audioEnergyScale(1)] }),
+  );
   const rippleOpacity = ripple.interpolate({ inputRange: [0, 0.28, 1], outputRange: [0, voiceState === 'READY' ? 0.1 : 0.42, 0] });
 
-  return <LinearGradient colors={dark ? [brand.obsidian, '#0A0F17', brand.obsidian] : [brand.paper, '#EEF1F4', brand.paper]} style={styles.screen}>
+  // Keep this layer translucent: EnvironmentBackground owns the persisted
+  // scene/custom image underneath, while this gradient supplies Voice Mode's
+  // branded contrast treatment instead of replacing that user choice.
+  const gradientColors: [string, string, string] = dark
+    ? ['rgba(5,7,10,0.68)', 'rgba(10,15,23,0.58)', 'rgba(5,7,10,0.68)']
+    : ['rgba(247,248,250,0.58)', 'rgba(238,241,244,0.48)', 'rgba(247,248,250,0.58)'];
+
+  return <EnvironmentBackground hideBottomControls voiceMode><LinearGradient colors={gradientColors} style={styles.screen}>
     <SafeAreaView style={styles.safeArea}>
       <View style={[styles.header, compact && styles.headerCompact]}>
         <View><Text style={[styles.eyebrow, { color: brand.cyan }]}>FIRSTMATE / VOICE</Text><Text style={[styles.continuity, { color: mutedColor }]}>One continuous thread</Text></View>
@@ -256,14 +287,14 @@ export default function VoiceScreen() {
           <Text style={[styles.stateDetail, { color: mutedColor }]}>{currentCopy.detail}</Text>
         </View>
 
-        <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState) }} onPress={handleMainControl} disabled={['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
+        <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState) }} onPress={handleMainControl} {...(hoverHandlers as any)} disabled={['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
           <Svg width={stageSize} height={stageSize} viewBox="0 0 512 512" style={styles.stageTriangle}>
             <Polygon points="256,484 34,78 478,78" fill={dark ? 'rgba(36,216,255,0.035)' : 'rgba(139,108,255,0.035)'} stroke={borderColor} strokeWidth={1.2} />
           </Svg>
           <Animated.View style={[styles.ripple, { borderColor: brand.green, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
           <Animated.View style={[styles.ripple, styles.rippleMid, { borderColor: brand.cyan, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
           <Animated.View style={[styles.ripple, styles.rippleInner, { borderColor: brand.magenta, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
-          <View style={[styles.markHalo, { shadowColor: voiceState === 'THINKING' ? brand.violet : brand.cyan }]}><ActiveMark size={markSize} coreColor={dark ? brand.paper : brand.ink} /></View>
+          <Animated.View style={[styles.markHalo, { shadowColor: voiceState === 'THINKING' ? brand.violet : brand.cyan, transform: [{ translateY: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }, { scale: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.015] }) }] }]}><ActiveMark size={markSize} coreColor={dark ? brand.paper : brand.ink} /></Animated.View>
         </TouchableOpacity>
 
         <Waveform samples={waveSamples} listening={voiceState === 'LISTENING'} />
@@ -294,7 +325,7 @@ export default function VoiceScreen() {
         </View> : null}
       </ScrollView>
     </SafeAreaView>
-  </LinearGradient>;
+  </LinearGradient></EnvironmentBackground>;
 }
 
 const interfaceFont = Platform.select({ web: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", default: undefined });

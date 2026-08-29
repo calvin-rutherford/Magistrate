@@ -1,12 +1,13 @@
 import React from 'react';
 import { AccessibilityInfo, Animated, AppState, ImageBackground, PanResponder, StyleSheet, View } from 'react-native';
-import { getEnvironmentTheme, WeatherKind } from '../services/environmentTheme';
+import { getEnvironmentTheme, subscribeActiveBackground, WeatherKind } from '../services/environmentTheme';
 import { getWeather, WEATHER_REFRESH_MS } from '../services/weather';
 import { BottomControls } from './BottomControls';
 import { usePathname, useRouter } from 'expo-router';
 
-export function EnvironmentBackground({ children, hideBottomControls = false }: { children: React.ReactNode; hideBottomControls?: boolean }) {
+export function EnvironmentBackground({ children, hideBottomControls = false, voiceMode = false }: { children: React.ReactNode; hideBottomControls?: boolean; voiceMode?: boolean }) {
   const router = useRouter(); const pathname = usePathname();
+  const [, setBackgroundRevision] = React.useState(0);
   const [weather, setWeather] = React.useState<WeatherKind>('clear');
   const [clock, setClock] = React.useState(() => new Date());
   const [reducedMotion, setReducedMotion] = React.useState(false);
@@ -14,6 +15,7 @@ export function EnvironmentBackground({ children, hideBottomControls = false }: 
   const fade = React.useRef(new Animated.Value(1)).current;
   const theme = getEnvironmentTheme(weather, clock);
   const refresh = React.useCallback(async () => { setClock(new Date()); setWeather((await getWeather()).kind); }, []);
+  React.useEffect(() => subscribeActiveBackground(() => setBackgroundRevision(revision => revision + 1)), []);
   React.useEffect(() => {
     refresh(); AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion); AccessibilityInfo.isHighTextContrastEnabled?.().then(setHighContrast);
     const timer = setInterval(refresh, WEATHER_REFRESH_MS);
@@ -34,7 +36,8 @@ export function EnvironmentBackground({ children, hideBottomControls = false }: 
     <Animated.View style={[styles.container, { opacity: fade }]}>
       <ImageBackground source={theme.sceneImage} style={styles.bgImage} resizeMode="cover">
         <WeatherOverlay kind={theme.weather} />
-        <View style={[styles.darkDimOverlay, { opacity: highContrast ? 0.78 : theme.dimOpacity }]} />
+        <View style={[styles.darkDimOverlay, { opacity: highContrast ? 0.78 : voiceMode ? 0.58 : theme.dimOpacity }]} />
+        {voiceMode ? <View pointerEvents="none" style={styles.voiceModeTreatment} /> : null}
         <View style={styles.contentArea}>{children}</View>
         {!hideBottomControls && pathname !== '/chat' ? <BottomControls /> : null}
       </ImageBackground>
@@ -49,7 +52,11 @@ function WeatherOverlay({ kind }: { kind: WeatherKind }) {
 }
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0D1322' }, bgImage: { flex: 1, width: '100%', height: '100%' }, contentArea: { flex: 1 },
-  darkDimOverlay: { ...StyleSheet.absoluteFill, backgroundColor: '#07101D' }, weather: { ...StyleSheet.absoluteFill },
+  darkDimOverlay: { ...StyleSheet.absoluteFill, backgroundColor: '#07101D' },
+  // Voice keeps the selected environment visible underneath a near-obsidian
+  // treatment, preserving the dark immersive contract without breaking custom backgrounds.
+  voiceModeTreatment: { ...StyleSheet.absoluteFill, backgroundColor: '#05070A', opacity: 0.18 },
+  weather: { ...StyleSheet.absoluteFill },
   clouds: { backgroundColor: 'rgba(35, 45, 58, 0.18)' }, storm: { backgroundColor: 'rgba(18, 20, 38, 0.38)' },
   rain: { position: 'absolute', width: 1, height: 34, backgroundColor: 'rgba(180, 211, 225, 0.16)', transform: [{ rotate: '12deg' }] },
   snow: { position: 'absolute', width: 5, height: 5, borderRadius: 3, backgroundColor: '#EAF4F6' },
