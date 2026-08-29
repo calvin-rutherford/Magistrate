@@ -552,7 +552,7 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, pref
 export default function ChatScreen() {
   const { agentId } = useLocalSearchParams<{ agentId?: string | string[] }>(); const target = Array.isArray(agentId) ? agentId[0] : agentId;
   const router = useRouter();
-  const dark = isDarkTheme(useChatColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
+  const dark = isDarkTheme(useChatColorScheme()); const { width, height } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
   const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES);
   const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [health, setHealth] = useState<HealthInfo | null>(null);
   const [loading, setLoading] = useState(true); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
@@ -579,7 +579,12 @@ export default function ChatScreen() {
     onMoveShouldSetPanResponder: (_, g) => isNarrow && drawerOpen && g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy),
     onPanResponderRelease: (_, g) => { if (g.dx < -55 || g.vx < -0.35) setDrawerOpen(false); },
   }), [drawerOpen, isNarrow]);
-  return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page}>
+  // Composer sits in the bottom ~140px; excluding that band keeps this from hijacking text-selection drags there.
+  const swipeToOpen = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, g) => isNarrow && !drawerOpen && g.y0 < height - 140 && g.dx > 8 && Math.abs(g.dx) > Math.abs(g.dy),
+    onPanResponderRelease: (_, g) => { if (g.dx > 55 || g.vx > 0.35) setDrawerOpen(true); },
+  }), [drawerOpen, isNarrow, height]);
+  return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page} {...(isNarrow ? swipeToOpen.panHandlers : {})}>
     <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
     <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} /></Animated.View>
     <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError} preferences={preferences} onPreferencesChange={setPreferences} onClose={() => setSettingsOpen(false)} />
@@ -587,7 +592,7 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, minWidth: 0, overflow: 'hidden' }, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
+  page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
   shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
   newSessionControl: { zIndex: 6 }, newSessionButton: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 17 }, newSessionButtonText: { fontSize: 13, fontWeight: '700' },
   newSessionMenu: { position: 'absolute', right: 0, top: 40, width: 260, borderRadius: 18, padding: 14, gap: 10, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 10 }, newSessionMenuText: { fontSize: 12, lineHeight: 17 }, newSessionMenuActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 6 },
