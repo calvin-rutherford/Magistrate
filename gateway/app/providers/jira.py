@@ -1,5 +1,4 @@
 import os
-import httpx
 from typing import Dict, Any, List
 from app.providers.base import ProviderAdapter
 
@@ -29,29 +28,6 @@ class JiraProviderAdapter(ProviderAdapter):
         return ['read_assigned_issues', 'read_attention_issues', 'read_recent_activity']
 
     async def get_assigned_issues(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                'id': 'AI-214',
-                'key': 'AI-214',
-                'title': 'PMR migration schema review & validation',
-                'project': 'AI Engineering',
-                'status': 'IN PROGRESS',
-                'priority': 'HIGH',
-                'assignee': 'Calvin Rutherford',
-                'summary': 'Production PMR backend migration changes database schema',
-                'requires_attention': True,
-                'url': 'https://eversana.atlassian.net/browse/AI-214'
-            },
-            {
-                'id': 'AI-189',
-                'key': 'AI-189',
-                'title': 'Setup EVERSANA enterprise security boundary',
-                'project': 'Security & Compliance',
-                'status': 'IN REVIEW',
-                'priority': 'MEDIUM',
-                'assignee': 'Calvin Rutherford',
-                'summary': 'Define sensitivity boundaries for internal LLM prompts',
-                'requires_attention': False,
-                'url': 'https://eversana.atlassian.net/browse/AI-189'
-            }
-        ]
+        # Jira issue retrieval is not implemented yet. An unavailable provider must
+        # contribute no records rather than presenting sample issues as live data.
+        return []

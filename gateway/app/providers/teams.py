@@ -1,5 +1,4 @@
 import os
-import httpx
 from typing import Dict, Any, List
 from app.providers.base import ProviderAdapter
 
@@ -29,14 +28,6 @@ class TeamsProviderAdapter(ProviderAdapter):
         return ['read_mentions', 'read_channel_activity', 'read_chats']
 
     async def get_mentions(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                'id': 'teams-msg-1049',
-                'sender': 'Sarah Jenkins',
-                'channel': 'AI-Architecture-Dev',
-                'summary': 'Calvin, please review the PMR API migration pull request when you get a chance.',
-                'timestamp': '10 mins ago',
-                'requires_attention': True,
-                'url': 'https://teams.microsoft.com/l/message/19:channel-1049'
-            }
-        ]
+        # Teams mention retrieval is not implemented yet. An unavailable provider
+        # must contribute no records rather than presenting a sample mention as live.
+        return []
