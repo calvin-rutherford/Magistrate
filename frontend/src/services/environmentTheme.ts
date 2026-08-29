@@ -22,8 +22,10 @@ export function subscribeActiveBackground(listener: () => void): () => void {
 }
 export function setActiveBackground(sceneKey: WeatherSceneKey, customUri?: string) {
   activeSceneKey = sceneKey;
-  if (sceneKey === 'custom' && customUri) customImageUri = customUri;
-  if (sceneKey !== 'custom') customImageUri = '';
+  // Always replace the cached upload, including when a custom scene is
+  // selected without a usable URI. This prevents an old image from leaking
+  // back into a newly hydrated presentation after refresh.
+  customImageUri = sceneKey === 'custom' ? customUri?.trim() || '' : '';
   backgroundListeners.forEach(listener => listener());
 }
 export function getCurrentTimePeriod(date: Date = new Date()): TimePeriod {
@@ -52,6 +54,7 @@ export function getEnvironmentTheme(weather: WeatherKind = 'clear', date: Date =
     'dusk-mountain': 'dusk', 'clear-day': 'day', 'clear-night': 'night', sunset: 'dusk', 'minimal-dark': 'night',
   };
   const timePeriod = selectedPeriod[activeSceneKey] || getCurrentTimePeriod(date);
-  const isCustom = activeSceneKey === 'custom' && !!customImageUri;
+  const isBuiltIn = activeSceneKey !== 'custom';
+  const isCustom = !isBuiltIn && !!customImageUri;
   return { timePeriod, sceneKey: activeSceneKey, sceneImage: isCustom ? { uri: customImageUri } : TIME_IMAGES[timePeriod], weather: selectedWeather(weather), customUri: customImageUri || undefined, dimOpacity: activeSceneKey === 'minimal-dark' ? 0.72 : timePeriod === 'day' ? 0.48 : 0.34 };
 }
