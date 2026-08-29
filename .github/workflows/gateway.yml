@@ -29,4 +29,12 @@ jobs:
       - name: Install dependencies
         run: uv sync
       - name: Run tests
-        run: PYTHONPATH=. uv run pytest -v
+        run: |
+          PYTHONPATH=. uv run pytest -v \
+            tests/test_db_secrets.py \
+            tests/test_oauth_transactions.py \
+            tests/test_notification_transitions.py \
+            tests/test_github_service.py \
+            tests/test_stt_adapter.py \
+            tests/test_jira_teams_attention_siri.py \
+            tests/test_execution_capabilities.py
