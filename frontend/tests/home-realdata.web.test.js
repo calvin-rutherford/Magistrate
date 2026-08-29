@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const puppeteer = require('puppeteer-core');
 
-const PORT = 8094;
+const PORT = Number(process.env.MAGISTRATE_WEB_TEST_PORT) || 8094;
 const BASE = `http://127.0.0.1:${PORT}/diagnostics`;
 let server;
 let browser;

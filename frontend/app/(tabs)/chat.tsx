@@ -12,13 +12,13 @@ import { EnvironmentBackground } from '../../src/components/EnvironmentBackgroun
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { AgentHistoryMessage, filterAgentHistory } from '../../src/services/ChatHistory';
+import { appendConversationMessage, ConversationMessage, resetConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
 import { openExternalUrl } from '../../src/utils/externalLinks';
 
 const markPaper = require('../../assets/images/magistrate-mark-paper-256.png');
 const markInk = require('../../assets/images/magistrate-mark-ink-256.png');
 const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B', mutedDark: '#8E99AA', mutedLight: '#667180', cyan: '#24D8FF', violet: '#8B6CFF', success: '#43D17A', attention: '#FFB347', critical: '#FF625F' };
 
-type ChatMessage = { id: string; role: 'user' | 'assistant'; text: string; sentAt?: Date; kind?: 'conversation' | 'tool' };
 type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file' };
 type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | null;
 type ModelSelection = { harness: string; model: string; label: string } | null;
@@ -129,8 +129,8 @@ function ModelMenu({ dark, harnesses, loading, error, open, selection, onToggle,
   </View>;
 }
 
-function UserMessage({ message, textColor, selectable, onLongPress }: { message: ChatMessage; textColor: string; selectable: boolean; onLongPress: () => void }) {
-  const timestamp = message.sentAt?.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+function UserMessage({ message, textColor, selectable, onLongPress }: { message: ConversationMessage; textColor: string; selectable: boolean; onLongPress: () => void }) {
+  const timestamp = message.sentAt === undefined ? undefined : new Date(message.sentAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return <TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="button" accessibilityLabel={timestamp ? `Your message, sent ${timestamp}. Press and hold for actions.` : 'Your message'} delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={styles.userMessage}>
     <Text testID={`user-message-text-${message.id}`} selectable={selectable} style={[styles.messageText, { color: textColor }]}>{message.text}</Text>
     {timestamp ? <Text style={styles.messageTimestamp}>Sent {timestamp}</Text> : null}
@@ -143,7 +143,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const text = dark ? '#F4F5F7' : brand.ink;
   const muted = dark ? brand.mutedDark : brand.mutedLight;
   const composerSurface = dark ? 'rgba(17,23,34,0.98)' : 'rgba(255,255,255,0.98)';
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messages = useConversationMessages(target);
   const [promptText, setPromptText] = useState('');
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [messageActionsId, setMessageActionsId] = useState<string | null>(null);
@@ -171,12 +171,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
 
   useEffect(() => {
     let mounted = true;
-    setMessages([]);
     setSendError(null);
+    // The captain thread is shared with Voice Mode (see ConversationSession),
+    // so it persists across remounts; agent threads are replayed from Herdr.
     if (target === 'captain') return () => { mounted = false; };
+    resetConversationMessages(target);
     fetchAgentHistory(target).then(result => {
       if (!mounted) return;
-      setMessages(result.messages.map((message: AgentHistoryMessage, index: number) => ({ ...message, id: `history-${index}` })));
+      resetConversationMessages(target, result.messages.map((message: AgentHistoryMessage, index: number) => ({ ...message, id: `history-${index}`, source: 'text' as const })));
       requestAnimationFrame?.(() => scrollRef.current?.scrollToEnd({ animated: false }));
     }).catch(error => { if (mounted) setSendError(errorText(error, 'Agent history could not be loaded.')); });
     return () => { mounted = false; };
@@ -267,8 +269,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       })));
     } catch (error) { setSendError(errorText(error, 'The file picker could not be opened.')); }
   };
-  const appendMessage = (message: ChatMessage) => {
-    setMessages(current => [...current, message]);
+  const appendMessage = (message: ConversationMessage) => {
+    appendConversationMessage(target, message);
     if (!atBottomRef.current) setHasNewMessages(true);
     requestAnimationFrame?.(() => { if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: true }); });
   };
@@ -281,15 +283,15 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!trimmed) { router.push('/voice' as any); return; }
     const now = new Date();
     if (editingMessageId) {
-      setMessages(current => current.map(message => message.id === editingMessageId ? { ...message, text: trimmed, sentAt: now } : message));
+      updateConversationMessage(target, editingMessageId, trimmed, now.getTime());
       setEditingMessageId(null);
-    } else appendMessage({ id: `u-${Date.now()}`, role: 'user', text: trimmed, sentAt: now });
+    } else appendMessage({ id: `u-${Date.now()}`, role: 'user', text: trimmed, sentAt: now.getTime(), source: 'text' });
     setPromptText(''); setSendError(null); setIsThinking(true);
     try {
       const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model);
       if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The message was not accepted.');
       const reply = response?.response?.trim();
-      if (reply) appendMessage({ id: `a-${Date.now()}`, role: 'assistant', text: reply, sentAt: new Date() });
+      if (reply) appendMessage({ id: `a-${Date.now()}`, role: 'assistant', text: reply, sentAt: Date.now(), source: 'text' });
     } catch (error) { setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); }
     finally { setIsThinking(false); }
   };

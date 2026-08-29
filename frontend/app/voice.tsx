@@ -1,142 +1,337 @@
+import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Dimensions, TextInput, ScrollView } from 'react-native';
-import Svg, { Polygon, Line, Circle } from 'react-native-svg';
-import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
-import { GlassSurface } from '../src/components/GlassSurface';
+import { AccessibilityInfo, Animated, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, useColorScheme, useWindowDimensions, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import Svg, { G, Path, Polygon } from 'react-native-svg';
+import { submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
-import { fetchAgents, submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
+import { appendConversationMessage, useConversationMessages } from '../src/services/ConversationSession';
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
-import { useRouter } from 'expo-router';
 
-const { width } = Dimensions.get('window');
-const CANVAS_SIZE = Math.min(width - 40, 320);
+const brand = {
+  obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B',
+  mutedDark: '#8E99AA', mutedLight: '#667180', borderDark: '#2A3542', borderLight: '#D5DAE2',
+  green: '#54FF87', cyan: '#24D8FF', violet: '#8B6CFF', magenta: '#FF3FD1', critical: '#FF625F',
+};
+const QUIET_AFTER_SPEECH_MS = 1200;
+const MAX_TURN_MS = 30_000;
+const MIN_TURN_MS = 450;
+
+const stateCopy: Record<VoiceState, { title: string; detail: string }> = {
+  READY: { title: 'Voice ready', detail: 'Tap the mark to begin' },
+  STARTING: { title: 'Starting', detail: 'Connecting to your microphone' },
+  LISTENING: { title: 'Listening', detail: 'Speak naturally — your turn ends when you pause' },
+  TRANSCRIBING: { title: 'Transcribing', detail: 'Finishing your words' },
+  THINKING: { title: 'Thinking', detail: 'Firstmate is responding' },
+  CONFIRMING: { title: 'Confirm action', detail: 'Voice control is paused for your review' },
+  SPEAKING: { title: 'Speaking', detail: 'Tap the mark to interrupt' },
+  ERROR: { title: 'Voice paused', detail: 'Tap the mark to try again' },
+};
+
+function ActiveMark({ size, coreColor }: { size: number; coreColor: string }) {
+  const triangle = '64,112 448,112 256,444';
+  const spiral = 'M256 226C270 226 277 241 269 252C257 268 232 261 228 242C222 212 248 189 277 196C316 205 327 248 305 278C276 317 216 307 192 264';
+  return <Svg width={size} height={size} viewBox="0 0 512 512" accessibilityLabel="Magistrate active voice mark">
+    <G fill="none" strokeWidth={16} strokeLinecap="round" strokeLinejoin="round" opacity={0.72}>
+      <G stroke={brand.magenta} transform="translate(-5 2)"><Polygon points={triangle} /><Path d={spiral} /></G>
+      <G stroke={brand.cyan} transform="translate(5 -2)"><Polygon points={triangle} /><Path d={spiral} /></G>
+      <G stroke={brand.green}><Polygon points={triangle} /><Path d={spiral} /></G>
+    </G>
+    <G fill="none" stroke={coreColor} strokeWidth={7} strokeLinecap="round" strokeLinejoin="round" opacity={0.94}>
+      <Polygon points={triangle} /><Path d={spiral} />
+    </G>
+  </Svg>;
+}
+
+function Waveform({ samples, listening }: { samples: number[]; listening: boolean }) {
+  return <View testID="voice-waveform" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.waveform}>
+    {samples.map((sample, index) => {
+      const color = [brand.green, brand.cyan, brand.violet, brand.magenta][index % 4];
+      return <View key={index} style={[styles.waveBar, { height: listening ? 4 + sample * 42 : 4, backgroundColor: color, opacity: listening ? 0.92 : 0.24 }]} />;
+    })}
+  </View>;
+}
 
 export default function VoiceScreen() {
   const router = useRouter();
+  const { width, height } = useWindowDimensions();
+  const dark = useColorScheme() !== 'light';
+  const compact = width < 680 || height < 720;
   const [voiceState, setVoiceState] = useReducer(transitionVoiceState, 'READY' as VoiceState);
-  const [rotation, setRotation] = useState(0);
-  const [transcript, setTranscript] = useState('');
   const [intermediate, setIntermediate] = useState('');
-  const [response, setResponse] = useState('');
+  const [finalTranscript, setFinalTranscript] = useState('');
   const [error, setError] = useState('');
-  const [target, setTarget] = useState('captain');
-  const [targets, setTargets] = useState<{id: string; name: string}[]>([]);
+  const [notice, setNotice] = useState('');
   const [pendingMove, setPendingMove] = useState<VoiceMoveResult | null>(null);
-  const [idempotencyKey, setIdempotencyKey] = useState('');
-  const sessionId = useId();
-  const moveSequence = useRef(0);
+  const [pendingKey, setPendingKey] = useState('');
+  const [waveSamples, setWaveSamples] = useState<number[]>(() => new Array(38).fill(0.04));
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const messages = useConversationMessages('captain');
   const capture = useVoiceInputAdapter(setIntermediate);
+  const captureRef = useRef(capture);
+  const stateRef = useRef<VoiceState>(voiceState);
+  const intermediateRef = useRef(intermediate);
+  const amplitudeRef = useRef(capture.amplitude);
+  const endingRef = useRef(false);
+  const turnInFlightRef = useRef(false);
+  const heardSpeechRef = useRef(false);
+  const listeningStartedAtRef = useRef(0);
+  const lastSpeechAtRef = useRef(0);
+  const sequenceRef = useRef(0);
+  const sessionId = useId().replace(/[^A-Za-z0-9_-]/g, '');
+  const [ripple] = useState(() => new Animated.Value(0));
+  useEffect(() => {
+    captureRef.current = capture;
+    stateRef.current = voiceState;
+    intermediateRef.current = intermediate;
+    amplitudeRef.current = capture.amplitude;
+  });
 
   useEffect(() => {
-    fetchAgents().then(agents => setTargets(agents.map(agent => ({ id: agent.id, name: agent.name })))).catch(() => undefined);
-    const interval = setInterval(() => setRotation(prev => (prev + 0.05) % (Math.PI * 2)), 30);
-    return () => { clearInterval(interval); capture.cancel(); ttsService.stop(); };
-    // Capture is deliberately not started on mount; cleanup uses the mounted adapter instance.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
+    return () => subscription.remove();
   }, []);
 
+  useEffect(() => {
+    if (reducedMotion) { ripple.setValue(0.34); return; }
+    const animation = Animated.loop(Animated.timing(ripple, { toValue: 1, duration: 2100, useNativeDriver: Platform.OS !== 'web' }));
+    ripple.setValue(0); animation.start();
+    return () => animation.stop();
+  }, [reducedMotion, ripple]);
+
+  useEffect(() => {
+    if (voiceState !== 'LISTENING' || !intermediate.trim()) return;
+    heardSpeechRef.current = true;
+    lastSpeechAtRef.current = Date.now();
+  }, [intermediate, voiceState]);
+
   const fail = useCallback((cause: unknown) => {
+    if (endingRef.current) return;
+    turnInFlightRef.current = false;
     setError(cause instanceof Error ? cause.message : 'Voice Mode encountered an unexpected error.');
     setVoiceState('ERROR');
   }, []);
 
-  const startRecording = async () => {
-    ttsService.stop(); setResponse(''); setError(''); setTranscript(''); setIntermediate(''); setPendingMove(null);
-    try { await capture.start(); setVoiceState('LISTENING'); } catch (cause) { fail(cause); }
-  };
-  const finishRecording = async () => {
-    if (voiceState !== 'LISTENING') return;
+  const beginListening = useCallback(async () => {
+    if (endingRef.current || turnInFlightRef.current) return;
+    ttsService.stop();
+    setError(''); setNotice(''); setIntermediate(''); setFinalTranscript(''); setPendingMove(null); setPendingKey('');
+    setWaveSamples(new Array(38).fill(0.04));
+    setVoiceState('STARTING');
+    try {
+      await captureRef.current.start();
+      listeningStartedAtRef.current = Date.now();
+      lastSpeechAtRef.current = Date.now();
+      heardSpeechRef.current = false;
+      setVoiceState('LISTENING');
+    } catch (cause) { fail(cause); }
+  }, [fail]);
+
+  const deliverResponse = useCallback((result: VoiceMoveResult) => {
+    if (result.status !== 'completed') throw new Error(result.error || 'Firstmate did not complete the request.');
+    const responseText = result.response?.trim() || `Request completed by ${result.target}.`;
+    appendConversationMessage('captain', { id: `voice-a-${Date.now()}`, role: 'assistant', text: responseText, sentAt: Date.now(), source: 'voice' });
+    setVoiceState('SPEAKING');
+    turnInFlightRef.current = false;
+    ttsService.speakChunk(responseText, () => { if (!endingRef.current) void beginListening(); });
+  }, [beginListening]);
+
+  const finishTurn = useCallback(async () => {
+    if (endingRef.current || stateRef.current !== 'LISTENING' || turnInFlightRef.current) return;
+    turnInFlightRef.current = true;
     setVoiceState('TRANSCRIBING');
     try {
-      const recording = await capture.stop();
-      if (recording.durationMillis < 250) throw new Error('The recording was too short. Start the microphone and speak before stopping.');
-      const result = await transcribeVoiceAudio(recording.uri, recording.mimeType, recording.filename);
-      setTranscript(result.text); setIntermediate(''); setVoiceState('REVIEW');
+      const recording = await captureRef.current.stop();
+      if (recording.durationMillis < MIN_TURN_MS) {
+        turnInFlightRef.current = false;
+        await beginListening();
+        setNotice('Keep speaking a little longer so Magistrate can hear the full turn.');
+        return;
+      }
+      const transcription = await transcribeVoiceAudio(recording.uri, recording.mimeType, recording.filename);
+      const utterance = transcription.text?.trim() || intermediateRef.current.trim();
+      if (!utterance) {
+        turnInFlightRef.current = false;
+        await beginListening();
+        setNotice('I didn’t catch that. Listening again…');
+        return;
+      }
+      setFinalTranscript(utterance); setIntermediate('');
+      appendConversationMessage('captain', { id: `voice-u-${Date.now()}`, role: 'user', text: utterance, sentAt: Date.now(), source: 'voice' });
+      setVoiceState('THINKING');
+      sequenceRef.current += 1;
+      const key = `voice-${sessionId}-${sequenceRef.current}`;
+      const move = await submitVoiceMove(utterance, 'captain', key);
+      if (move.status === 'prohibited' || move.status === 'error' || move.status === 'confirmation_expired') throw new Error(move.error || 'That request cannot be completed in Voice Mode.');
+      if (move.status === 'confirmation_required') {
+        setPendingMove(move); setPendingKey(key); setVoiceState('CONFIRMING'); turnInFlightRef.current = false;
+        return;
+      }
+      if (move.status !== 'ready') throw new Error(move.error || 'The voice request could not be prepared.');
+      const result = await submitVoiceMove(utterance, 'captain', key, true);
+      deliverResponse(result);
     } catch (cause) { fail(cause); }
-  };
-  const cancel = async () => {
-    await capture.cancel(); ttsService.stop(); setIntermediate(''); setPendingMove(null); setVoiceState('READY');
-  };
-  const resolveAndSubmit = async () => {
-    const utterance = transcript.trim();
-    if (!utterance) return fail(new Error('Review or enter a transcript before submitting.'));
-    moveSequence.current += 1;
-    const key = `voice-${sessionId}-${moveSequence.current}`;
-    setIdempotencyKey(key); setVoiceState('RESOLVING'); setError('');
+  }, [beginListening, deliverResponse, fail, sessionId]);
+
+  useEffect(() => {
+    if (voiceState !== 'LISTENING') return;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setWaveSamples(current => [...current.slice(1), Math.min(1, Math.max(0.04, amplitudeRef.current * 7))]);
+      if (amplitudeRef.current > 0.026) {
+        heardSpeechRef.current = true;
+        lastSpeechAtRef.current = now;
+      }
+      const elapsed = now - listeningStartedAtRef.current;
+      const quietFor = now - lastSpeechAtRef.current;
+      if ((heardSpeechRef.current && elapsed >= MIN_TURN_MS && quietFor >= QUIET_AFTER_SPEECH_MS) ||
+          (elapsed >= MAX_TURN_MS && Boolean(intermediateRef.current.trim()))) void finishTurn();
+    }, 160);
+    return () => clearInterval(timer);
+  }, [finishTurn, voiceState]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => { void beginListening(); }, 180);
+    return () => {
+      clearTimeout(timer); endingRef.current = true;
+      void captureRef.current.cancel();
+      ttsService.stop();
+    };
+  }, [beginListening]);
+
+  const confirmMove = async () => {
+    if (!pendingMove || !pendingKey || turnInFlightRef.current) return;
+    turnInFlightRef.current = true; setVoiceState('THINKING');
     try {
-      const move = await submitVoiceMove(utterance, target, key);
-      setPendingMove(move);
-      if (move.status === 'confirmation_required') setVoiceState('CONFIRMING');
-      else if (move.status === 'ready') await executeMove(move, key);
-      else fail(new Error(move.error || 'The gateway refused this voice move.'));
-    } catch (cause) { fail(cause); }
-  };
-  const executeMove = async (move = pendingMove, key = idempotencyKey) => {
-    if (!move) return;
-    setVoiceState('EXECUTING');
-    try {
-      const result = await submitVoiceMove(transcript.trim(), target, key, true, move.confirmation_token);
-      if (result.status !== 'completed') throw new Error(result.error || 'The request did not complete.');
-      const text = result.response || `Request completed by ${result.target}.`;
-      setPendingMove(result); setResponse(text); setVoiceState('SPEAKING');
-      ttsService.speakChunk(text.slice(0, 280), () => setVoiceState('READY'));
+      const result = await submitVoiceMove(finalTranscript, 'captain', pendingKey, true, pendingMove.confirmation_token);
+      setPendingMove(null); setPendingKey(''); deliverResponse(result);
     } catch (cause) { fail(cause); }
   };
 
-  const cx = CANVAS_SIZE / 2, cy = CANVAS_SIZE / 2, r = 85 + capture.amplitude * 45;
-  const v0 = { x: cx + r * Math.cos(rotation), y: cy - r * 0.8 };
-  const v1 = { x: cx - r * Math.cos(rotation + 1.05), y: cy + r * 0.7 };
-  const v2 = { x: cx + r * Math.cos(rotation + 2.1), y: cy + r * 0.6 };
-  const v3 = { x: cx + r * 0.3 * Math.sin(rotation * 2), y: cy + r * 0.2 * Math.cos(rotation) };
-  const status = { READY: 'READY · MICROPHONE OFF', LISTENING: 'LISTENING · TAP TO STOP', TRANSCRIBING: 'TRANSCRIBING AUDIO',
-    REVIEW: 'REVIEW TRANSCRIPT', RESOLVING: 'CHECKING INTENT & TARGET', CONFIRMING: 'CONFIRMATION REQUIRED', EXECUTING: 'SENDING REQUEST',
-    SPEAKING: 'SPEAKING RESPONSE', ERROR: 'VOICE ERROR' }[voiceState];
+  const cancelConfirmation = () => {
+    turnInFlightRef.current = false; setPendingMove(null); setPendingKey('');
+    void beginListening();
+  };
 
-  return <EnvironmentBackground>
-    <View style={styles.headerRow}>
-      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Leave Voice Mode" onPress={() => router.back()}>
-        <GlassSurface variant="control" style={styles.headerCircleBtn}><Text style={styles.backText}>←</Text></GlassSurface>
-      </TouchableOpacity>
-      <Text style={styles.headerTitle}>VOICE MODE</Text><View style={{ width: 36 }} />
-    </View>
-    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-      <GlassSurface variant="card" style={styles.statusBox}><Text accessibilityLiveRegion="polite" style={styles.statusText}>{status}</Text></GlassSurface>
-      <Text style={styles.targetLabel}>TARGET</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.targetRow}>
-        <TouchableOpacity testID="target-captain" onPress={() => setTarget('captain')} style={[styles.targetChip, target === 'captain' && styles.targetSelected]}><Text style={styles.chipText}>Magistrate</Text></TouchableOpacity>
-        {targets.filter(item => item.id !== 'captain').map(item => <TouchableOpacity key={item.id} onPress={() => setTarget(item.id)} style={[styles.targetChip, target === item.id && styles.targetSelected]}><Text style={styles.chipText}>{item.name}</Text></TouchableOpacity>)}
+  const handleMainControl = () => {
+    if (voiceState === 'LISTENING') void finishTurn();
+    else if (voiceState === 'SPEAKING' || voiceState === 'READY' || voiceState === 'ERROR') void beginListening();
+  };
+
+  const endConversation = () => {
+    endingRef.current = true; turnInFlightRef.current = true; ttsService.stop();
+    void captureRef.current.cancel().finally(() => router.back());
+  };
+
+  const currentCopy = stateCopy[voiceState];
+  const textColor = dark ? brand.paper : brand.ink;
+  const mutedColor = dark ? brand.mutedDark : brand.mutedLight;
+  const surfaceColor = dark ? 'rgba(17,23,34,0.78)' : 'rgba(255,255,255,0.82)';
+  const borderColor = dark ? brand.borderDark : brand.borderLight;
+  // useWindowDimensions can report 0x0 on the first web render; clamp so SVG sizes stay valid.
+  const markSize = compact ? Math.min(Math.max(width * 0.54, 140), 220) : Math.min(width * 0.28, 270);
+  const stageSize = compact ? Math.min(Math.max(width - 34, 200), 360) : Math.min(width * 0.46, 520);
+  const visibleMessages = messages.slice(-3);
+  const rippleScale = ripple.interpolate({ inputRange: [0, 1], outputRange: [0.78, 1.34] });
+  const rippleOpacity = ripple.interpolate({ inputRange: [0, 0.28, 1], outputRange: [0, voiceState === 'READY' ? 0.1 : 0.42, 0] });
+
+  return <LinearGradient colors={dark ? [brand.obsidian, '#0A0F17', brand.obsidian] : [brand.paper, '#EEF1F4', brand.paper]} style={styles.screen}>
+    <SafeAreaView style={styles.safeArea}>
+      <View style={[styles.header, compact && styles.headerCompact]}>
+        <View><Text style={[styles.eyebrow, { color: brand.cyan }]}>FIRSTMATE / VOICE</Text><Text style={[styles.continuity, { color: mutedColor }]}>One continuous thread</Text></View>
+        <TouchableOpacity testID="end-voice-conversation" accessibilityRole="button" accessibilityLabel="End voice conversation and return to chat" onPress={endConversation} style={[styles.endButton, { borderColor, backgroundColor: surfaceColor }]}>
+          <View style={styles.endIcon} /><Text style={[styles.endText, { color: textColor }]}>End conversation</Text>
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView contentContainerStyle={[styles.content, compact && styles.contentCompact]} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <View style={styles.statusArea}>
+          <View style={[styles.statusDot, { backgroundColor: voiceState === 'THINKING' ? brand.violet : voiceState === 'ERROR' ? brand.critical : brand.cyan }]} />
+          <Text testID="voice-state" accessibilityRole="header" accessibilityLiveRegion="polite" style={[styles.stateTitle, compact && styles.stateTitleCompact, { color: textColor }]}>{currentCopy.title}</Text>
+          <Text style={[styles.stateDetail, { color: mutedColor }]}>{currentCopy.detail}</Text>
+        </View>
+
+        <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState) }} onPress={handleMainControl} disabled={['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
+          <Svg width={stageSize} height={stageSize} viewBox="0 0 512 512" style={styles.stageTriangle}>
+            <Polygon points="256,484 34,78 478,78" fill={dark ? 'rgba(36,216,255,0.035)' : 'rgba(139,108,255,0.035)'} stroke={borderColor} strokeWidth={1.2} />
+          </Svg>
+          <Animated.View style={[styles.ripple, { borderColor: brand.green, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
+          <Animated.View style={[styles.ripple, styles.rippleMid, { borderColor: brand.cyan, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
+          <Animated.View style={[styles.ripple, styles.rippleInner, { borderColor: brand.magenta, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
+          <View style={[styles.markHalo, { shadowColor: voiceState === 'THINKING' ? brand.violet : brand.cyan }]}><ActiveMark size={markSize} coreColor={dark ? brand.paper : brand.ink} /></View>
+        </TouchableOpacity>
+
+        <Waveform samples={waveSamples} listening={voiceState === 'LISTENING'} />
+        <View style={styles.liveTranscript} accessibilityLiveRegion="polite">
+          <Text testID="voice-live-transcript" style={[styles.liveTranscriptText, { color: intermediate || finalTranscript ? textColor : mutedColor }]}>
+            {intermediate || finalTranscript || (voiceState === 'LISTENING' ? 'Your words will appear here…' : ' ')}
+          </Text>
+          {voiceState === 'LISTENING' ? <Text style={[styles.turnHint, { color: mutedColor }]}>{(capture.durationMillis / 1000).toFixed(1)}s · tap the mark to finish now</Text> : null}
+        </View>
+
+        {pendingMove?.confirmation_message && voiceState === 'CONFIRMING' ? <View testID="voice-confirmation" style={[styles.confirmation, { backgroundColor: surfaceColor, borderColor }]}>
+          <Text style={[styles.confirmationLabel, { color: brand.violet }]}>REVIEW BEFORE CONTINUING</Text>
+          <Text style={[styles.confirmationText, { color: textColor }]}>{pendingMove.confirmation_message}</Text>
+          <View style={styles.confirmationActions}>
+            <TouchableOpacity testID="confirm-voice-move" onPress={() => void confirmMove()} style={styles.confirmButton}><Text style={styles.confirmButtonText}>Confirm</Text></TouchableOpacity>
+            <TouchableOpacity onPress={cancelConfirmation} style={[styles.cancelButton, { borderColor }]}><Text style={[styles.cancelButtonText, { color: textColor }]}>Cancel</Text></TouchableOpacity>
+          </View>
+        </View> : null}
+
+        {error ? <View testID="voice-error" accessibilityLiveRegion="assertive" style={[styles.feedback, { borderColor: brand.critical }]}><Text style={styles.errorText}>{error}</Text></View> : null}
+        {notice ? <Text accessibilityLiveRegion="polite" style={[styles.noticeText, { color: mutedColor }]}>{notice}</Text> : null}
+
+        {visibleMessages.length ? <View testID="voice-conversation" style={[styles.conversation, { borderTopColor: borderColor }]}>
+          {visibleMessages.map(message => <View key={message.id} style={styles.turn}>
+            <Text style={[styles.turnRole, { color: message.role === 'user' ? brand.cyan : brand.violet }]}>{message.role === 'user' ? 'YOU' : 'FIRSTMATE'}</Text>
+            <Text style={[styles.turnText, { color: textColor }]} numberOfLines={3}>{message.text}</Text>
+          </View>)}
+        </View> : null}
       </ScrollView>
-      <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Stop recording' : 'Start recording'}
-        accessibilityState={{ busy: !['READY','REVIEW','ERROR'].includes(voiceState) }}
-        onPress={voiceState === 'LISTENING' ? finishRecording : startRecording}
-        disabled={!['READY','LISTENING','SPEAKING','ERROR'].includes(voiceState)} activeOpacity={0.9} style={styles.canvasTouch}>
-        <GlassSurface variant="surface" intensity={40} style={styles.canvasSurface}><Svg width={CANVAS_SIZE} height={CANVAS_SIZE}>
-          <Polygon points={`${v0.x},${v0.y} ${v1.x},${v1.y} ${v2.x},${v2.y}`} fill="rgba(255,255,255,.08)" stroke="#FFF" strokeWidth="1.5" />
-          <Polygon points={`${v0.x},${v0.y} ${v1.x},${v1.y} ${v3.x},${v3.y}`} fill="rgba(255,255,255,.04)" stroke="#FFF" />
-          <Polygon points={`${v0.x},${v0.y} ${v2.x},${v2.y} ${v3.x},${v3.y}`} fill="rgba(255,255,255,.06)" stroke="#FFF" />
-          <Line x1={v1.x} y1={v1.y} x2={v2.x} y2={v2.y} stroke="#FFF" /><Line x1={v1.x} y1={v1.y} x2={v3.x} y2={v3.y} stroke="#AAA" /><Line x1={v2.x} y1={v2.y} x2={v3.x} y2={v3.y} stroke="#AAA" />
-          {[v0,v1,v2,v3].map((v,i) => <Circle key={i} cx={v.x} cy={v.y} r={3 + capture.amplitude * 6} fill="#FFF" />)}
-        </Svg></GlassSurface>
-      </TouchableOpacity>
-      <Text style={styles.hintText}>{voiceState === 'LISTENING' ? `${(capture.durationMillis / 1000).toFixed(1)}s · TAP TO STOP` : 'TAP TO TALK · TAP AGAIN TO STOP'}</Text>
-      {(intermediate || transcript || voiceState === 'REVIEW') && <GlassSurface variant="card" style={styles.transcriptCard}>
-        <Text style={styles.cardLabel}>{intermediate ? 'LIVE TRANSCRIPT (DEVICE)' : 'FINAL TRANSCRIPT · EDITABLE'}</Text>
-        <TextInput testID="voice-transcript" accessibilityLabel="Voice transcript" multiline editable={voiceState === 'REVIEW' || voiceState === 'ERROR'} value={intermediate || transcript}
-          onChangeText={setTranscript} placeholder="Your recognized request appears here" placeholderTextColor="#899" style={styles.transcriptInput} />
-      </GlassSurface>}
-      {pendingMove?.confirmation_message && voiceState === 'CONFIRMING' && <GlassSurface variant="card" style={styles.transcriptCard}>
-        <Text style={styles.cardLabel}>IMPACT: {pendingMove.impact.toUpperCase()}</Text><Text style={styles.bodyText}>{pendingMove.confirmation_message}</Text>
-        <View style={styles.actions}><TouchableOpacity testID="confirm-move" onPress={() => executeMove()} style={styles.primary}><Text style={styles.buttonText}>CONFIRM</Text></TouchableOpacity><TouchableOpacity onPress={cancel} style={styles.secondary}><Text style={styles.buttonText}>CANCEL</Text></TouchableOpacity></View>
-      </GlassSurface>}
-      {response ? <GlassSurface variant="card" style={styles.transcriptCard}><Text style={styles.cardLabel}>CORRELATED RESPONSE · {pendingMove?.move_id}</Text><Text accessibilityLiveRegion="polite" style={styles.bodyText}>{response}</Text></GlassSurface> : null}
-      {error ? <Text testID="voice-error" accessibilityLiveRegion="assertive" style={styles.errorText}>{error}</Text> : null}
-      {voiceState === 'REVIEW' && <View style={styles.actions}><TouchableOpacity testID="submit-voice-move" onPress={resolveAndSubmit} style={styles.primary}><Text style={styles.buttonText}>SUBMIT TO {target === 'captain' ? 'MAGISTRATE' : target}</Text></TouchableOpacity><TouchableOpacity onPress={cancel} style={styles.secondary}><Text style={styles.buttonText}>CANCEL</Text></TouchableOpacity></View>}
-      {voiceState === 'LISTENING' && <TouchableOpacity onPress={cancel} style={styles.secondary}><Text style={styles.buttonText}>CANCEL RECORDING</Text></TouchableOpacity>}
-    </ScrollView>
-  </EnvironmentBackground>;
+    </SafeAreaView>
+  </LinearGradient>;
 }
 
+const interfaceFont = Platform.select({ web: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", default: undefined });
 const styles = StyleSheet.create({
-  container:{alignItems:'center',padding:20,paddingBottom:48},headerRow:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingHorizontal:16,paddingTop:12},headerTitle:{fontFamily:'monospace',fontSize:14,fontWeight:'bold',color:'#FFF',letterSpacing:2},headerCircleBtn:{width:36,height:36,borderRadius:18,justifyContent:'center',alignItems:'center'},backText:{color:'#FFF',fontSize:16,fontWeight:'bold'},statusBox:{paddingHorizontal:20,paddingVertical:10,borderRadius:20,marginVertical:14},statusText:{fontFamily:'monospace',fontSize:12,fontWeight:'bold',color:'#FFF',letterSpacing:1},targetLabel:{color:'#9CA3AF',fontFamily:'monospace',fontSize:10},targetRow:{gap:8,paddingVertical:8},targetChip:{borderWidth:1,borderColor:'#64748B',borderRadius:16,paddingHorizontal:12,paddingVertical:7},targetSelected:{backgroundColor:'rgba(255,255,255,.18)',borderColor:'#FFF'},chipText:{color:'#FFF',fontSize:12},canvasTouch:{borderRadius:24,overflow:'hidden'},canvasSurface:{width:CANVAS_SIZE,height:CANVAS_SIZE,borderRadius:24,justifyContent:'center',alignItems:'center'},hintText:{fontFamily:'monospace',fontSize:10,color:'rgba(255,255,255,.7)',marginVertical:14,letterSpacing:.8},transcriptCard:{width:'100%',padding:16,borderRadius:18,marginTop:10},cardLabel:{fontFamily:'monospace',fontSize:10,color:'#A5B4FC',letterSpacing:1,marginBottom:8},transcriptInput:{color:'#FFF',fontSize:16,minHeight:58,textAlignVertical:'top'},bodyText:{color:'#FFF',fontSize:15,lineHeight:21},errorText:{color:'#FCA5A5',fontSize:14,width:'100%',marginTop:12},actions:{flexDirection:'row',gap:10,width:'100%',marginTop:14},primary:{flex:1,backgroundColor:'#FFF',borderRadius:12,padding:13,alignItems:'center'},secondary:{borderWidth:1,borderColor:'#94A3B8',borderRadius:12,padding:13,alignItems:'center',marginTop:14},buttonText:{color:'#111827',fontFamily:'monospace',fontSize:11,fontWeight:'bold'},
+  screen: { flex: 1 }, safeArea: { flex: 1 },
+  header: { minHeight: 72, paddingHorizontal: 28, paddingTop: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 18 },
+  headerCompact: { minHeight: 62, paddingHorizontal: 17, paddingTop: 7 },
+  eyebrow: { fontFamily: interfaceFont, fontSize: 11, lineHeight: 16, fontWeight: '700', letterSpacing: 1.4 },
+  continuity: { fontFamily: interfaceFont, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  endButton: { minHeight: 42, borderWidth: 1, borderRadius: 999, paddingHorizontal: 15, flexDirection: 'row', alignItems: 'center', gap: 9 },
+  endIcon: { width: 9, height: 9, borderRadius: 2, backgroundColor: brand.critical },
+  endText: { fontFamily: interfaceFont, fontSize: 13, fontWeight: '600' },
+  content: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 22, paddingTop: 10, paddingBottom: 34 },
+  contentCompact: { justifyContent: 'flex-start', paddingTop: 14, paddingBottom: 24 },
+  statusArea: { alignItems: 'center', minHeight: 92 }, statusDot: { width: 7, height: 7, borderRadius: 4, marginBottom: 9 },
+  stateTitle: { fontFamily: interfaceFont, fontSize: 36, lineHeight: 42, fontWeight: '600', letterSpacing: -0.7 },
+  stateTitleCompact: { fontSize: 30, lineHeight: 35 },
+  stateDetail: { fontFamily: interfaceFont, fontSize: 13, lineHeight: 19, marginTop: 5, textAlign: 'center' },
+  stage: { position: 'relative', alignItems: 'center', justifyContent: 'center', marginTop: 3 }, stageTriangle: { position: 'absolute', pointerEvents: 'none' },
+  ripple: { position: 'absolute', width: '54%', height: '54%', borderRadius: 999, borderWidth: 2, pointerEvents: 'none' },
+  rippleMid: { width: '44%', height: '44%', borderWidth: 1.5 }, rippleInner: { width: '34%', height: '34%', borderWidth: 1 },
+  markHalo: { alignItems: 'center', justifyContent: 'center', shadowOpacity: 0.45, shadowRadius: 32, shadowOffset: { width: 0, height: 10 } },
+  waveform: { width: '100%', maxWidth: 560, height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 10, marginTop: -12 },
+  waveBar: { width: 3, borderRadius: 999 },
+  liveTranscript: { minHeight: 66, width: '100%', maxWidth: 720, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10 },
+  liveTranscriptText: { fontFamily: interfaceFont, fontSize: 17, lineHeight: 25, textAlign: 'center' },
+  turnHint: { fontFamily: interfaceFont, fontSize: 11, lineHeight: 16, marginTop: 5 },
+  confirmation: { width: '100%', maxWidth: 620, borderWidth: 1, borderRadius: 18, padding: 18, marginTop: 14 },
+  confirmationLabel: { fontFamily: interfaceFont, fontSize: 10, lineHeight: 15, fontWeight: '700', letterSpacing: 1.1 },
+  confirmationText: { fontFamily: interfaceFont, fontSize: 16, lineHeight: 23, marginTop: 8 }, confirmationActions: { flexDirection: 'row', gap: 10, marginTop: 15 },
+  confirmButton: { minHeight: 44, borderRadius: 999, backgroundColor: brand.cyan, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 22 },
+  confirmButtonText: { color: brand.obsidian, fontFamily: interfaceFont, fontSize: 13, fontWeight: '700' },
+  cancelButton: { minHeight: 44, borderRadius: 999, borderWidth: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 22 },
+  cancelButtonText: { fontFamily: interfaceFont, fontSize: 13, fontWeight: '600' },
+  feedback: { width: '100%', maxWidth: 620, borderWidth: 1, borderRadius: 12, padding: 12, marginTop: 12 },
+  errorText: { color: brand.critical, fontFamily: interfaceFont, fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  noticeText: { fontFamily: interfaceFont, fontSize: 12, lineHeight: 18, textAlign: 'center', marginTop: 8 },
+  conversation: { width: '100%', maxWidth: 720, borderTopWidth: 1, marginTop: 16, paddingTop: 14, gap: 11 },
+  turn: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  turnRole: { width: 76, fontFamily: interfaceFont, fontSize: 9, lineHeight: 17, fontWeight: '700', letterSpacing: 0.9 },
+  turnText: { flex: 1, fontFamily: interfaceFont, fontSize: 13, lineHeight: 19 },
 });

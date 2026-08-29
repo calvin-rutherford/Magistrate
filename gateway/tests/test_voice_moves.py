@@ -23,15 +23,26 @@ def payload(**updates):
     value.update(updates)
     return value
 
-def test_prompt_requires_bound_confirmation(monkeypatch):
+def test_prompt_flows_hands_free_without_confirmation(monkeypatch):
     fake = FakeHerdr(); monkeypatch.setattr(voice_move_service, 'herdr', fake)
     resolved = client.post('/api/v1/voice/moves', json=payload(), headers=HEADERS)
     assert resolved.status_code == 200
-    move = resolved.json(); assert move['status'] == 'confirmation_required'; assert fake.calls == []
-    executed = client.post('/api/v1/voice/moves', json=payload(execute=True, confirmation_token=move['confirmation_token']), headers=HEADERS)
+    move = resolved.json()
+    assert move['status'] == 'ready'; assert move['requires_confirmation'] is False; assert fake.calls == []
+    executed = client.post('/api/v1/voice/moves', json=payload(execute=True), headers=HEADERS)
     assert executed.json()['status'] == 'completed'
     assert executed.json()['move_id'] == move['move_id']
     assert fake.calls == [('prompt', 'pane-api', 'summarize the failing tests')]
+
+def test_control_requires_bound_confirmation(monkeypatch):
+    fake = FakeHerdr(); monkeypatch.setattr(voice_move_service, 'herdr', fake)
+    move = client.post('/api/v1/voice/moves', json=payload(utterance='stop the api agent', idempotency_key='voice-control-1'), headers=HEADERS).json()
+    assert move['status'] == 'confirmation_required'; assert move['requires_confirmation'] is True; assert fake.calls == []
+    rejected = client.post('/api/v1/voice/moves', json=payload(utterance='stop the api agent', idempotency_key='voice-control-1', execute=True), headers=HEADERS).json()
+    assert rejected['status'] == 'confirmation_expired'; assert fake.calls == []
+    executed = client.post('/api/v1/voice/moves', json=payload(utterance='stop the api agent', idempotency_key='voice-control-2', execute=True, confirmation_token=move['confirmation_token']), headers=HEADERS).json()
+    assert executed['status'] == 'completed'
+    assert fake.calls == [('interrupt', 'pane-api')]
 
 def test_invented_target_is_rejected(monkeypatch):
     monkeypatch.setattr(voice_move_service, 'herdr', FakeHerdr())

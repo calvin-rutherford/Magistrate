@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const puppeteer = require('puppeteer-core');
 
-const PORT = 8091;
+const PORT = Number(process.env.MAGISTRATE_WEB_TEST_PORT) || 8091;
 const URL = `http://127.0.0.1:${PORT}/chat`;
 let server;
 let browser;
@@ -141,6 +141,9 @@ test('mobile drawer slides chat aside, swipes closed, and composer focus is stab
   }
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) < 0.05);
+  // The drawer fade and the chat shell slide-back are separate springs, so wait
+  // for the shell to actually settle before measuring it.
+  await page.waitForFunction(left => Math.abs(document.querySelector('[data-testid="branded-chat-shell"]').getBoundingClientRect().left - left) < 2, {}, before.left);
   await page.focus('[data-testid="captain-prompt"]');
   await page.keyboard.type('status please');
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'status please');
