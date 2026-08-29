@@ -288,16 +288,17 @@ test('mic button records real audio, shows a live waveform, and fills the compos
   await page.close();
 });
 
-test('the composer mic and wrench icons render 10% larger than the base icon size', async () => {
+test('the composer mic and wrench icons render at the same size as the voice-mode icon', async () => {
   // Pinned because a rebase that takes the composer wholesale silently reverts
-  // these to the 18px default.
+  // these to the 18px default, which reads visually smaller than the
+  // send-button's soundwave glyph.
   const page = await openChat({ width: 900, height: 700 });
   const box = async selector => page.$eval(selector, element => {
     const rect = element.querySelector('svg').getBoundingClientRect();
     return { width: Number(rect.width.toFixed(2)), height: Number(rect.height.toFixed(2)) };
   });
-  assert.deepEqual(await box('[data-testid="inline-mic-button"]'), { width: 19.8, height: 19.8 });
-  assert.deepEqual(await box('[data-testid="model-menu-button"]'), { width: 19.8, height: 19.8 });
+  assert.deepEqual(await box('[data-testid="inline-mic-button"]'), { width: 24, height: 24 });
+  assert.deepEqual(await box('[data-testid="model-menu-button"]'), { width: 24, height: 24 });
   await page.close();
 });
 
