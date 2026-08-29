@@ -14,10 +14,17 @@ export const TIME_IMAGES: Record<TimePeriod, ImageSourcePropType> = {
 
 let activeSceneKey: WeatherSceneKey = 'auto';
 let customImageUri = '';
+const backgroundListeners = new Set<() => void>();
+
+export function subscribeActiveBackground(listener: () => void): () => void {
+  backgroundListeners.add(listener);
+  return () => backgroundListeners.delete(listener);
+}
 export function setActiveBackground(sceneKey: WeatherSceneKey, customUri?: string) {
   activeSceneKey = sceneKey;
   if (sceneKey === 'custom' && customUri) customImageUri = customUri;
   if (sceneKey !== 'custom') customImageUri = '';
+  backgroundListeners.forEach(listener => listener());
 }
 export function getCurrentTimePeriod(date: Date = new Date()): TimePeriod {
   const hours = date.getHours();
