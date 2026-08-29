@@ -6,6 +6,7 @@ import os
 import json
 import asyncio
 import time
+import re
 from pathlib import Path
 from typing import Optional, List
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -13,13 +14,15 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from app.auth import verify_token, MAGISTRATE_TOKEN
 from app.herdr_client import DEFAULT_HISTORY_LINES, HERDR_MAX_READ_LINES, HerdrClient
 from app.firstmate_client import FirstmateClient
-from app.execution_capabilities import get_execution_capabilities, validate_execution_selection
-from app.contracts import (UniversalInputContract, GestureInputContract,
+from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
+from app.contracts import (UniversalInputContract, ExecutionSettingsContract, ExecutionCredentialContract, GestureInputContract,
                            NotificationAckContract, NotificationPreferencesContract,
                            RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
-from app.db import init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
+from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
+                    disconnect_account, get_execution_preferences, get_execution_credential_status,
+                    save_execution_preferences, save_execution_credential, delete_execution_credential)
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
 from app.attention_service import attention_service
@@ -309,11 +312,64 @@ async def create_voice_move(request: VoiceMoveRequest, token: str = Depends(veri
 
 # FLEET, ATTENTION & AGENTS
 @app.get('/api/v1/execution/capabilities')
-async def get_execution_capability_inventory(token: str = Depends(verify_token)):
+async def get_execution_capability_inventory(user_id: str = 'default_user', token: str = Depends(verify_token)):
     try:
-        return get_execution_capabilities()
+        return get_execution_capabilities(user_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+
+
+@app.get('/api/v1/execution/settings')
+async def get_execution_settings(user_id: str = 'default_user', token: str = Depends(verify_token)):
+    return {**get_execution_preferences(user_id), 'migration_supported': False,
+            'credential_storage': 'encrypted', 'credentials': [
+                {'credential_key': key, 'configured': configured}
+                for key, configured in get_execution_credential_status(user_id).items()
+            ]}
+
+
+@app.put('/api/v1/execution/settings')
+async def put_execution_settings(contract: ExecutionSettingsContract, user_id: str = 'default_user', token: str = Depends(verify_token)):
+    current = get_execution_preferences(user_id)
+    profile_id = contract.profile_id if 'profile_id' in contract.model_fields_set else current['profile_id']
+    switching = contract.switching_behavior or current['switching_behavior']
+    unavailable = contract.unavailable_behavior or current['unavailable_behavior']
+    if profile_id:
+        try:
+            # Validate identity and availability separately. An unavailable profile
+            # remains persisted so the configured error policy can explain it in UI.
+            capabilities = get_execution_capabilities(user_id)
+            profile = next((item for item in capabilities['profiles'] if item['id'] == profile_id), None)
+            if profile is None:
+                raise ValueError('The selected execution profile is not available.')
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {**save_execution_preferences(user_id, profile_id=profile_id, switching_behavior=switching, unavailable_behavior=unavailable),
+            'migration_supported': False}
+
+
+@app.put('/api/v1/execution/credentials/{credential_key}')
+async def put_execution_credential(credential_key: str, contract: ExecutionCredentialContract, user_id: str = 'default_user', token: str = Depends(verify_token)):
+    if not re.fullmatch(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$', credential_key):
+        raise HTTPException(status_code=422, detail='Invalid credential key.')
+    try:
+        capabilities = get_execution_capabilities(user_id)
+        allowed_keys = {profile['auth']['credential_key'] for profile in capabilities['profiles']}
+        if capabilities['configured'] and credential_key not in allowed_keys:
+            raise HTTPException(status_code=422, detail='That credential is not used by a verified execution profile.')
+        return save_execution_credential(user_id, credential_key, contract.credential)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete('/api/v1/execution/credentials/{credential_key}')
+async def remove_execution_credential(credential_key: str, user_id: str = 'default_user', token: str = Depends(verify_token)):
+    delete_execution_credential(user_id, credential_key)
+    return {'credential_key': credential_key, 'configured': False}
 
 
 @app.get('/api/v1/agents')
@@ -345,15 +401,33 @@ async def get_agent_history(
     return await herdr_client.get_agent_history(agent_id, lines=lines)
 
 @app.post('/api/v1/captain/prompt')
-async def send_captain_prompt(contract: UniversalInputContract, token: str = Depends(verify_token)):
+async def send_captain_prompt(contract: UniversalInputContract, user_id: str = 'default_user', token: str = Depends(verify_token)):
     selection = None
-    if contract.harness or contract.model:
+    if contract.profile_id:
+        try:
+            selection = profile_selection(contract.profile_id, user_id)
+        except ValueError as exc:
+            if get_execution_preferences(user_id)['unavailable_behavior'] != 'fallback':
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            # Fallback is explicit user policy, never the default. The response
+            # remains a current-session prompt and does not pretend migration ran.
+            selection = None
+    elif contract.harness or contract.model:
         if not contract.harness or not contract.model:
             raise HTTPException(status_code=422, detail='A harness and model must be selected together.')
         try:
             selection = validate_execution_selection(contract.harness, contract.model)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        preference = get_execution_preferences(user_id)
+        if preference['profile_id']:
+            try:
+                selection = profile_selection(preference['profile_id'], user_id)
+            except ValueError as exc:
+                if preference['unavailable_behavior'] != 'fallback':
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                selection = None
     return await herdr_client.prompt_agent(contract.target, contract.text, **(selection or {}))
 
 @app.post('/api/v1/agents/{agent_id}/send-key')

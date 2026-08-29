@@ -43,6 +43,12 @@ export interface HealthInfo {
 export interface ExecutionModel {
   id: string;
   label: string;
+  provider?: string;
+  variant?: string;
+  profile_id?: string;
+  available?: boolean;
+  availability?: 'available' | 'unavailable' | string;
+  auth?: { required: boolean; credential_key: string; status: string };
 }
 
 export interface ExecutionHarness {
@@ -52,10 +58,35 @@ export interface ExecutionHarness {
   models: ExecutionModel[];
 }
 
+export interface ExecutionProfile {
+  id: string;
+  variant: string;
+  label: string;
+  harness: { id: string; label: string };
+  provider: { id: string; label: string };
+  model: { id: string; label: string };
+  verified: boolean;
+  available: boolean;
+  availability: 'available' | 'unavailable' | string;
+  availability_reason?: string | null;
+  auth: { required: boolean; credential_key: string; status: string };
+}
+
 export interface ExecutionCapabilities {
   harnesses: ExecutionHarness[];
+  profiles?: ExecutionProfile[];
   source: string;
   configured: boolean;
+  routing?: { selection_supported: boolean; migration_supported: boolean; mode: string };
+}
+
+export interface ExecutionSettings {
+  profile_id: string | null;
+  switching_behavior: 'migrate' | 'new-session';
+  unavailable_behavior: 'error' | 'fallback';
+  migration_supported: boolean;
+  credential_storage?: string;
+  credentials?: Array<{ credential_key: string; configured: boolean }>;
 }
 
 export interface TaskInfo {
@@ -298,6 +329,29 @@ export async function fetchExecutionCapabilities(): Promise<ExecutionCapabilitie
   return checkedJson<ExecutionCapabilities>(res);
 }
 
+export async function fetchExecutionSettings(): Promise<ExecutionSettings> {
+  const res = await fetch(GATEWAY_URL + '/execution/settings', {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  return checkedJson<ExecutionSettings>(res);
+}
+
+export async function updateExecutionSettings(update: Partial<Pick<ExecutionSettings, 'profile_id' | 'switching_behavior' | 'unavailable_behavior'>>): Promise<ExecutionSettings> {
+  const res = await fetch(GATEWAY_URL + '/execution/settings', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify(update)
+  });
+  return checkedJson<ExecutionSettings>(res);
+}
+
+export async function saveExecutionCredential(credentialKey: string, credential: string): Promise<{ credential_key: string; configured: boolean }> {
+  const res = await fetch(GATEWAY_URL + '/execution/credentials/' + encodeURIComponent(credentialKey), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify({ credential })
+  });
+  return checkedJson<{ credential_key: string; configured: boolean }>(res);
+}
+
 export async function connectAuthProvider(provider: string): Promise<any> {
   const res = await fetch(GATEWAY_URL + '/auth/' + provider + '/connect', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
@@ -415,7 +469,7 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
   return data;
 }
 
-export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string) {
+export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string) {
   const res = await fetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
     headers: {
@@ -428,7 +482,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       type: 'prompt',
       text,
       target,
-      ...(harness && model ? { harness, model } : {})
+      ...(harness && model ? { harness, model, ...(profileId ? { profile_id: profileId } : {}) } : {})
     })
   });
   return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);

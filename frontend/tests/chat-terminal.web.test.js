@@ -56,9 +56,14 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
           harnesses: noOverrides ? [] : [
             { id: 'codex', label: 'Codex', verified: true, models: [{ id: 'gpt-5', label: 'GPT-5' }] },
             { id: 'reviewer', label: 'Reviewer', verified: true, models: [{ id: 'review-model', label: 'Review Model' }] },
+          ], profiles: noOverrides ? [] : [
+            { id: 'codex:gpt-5', variant: 'gpt-5', label: 'GPT-5', harness: { id: 'codex', label: 'Codex' }, provider: { id: 'openai-codex', label: 'OpenAI Codex' }, model: { id: 'gpt-5', label: 'GPT-5' }, verified: true, available: true, availability: 'available', auth: { required: false, credential_key: 'openai-codex', status: 'not-required' } },
+            { id: 'reviewer:review-model', variant: 'review-model', label: 'Review Model', harness: { id: 'reviewer', label: 'Reviewer' }, provider: { id: 'anthropic', label: 'Anthropic' }, model: { id: 'review-model', label: 'Review Model' }, verified: true, available: true, availability: 'available', auth: { required: false, credential_key: 'anthropic', status: 'not-required' } },
+            { id: 'pi:default', variant: 'default', label: 'GPT-5.6 Luna', harness: { id: 'pi', label: 'Pi' }, provider: { id: 'openai-codex', label: 'OpenAI Codex' }, model: { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' }, verified: true, available: true, availability: 'available', auth: { required: false, credential_key: 'openai-codex', status: 'not-required' } },
           ], source: 'test', configured: !noOverrides,
         }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
+      if (url.includes('/api/v1/execution/settings')) return Promise.resolve(new Response(JSON.stringify({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/agents/w1%3Ap7/history')) {
         if (simulateHistoryRace) {
@@ -312,7 +317,23 @@ test('current backend session works without setup and explicit model overrides s
   const overrideBody = JSON.parse(await overridePage.evaluate(() => window.__magistrateApiCalls.find(call => call.url.includes('/captain/prompt')).body));
   assert.equal(overrideBody.harness, 'reviewer');
   assert.equal(overrideBody.model, 'review-model');
+  assert.equal(overrideBody.profile_id, 'reviewer:review-model');
   await overridePage.close();
+});
+
+test('Pi remains an atomic harness/provider/model selection', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="model-menu-button"]');
+  const option = await page.$('[data-testid="model-option-pi-gpt-5-6-luna"]');
+  assert.ok(option);
+  assert.match(await option.evaluate(element => element.getAttribute('aria-label')), /Pi, OpenAI Codex, GPT-5.6 Luna/);
+  await option.click();
+  await submit(page, 'use pi');
+  const body = JSON.parse(await page.evaluate(() => window.__magistrateApiCalls.find(call => call.url.includes('/captain/prompt')).body));
+  assert.equal(body.profile_id, 'pi:default');
+  assert.equal(body.harness, 'pi');
+  assert.equal(body.model, 'gpt-5.6-luna');
+  await page.close();
 });
 
 test('account gear opens the lower settings drawer with live network status', async () => {

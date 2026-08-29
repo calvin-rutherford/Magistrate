@@ -272,9 +272,11 @@ class HerdrClient:
         if target in ('captain', 'codex', 'firstmate'):
             agents = await self.list_agents()
             if agents:
-                # Prefer an explicitly named captain/firstmate, then the
-                # verified Codex/Pi panes. Do not silently route a Pi captain
-                # to an unrelated first pane when another harness is present.
+                # Firstmate currently names Pi panes "π - firstmate" / "π -
+                # Magistrate". Prefer an explicit captain name, then a known
+                # verified harness, rather than silently selecting the first pane.
+                # Do not silently route a Pi captain to an unrelated first pane
+                # when another harness is present.
                 for ag in agents:
                     name = (ag.get('name') or '').strip().lower()
                     if name in ('captain', 'codex', 'firstmate') or name.endswith(' - firstmate'):
@@ -285,7 +287,11 @@ class HerdrClient:
                 return agents[0].get('pane_id') or agents[0].get('id')
         return target
 
-    async def prompt_agent(self, target: str, text: str, harness: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
+    async def prompt_agent(
+        self, target: str, text: str, harness: Optional[str] = None,
+        model: Optional[str] = None, profile_id: Optional[str] = None,
+        provider: Optional[str] = None, variant: Optional[str] = None,
+    ) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)
         submitted_text = text
         if harness and model:
@@ -310,9 +316,19 @@ class HerdrClient:
             # safe to return synchronously; all other replies arrive via the
             # history poll and are parsed by parse_agent_history().
             response = _prompt_response(output_str)
-            return {'status': 'submitted', 'target': resolved_target, 'response': response, 'harness': harness, 'model': model}
+            return {
+                'status': 'submitted', 'target': resolved_target, 'response': response,
+                'harness': harness, 'provider': provider, 'model': model, 'variant': variant,
+                'profile_id': profile_id,
+                'routing': {'selection_supported': True, 'migration_supported': False, 'mode': 'prompt-context'},
+            }
         else:
-            return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(), 'harness': harness, 'model': model}
+            return {
+                'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(),
+                'harness': harness, 'provider': provider, 'model': model, 'variant': variant,
+                'profile_id': profile_id,
+                'routing': {'selection_supported': True, 'migration_supported': False, 'mode': 'prompt-context'},
+            }
 
     async def read_agent_output(self, target: str, lines: int = HERDR_MAX_READ_LINES, source: str = 'recent-unwrapped') -> str:
         resolved_target = await self.resolve_target(target)
