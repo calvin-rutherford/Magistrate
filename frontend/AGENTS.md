@@ -13,7 +13,15 @@ Sharp edges when driving the web build in headless Chrome:
 
 ## Backend model selection contract
 
-`POST /api/v1/captain/prompt` requires `harness` and `model` together or neither; omitting both keeps the backend's current session selection (see `gateway/app/main.py`). Offer variants from `GET /api/v1/execution/capabilities` only.
+`POST /api/v1/captain/prompt` requires `harness` and `model` together or neither; omitting both keeps the backend's current session selection (see `gateway/app/main.py`). Offer variants from `GET /api/v1/execution/capabilities` only. Its response's `response` field is the agent's reply text and must be appended to the chat transcript by the caller — the gateway does not push it, so a caller that only checks for `status`/`error` will silently drop every reply.
+
+## Voice input
+
+`src/input/VoiceInputAdapter.ts` (`useVoiceInputAdapter`) is the one seam for microphone capture: it wraps `expo-audio` recording, exposes live `amplitude` (0-1, ~100ms cadence) for waveform UI, and on web also drives the Web Speech API for interim transcript callbacks. Pair `capture.stop()` with `transcribeVoiceAudio()` from `src/api/client.ts` to get a final transcript from the gateway's `/voice/transcribe` endpoint. Test it in headless Chrome by launching Puppeteer with `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` so `getUserMedia` resolves without real hardware.
+
+## Local dev environment
+
+If `npx tsc`/`expo start` fails with `Cannot find module 'expo-*'` even though it's listed in `package.json`, the worktree's `node_modules` is stale — run `npm install` (not `npm ci`, to avoid rewriting the lockfile) before debugging further.
 
 ## Maintaining this file
 

@@ -21,22 +21,24 @@ async function waitForServer() {
 test.before(async () => {
   server = spawn(path.join(process.cwd(), 'node_modules', '.bin', 'expo'), ['start', '--web', '--port', String(PORT)], { cwd: process.cwd(), env: { ...process.env, CI: '1' }, stdio: 'ignore' });
   await waitForServer();
-  browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+  // Fake device/UI flags let getUserMedia() resolve with a synthetic audio
+  // track instead of prompting for real microphone hardware/permission.
+  browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
 });
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '') {
   const page = await browser.newPage();
   await page.setViewport(viewport);
-  await page.evaluateOnNewDocument(noOverrides => {
+  await page.evaluateOnNewDocument((noOverrides, responseText) => {
     const nativeFetch = window.fetch.bind(window);
     window.__magistrateApiCalls = [];
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/captain/prompt')) {
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
-        return Promise.resolve(new Response(JSON.stringify({ status: 'submitted', target: 'captain' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        return Promise.resolve(new Response(JSON.stringify({ status: 'submitted', target: 'captain', response: responseText }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/execution/capabilities')) {
         return Promise.resolve(new Response(JSON.stringify({
@@ -51,10 +53,11 @@ async function openChat(viewport, emptyInventory = false) {
       if (url.includes('/api/v1/attention/unified')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/auth/providers')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/voice/transcribe')) return Promise.resolve(new Response(JSON.stringify({ text: 'test transcript from mic', is_final: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, emptyInventory);
+  }, emptyInventory, promptResponseText);
   await page.goto(URL, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
   // win hit-testing near the viewport bottom in headless Chrome.
@@ -78,7 +81,7 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
   assert.equal((await page.$$('[data-testid="brand-drawer-toggle"] img')).length, 1);
   const body = await page.evaluate(() => document.body.innerText);
   assert.doesNotMatch(body, /Firstmate|melkezic/i);
-  assert.match(body, /model/);
+  assert.equal((await page.$$('[data-testid="model-menu-button"]')).length, 1);
   await page.close();
 });
 
@@ -169,5 +172,26 @@ test('two-second hold exposes edit, copy, selection, and a sent timestamp', asyn
   assert.match(actions, /Edit/); assert.match(actions, /Copy/); assert.match(actions, /Select text/);
   await page.locator('::-p-text(Edit)').click();
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'editable message');
+  await page.close();
+});
+
+test('mic button records real audio, shows a live waveform, and fills the composer with the transcript', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="inline-mic-button"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="inline-mic-button"]').getAttribute('aria-label') === 'Stop microphone');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  await page.click('[data-testid="inline-mic-button"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="captain-prompt"]').value.includes('test transcript from mic'));
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'test transcript from mic');
+  await page.close();
+});
+
+test('the agent response is appended to the conversation once the gateway replies', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, 'Understood, working on it now.');
+  await submit(page, 'status please');
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('Understood, working on it now.'));
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /status please/);
+  assert.match(history, /Understood, working on it now\./);
   await page.close();
 });
