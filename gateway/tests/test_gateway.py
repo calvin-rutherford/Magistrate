@@ -55,3 +55,24 @@ def test_agent_interrupt_delegates_to_herdr(monkeypatch):
     resp = client.post('/api/v1/agents/agent-1/interrupt', headers={'X-Magistrate-Token': MAGISTRATE_TOKEN})
     assert resp.status_code == 200
     assert resp.json() == {'status': 'interrupted', 'target': 'agent-1'}
+
+def test_agent_history_delegates_to_herdr(monkeypatch):
+    async def fake_history(target, lines):
+        return {'target': target, 'messages': [{'role': 'user', 'kind': 'conversation', 'text': 'Hello'}]}
+
+    monkeypatch.setattr('app.main.herdr_client.get_agent_history', fake_history)
+    resp = client.get('/api/v1/agents/agent-1/history?lines=25', headers={'X-Magistrate-Token': MAGISTRATE_TOKEN})
+    assert resp.status_code == 200
+    assert resp.json()['messages'][0]['text'] == 'Hello'
+
+def test_agent_rename_delegates_to_herdr_and_validates_name(monkeypatch):
+    async def fake_rename(target, name):
+        return {'status': 'renamed', 'target': target, 'name': name}
+
+    monkeypatch.setattr('app.main.herdr_client.rename_agent', fake_rename)
+    resp = client.post('/api/v1/agents/agent-1/rename', headers={'X-Magistrate-Token': MAGISTRATE_TOKEN}, json={'name': 'review_agent'})
+    assert resp.status_code == 200
+    assert resp.json() == {'status': 'renamed', 'target': 'agent-1', 'name': 'review_agent'}
+
+    invalid = client.post('/api/v1/agents/agent-1/rename', headers={'X-Magistrate-Token': MAGISTRATE_TOKEN}, json={'name': 'Invalid Name'})
+    assert invalid.status_code == 422

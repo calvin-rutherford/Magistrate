@@ -2,10 +2,69 @@ import asyncio
 import json
 import os
 import subprocess
+import re
 from typing import Dict, Any, List, Optional
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
 HERDR_MAX_READ_LINES = 2**32 - 1
+
+_HISTORY_MARKER = re.compile(r'^\s*([›❯•⏺●])\s+(.*)$')
+_TOOL_SUMMARY = re.compile(
+    r'^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|SessionStart\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
+    re.IGNORECASE,
+)
+_TRANSIENT_SUMMARY = re.compile(r'^(?:Working\s*\(|You have \d+ usage|Session renamed\b)', re.IGNORECASE)
+_TRANSIENT_USER_TEXT = {'Ask Codex to do anything', 'Ask Claude anything', 'Skipping dev server'}
+
+
+def parse_agent_history(output: str) -> List[Dict[str, str]]:
+    """Turn Herdr's plain terminal transcript into displayable chat entries.
+
+    Herdr intentionally exposes terminal snapshots rather than a harness-specific
+    conversation API. Codex and Claude both render stable prompt/response markers;
+    everything else (chrome, spinners, separators, and the live composer) is
+    ignored. Tool summaries remain typed separately so clients can hide them.
+    """
+    messages: List[Dict[str, str]] = []
+    current: Optional[Dict[str, str]] = None
+
+    def finish() -> None:
+        nonlocal current
+        if not current:
+            return
+        text = current['text'].strip()
+        if text and text not in _TRANSIENT_USER_TEXT:
+            messages.append({**current, 'text': text})
+        current = None
+
+    for raw_line in output.replace('\r', '').splitlines():
+        marker = _HISTORY_MARKER.match(raw_line)
+        if marker:
+            finish()
+            glyph, text = marker.groups()
+            if glyph in ('›', '❯'):
+                current = {'role': 'user', 'kind': 'conversation', 'text': text}
+            else:
+                if _TRANSIENT_SUMMARY.match(text.strip()):
+                    current = None
+                    continue
+                kind = 'tool' if _TOOL_SUMMARY.match(text.strip()) else 'conversation'
+                current = {'role': 'assistant', 'kind': kind, 'text': text}
+            continue
+        if current is None:
+            continue
+        stripped = raw_line.strip()
+        if stripped.startswith('───') or re.match(r'^[^\s]+\s+(?:low|medium|high|xhigh|max|ultra)\s+·\s+', stripped):
+            finish()
+            continue
+        # Wrapped transcript rows are indented. Empty rows preserve paragraphs;
+        # unindented terminal chrome ends the current entry.
+        if not raw_line or raw_line[:1].isspace():
+            current['text'] += '\n' + stripped
+        else:
+            finish()
+    finish()
+    return messages
 
 class HerdrClient:
     def __init__(self, socket_path: str = HERDR_SOCKET_PATH):
@@ -136,7 +195,33 @@ class HerdrClient:
             stderr=asyncio.subprocess.PIPE
         )
         stdout, _ = await proc.communicate()
+        if proc.returncode not in (None, 0) and source != 'visible':
+            # Active alternate-screen agents cannot expose scrollback while
+            # working. Their visible viewport still contains the latest live
+            # conversation, so return that instead of an empty history.
+            return await self.read_agent_output(resolved_target, lines=lines, source='visible')
         return stdout.decode('utf-8', errors='replace') if stdout else ''
+
+    async def get_agent_history(self, target: str, lines: int = HERDR_MAX_READ_LINES) -> Dict[str, Any]:
+        resolved_target = await self.resolve_target(target)
+        output = await self.read_agent_output(resolved_target, lines=lines)
+        return {'target': resolved_target, 'messages': parse_agent_history(output)}
+
+    async def rename_agent(self, target: str, name: str) -> Dict[str, Any]:
+        resolved_target = await self.resolve_target(target)
+        proc = await asyncio.create_subprocess_exec(
+            'herdr', 'agent', 'rename', resolved_target, name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            return {'status': 'renamed', 'target': resolved_target, 'name': name}
+        return {
+            'status': 'error',
+            'target': resolved_target,
+            'error': (stderr or stdout).decode('utf-8', errors='replace').strip() or 'Herdr could not rename the agent.',
+        }
 
     async def interrupt_agent(self, target: str) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)

@@ -23,6 +23,9 @@ class NotificationPreferencesContract(BaseModel):
     quiet_start: Optional[int] = None
     quiet_end: Optional[int] = None
 
+class RenameAgentContract(BaseModel):
+    name: str = Field(min_length=1, max_length=32, pattern=r'^[a-z][a-z0-9_-]{0,31}$')
+
 class VoiceImpact(str, Enum):
     READ = 'read'
     PROMPT = 'prompt'

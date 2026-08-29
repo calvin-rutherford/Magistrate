@@ -19,6 +19,17 @@ export interface AgentControlResult {
   error?: string | null;
 }
 
+export interface AgentHistoryMessage {
+  role: 'user' | 'assistant';
+  kind: 'conversation' | 'tool';
+  text: string;
+}
+
+export interface AgentHistoryResult {
+  target: string;
+  messages: AgentHistoryMessage[];
+}
+
 export interface HealthInfo {
   status: string;
   service: string;
@@ -356,6 +367,15 @@ export async function fetchCaptainOutput(lines: number = HERDR_MAX_READ_LINES) {
   return checkedJson<{ output?: string }>(res);
 }
 
+export async function fetchAgentHistory(agentId: string, lines: number = HERDR_MAX_READ_LINES): Promise<AgentHistoryResult> {
+  const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/history?lines=' + lines, {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  const data = await checkedJson<AgentHistoryResult>(res);
+  if (!Array.isArray(data.messages)) throw new Error('Gateway returned invalid agent history.');
+  return data;
+}
+
 export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string) {
   const res = await fetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
@@ -381,6 +401,15 @@ export async function interruptAgent(agentId: string): Promise<AgentControlResul
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
   return checkedJson<AgentControlResult>(res);
+}
+
+export async function renameAgent(agentId: string, name: string): Promise<AgentControlResult & { name?: string }> {
+  const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/rename', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify({ name })
+  });
+  return checkedJson<AgentControlResult & { name?: string }>(res);
 }
 
 export async function sendAgentKey(agentId: string = 'captain', key: string = 'Enter'): Promise<AgentControlResult> {

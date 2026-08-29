@@ -16,7 +16,7 @@ from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection
 from app.contracts import (UniversalInputContract, GestureInputContract,
                            NotificationAckContract, NotificationPreferencesContract,
-                           VoiceMoveRequest)
+                           RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
 from app.db import init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
@@ -327,6 +327,14 @@ async def get_captain_output(
     output = await herdr_client.read_agent_output('captain', lines=lines)
     return {'output': output}
 
+@app.get('/api/v1/agents/{agent_id}/history')
+async def get_agent_history(
+    agent_id: str,
+    lines: int = Query(HERDR_MAX_READ_LINES, ge=0, le=HERDR_MAX_READ_LINES),
+    token: str = Depends(verify_token),
+):
+    return await herdr_client.get_agent_history(agent_id, lines=lines)
+
 @app.post('/api/v1/captain/prompt')
 async def send_captain_prompt(contract: UniversalInputContract, token: str = Depends(verify_token)):
     selection = None
@@ -346,6 +354,10 @@ async def send_agent_key(agent_id: str, key: str = Query('Enter'), token: str = 
 @app.post('/api/v1/agents/{agent_id}/interrupt')
 async def interrupt_agent(agent_id: str, token: str = Depends(verify_token)):
     return await herdr_client.interrupt_agent(agent_id)
+
+@app.post('/api/v1/agents/{agent_id}/rename')
+async def rename_agent(agent_id: str, contract: RenameAgentContract, token: str = Depends(verify_token)):
+    return await herdr_client.rename_agent(agent_id, contract.name)
 
 # STATIC SPA FALLBACK FOR DIRECT DEEP LINKS
 # Resolve the default from the checkout containing this gateway. Deployments may
