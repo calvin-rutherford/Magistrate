@@ -94,6 +94,10 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
   assert.equal((await page.$$('[data-testid="brand-drawer-toggle"] img')).length, 1);
   const body = await page.evaluate(() => document.body.innerText);
   assert.doesNotMatch(body, /Firstmate|melkezic/i);
+  // Opening Chat and its recurring history refresh must never submit a prompt;
+  // prompts are sent only after an explicit composer action.
+  await new Promise(resolve => setTimeout(resolve, 3200));
+  assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length), 0);
   assert.equal((await page.$$('[data-testid="model-menu-button"]')).length, 1);
   await page.close();
 });
