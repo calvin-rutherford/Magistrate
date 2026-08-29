@@ -14,6 +14,7 @@ Sharp edges when driving the web build in headless Chrome:
 - React Native `PanResponder` gestures do not fire from synthetic mouse drags; dispatch real touch events via the CDP `Input.dispatchTouchEvent` command instead.
 - Cross-origin gateway mocks need in-page `fetch` patching (`page.evaluateOnNewDocument`); network-level request interception fails CORS preflights.
 - Each suite pins a fixed dev-server port, so parallel git worktrees collide and silently drive *another* checkout's app. Override with `MAGISTRATE_WEB_TEST_PORT=<free port>` when running outside the primary checkout.
+- The live gateway at `http://100.84.181.23:8000` runs behind `main`, so it 404s newly added endpoints. To verify chat rendering against *real* herdr data, run this checkout's gateway locally against the real socket (`uvicorn app.main:app --port 8099` in `gateway/`) and rewrite the host in the page's `fetch` patch — the app hardcodes `GATEWAY_URL` in `src/api/client.ts`.
 
 ## Backend model selection contract
 
