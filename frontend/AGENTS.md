@@ -10,6 +10,7 @@ Sharp edges when driving the web build in headless Chrome:
 - Expo's development-only `#error-toast` has a zero-sized box but can win hit-testing near the viewport bottom, silently swallowing clicks on the composer or drawer footer. Disable its pointer events first (see `tests/chat-terminal.web.test.js`).
 - React Native `PanResponder` gestures do not fire from synthetic mouse drags; dispatch real touch events via the CDP `Input.dispatchTouchEvent` command instead.
 - Cross-origin gateway mocks need in-page `fetch` patching (`page.evaluateOnNewDocument`); network-level request interception fails CORS preflights.
+- Each suite pins a fixed dev-server port, so parallel git worktrees collide and silently drive *another* checkout's app. Override with `MAGISTRATE_WEB_TEST_PORT=<free port>` when running outside the primary checkout.
 
 ## Backend model selection contract
 
@@ -22,6 +23,8 @@ Sharp edges when driving the web build in headless Chrome:
 ## Local dev environment
 
 If `npx tsc`/`expo start` fails with `Cannot find module 'expo-*'` even though it's listed in `package.json`, the worktree's `node_modules` is stale — run `npm install` (not `npm ci`, to avoid rewriting the lockfile) before debugging further.
+
+`CI=1 expo start --web` disables Metro file-watching: a long-running dev server keeps serving the bundle from launch time, so restart it after code edits (the `test:*` suites are unaffected — they spawn fresh servers).
 
 ## Maintaining this file
 

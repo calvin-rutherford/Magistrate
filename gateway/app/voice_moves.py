@@ -38,7 +38,10 @@ class VoiceMoveService:
         move_id = f'vm_{hashlib.sha256(request.idempotency_key.encode()).hexdigest()[:16]}'
         base = {'schema_version': 'voice-move.v1', 'move_id': move_id, 'utterance': utterance,
                 'intent': intent, 'impact': impact.value, 'target': target,
-                'requires_confirmation': impact in {VoiceImpact.PROMPT, VoiceImpact.CONTROL}}
+                # Ordinary prompts are the conversational voice path. Destructive
+                # language is prohibited above; only direct fleet control pauses
+                # the hands-free loop for an explicit confirmation.
+                'requires_confirmation': impact == VoiceImpact.CONTROL}
         if impact == VoiceImpact.PROHIBITED:
             return {**base, 'status': 'prohibited',
                     'error': 'Voice Mode cannot execute terminal or destructive actions.'}

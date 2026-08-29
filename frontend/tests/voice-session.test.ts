@@ -4,25 +4,29 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { transitionVoiceState } from '../src/services/VoiceSessionReducer.ts';
 
-test('voice session follows capture, review, confirmation, execution and response states', () => {
-  let state = transitionVoiceState('READY', 'LISTENING');
+test('continuous voice loop cycles listening, thinking, speaking, then listening again', () => {
+  let state = transitionVoiceState('READY', 'STARTING');
+  state = transitionVoiceState(state, 'LISTENING');
   state = transitionVoiceState(state, 'TRANSCRIBING');
-  state = transitionVoiceState(state, 'REVIEW');
-  state = transitionVoiceState(state, 'RESOLVING');
-  state = transitionVoiceState(state, 'CONFIRMING');
-  state = transitionVoiceState(state, 'EXECUTING');
+  state = transitionVoiceState(state, 'THINKING');
   state = transitionVoiceState(state, 'SPEAKING');
-  assert.equal(transitionVoiceState(state, 'READY'), 'READY');
+  assert.equal(transitionVoiceState(state, 'STARTING'), 'STARTING');
+});
+
+test('fleet-control moves pause the loop for confirmation and resume it either way', () => {
+  assert.equal(transitionVoiceState('THINKING', 'CONFIRMING'), 'CONFIRMING');
+  assert.equal(transitionVoiceState('CONFIRMING', 'THINKING'), 'THINKING');
+  assert.equal(transitionVoiceState('CONFIRMING', 'STARTING'), 'STARTING');
 });
 
 test('cancel and permission errors recover without entering chat', () => {
   assert.equal(transitionVoiceState('LISTENING', 'READY'), 'READY');
   assert.equal(transitionVoiceState('READY', 'ERROR'), 'ERROR');
-  assert.equal(transitionVoiceState('ERROR', 'LISTENING'), 'LISTENING');
-  assert.throws(() => transitionVoiceState('READY', 'EXECUTING'), /Invalid Voice Mode transition/);
+  assert.equal(transitionVoiceState('ERROR', 'STARTING'), 'STARTING');
+  assert.throws(() => transitionVoiceState('READY', 'SPEAKING'), /Invalid Voice Mode transition/);
   const source = readFileSync(new URL('../app/voice.tsx', import.meta.url), 'utf8');
   const capture = readFileSync(new URL('../src/input/VoiceInputAdapter.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /router\.push\s*\(\s*['"]\/chat/);
-  assert.match(source, /submitVoiceMove\(utterance, target, key\)/);
+  assert.match(source, /submitVoiceMove\(utterance, 'captain', key\)/);
   assert.match(capture, /Microphone permission was denied/);
 });
