@@ -30,13 +30,17 @@ export function weatherCodeToKind(code: number): WeatherKind {
   return 'clear';
 }
 function selectedWeather(fetched: WeatherKind): WeatherKind {
+  if (['dusk-mountain', 'clear-day', 'clear-night', 'sunset', 'minimal-dark'].includes(activeSceneKey)) return 'clear';
   if (activeSceneKey === 'clouds') return 'cloudy';
   if (activeSceneKey === 'rain') return 'rain';
   if (activeSceneKey === 'storm') return 'storm';
   return fetched;
 }
 export function getEnvironmentTheme(weather: WeatherKind = 'clear', date: Date = new Date()): EnvironmentTheme {
-  const timePeriod = getCurrentTimePeriod(date);
+  const selectedPeriod: Partial<Record<WeatherSceneKey, TimePeriod>> = {
+    'dusk-mountain': 'dusk', 'clear-day': 'day', 'clear-night': 'night', sunset: 'dusk', 'minimal-dark': 'night',
+  };
+  const timePeriod = selectedPeriod[activeSceneKey] || getCurrentTimePeriod(date);
   const isCustom = activeSceneKey === 'custom' && !!customImageUri;
-  return { timePeriod, sceneKey: activeSceneKey, sceneImage: isCustom ? { uri: customImageUri } : TIME_IMAGES[timePeriod], weather: selectedWeather(weather), customUri: customImageUri || undefined, dimOpacity: timePeriod === 'day' ? 0.48 : 0.34 };
+  return { timePeriod, sceneKey: activeSceneKey, sceneImage: isCustom ? { uri: customImageUri } : TIME_IMAGES[timePeriod], weather: selectedWeather(weather), customUri: customImageUri || undefined, dimOpacity: activeSceneKey === 'minimal-dark' ? 0.72 : timePeriod === 'day' ? 0.48 : 0.34 };
 }

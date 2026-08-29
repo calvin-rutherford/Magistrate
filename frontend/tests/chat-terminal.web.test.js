@@ -183,7 +183,7 @@ test('account gear opens the lower settings drawer with live network status', as
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
   assert.equal(await page.$eval('[data-testid="settings-network-status"]', element => element.textContent), 'Connected');
   const ratio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
-  assert.ok(ratio >= 0.4 && ratio <= 0.48);
+  assert.ok(ratio >= 0.42 && ratio <= 0.52);
   await page.click('[data-testid="settings-close"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) < 0.05);
   await page.close();
@@ -208,6 +208,8 @@ test('fleet agent opens its conversation, hides tools by default, and settings c
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   await page.click('[data-testid="settings-open"]');
+  await page.waitForSelector('[data-testid="settings-theme"]');
+  await page.click('[data-testid="settings-theme"]');
   await page.waitForSelector('[data-testid="settings-tool-calls-toggle"]');
   await page.click('[data-testid="settings-tool-calls-toggle"]');
   await page.waitForSelector('[data-testid="tool-history-message"]');
@@ -254,6 +256,34 @@ test('mic button records real audio, shows a live waveform, and fills the compos
   await page.click('[data-testid="inline-mic-button"]');
   await page.waitForFunction(() => document.querySelector('[data-testid="captain-prompt"]').value.includes('test transcript from mic'));
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'test transcript from mic');
+  await page.close();
+});
+
+test('the composer mic and wrench icons render 10% larger than the base icon size', async () => {
+  // Pinned because a rebase that takes the composer wholesale silently reverts
+  // these to the 18px default.
+  const page = await openChat({ width: 900, height: 700 });
+  const box = async selector => page.$eval(selector, element => {
+    const rect = element.querySelector('svg').getBoundingClientRect();
+    return { width: Number(rect.width.toFixed(2)), height: Number(rect.height.toFixed(2)) };
+  });
+  assert.deepEqual(await box('[data-testid="inline-mic-button"]'), { width: 19.8, height: 19.8 });
+  assert.deepEqual(await box('[data-testid="model-menu-button"]'), { width: 19.8, height: 19.8 });
+  await page.close();
+});
+
+test('a herdr RPC acknowledgement envelope never reaches the conversation', async () => {
+  // Gateways one deploy behind still return herdr's raw acknowledgement in
+  // `response`; it is transport metadata, not the agent's message.
+  const envelope = JSON.stringify({ jsonrpc: '2.0', id: 7, result: { ok: true, target: 'captain' } });
+  const page = await openChat({ width: 900, height: 700 }, false, envelope);
+  await submit(page, 'status please');
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /status please/);
+  assert.doesNotMatch(history, /jsonrpc/);
+  assert.doesNotMatch(history, /result/);
+  assert.doesNotMatch(history, /[{}]/);
   await page.close();
 });
 

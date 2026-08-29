@@ -59,7 +59,8 @@ test('chat is a standalone route and preserves agent target deep links', async (
   const page = await open(`${BASE}/chat?agentId=w1%3Ap7`);
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   assert.equal(await page.$('[data-testid="workspace-shell"]'), null);
-  assert.match(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('placeholder')), /w1:p7/);
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
+  assert.match(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('aria-label')), /w1:p7/);
   assert.equal(new URL(page.url()).pathname, '/chat');
   await page.close();
 });

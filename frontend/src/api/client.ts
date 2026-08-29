@@ -1,3 +1,5 @@
+import { parseAgentHistory } from '../services/ChatHistory';
+
 const GATEWAY_URL = 'http://100.84.181.23:8000/api/v1';
 const DEVICE_TOKEN = 'magistrate-device-token-12345';
 
@@ -397,6 +399,13 @@ export async function fetchAgentHistory(agentId: string, lines: number = HERDR_M
   const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/history?lines=' + lines, {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
+  // The live gateway may be one deploy behind the app. Captain output has the
+  // same terminal snapshot and keeps new message rendering clean during that
+  // rolling upgrade instead of exposing the prompt acknowledgement JSON.
+  if (res.status === 404 && agentId === 'captain') {
+    const fallback = await fetchCaptainOutput(lines);
+    return { target: agentId, messages: parseAgentHistory(fallback.output || '') };
+  }
   const data = await checkedJson<AgentHistoryResult>(res);
   if (!Array.isArray(data.messages)) throw new Error('Gateway returned invalid agent history.');
   return data;

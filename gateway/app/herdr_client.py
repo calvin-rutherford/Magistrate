@@ -1,8 +1,8 @@
 import asyncio
 import json
 import os
-import subprocess
 import re
+import subprocess
 from typing import Dict, Any, List, Optional
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
@@ -10,11 +10,39 @@ HERDR_MAX_READ_LINES = 2**32 - 1
 
 _HISTORY_MARKER = re.compile(r'^\s*([›❯•⏺●])\s+(.*)$')
 _TOOL_SUMMARY = re.compile(
-    r'^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|SessionStart\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
+    r'^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b'
+    r'|Background command\b|Pushed\b|Committed\b|SessionStart\b'
+    r'|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b'
+    r'|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
     re.IGNORECASE,
 )
-_TRANSIENT_SUMMARY = re.compile(r'^(?:Working\s*\(|You have \d+ usage|Session renamed\b)', re.IGNORECASE)
+_TRANSIENT_SUMMARY = re.compile(
+    r'^(?:Working\s*\(|You have \d+ usage|Session renamed\b|Stop hook feedback\b|Tip:'
+    r'|(?:low|medium|high|xhigh|max|ultra)\s+·\s+/)',
+    re.IGNORECASE,
+)
 _TRANSIENT_USER_TEXT = {'Ask Codex to do anything', 'Ask Claude anything', 'Skipping dev server'}
+_LINE_BREAK = re.compile(r'^(?:[-*•‣]|\d+[.)]\s|#)')
+# Footer/status overlays herdr captures mid-frame; they can land on an indented
+# row directly under a message, so they are dropped wherever they appear.
+_TERMINAL_CHROME = re.compile(
+    r'\(ctrl\+(?:End|Home)\)|Jump to bottom|Update installed · Restart|⏵⏵|⏸\s|auto mode on ·|esc to interrupt|ctrl\+\w+ to '
+)
+
+
+def unwrap_terminal_text(text: str) -> str:
+    """Rejoin prose hard-wrapped at the terminal width, keeping list items and paragraph breaks."""
+    blocks: List[str] = []
+    for line in text.split('\n'):
+        trimmed = line.strip()
+        if not trimmed:
+            blocks.append('')
+            continue
+        if blocks and blocks[-1] and not _LINE_BREAK.match(trimmed):
+            blocks[-1] += trimmed if blocks[-1][-1] in '-/' else ' ' + trimmed
+        else:
+            blocks.append(trimmed)
+    return re.sub(r'\n{2,}', '\n\n', '\n'.join(blocks)).strip()
 
 
 def parse_agent_history(output: str) -> List[Dict[str, str]]:
@@ -23,7 +51,8 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
     Herdr intentionally exposes terminal snapshots rather than a harness-specific
     conversation API. Codex and Claude both render stable prompt/response markers;
     everything else (chrome, spinners, separators, and the live composer) is
-    ignored. Tool summaries remain typed separately so clients can hide them.
+    ignored. Conversational prose is unwrapped from the terminal's hard wrapping,
+    and tool summaries remain typed separately so clients can hide them.
     """
     messages: List[Dict[str, str]] = []
     current: Optional[Dict[str, str]] = None
@@ -32,34 +61,64 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         nonlocal current
         if not current:
             return
-        text = current['text'].strip()
+        text = unwrap_terminal_text(current['text']) if current['kind'] == 'conversation' else current['text'].strip()
         if text and text not in _TRANSIENT_USER_TEXT:
             messages.append({**current, 'text': text})
         current = None
 
+    previous_blank = True
+    # Offset in current['text'] where the last blank-line-separated unmarked row
+    # begins: a later '⎿' detail row proves that row was tool activity, not prose.
+    split_at: Optional[int] = None
     for raw_line in output.replace('\r', '').splitlines():
+        was_blank, previous_blank = previous_blank, not raw_line.strip()
         marker = _HISTORY_MARKER.match(raw_line)
         if marker:
             finish()
+            split_at = None
             glyph, text = marker.groups()
             if glyph in ('›', '❯'):
                 current = {'role': 'user', 'kind': 'conversation', 'text': text}
             else:
-                if _TRANSIENT_SUMMARY.match(text.strip()):
+                if _TRANSIENT_SUMMARY.match(text.strip()) or _TERMINAL_CHROME.search(text):
                     current = None
                     continue
                 kind = 'tool' if _TOOL_SUMMARY.match(text.strip()) else 'conversation'
                 current = {'role': 'assistant', 'kind': kind, 'text': text}
             continue
+        stripped = raw_line.strip()
+        # Claude's harness prints tool activity as unmarked rows set off by a
+        # blank line rather than a response marker. Without this they would be
+        # folded into the conversational message above them and leak into chat.
+        if was_blank and stripped and _TOOL_SUMMARY.match(stripped):
+            finish()
+            current = {'role': 'assistant', 'kind': 'tool', 'text': stripped}
+            split_at = None
+            continue
         if current is None:
             continue
-        stripped = raw_line.strip()
-        if stripped.startswith('───') or re.match(r'^[^\s]+\s+(?:low|medium|high|xhigh|max|ultra)\s+·\s+', stripped):
+        if stripped.startswith('───') or _TERMINAL_CHROME.search(stripped) or re.match(r'^[^\s]+\s+(?:low|medium|high|xhigh|max|ultra)\s+·\s+', stripped):
             finish()
             continue
+        if was_blank and _TRANSIENT_SUMMARY.match(stripped):
+            finish()
+            continue
+        # A '⎿' detail row is the harness's unambiguous tool-output marker, so it
+        # retypes the row above it even when that row's verb is not recognised.
+        if stripped.startswith('⎿'):
+            if current['kind'] == 'conversation' and split_at is not None:
+                tail = current['text'][split_at:].strip()
+                current['text'] = current['text'][:split_at]
+                finish()
+                current = {'role': 'assistant', 'kind': 'tool', 'text': tail}
+            else:
+                current['kind'] = 'tool'
+            split_at = None
         # Wrapped transcript rows are indented. Empty rows preserve paragraphs;
         # unindented terminal chrome ends the current entry.
         if not raw_line or raw_line[:1].isspace():
+            if was_blank and stripped and current['kind'] == 'conversation':
+                split_at = len(current['text']) + 1
             current['text'] += '\n' + stripped
         else:
             finish()
@@ -175,7 +234,16 @@ class HerdrClient:
         err_str = stderr.decode('utf-8') if stderr else ''
 
         if proc.returncode == 0:
-            return {'status': 'submitted', 'target': resolved_target, 'response': output_str.strip(), 'harness': harness, 'model': model}
+            response = output_str.strip()
+            try:
+                envelope = json.loads(response)
+            except json.JSONDecodeError:
+                envelope = None
+            # `herdr agent prompt` normally prints an RPC acknowledgement. It
+            # is transport metadata, never an assistant message.
+            if isinstance(envelope, dict) and isinstance(envelope.get('result'), dict):
+                response = ''
+            return {'status': 'submitted', 'target': resolved_target, 'response': response or None, 'harness': harness, 'model': model}
         else:
             return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(), 'harness': harness, 'model': model}
 

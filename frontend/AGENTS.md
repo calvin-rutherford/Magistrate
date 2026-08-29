@@ -7,10 +7,14 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before 
 Run the suites via the `test:*` scripts in `package.json`; each spawns its own Expo web server and drives headless Chrome through puppeteer-core.
 
 Sharp edges when driving the web build in headless Chrome:
+- `chrome-devtools-axi` reports screenshots saved but writes no file and its eval bridge omits `pageId`; drive headless Chrome with `puppeteer-core` (launch config in `tests/chat-terminal.web.test.js`) for visual verification instead.
+- The Metro dev server can serve a stale bundle after edits; if changes don't appear on reload, restart `expo start --web` with `--clear`.
+- `Appearance.setColorScheme` is not implemented by react-native-web; theme-mode overrides must go through the subscribable store in `src/services/ChatPreferences.ts` (`useChatColorScheme`).
 - Expo's development-only `#error-toast` has a zero-sized box but can win hit-testing near the viewport bottom, silently swallowing clicks on the composer or drawer footer. Disable its pointer events first (see `tests/chat-terminal.web.test.js`).
 - React Native `PanResponder` gestures do not fire from synthetic mouse drags; dispatch real touch events via the CDP `Input.dispatchTouchEvent` command instead.
 - Cross-origin gateway mocks need in-page `fetch` patching (`page.evaluateOnNewDocument`); network-level request interception fails CORS preflights.
 - Each suite pins a fixed dev-server port, so parallel git worktrees collide and silently drive *another* checkout's app. Override with `MAGISTRATE_WEB_TEST_PORT=<free port>` when running outside the primary checkout.
+- The live gateway at `http://100.84.181.23:8000` runs behind `main`, so it 404s newly added endpoints. To verify chat rendering against *real* herdr data, run this checkout's gateway locally against the real socket (`uvicorn app.main:app --port 8099` in `gateway/`) and rewrite the host in the page's `fetch` patch — the app hardcodes `GATEWAY_URL` in `src/api/client.ts`.
 
 ## Backend model selection contract
 

@@ -3,7 +3,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Image, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useColorScheme, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, Image, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
@@ -13,6 +13,8 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { AgentHistoryMessage, filterAgentHistory } from '../../src/services/ChatHistory';
 import { appendConversationMessage, ConversationMessage, resetConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
+import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, saveChatBackground, saveThemeMode, saveToolCallVisibility, useChatColorScheme } from '../../src/services/ChatPreferences';
+import { WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl } from '../../src/utils/externalLinks';
 
 const markPaper = require('../../assets/images/magistrate-mark-paper-256.png');
@@ -49,6 +51,13 @@ function MicIcon({ color, size = 18 }: { color: string; size?: number }) {
   return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
     <Rect x="9" y="2.5" width="6" height="11" rx="3" stroke={color} strokeWidth={1.6} />
     <Path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5v3M9 20.5h6" stroke={color} strokeWidth={1.6} strokeLinecap="round" fill="none" />
+  </Svg>;
+}
+
+function GearIcon({ color, size = 18 }: { color: string; size?: number }) {
+  return <Svg testID="settings-gear-icon" width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Circle cx="12" cy="12" r="3.1" stroke={color} strokeWidth={1.6} />
+    <Path d="M9.8 3.1h4.4l.5 2.1c.5.2.9.4 1.3.7l2-.6 2.2 3.8-1.5 1.5v2.8l1.5 1.5-2.2 3.8-2-.6c-.4.3-.8.5-1.3.7l-.5 2.1H9.8l-.5-2.1c-.5-.2-.9-.4-1.3-.7l-2 .6-2.2-3.8 1.5-1.5v-2.8L3.8 9.1 6 5.3l2 .6c.4-.3.8-.5 1.3-.7z" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
   </Svg>;
 }
 
@@ -103,7 +112,7 @@ function ModelMenu({ dark, harnesses, loading, error, open, selection, onToggle,
   const muted = dark ? brand.mutedDark : brand.mutedLight;
   return <View style={styles.modelControl}>
     <TouchableOpacity testID="model-menu-button" accessibilityRole="button" accessibilityLabel={`Model, ${selection?.label || 'current session'}`} accessibilityState={{ expanded: open }} onPress={onToggle} style={styles.modelButton}>
-      <WrenchIcon color={selection ? brand.cyan : muted} />
+      <WrenchIcon size={19.8} color={selection ? brand.cyan : muted} />
     </TouchableOpacity>
     {open ? <View testID="model-menu" accessibilityViewIsModal style={[styles.modelMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
       <Text style={[styles.menuTitle, { color: text }]}>Agent and variant</Text>
@@ -137,9 +146,19 @@ function UserMessage({ message, textColor, selectable, onLongPress }: { message:
   </TouchableOpacity>;
 }
 
+const historyMessages = (messages: AgentHistoryMessage[]): ConversationMessage[] => messages.map((message, index) => ({ ...message, id: `history-${index}`, source: 'text' as const }));
+function conversationalPromptResponse(response: unknown): string | null {
+  if (typeof response !== 'string' || !response.trim()) return null;
+  try {
+    const envelope = JSON.parse(response);
+    if (envelope && typeof envelope === 'object' && ('result' in envelope || 'jsonrpc' in envelope)) return null;
+  } catch { /* A plain string is a legacy synchronous conversational response. */ }
+  return response.trim();
+}
+
 export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawerToggle = () => {}, drawerOpen = false }: { target?: string; showToolCalls?: boolean; onDrawerToggle?: () => void; drawerOpen?: boolean }) {
   const router = useRouter();
-  const dark = isDarkTheme(useColorScheme());
+  const dark = isDarkTheme(useChatColorScheme());
   const text = dark ? '#F4F5F7' : brand.ink;
   const muted = dark ? brand.mutedDark : brand.mutedLight;
   const composerSurface = dark ? 'rgba(17,23,34,0.98)' : 'rgba(255,255,255,0.98)';
@@ -166,22 +185,29 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const atBottomRef = useRef(true);
+  const historyRequestRef = useRef(0);
   const targetLabel = target === 'captain' ? 'Magistrate' : target;
   const capture = useVoiceInputAdapter();
 
   useEffect(() => {
-    let mounted = true;
-    setSendError(null);
+    const request = ++historyRequestRef.current;
+    setSendError(null); setIsThinking(false);
     // The captain thread is shared with Voice Mode (see ConversationSession),
     // so it persists across remounts; agent threads are replayed from Herdr.
-    if (target === 'captain') return () => { mounted = false; };
+    if (target === 'captain') return () => { historyRequestRef.current += 1; };
     resetConversationMessages(target);
-    fetchAgentHistory(target).then(result => {
-      if (!mounted) return;
-      resetConversationMessages(target, result.messages.map((message: AgentHistoryMessage, index: number) => ({ ...message, id: `history-${index}`, source: 'text' as const })));
-      requestAnimationFrame?.(() => scrollRef.current?.scrollToEnd({ animated: false }));
-    }).catch(error => { if (mounted) setSendError(errorText(error, 'Agent history could not be loaded.')); });
-    return () => { mounted = false; };
+    // A working agent can briefly leave an empty terminal snapshot (redraw or
+    // alternate screen), so retry a few times before accepting an empty history.
+    const loadHistory = (attempt: number) => {
+      fetchAgentHistory(target).then(result => {
+        if (request !== historyRequestRef.current) return;
+        if (result.messages.length === 0 && attempt < 5) { setTimeout(() => loadHistory(attempt + 1), 2000); return; }
+        resetConversationMessages(target, historyMessages(result.messages));
+        requestAnimationFrame?.(() => scrollRef.current?.scrollToEnd({ animated: false }));
+      }).catch(error => { if (request === historyRequestRef.current) setSendError(errorText(error, 'Agent history could not be loaded.')); });
+    };
+    loadHistory(0);
+    return () => { historyRequestRef.current += 1; };
   }, [target]);
 
   useEffect(() => {
@@ -290,10 +316,34 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     try {
       const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model);
       if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The message was not accepted.');
-      const reply = response?.response?.trim();
-      if (reply) appendMessage({ id: `a-${Date.now()}`, role: 'assistant', text: reply, sentAt: Date.now(), source: 'text' });
-    } catch (error) { setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); }
-    finally { setIsThinking(false); }
+      const reply = conversationalPromptResponse(response?.response);
+      if (reply) {
+        appendMessage({ id: `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text' });
+        setIsThinking(false);
+        return;
+      }
+      // Herdr only acknowledges the prompt; the agent answers asynchronously in
+      // its terminal, so poll history until its conversational reply lands.
+      const request = ++historyRequestRef.current;
+      const pollForReply = async () => {
+        if (request !== historyRequestRef.current) return;
+        try {
+          const result = await fetchAgentHistory(target);
+          const lastPrompt = result.messages.map(message => message.role === 'user' ? message.text.trim() : '').lastIndexOf(trimmed);
+          const replies = lastPrompt < 0 ? [] : result.messages.slice(lastPrompt + 1).filter(message => message.role === 'assistant' && message.kind === 'conversation');
+          if (replies.length) {
+            // Replaying history would discard the captain's Voice Mode turns,
+            // which never appear in the terminal snapshot.
+            if (target === 'captain') replies.forEach((message, index) => appendMessage({ id: `a-${Date.now()}-${index}`, role: 'assistant', kind: 'conversation', text: message.text, source: 'text' }));
+            else resetConversationMessages(target, historyMessages(result.messages));
+            setIsThinking(false);
+            return;
+          }
+        } catch { /* Keep polling: submission succeeded and the gateway may still be settling. */ }
+        setTimeout(() => void pollForReply(), 1000);
+      };
+      void pollForReply();
+    } catch (error) { setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); setIsThinking(false); }
   };
   const activeMessage = messages.find(message => message.id === messageActionsId);
   const editMessage = () => {
@@ -307,7 +357,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.784)' : 'rgba(255,255,255,0.8)' }, webViewportHeight ? { height: webViewportHeight } : null]}>
     <View style={styles.shellHeader}><TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity></View>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
-      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : undefined} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.text}</Text></View>)}
+      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.text}</Text></View>)}
     </ScrollView>
     {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { atBottomRef.current = true; setHasNewMessages(false); setIsScrolledUp(false); scrollRef.current?.scrollToEnd({ animated: true }); }}><Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text></TouchableOpacity> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
@@ -333,9 +383,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           <TouchableOpacity testID="attachment-option-files" accessibilityRole="button" accessibilityLabel="Choose files" onPress={() => void pickFiles()} style={styles.attachmentOption}><FileIcon color={dark ? brand.cyan : brand.violet} /><View><Text style={[styles.attachmentOptionTitle, { color: text }]}>Files</Text><Text style={[styles.attachmentOptionMeta, { color: muted }]}>Browse this device</Text></View></TouchableOpacity>
         </View> : null}
       </View>
-      <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder={editingMessageId ? 'Edit message…' : `Message ${targetLabel}…`} placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable={!isThinking} accessibilityLabel={`Message ${targetLabel}`} />
+      <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable={!isThinking} accessibilityLabel={`Message ${targetLabel}`} />
       <ModelMenu dark={dark} harnesses={harnesses} loading={capabilityLoading} error={capabilityError} open={modelMenuOpen} selection={modelSelection} onToggle={() => setModelMenuOpen(value => !value)} onSelect={selection => { setModelSelection(selection); setModelMenuOpen(false); setSendError(null); }} />
-      <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing }} style={styles.composerIconButton} onPress={() => void handleMicPress()} disabled={isTranscribing}><MicIcon color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
+      <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing }} style={styles.composerIconButton} onPress={() => void handleMicPress()} disabled={isTranscribing}><MicIcon size={19.8} color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
       <TouchableOpacity testID="send-captain-prompt" accessibilityRole="button" accessibilityLabel={promptText.trim() || attachments.length ? `Send message to ${targetLabel}` : 'Open voice mode'} accessibilityState={{ disabled: isThinking, busy: isThinking }} onPress={() => void handleSend()} disabled={isThinking} style={[styles.sendButton, isThinking ? styles.disabled : undefined]}>{isThinking ? <Text style={styles.sendArrow}>…</Text> : promptText.trim() || attachments.length ? <Text style={styles.sendArrow}>↑</Text> : <SoundwaveIcon color={brand.obsidian} />}</TouchableOpacity>
     </View>
     <View style={styles.composerStatus} accessibilityLiveRegion="polite">{editingMessageId ? <Text style={styles.editingLabel}>Editing message</Text> : null}{sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}</View>
@@ -425,33 +475,49 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
         ) : errors.providers ? <PanelText text={errors.providers} muted={brand.critical} /> : providers.length === 0 ? <PanelText text="No connected account data is available." muted={muted} /> : providers.map(provider => <View key={provider.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{provider.provider}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{provider.status}{provider.username ? ` · ${provider.username}` : ''}</Text></View>)}</View> : null}
       </View>)}
     </ScrollView>
-    <View style={styles.drawerBottom}><TouchableOpacity testID="settings-open" accessibilityRole="button" accessibilityLabel="Open Account settings" onPress={onOpenSettings} activeOpacity={0.75} style={styles.accountRow}><Text style={[styles.accountIcon, { color: muted }]}>○</Text><Text style={[styles.drawerRowText, { color: text }]}>Account</Text><Text style={[styles.drawerIcon, { color: muted }]}>⚙</Text></TouchableOpacity></View>
+    <View style={styles.drawerBottom}><TouchableOpacity testID="settings-open" accessibilityRole="button" accessibilityLabel="Open Account settings" onPress={onOpenSettings} activeOpacity={0.75} style={styles.accountRow}><Text style={[styles.accountIcon, { color: muted }]}>○</Text><Text style={[styles.drawerRowText, { color: text }]}>Account</Text><View style={styles.gearIconContainer}><GearIcon color={muted} /></View></TouchableOpacity></View>
   </Animated.View>;
 }
 
-function SettingsSheet({ open, dark, animatedStyle, health, loading, error, showToolCalls, onShowToolCallsChange, onClose }: { open: boolean; dark: boolean; animatedStyle: object; health: HealthInfo | null; loading: boolean; error: string | null; showToolCalls: boolean; onShowToolCallsChange: (value: boolean) => void; onClose: () => void }) {
+const backgroundOptions: Array<{ key: WeatherSceneKey; label: string }> = [
+  { key: 'auto', label: 'Auto' }, { key: 'dusk-mountain', label: 'Dusk' }, { key: 'clear-day', label: 'Day' }, { key: 'clear-night', label: 'Night' }, { key: 'minimal-dark', label: 'Minimal' },
+];
+const themeOptions: Array<{ key: ChatThemeMode; label: string }> = [
+  { key: 'system', label: 'System' }, { key: 'dark', label: 'Dark' }, { key: 'light', label: 'Light' },
+];
+
+function SettingsSheet({ open, dark, animatedStyle, health, loading, error, preferences, onPreferencesChange, onClose }: { open: boolean; dark: boolean; animatedStyle: object; health: HealthInfo | null; loading: boolean; error: string | null; preferences: ChatPreferences; onPreferencesChange: (preferences: ChatPreferences) => void; onClose: () => void }) {
   const router = useRouter(); const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
   const network = health?.status === 'healthy'; const runtime = Boolean(health?.herdr_socket_connected);
   return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="settings-sheet" style={[styles.settingsSheet, { backgroundColor: dark ? brand.command : '#FFFFFF' }, animatedStyle]}>
     <TouchableOpacity testID="settings-close" accessibilityRole="button" accessibilityLabel="Close settings" onPress={onClose} style={styles.settingsClose}><Text style={[styles.settingsCloseText, { color: text }]}>×</Text></TouchableOpacity>
     <Text style={[styles.settingsTitle, { color: text }]}>Settings</Text>
     <View style={styles.settingsStatusGrid}><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: error ? brand.critical : loading ? brand.attention : network ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Network</Text><Text testID="settings-network-status" style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : error ? 'Unavailable' : network ? 'Connected' : 'Degraded'}</Text></View></View><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: runtime ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Runtime</Text><Text style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : runtime ? 'Live' : 'Unavailable'}</Text></View></View></View>
     {error ? <Text style={styles.settingsError}>{error}</Text> : null}
-    <View style={styles.settingsToggleRow}><View style={styles.settingsToggleCopy}><Text style={[styles.settingsToggleTitle, { color: text }]}>Show tool calls</Text><Text style={[styles.settingsToggleDescription, { color: muted }]}>Include agent tool activity in chat history.</Text></View><Switch testID="settings-tool-calls-toggle" accessibilityLabel="Show tool calls in chat history" value={showToolCalls} onValueChange={onShowToolCallsChange} trackColor={{ false: '#424B59', true: brand.cyan }} thumbColor={showToolCalls ? brand.obsidian : '#F4F5F7'} /></View>
-    <TouchableOpacity testID="settings-theme" accessibilityRole="button" accessibilityLabel="Open theme settings" onPress={() => { onClose(); router.push('/account' as any); }} style={styles.diagnosticsButton}><Text style={[styles.diagnosticsButtonText, { color: text }]}>Theme settings</Text><Text style={[styles.diagnosticsArrow, { color: muted }]}>↗</Text></TouchableOpacity>
+    <TouchableOpacity testID="settings-theme" accessibilityRole="button" accessibilityLabel="Open theme settings" accessibilityState={{ expanded: appearanceOpen }} onPress={() => setAppearanceOpen(true)} style={styles.diagnosticsButton}><Text style={[styles.diagnosticsButtonText, { color: text }]}>Theme settings</Text><Text style={[styles.diagnosticsArrow, { color: muted }]}>›</Text></TouchableOpacity>
     <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open diagnostics" onPress={() => { onClose(); router.push('/diagnostics' as any); }} style={styles.diagnosticsButton}><Text style={[styles.diagnosticsButtonText, { color: text }]}>Diagnostics</Text><Text style={[styles.diagnosticsArrow, { color: muted }]}>↗</Text></TouchableOpacity>
+    {appearanceOpen ? <View testID="settings-appearance-window" accessibilityViewIsModal style={[styles.appearanceWindow, { backgroundColor: dark ? '#171E2A' : '#F4F6F9' }]}>
+      <View style={styles.appearanceHeader}><Text style={[styles.appearanceTitle, { color: text }]}>Appearance</Text><TouchableOpacity testID="settings-appearance-close" accessibilityRole="button" accessibilityLabel="Close appearance settings" onPress={() => setAppearanceOpen(false)} style={styles.appearanceClose}><Text style={[styles.settingsCloseText, { color: text }]}>×</Text></TouchableOpacity></View>
+      <Text style={[styles.preferenceLabel, { color: muted }]}>BACKGROUND</Text>
+      <View style={styles.optionRow}>{backgroundOptions.map(option => <TouchableOpacity key={option.key} testID={`background-option-${option.key}`} accessibilityRole="button" accessibilityState={{ selected: preferences.background === option.key }} onPress={() => { const next = { ...preferences, background: option.key }; onPreferencesChange(next); void saveChatBackground(option.key); }} style={[styles.optionPill, preferences.background === option.key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: preferences.background === option.key ? brand.obsidian : text }]}>{option.label}</Text></TouchableOpacity>)}</View>
+      <Text style={[styles.preferenceLabel, { color: muted }]}>MODE</Text>
+      <View style={styles.optionRow}>{themeOptions.map(option => <TouchableOpacity key={option.key} testID={`theme-option-${option.key}`} accessibilityRole="button" accessibilityState={{ selected: preferences.themeMode === option.key }} onPress={() => { const next = { ...preferences, themeMode: option.key }; onPreferencesChange(next); void saveThemeMode(option.key); }} style={[styles.optionPill, preferences.themeMode === option.key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: preferences.themeMode === option.key ? brand.obsidian : text }]}>{option.label}</Text></TouchableOpacity>)}</View>
+      <View style={styles.settingsToggleRow}><View style={styles.settingsToggleCopy}><Text style={[styles.settingsToggleTitle, { color: text }]}>Show tool calls</Text><Text style={[styles.settingsToggleDescription, { color: muted }]}>Include tool activity in agent conversations.</Text></View><Switch testID="settings-tool-calls-toggle" accessibilityLabel="Show tool calls in chat history" value={preferences.showToolCalls} onValueChange={value => { const next = { ...preferences, showToolCalls: value }; onPreferencesChange(next); void saveToolCallVisibility(value); }} trackColor={{ false: '#424B59', true: brand.cyan }} thumbColor={preferences.showToolCalls ? brand.obsidian : '#F4F5F7'} /></View>
+    </View> : null}
   </Animated.View>;
 }
 
 export default function ChatScreen() {
   const { agentId } = useLocalSearchParams<{ agentId?: string | string[] }>(); const target = Array.isArray(agentId) ? agentId[0] : agentId;
   const router = useRouter();
-  const dark = isDarkTheme(useColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
-  const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [showToolCalls, setShowToolCalls] = useState(false);
+  const dark = isDarkTheme(useChatColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
+  const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES);
   const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [health, setHealth] = useState<HealthInfo | null>(null);
   const [loading, setLoading] = useState(true); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
   const [errors, setErrors] = useState<{ agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }>({});
   const drawerProgress = useSharedValue(0); const settingsProgress = useSharedValue(0);
+  useEffect(() => { let mounted = true; loadChatPreferences().then(value => { if (mounted) setPreferences(value); }).catch(() => {}); return () => { mounted = false; }; }, []);
   useEffect(() => { AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion); const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion); return () => sub.remove(); }, []);
   useEffect(() => { drawerProgress.value = withTiming(drawerOpen ? 1 : 0, { duration: reducedMotion ? 1 : drawerOpen ? 260 : 340, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [drawerOpen, drawerProgress, reducedMotion]);
   useEffect(() => { settingsProgress.value = withTiming(settingsOpen ? 1 : 0, { duration: reducedMotion ? 1 : 300, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [settingsOpen, settingsProgress, reducedMotion]);
@@ -474,15 +540,15 @@ export default function ChatScreen() {
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page}>
     <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
-    <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} /></Animated.View>
-    <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError} showToolCalls={showToolCalls} onShowToolCallsChange={setShowToolCalls} onClose={() => setSettingsOpen(false)} />
+    <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} /></Animated.View>
+    <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError} preferences={preferences} onPreferencesChange={setPreferences} onClose={() => setSettingsOpen(false)} />
   </SafeAreaView></EnvironmentBackground>;
 }
 
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden' }, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
   shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 22, paddingHorizontal: 22, paddingBottom: 20, gap: 14 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 11, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 16, lineHeight: 23 }, messageTimestamp: { color: 'rgba(142,153,170,0.9)', fontSize: 10, marginTop: 6, textAlign: 'right' },
+  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 22, paddingHorizontal: 22, paddingBottom: 20, gap: 14 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 11, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 16, lineHeight: 23 }, messageTimestamp: { color: 'rgba(142,153,170,0.9)', fontSize: 10, marginTop: 6, textAlign: 'right' },
   jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, zIndex: 5 }, jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
   composer: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 10 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.cyan }, sendArrow: { color: brand.obsidian, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
@@ -490,6 +556,6 @@ const styles = StyleSheet.create({
   attachmentPreview: { flexGrow: 0, marginHorizontal: 8, marginBottom: 7, maxHeight: 60 }, attachmentPreviewContent: { gap: 8, paddingHorizontal: 3 }, attachmentChip: { width: 220, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, padding: 5, paddingRight: 7, borderRadius: 15 }, attachmentThumbnail: { width: 46, height: 46, borderRadius: 11 }, attachmentFileIcon: { width: 46, height: 46, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, attachmentCopy: { flex: 1, minWidth: 0 }, attachmentName: { fontSize: 12, fontWeight: '700' }, attachmentMeta: { fontSize: 10, marginTop: 3 }, attachmentRemove: { width: 28, height: 38, alignItems: 'center', justifyContent: 'center' }, attachmentRemoveText: { fontSize: 21, lineHeight: 23 },
   liveWaveform: { position: 'absolute', left: 8, right: 8, bottom: 72, height: 52, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', paddingHorizontal: 14, zIndex: 9 }, liveWaveformBar: { width: 3, borderRadius: 2 },
   modelControl: { width: 40, zIndex: 15 }, modelButton: { height: 34, width: 34, alignItems: 'center', justifyContent: 'center' }, modelMenu: { position: 'absolute', right: -8, bottom: 44, width: 280, maxHeight: 350, borderRadius: 22, padding: 12, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 10 }, modelOptionsScroll: { maxHeight: 235 }, menuTitle: { fontSize: 14, fontWeight: '800', marginBottom: 7, paddingHorizontal: 7 }, harnessLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase', paddingHorizontal: 7, paddingTop: 8 }, modelOption: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 7, paddingVertical: 6 }, modelOptionCopy: { flex: 1 }, modelOptionTitle: { fontSize: 13, fontWeight: '700' }, modelOptionMeta: { fontSize: 11, lineHeight: 15, marginTop: 2 }, selectionDot: { width: 7, height: 7, borderRadius: 4 }, modelNotice: { fontSize: 11, lineHeight: 16, paddingHorizontal: 7, paddingTop: 8 }, modelError: { color: '#FFB4B2', fontSize: 11, lineHeight: 16, paddingHorizontal: 7, paddingTop: 8 },
-  drawer: { position: 'absolute', top: 8, bottom: 8, width: 310, zIndex: 10, borderRadius: 24, padding: 14, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 28, elevation: 12 }, drawerDesktop: { left: 58 }, drawerMobile: { left: 8, width: '82%' }, drawerWordmark: { fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 25, lineHeight: 32, fontWeight: '500', marginLeft: 4, marginBottom: 13 }, drawerScroll: { flex: 1, minHeight: 0 }, drawerScrollContent: { paddingBottom: 12 }, drawerRow: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 8, paddingHorizontal: 4 }, drawerIcon: { width: 20, fontSize: 14, fontWeight: '800', textAlign: 'center' }, drawerRowText: { flex: 1, fontSize: 15, fontWeight: '400', textAlign: 'left' }, drawerCount: { fontSize: 11, fontWeight: '800' }, chevron: { width: 18, fontSize: 13, textAlign: 'center' }, sectionPanel: { paddingLeft: 30, paddingRight: 4, paddingBottom: 10, gap: 7 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '800', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 }, fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 7 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, renameRow: { flexDirection: 'row', alignItems: 'center', gap: 7 }, renameInput: { flex: 1, minWidth: 0, height: 38, borderWidth: 1, borderColor: 'rgba(142,153,170,0.4)', borderRadius: 10, paddingHorizontal: 10, fontSize: 13, outlineStyle: 'none' as any }, confirmInterruptRow: { flexDirection: 'row', alignItems: 'center', gap: 9 }, confirmInterruptText: { flex: 1, fontSize: 11 }, popoverLink: { fontSize: 10, fontWeight: '800' }, agentActionMessage: { fontSize: 10, lineHeight: 14 }, drawerBottom: { paddingTop: 6 }, accountRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 5 }, accountIcon: { width: 20, fontSize: 19, textAlign: 'center' },
-  settingsSheet: { position: 'absolute', left: 8, right: 8, bottom: 8, height: '42%', minHeight: 320, zIndex: 20, borderTopLeftRadius: 28, borderTopRightRadius: 28, borderBottomLeftRadius: 18, borderBottomRightRadius: 18, padding: 18, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 30, elevation: 18 }, settingsClose: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center', marginLeft: -7, marginTop: -7 }, settingsCloseText: { fontSize: 27, lineHeight: 30, fontWeight: '300' }, settingsTitle: { fontSize: 24, fontWeight: '700', marginTop: -3, marginBottom: 18 }, settingsStatusGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 24 }, settingsStatus: { minWidth: 150, flexDirection: 'row', alignItems: 'center', gap: 10 }, statusDot: { width: 9, height: 9, borderRadius: 5 }, settingsLabel: { fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '700' }, settingsValue: { fontSize: 15, fontWeight: '700', marginTop: 2 }, settingsError: { color: '#FFB4B2', fontSize: 12, marginTop: 12 }, settingsToggleRow: { maxWidth: 420, minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 16 }, settingsToggleCopy: { flex: 1 }, settingsToggleTitle: { fontSize: 15, fontWeight: '700' }, settingsToggleDescription: { fontSize: 11, lineHeight: 16, marginTop: 2 }, diagnosticsButton: { marginTop: 10, minHeight: 38, flexDirection: 'row', alignItems: 'center', maxWidth: 260 }, diagnosticsButtonText: { flex: 1, fontSize: 15, fontWeight: '700' }, diagnosticsArrow: { fontSize: 17 },
+  drawer: { position: 'absolute', top: 8, bottom: 8, width: 310, zIndex: 10, borderRadius: 24, padding: 14, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 28, elevation: 12 }, drawerDesktop: { left: 58 }, drawerMobile: { left: 8, width: '82%' }, drawerWordmark: { fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 25, lineHeight: 32, fontWeight: '500', marginLeft: 4, marginBottom: 13 }, drawerScroll: { flex: 1, minHeight: 0 }, drawerScrollContent: { paddingBottom: 12 }, drawerRow: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 8, paddingHorizontal: 4 }, drawerIcon: { width: 20, fontSize: 14, fontWeight: '800', textAlign: 'center' }, gearIconContainer: { width: 20, alignItems: 'center', justifyContent: 'center' }, drawerRowText: { flex: 1, fontSize: 15, fontWeight: '400', textAlign: 'left' }, drawerCount: { fontSize: 11, fontWeight: '800' }, chevron: { width: 18, fontSize: 13, textAlign: 'center' }, sectionPanel: { paddingLeft: 30, paddingRight: 4, paddingBottom: 10, gap: 7 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '800', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 }, fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 7 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, renameRow: { flexDirection: 'row', alignItems: 'center', gap: 7 }, renameInput: { flex: 1, minWidth: 0, height: 38, borderWidth: 1, borderColor: 'rgba(142,153,170,0.4)', borderRadius: 10, paddingHorizontal: 10, fontSize: 13, outlineStyle: 'none' as any }, confirmInterruptRow: { flexDirection: 'row', alignItems: 'center', gap: 9 }, confirmInterruptText: { flex: 1, fontSize: 11 }, popoverLink: { fontSize: 10, fontWeight: '800' }, agentActionMessage: { fontSize: 10, lineHeight: 14 }, drawerBottom: { paddingTop: 6 }, accountRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 5 }, accountIcon: { width: 20, fontSize: 19, textAlign: 'center' },
+  settingsSheet: { position: 'absolute', left: 8, right: 8, bottom: 8, height: '42%', minHeight: 320, zIndex: 20, borderTopLeftRadius: 28, borderTopRightRadius: 28, borderBottomLeftRadius: 18, borderBottomRightRadius: 18, padding: 18, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 30, elevation: 18 }, settingsClose: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center', marginLeft: -7, marginTop: -7 }, settingsCloseText: { fontSize: 27, lineHeight: 30, fontWeight: '300' }, settingsTitle: { fontSize: 24, fontWeight: '700', marginTop: -3, marginBottom: 18 }, settingsStatusGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 24 }, settingsStatus: { minWidth: 150, flexDirection: 'row', alignItems: 'center', gap: 10 }, statusDot: { width: 9, height: 9, borderRadius: 5 }, settingsLabel: { fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '700' }, settingsValue: { fontSize: 15, fontWeight: '700', marginTop: 2 }, settingsError: { color: '#FFB4B2', fontSize: 12, marginTop: 12 }, settingsToggleRow: { maxWidth: 420, minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 16 }, settingsToggleCopy: { flex: 1 }, settingsToggleTitle: { fontSize: 15, fontWeight: '700' }, settingsToggleDescription: { fontSize: 11, lineHeight: 16, marginTop: 2 }, diagnosticsButton: { marginTop: 10, minHeight: 38, flexDirection: 'row', alignItems: 'center', maxWidth: 260 }, diagnosticsButtonText: { flex: 1, fontSize: 15, fontWeight: '700' }, diagnosticsArrow: { fontSize: 17 }, appearanceWindow: { ...StyleSheet.absoluteFill, borderRadius: 24, padding: 18, zIndex: 3, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 22, elevation: 20 }, appearanceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }, appearanceTitle: { fontSize: 22, fontWeight: '800' }, appearanceClose: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' }, preferenceLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 0.9, marginTop: 8, marginBottom: 8 }, optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, optionPill: { minHeight: 36, justifyContent: 'center', borderRadius: 18, borderWidth: 1, borderColor: 'rgba(142,153,170,0.38)', paddingHorizontal: 13 }, optionPillSelected: { backgroundColor: brand.cyan, borderColor: brand.cyan }, optionText: { fontSize: 12, fontWeight: '800' }
 });
