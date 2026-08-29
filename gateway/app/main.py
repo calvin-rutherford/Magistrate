@@ -34,6 +34,7 @@ from app.providers.google import GoogleProviderAdapter
 from app.providers.jira import JiraProviderAdapter
 from app.providers.teams import TeamsProviderAdapter
 from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
+from app.usage import get_usage
 
 init_db()
 
@@ -61,6 +62,44 @@ fm_client = FirstmateClient()
 recent_activity_service = RecentActivityService(fm_client, github_service)
 stt_adapter = VoiceInputAdapter()
 voice_move_service = VoiceMoveService(herdr_client)
+
+
+@app.websocket('/api/v1/events')
+async def agent_events(websocket: WebSocket):
+    """Stream normalized agent history; clients retain HTTP polling as a fallback."""
+    if websocket.query_params.get('token') != MAGISTRATE_TOKEN:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    target = 'captain'
+    seen: set[str] = set()
+    try:
+        await websocket.send_json({'type': 'connected', 'target': target})
+        while True:
+            try:
+                control = await asyncio.wait_for(websocket.receive_text(), timeout=0.75)
+                try:
+                    message = json.loads(control)
+                except json.JSONDecodeError:
+                    message = {}
+                if isinstance(message, dict) and isinstance(message.get('target'), str):
+                    target = message['target']
+                    seen.clear()
+                    await websocket.send_json({'type': 'subscribed', 'target': target})
+            except asyncio.TimeoutError:
+                pass
+            history = await herdr_client.get_agent_history(target, lines=DEFAULT_HISTORY_LINES)
+            fresh = []
+            for item in history.get('messages', []):
+                key = f"{item.get('role')}|{item.get('kind')}|{item.get('text')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                fresh.append(item)
+            if fresh:
+                await websocket.send_json({'type': 'agent_history', 'target': history.get('target', target), 'messages': fresh})
+    except WebSocketDisconnect:
+        return
 
 jira_adapter = JiraProviderAdapter()
 teams_adapter = TeamsProviderAdapter()
@@ -264,6 +303,13 @@ async def get_teams_mentions(token: str = Depends(verify_token)):
 async def get_unified_attention(token: str = Depends(verify_token)):
     return await attention_service.get_unified_attention_items()
 
+@app.get('/api/v1/usage')
+async def get_usage_summary(provider: Optional[str] = None, token: str = Depends(verify_token)):
+    try:
+        return await get_usage(provider)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 # PUSH NOTIFICATIONS ENDPOINT
 @app.post('/api/v1/notifications/register')
 async def register_notifications(push_token: str = Form(...), platform: str = Form('ios'), user_id: str = 'default_user', token: str = Depends(verify_token)):
@@ -334,7 +380,7 @@ async def put_execution_settings(contract: ExecutionSettingsContract, user_id: s
     profile_id = contract.profile_id if 'profile_id' in contract.model_fields_set else current['profile_id']
     switching = contract.switching_behavior or current['switching_behavior']
     unavailable = contract.unavailable_behavior or current['unavailable_behavior']
-    if profile_id:
+    if profile_id and 'profile_id' in contract.model_fields_set:
         try:
             # Validate identity and availability separately. An unavailable profile
             # remains persisted so the configured error policy can explain it in UI.
@@ -350,8 +396,10 @@ async def put_execution_settings(contract: ExecutionSettingsContract, user_id: s
             'migration_supported': False}
 
 
-@app.put('/api/v1/execution/credentials/{credential_key}')
+@app.put('/api/v1/execution/credentials/{credential_key:path}')
 async def put_execution_credential(credential_key: str, contract: ExecutionCredentialContract, user_id: str = 'default_user', token: str = Depends(verify_token)):
+    if user_id != 'default_user':
+        raise HTTPException(status_code=403, detail='Credential storage is scoped to the authenticated Magistrate account.')
     if not re.fullmatch(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$', credential_key):
         raise HTTPException(status_code=422, detail='Invalid credential key.')
     try:
@@ -396,9 +444,19 @@ async def get_captain_output(
 async def get_agent_history(
     agent_id: str,
     lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
+    before: Optional[str] = Query(None, min_length=1, max_length=64),
+    after: Optional[str] = Query(None, min_length=1, max_length=64),
     token: str = Depends(verify_token),
 ):
-    return await herdr_client.get_agent_history(agent_id, lines=lines)
+    if before and after:
+        raise HTTPException(status_code=422, detail='Use only one history cursor.')
+    try:
+        history_kwargs = {'lines': lines}
+        if before is not None: history_kwargs['before'] = before
+        if after is not None: history_kwargs['after'] = after
+        return await herdr_client.get_agent_history(agent_id, **history_kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
 
 @app.post('/api/v1/captain/prompt')
 async def send_captain_prompt(contract: UniversalInputContract, user_id: str = 'default_user', token: str = Depends(verify_token)):
@@ -406,6 +464,8 @@ async def send_captain_prompt(contract: UniversalInputContract, user_id: str = '
     if contract.profile_id:
         try:
             selection = profile_selection(contract.profile_id, user_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
         except ValueError as exc:
             if get_execution_preferences(user_id)['unavailable_behavior'] != 'fallback':
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -416,14 +476,21 @@ async def send_captain_prompt(contract: UniversalInputContract, user_id: str = '
         if not contract.harness or not contract.model:
             raise HTTPException(status_code=422, detail='A harness and model must be selected together.')
         try:
-            selection = validate_execution_selection(contract.harness, contract.model, user_id=user_id)
+            selection = validate_execution_selection(contract.harness, contract.model, user_id=user_id, provider=contract.provider, variant=contract.variant)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-    else:
+            if get_execution_preferences(user_id)['unavailable_behavior'] == 'fallback':
+                selection = None
+            else:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif 'profile_id' not in contract.model_fields_set:
         preference = get_execution_preferences(user_id)
         if preference['profile_id']:
             try:
                 selection = profile_selection(preference['profile_id'], user_id)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
             except ValueError as exc:
                 if preference['unavailable_behavior'] != 'fallback':
                     raise HTTPException(status_code=422, detail=str(exc)) from exc

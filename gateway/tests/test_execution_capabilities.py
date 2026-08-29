@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.auth import MAGISTRATE_TOKEN
+from app.usage import _summarize_provider
 
 
 HEADERS = {'X-Magistrate-Token': MAGISTRATE_TOKEN}
@@ -27,6 +28,18 @@ def inventory():
                 'models': [{'id': 'unsafe', 'label': 'Unsafe'}],
             },
         ]
+    }
+
+
+def test_usage_summary_preserves_only_authenticated_quota_evidence():
+    summary = _summarize_provider({
+        'provider': 'codex', 'plan': 'plus',
+        'state': {'status': 'fresh', 'stale': False},
+        'windows': [{'label': 'week', 'percentRemaining': 20, 'resetsAt': 'tomorrow', 'ignored': 'not exposed'}],
+    })
+    assert summary == {
+        'provider': 'codex', 'plan': 'plus', 'status': 'fresh', 'stale': False,
+        'windows': [{'label': 'week', 'percentRemaining': 20, 'resetsAt': 'tomorrow'}],
     }
 
 
@@ -91,11 +104,11 @@ def test_execution_credential_is_encrypted_and_changes_profile_auth(monkeypatch)
     configured['harnesses'][0]['provider'] = 'openai-codex'
     configured['harnesses'][0]['models'][0]['auth'] = {'required': True, 'credential_key': 'openai-codex'}
     monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(configured))
-    response = client.put('/api/v1/execution/credentials/openai-codex?user_id=credential-test', headers=HEADERS, json={'credential': 'secret-value'})
+    response = client.put('/api/v1/execution/credentials/openai-codex', headers=HEADERS, json={'credential': 'secret-value'})
     assert response.status_code == 200
     assert response.json() == {'credential_key': 'openai-codex', 'configured': True, 'updated_at': response.json()['updated_at']}
     assert response.json()['updated_at']
-    profile = client.get('/api/v1/execution/capabilities?user_id=credential-test', headers=HEADERS).json()['profiles'][0]
+    profile = client.get('/api/v1/execution/capabilities', headers=HEADERS).json()['profiles'][0]
     assert profile['auth']['status'] == 'configured'
     assert profile['availability'] == 'available'
 
@@ -152,7 +165,7 @@ def test_prompt_passes_validated_selection_to_real_prompt_path(monkeypatch):
     })
 
     assert response.status_code == 200
-    prompt_agent.assert_awaited_once_with('captain', 'hello', harness='codex', model='gpt-5')
+    prompt_agent.assert_awaited_once_with('captain', 'hello', profile_id='codex:gpt-5', harness='codex', provider='unknown', model='gpt-5', variant='gpt-5')
 
 
 def test_invalid_inventory_is_reported_without_exposing_configuration(monkeypatch):

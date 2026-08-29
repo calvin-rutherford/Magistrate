@@ -45,6 +45,21 @@ function stubSpeechSynthesis() {
   }});
 }
 
+test('voice control keeps the compact stage and enlarged branded mark proportions', async () => {
+  const page = await browser.newPage();
+  await page.evaluateOnNewDocument(() => { if (typeof navigator.mediaDevices === 'undefined') Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: () => Promise.reject(new DOMException('denied', 'NotAllowedError')) } }); });
+  await page.goto(VOICE_URL, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="voice-control"]');
+  const sizes = await page.$eval('[data-testid="voice-control"]', element => Array.from(element.querySelectorAll('svg')).map(svg => Math.round(svg.getBoundingClientRect().width)));
+  const viewportWidth = await page.evaluate(() => innerWidth);
+  const expectedStage = (viewportWidth < 680 ? Math.min(Math.max(viewportWidth - 34, 200), 360) : Math.min(viewportWidth * 0.46, 520)) * 0.95;
+  const expectedMark = (viewportWidth < 680 ? Math.min(Math.max(viewportWidth * 0.54, 140), 220) : Math.min(viewportWidth * 0.28, 270)) * 1.2;
+  assert.equal(sizes.length >= 2, true);
+  assert.ok(Math.abs(sizes[0] - expectedStage) <= 12, JSON.stringify({ sizes, expectedStage, expectedMark, viewportWidth }));
+  assert.ok(Math.abs(sizes[1] - expectedMark) <= 12, JSON.stringify({ sizes, expectedStage, expectedMark, viewportWidth }));
+  await page.close();
+});
+
 test('voice mode surfaces a recoverable error and never leaves /voice when the microphone is denied', async () => {
   const page = await browser.newPage();
   await page.evaluateOnNewDocument(() => {

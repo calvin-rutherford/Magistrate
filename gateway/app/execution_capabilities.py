@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import hashlib
 from typing import Any, Dict, List, Optional
 
 from app.db import get_execution_credential_status
@@ -21,6 +22,7 @@ def _validate_inventory(value: Any, credential_status: Optional[Dict[str, bool]]
 
     harnesses: List[Dict[str, Any]] = []
     profiles: List[Dict[str, Any]] = []
+    profile_ids = set()
     credential_status = credential_status or {}
     for raw_harness in value['harnesses']:
         if not isinstance(raw_harness, dict):
@@ -50,26 +52,38 @@ def _validate_inventory(value: Any, credential_status: Optional[Dict[str, bool]]
             variant = _safe(variant, 'Execution variant IDs must be safe capability identifiers.')
             profile_id = raw_model.get('profile_id', f'{harness_id}:{variant}')
             profile_id = _safe(profile_id, 'Execution profile IDs must be safe capability identifiers.')
+            if profile_id in profile_ids:
+                # Keep the historical short ID when unique, but make generated
+                # collisions deterministic instead of invalidating the whole inventory.
+                digest = hashlib.sha256(f'{harness_id}\0{provider}\0{model_id}\0{variant}'.encode()).hexdigest()[:12]
+                profile_id = _safe(f'{profile_id}:{digest}', 'Execution profile IDs must be safe capability identifiers.')
+            if profile_id in profile_ids:
+                raise ValueError(f'Execution profile {profile_id} is duplicated.')
+            profile_ids.add(profile_id)
             auth = raw_model.get('auth', raw_harness.get('auth', {}))
             if auth is None:
                 auth = {}
             if not isinstance(auth, dict):
                 raise ValueError(f'Execution model {model_id} has invalid auth metadata.')
-            auth_required = auth.get('required', raw_model.get('auth_required', False)) is True
+            required_value = auth.get('required', raw_model.get('auth_required', False))
+            available_value = raw_model.get('available', True)
+            if not isinstance(required_value, bool) or not isinstance(available_value, bool):
+                raise ValueError(f'Execution model {model_id} has invalid availability flags.')
+            auth_required = required_value
             credential_key = auth.get('credential_key', provider)
             credential_key = _safe(credential_key, 'Execution credential keys must be safe capability identifiers.')
             has_credential = bool(credential_status.get(credential_key))
             auth_state = 'configured' if has_credential else ('required' if auth_required else 'not-required')
-            available = raw_model.get('available', True) is not False and auth_state != 'required'
+            available = available_value and auth_state != 'required'
             reason = raw_model.get('availability_reason')
             if not available and not isinstance(reason, str):
                 reason = 'A compatible credential is required.' if auth_state == 'required' else 'This profile is unavailable.'
             profile = {
                 'id': profile_id,
                 'variant': variant,
-                'label': raw_model.get('profile_label', model_label),
+                'label': raw_model.get('profile_label', model_label) if isinstance(raw_model.get('profile_label', model_label), str) else model_label,
                 'harness': {'id': harness_id, 'label': label},
-                'provider': {'id': provider, 'label': raw_model.get('provider_label', provider)},
+                'provider': {'id': provider, 'label': raw_model.get('provider_label', provider) if isinstance(raw_model.get('provider_label', provider), str) else provider},
                 'model': {'id': model_id, 'label': model_label},
                 'verified': True,
                 'available': available,
@@ -109,23 +123,25 @@ def get_execution_capabilities(user_id: str = 'default_user') -> Dict[str, Any]:
     }
 
 
-def validate_execution_selection(harness_id: str, model_id: str, profile_id: Optional[str] = None, user_id: str = 'default_user') -> Dict[str, str]:
-    try:
-        capabilities = get_execution_capabilities(user_id)
-    except RuntimeError as exc:
-        raise ValueError(str(exc)) from exc
+def validate_execution_selection(harness_id: str, model_id: str, profile_id: Optional[str] = None, user_id: str = 'default_user', provider: Optional[str] = None, variant: Optional[str] = None) -> Dict[str, str]:
+    capabilities = get_execution_capabilities(user_id)
+    matches = []
     for profile in capabilities['profiles']:
         if profile['harness']['id'] != harness_id or profile['model']['id'] != model_id:
             continue
         if profile_id and profile['id'] != profile_id:
             continue
-        if profile['availability'] != 'available':
-            raise ValueError(profile['availability_reason'] or 'The selected execution profile is unavailable.')
-        result = {'harness': harness_id, 'model': model_id}
-        if profile_id:
-            result.update({'profile_id': profile['id'], 'provider': profile['provider']['id'], 'variant': profile['variant']})
-        return result
-    raise ValueError('The selected harness and model are not available in the gateway inventory.')
+        if provider and profile['provider']['id'] != provider:
+            continue
+        if variant and profile['variant'] != variant:
+            continue
+        matches.append(profile)
+    if len(matches) != 1:
+        raise ValueError('The selected harness, provider, model, and variant are not uniquely available in the gateway inventory.')
+    profile = matches[0]
+    if profile['availability'] != 'available':
+        raise ValueError(profile['availability_reason'] or 'The selected execution profile is unavailable.')
+    return {'profile_id': profile['id'], 'harness': harness_id, 'provider': profile['provider']['id'], 'model': model_id, 'variant': profile['variant']}
 
 
 def profile_selection(profile_id: str, user_id: str = 'default_user') -> Dict[str, str]:

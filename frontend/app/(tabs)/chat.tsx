@@ -4,25 +4,26 @@ import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, Alert, Image, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
-import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
-import { AgentInfo, AuthProviderInfo, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, HealthInfo, interruptAgent, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings } from '../../src/api/client';
+import { AgentInfo, AuthProviderInfo, CHAT_HISTORY_LINES, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, HealthInfo, interruptAgent, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider } from '../../src/api/client';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { filterAgentHistory } from '../../src/services/ChatHistory';
-import { appendConversationMessage, ConversationMessage, getConversationMessages, resetConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, ConversationMessage, getConversationMessages, hydrateConversationMessages, prependConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, saveChatBackground, saveThemeMode, saveToolCallVisibility, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl } from '../../src/utils/externalLinks';
+import { RealtimeClient } from '../../src/realtime/socket';
 
 const markPaper = require('../../assets/images/magistrate-mark-paper-256.png');
 const markInk = require('../../assets/images/magistrate-mark-ink-256.png');
 const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B', mutedDark: '#8E99AA', mutedLight: '#667180', cyan: '#24D8FF', violet: '#8B6CFF', success: '#43D17A', attention: '#FFB347', critical: '#FF625F' };
 
 type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file' };
-type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | null;
+type DrawerSection = 'attention' | 'fleet' | 'activity' | 'usage' | 'connections' | null;
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 const isDarkTheme = (scheme: string | null | undefined) => scheme !== 'light';
@@ -114,6 +115,13 @@ function LiveWaveform({ samples, color }: { samples: number[]; color: string }) 
   </View>;
 }
 
+function ThinkingIndicator({ dark }: { dark: boolean }) {
+  const pulse = useSharedValue(0);
+  useEffect(() => { pulse.value = withRepeat(withTiming(1, { duration: 700 }), -1, true); }, [pulse]);
+  const style = useAnimatedStyle(() => ({ opacity: interpolate(pulse.value, [0, 0.5, 1], [0.45, 1, 0.45]), transform: [{ translateY: interpolate(pulse.value, [0, 0.5, 1], [1, -2, 1]) }] }));
+  return <Animated.Text testID="thinking-dots" style={[styles.thinkingDots, { color: dark ? brand.cyan : brand.violet }, style]}>•••</Animated.Text>;
+}
+
 function ModelMenu({ dark, profiles, loading, error, open, selection, onToggle, onSelect }: {
   dark: boolean; profiles: ExecutionProfile[]; loading: boolean; error: string | null; open: boolean;
   selection: ModelSelection; onToggle: () => void; onSelect: (selection: ModelSelection) => void;
@@ -176,7 +184,7 @@ function conversationalPromptResponse(response: unknown): string | null {
   return response.trim();
 }
 
-export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawerToggle = () => {}, drawerOpen = false, profiles = [], capabilityLoading = false, capabilityError = null, selectedProfileId = null, onProfileChange = () => {} }: { target?: string; showToolCalls?: boolean; onDrawerToggle?: () => void; drawerOpen?: boolean; profiles?: ExecutionProfile[]; capabilityLoading?: boolean; capabilityError?: string | null; selectedProfileId?: string | null; onProfileChange?: (profileId: string | null) => void }) {
+export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawerToggle = () => {}, drawerOpen = false, profiles = [], capabilityLoading = false, capabilityError = null, selectedProfileId = null, routingReady = true, onProfileChange = () => {} }: { target?: string; showToolCalls?: boolean; onDrawerToggle?: () => void; drawerOpen?: boolean; profiles?: ExecutionProfile[]; capabilityLoading?: boolean; capabilityError?: string | null; selectedProfileId?: string | null; routingReady?: boolean; onProfileChange?: (profileId: string | null) => void }) {
   const router = useRouter();
   const dark = isDarkTheme(useChatColorScheme());
   const text = dark ? '#F4F5F7' : brand.ink;
@@ -188,15 +196,18 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [messageActionsId, setMessageActionsId] = useState<string | null>(null);
   const [selectableMessageId, setSelectableMessageId] = useState<string | null>(null);
   const [isThinking, setIsThinking] = useState(false);
+  const [queuedPrompts, setQueuedPrompts] = useState<Array<{ id: string; text: string }>>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [isScrolledUp, setIsScrolledUp] = useState(false);
   const [hasNewMessages, setHasNewMessages] = useState(false);
+  const [historyBefore, setHistoryBefore] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [waveSamples, setWaveSamples] = useState<number[]>(() => new Array(48).fill(0.04));
   const [modelSelection, setModelSelection] = useState<ModelSelection>(() => {
     const profile = profiles.find(item => item.id === selectedProfileId);
-    return profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : null;
+    return profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null;
   });
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
@@ -218,7 +229,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const capture = useVoiceInputAdapter();
   useEffect(() => {
     const profile = profiles.find(item => item.id === selectedProfileId);
-    setModelSelection(profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : null);
+    setModelSelection(profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null);
   }, [profiles, selectedProfileId]);
 
   useEffect(() => {
@@ -231,8 +242,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     // The captain thread is shared with Voice Mode (see ConversationSession),
     // so switching back to it keeps whatever it already holds in memory for
     // this session; other targets start each visit with a clean thread.
-    if (target !== 'captain') resetConversationMessages(target, []);
     knownKeysRef.current = new Set(getConversationMessages(target).map(historyKey));
+    void hydrateConversationMessages(target).then(hydrated => hydrated.forEach(message => knownKeysRef.current.add(historyKey(message))));
     // Seed known-message keys from recent Herdr scrollback so the live poll
     // below doesn't treat pre-existing history as new and replay it into the
     // thread - chat only ever shows what happens while it's open.
@@ -243,6 +254,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         // or alternate screen); retry a few times before accepting it as empty.
         if (result.messages.length === 0 && attempt < 5) { setTimeout(() => loadHistory(attempt + 1), 2000); return; }
         result.messages.forEach(message => knownKeysRef.current.add(historyKey(message)));
+        setHistoryBefore(result.next_before || null);
         markHistoryReady();
       }).catch(error => {
         if (request !== historyRequestRef.current) return;
@@ -302,10 +314,22 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     catch (error) { setSendError(errorText(error, 'The microphone could not start.')); }
   };
 
+  const loadOlderHistory = async () => {
+    if (!historyBefore || historyLoading) return;
+    setHistoryLoading(true);
+    try {
+      const result = await fetchAgentHistory(target, CHAT_HISTORY_LINES, { before: historyBefore });
+      prependConversationMessages(target, result.messages.map(message => ({ id: message.id || `history-${Date.now()}-${Math.random()}`, role: message.role, kind: message.kind, text: message.text, source: 'text' as const })));
+      result.messages.forEach(message => knownKeysRef.current.add(historyKey(message)));
+      setHistoryBefore(result.next_before || null);
+    } catch (error) { setSendError(errorText(error, 'Older chat history could not be loaded.')); }
+    finally { setHistoryLoading(false); }
+  };
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
     atBottomRef.current = atBottom; setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
+    if (contentOffset.y < 36) void loadOlderHistory();
   };
   const addAttachments = (selected: ComposerAttachment[]) => {
     setAttachments(current => [...current, ...selected]);
@@ -345,32 +369,37 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!atBottomRef.current) setHasNewMessages(true);
     requestAnimationFrame?.(() => { if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: true }); });
   };
-  // Merges anything new in the Herdr transcript into the visible thread.
-  // Messages already known (typed locally, seeded from history on mount, or
-  // appended by a prior call) are matched by role+kind+text and skipped via
-  // knownKeysRef, so this is safe to call repeatedly. Returns whether a new
-  // assistant reply was appended, for callers waiting on one.
-  const syncFromHistory = async (): Promise<boolean> => {
-    const result = await fetchAgentHistory(target);
-    if (result.messages.length === 0) return false;
+  // Merges normalized Herdr events and HTTP history into the visible thread.
+  // The same deduplication path is used by WebSocket delivery and polling.
+  const appendHistoryMessages = (incoming: Array<{ role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }>): boolean => {
     let appendedReply = false;
-    result.messages.forEach(message => {
+    incoming.forEach(message => {
       const key = historyKey(message);
-      // Pi's fallback transcript has no role markers and is normalized as
-      // assistant prose. Match text as well as role+kind so the prompt that
-      // was already rendered locally is not echoed as a second assistant row.
       const alreadyVisible = getConversationMessages(target).some(existing => existing.text === message.text);
       if (knownKeysRef.current.has(key) || alreadyVisible) return;
       knownKeysRef.current.add(key);
-      // Herdr's terminal transcript carries no wall-clock time (see AGENTS.md), so a
-      // message discovered here - rather than typed locally via handleSend - has no
-      // real send time. Stamping it with Date.now() would show "now" instead of when
-      // it was actually sent, so leave it unset like other Herdr-replayed history.
       appendMessage({ id: `live-${Date.now()}-${Math.random().toString(36).slice(2)}`, role: message.role, kind: message.kind, text: message.text, sentAt: undefined, source: 'text' });
       if (message.role === 'assistant' && message.kind === 'conversation') appendedReply = true;
     });
     return appendedReply;
   };
+  const syncFromHistory = async (): Promise<boolean> => {
+    const result = await fetchAgentHistory(target);
+    return appendHistoryMessages(result.messages);
+  };
+
+  // Herdr has no native push channel, so the gateway's event stream is an
+  // acceleration path only. HTTP polling below remains the recovery path when
+  // the socket is unavailable or a snapshot is transiently empty.
+  useEffect(() => {
+    const realtime = new RealtimeClient(target);
+    const unsubscribe = realtime.subscribe(event => {
+      if (event?.type !== 'agent_history' || !Array.isArray(event.messages)) return;
+      if (appendHistoryMessages(event.messages)) setIsThinking(false);
+    });
+    realtime.connect();
+    return () => { unsubscribe(); realtime.disconnect(); };
+  }, [target]);
   // Live auto-refresh: whichever agent is behind `target` may produce new
   // terminal output without this device having sent the prompt (Herdr has no
   // push channel, see AGENTS.md), so poll on an interval independent of the
@@ -384,18 +413,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     const interval = setInterval(() => void poll(), 3000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [target]);
-  const handleSend = async () => {
-    const trimmed = promptText.trim();
-    if (attachments.length) {
-      setSendError('Attachments are ready, but the gateway cannot accept uploads yet. Remove them to send text only.');
-      return;
-    }
-    if (!trimmed) { router.push('/voice' as any); return; }
+  const submitPrompt = async (trimmed: string, editId: string | null = null) => {
     const now = new Date();
-    if (editingMessageId) {
-      updateConversationMessage(target, editingMessageId, trimmed, now.getTime());
-      setEditingMessageId(null);
-    } else appendMessage({ id: `u-${Date.now()}`, role: 'user', text: trimmed, sentAt: now.getTime(), source: 'text' });
+    if (editId) { updateConversationMessage(target, editId, trimmed, now.getTime()); setEditingMessageId(null); }
+    else appendMessage({ id: `u-${Date.now()}`, role: 'user', text: trimmed, sentAt: now.getTime(), source: 'text' });
     setPromptText(''); setSendError(null); setIsThinking(true);
     try {
       // Do not let the initial history seed race this submission (see
@@ -403,26 +424,38 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       // scrollback and the reply generated by this prompt.
       await historyReadyRef.current;
       if (modelSelection && !modelSelection.available) throw new Error(modelSelection.availabilityReason || 'The selected execution profile is unavailable.');
-      const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId);
+      const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null);
       if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The message was not accepted.');
       const reply = conversationalPromptResponse(response?.response);
-      if (reply) {
-        appendMessage({ id: `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text' });
-        setIsThinking(false);
-        return;
-      }
-      // Herdr only acknowledges the prompt; the agent answers asynchronously in
-      // its terminal, so poll faster than the background auto-refresh until
-      // its conversational reply lands.
+      if (reply) { appendMessage({ id: `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text' }); setIsThinking(false); return; }
+      // Herdr acknowledges first and answers in its terminal. The WebSocket
+      // normally clears this wait; HTTP polling below is the recovery path.
       const request = ++historyRequestRef.current;
       const pollForReply = async () => {
         if (request !== historyRequestRef.current) return;
         try { if (await syncFromHistory()) { setIsThinking(false); return; } }
-        catch { /* Keep polling: submission succeeded and the gateway may still be settling. */ }
+        catch { /* Retry after transient gateway/snapshot failures. */ }
         setTimeout(() => void pollForReply(), 1000);
       };
       void pollForReply();
     } catch (error) { setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); setIsThinking(false); }
+  };
+  useEffect(() => {
+    if (isThinking || queuedPrompts.length === 0) return;
+    const next = queuedPrompts[0];
+    setQueuedPrompts(queue => queue.slice(1));
+    void submitPrompt(next.text);
+  }, [isThinking, queuedPrompts]); // eslint-disable-line react-hooks/exhaustive-deps
+  const handleSend = async () => {
+    const trimmed = promptText.trim();
+    if (attachments.length) { setSendError('Attachments are ready, but the gateway cannot accept uploads yet. Remove them to send text only.'); return; }
+    if (!routingReady) { setSendError('Execution settings are still unavailable; your message was not sent.'); return; }
+    if (!trimmed) { if (!isThinking) router.push('/voice' as any); return; }
+    if (isThinking) {
+      setQueuedPrompts(queue => [...queue, { id: `q-${Date.now()}`, text: trimmed }]);
+      setPromptText(''); setSendError(null); return;
+    }
+    await submitPrompt(trimmed, editingMessageId);
   };
   const activeMessage = messages.find(message => message.id === messageActionsId);
   const editMessage = () => {
@@ -464,12 +497,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           <TouchableOpacity testID="attachment-option-files" accessibilityRole="button" accessibilityLabel="Choose files" onPress={() => void pickFiles()} style={styles.attachmentOption}><FileIcon color={dark ? brand.cyan : brand.violet} /><View><Text style={[styles.attachmentOptionTitle, { color: text }]}>Files</Text><Text style={[styles.attachmentOptionMeta, { color: muted }]}>Browse this device</Text></View></TouchableOpacity>
         </View> : null}
       </View>
-      <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable={!isThinking} accessibilityLabel={`Message ${targetLabel}`} />
+      <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable accessibilityLabel={`Message ${targetLabel}`} />
       <ModelMenu dark={dark} profiles={profiles} loading={capabilityLoading} error={capabilityError} open={modelMenuOpen} selection={modelSelection} onToggle={() => setModelMenuOpen(value => !value)} onSelect={selection => { setModelSelection(selection); onProfileChange(selection?.profileId || null); setModelMenuOpen(false); setSendError(null); }} />
       <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing }} style={styles.composerIconButton} onPress={() => void handleMicPress()} disabled={isTranscribing}><MicIcon size={24} color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
-      <TouchableOpacity testID="send-captain-prompt" accessibilityRole="button" accessibilityLabel={promptText.trim() || attachments.length ? `Send message to ${targetLabel}` : 'Open voice mode'} accessibilityState={{ disabled: isThinking, busy: isThinking }} onPress={() => void handleSend()} disabled={isThinking} style={[styles.sendButton, isThinking ? styles.disabled : undefined]}>{isThinking ? <Text style={styles.sendArrow}>…</Text> : promptText.trim() || attachments.length ? <Text style={styles.sendArrow}>↑</Text> : <SoundwaveIcon color={brand.obsidian} />}</TouchableOpacity>
+      <TouchableOpacity testID="send-captain-prompt" accessibilityRole="button" accessibilityLabel={promptText.trim() || attachments.length ? (isThinking ? `Queue message for ${targetLabel}` : `Send message to ${targetLabel}`) : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => void handleSend()} style={[styles.sendButton, isThinking ? styles.thinkingButton : undefined]}>{isThinking ? <Text style={styles.sendArrow}>＋</Text> : promptText.trim() || attachments.length ? <Text style={styles.sendArrow}>↑</Text> : <SoundwaveIcon color={brand.obsidian} />}</TouchableOpacity>
     </View>
-    <View style={styles.composerStatus} accessibilityLiveRegion="polite">{editingMessageId ? <Text style={styles.editingLabel}>Editing message</Text> : null}{sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}</View>
+    <View style={styles.composerStatus} accessibilityLiveRegion="polite">{editingMessageId ? <Text style={styles.editingLabel}>Editing message</Text> : isThinking ? <Text testID="thinking-indicator" style={styles.thinkingLabel}><ThinkingIndicator dark={dark} /> Thinking</Text> : null}{queuedPrompts.length ? <Text testID="queued-message-count" style={styles.queuedLabel}>{queuedPrompts.length} queued · sends in order</Text> : null}{sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}</View>
   </KeyboardAvoidingView>;
 }
 
@@ -522,10 +555,10 @@ function activityDate(value: string) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onOpenSettings, onOpenAgent, agents, attention, activity, providers, errors, loading }: {
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onOpenSettings, onOpenAgent, agents, attention, activity, providers, usage, usageLoading, usageError, errors, loading }: {
   open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onOpenSettings: () => void;
   onOpenAgent: (agentId: string) => void;
-  agents: AgentInfo[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
+  agents: AgentInfo[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; usage: UsageProvider[]; usageLoading: boolean; usageError: string | null; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
 }) {
   const router = useRouter();
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
@@ -539,7 +572,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
     if (item.pull_request_number) router.push(`/pr-detail?number=${item.pull_request_number}` as any);
     else if (item.url) { const result = await openExternalUrl(item.url); if (!result.ok) Alert.alert('Unable to open activity', result.message); }
   };
-  const rows = [{ key: 'attention' as const, icon: '!', title: 'Attention', count: activeAttention.length }, { key: 'fleet' as const, icon: '⌘', title: 'Fleet Summary', count: agents.length }, { key: 'activity' as const, icon: '↗', title: 'Recent Activity' }, { key: 'connections' as const, icon: '⌁', title: 'Connections' }];
+  const rows = [{ key: 'attention' as const, icon: '!', title: 'Attention', count: activeAttention.length }, { key: 'fleet' as const, icon: '⌘', title: 'Fleet Summary', count: agents.length }, { key: 'activity' as const, icon: '↗', title: 'Recent Activity' }, { key: 'usage' as const, icon: '◒', title: 'Usage' }, { key: 'connections' as const, icon: '⌁', title: 'Connections' }];
   return <Animated.View accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: dark ? 'rgba(10,14,20,0.98)' : 'rgba(255,255,255,0.98)' }, animatedStyle]} {...panHandlers}>
     <Text style={[styles.drawerWordmark, { color: text }]}>Magistrate</Text>
     <ScrollView style={styles.drawerScroll} contentContainerStyle={styles.drawerScrollContent} keyboardShouldPersistTaps="handled">
@@ -553,6 +586,8 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
           loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No live agent sessions are available." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <FleetAgentRow key={agent.id} agent={agent} activeStatus={displayStatus} dark={dark} onOpenChat={() => onOpenAgent(agent.id)} />)
         ) : row.key === 'activity' ? (
           loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)
+        ) : row.key === 'usage' ? (
+          usageLoading ? <PanelText text="Loading authenticated usage…" muted={muted} /> : usageError ? <PanelText text={usageError} muted={brand.critical} /> : usage.length === 0 ? <PanelText text="Usage is unknown; no authenticated quota data is available." muted={muted} /> : usage.map(item => <View key={item.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.provider}{item.plan ? ` · ${item.plan}` : ''}</Text><Text style={[styles.panelItemMeta, { color: item.status === 'fresh' ? muted : brand.attention }]}>{item.status === 'fresh' && item.windows.length ? item.windows.map(window => `${window.label || window.id || 'window'}: ${typeof window.percentRemaining === 'number' ? `${window.percentRemaining}% left` : typeof window.spentUsd === 'number' && typeof window.limitUsd === 'number' ? `$${window.spentUsd} / $${window.limitUsd}` : 'amount unknown'}`).join(' · ') : item.status === 'auth_required' ? 'Authentication required' : item.error || 'Quota unknown'}</Text></View>)
         ) : errors.providers ? <PanelText text={errors.providers} muted={brand.critical} /> : providers.length === 0 ? <PanelText text="No connected account data is available." muted={muted} /> : providers.map(provider => <View key={provider.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{provider.provider}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{provider.status}{provider.username ? ` · ${provider.username}` : ''}</Text></View>)}</View> : null}
       </View>)}
     </ScrollView>
@@ -567,7 +602,7 @@ const themeOptions: Array<{ key: ChatThemeMode; label: string }> = [
   { key: 'system', label: 'System' }, { key: 'dark', label: 'Dark' }, { key: 'light', label: 'Light' },
 ];
 
-function SettingsSheet({ open, dark, animatedStyle, health, loading, error, preferences, onPreferencesChange, executionProfiles, executionSettings, onExecutionSettingsChange, onSaveCredential, onClose }: { open: boolean; dark: boolean; animatedStyle: object; health: HealthInfo | null; loading: boolean; error: string | null; preferences: ChatPreferences; onPreferencesChange: (preferences: ChatPreferences) => void; executionProfiles: ExecutionProfile[]; executionSettings: ExecutionSettings; onExecutionSettingsChange: (update: Partial<Pick<ExecutionSettings, 'profile_id' | 'switching_behavior' | 'unavailable_behavior'>>) => void; onSaveCredential: (credentialKey: string, credential: string) => Promise<void>; onClose: () => void }) {
+function SettingsSheet({ open, dark, animatedStyle, health, loading, error, executionError, preferences, onPreferencesChange, executionProfiles, executionSettings, onExecutionSettingsChange, onSaveCredential, onClose }: { open: boolean; dark: boolean; animatedStyle: object; health: HealthInfo | null; loading: boolean; error: string | null; executionError?: string | null; preferences: ChatPreferences; onPreferencesChange: (preferences: ChatPreferences) => void; executionProfiles: ExecutionProfile[]; executionSettings: ExecutionSettings; onExecutionSettingsChange: (update: Partial<Pick<ExecutionSettings, 'profile_id' | 'switching_behavior' | 'unavailable_behavior'>>) => void; onSaveCredential: (credentialKey: string, credential: string) => Promise<void>; onClose: () => void }) {
   const router = useRouter(); const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [credentialKey, setCredentialKey] = useState('');
@@ -578,7 +613,7 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, pref
     <TouchableOpacity testID="settings-close" accessibilityRole="button" accessibilityLabel="Close settings" onPress={onClose} style={styles.settingsClose}><Text style={[styles.settingsCloseText, { color: text }]}>×</Text></TouchableOpacity>
     <Text style={[styles.settingsTitle, { color: text }]}>Settings</Text>
     <View style={styles.settingsStatusGrid}><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: error ? brand.critical : loading ? brand.attention : network ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Network</Text><Text testID="settings-network-status" style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : error ? 'Unavailable' : network ? 'Connected' : 'Degraded'}</Text></View></View><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: runtime ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Runtime</Text><Text style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : runtime ? 'Live' : 'Unavailable'}</Text></View></View></View>
-    {error ? <Text style={styles.settingsError}>{error}</Text> : null}
+    {error || executionError ? <Text style={styles.settingsError}>{error || executionError}</Text> : null}
     <Text style={[styles.preferenceLabel, { color: muted }]}>EXECUTION ROUTING</Text>
     <Text style={[styles.settingsToggleDescription, { color: muted }]}>Selection is saved to this Magistrate account. Runtime migration is not available yet; selected profiles are sent as explicit prompt context.</Text>
     <View style={styles.optionRow}>{[
@@ -610,19 +645,21 @@ export default function ChatScreen() {
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
   const [executionLoading, setExecutionLoading] = useState(true);
   const [executionError, setExecutionError] = useState<string | null>(null);
-  const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [executionReady, setExecutionReady] = useState(false);
+  const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
   const [loading, setLoading] = useState(true); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
   const [errors, setErrors] = useState<{ agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }>({});
   const drawerProgress = useSharedValue(0); const settingsProgress = useSharedValue(0);
   useEffect(() => { let mounted = true; loadChatPreferences().then(value => { if (mounted) setPreferences(value); }).catch(() => {}); return () => { mounted = false; }; }, []);
   useEffect(() => {
     let mounted = true;
-    Promise.all([fetchExecutionCapabilities(), fetchExecutionSettings()]).then(([capabilities, settings]) => {
+    Promise.allSettled([fetchExecutionCapabilities(), fetchExecutionSettings()]).then(([capabilityResult, settingsResult]) => {
       if (!mounted) return;
-      setExecutionProfiles(profilesFromCapabilities(capabilities));
-      setExecutionSettings(settings);
-    }).catch(error => { if (mounted) setExecutionError(errorText(error, 'Execution settings could not be loaded.')); })
-      .finally(() => { if (mounted) setExecutionLoading(false); });
+      if (capabilityResult.status === 'fulfilled') setExecutionProfiles(profilesFromCapabilities(capabilityResult.value));
+      else setExecutionError(errorText(capabilityResult.reason, 'Execution capabilities could not be loaded.'));
+      if (settingsResult.status === 'fulfilled') { setExecutionSettings(settingsResult.value); setExecutionReady(true); }
+      else setExecutionError(errorText(settingsResult.reason, 'Execution settings could not be loaded.'));
+    }).finally(() => { if (mounted) setExecutionLoading(false); });
     return () => { mounted = false; };
   }, []);
   useEffect(() => { AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion); const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion); return () => sub.remove(); }, []);
@@ -638,6 +675,11 @@ export default function ChatScreen() {
       setLoading(false); setHealthLoading(false);
     }); return () => { mounted = false; };
   }, []);
+  useEffect(() => {
+    if (activeSection !== 'usage') return;
+    setUsageLoading(true); setUsageError(null);
+    fetchUsage().then(result => setUsage(result.providers)).catch(error => setUsageError(errorText(error, 'Usage data could not be loaded.'))).finally(() => setUsageLoading(false));
+  }, [activeSection]);
   const drawerAnimatedStyle = useAnimatedStyle(() => ({ opacity: drawerProgress.value, transform: [{ translateX: interpolate(drawerProgress.value, [0, 1], [-(drawerWidth + 70), 0]) }] }), [drawerWidth]);
   const chatAnimatedStyle = useAnimatedStyle(() => ({ transform: [{ translateX: isNarrow ? drawerProgress.value * drawerWidth : 0 }] }), [drawerWidth, isNarrow]);
   const settingsAnimatedStyle = useAnimatedStyle(() => ({ opacity: settingsProgress.value, transform: [{ translateY: interpolate(settingsProgress.value, [0, 1], [420, 0]) }] }));
@@ -651,9 +693,9 @@ export default function ChatScreen() {
     onPanResponderRelease: (_, g) => { if (g.dx > 55 || g.vx > 0.35) setDrawerOpen(true); },
   }), [drawerOpen, isNarrow, height]);
   return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page} {...(isNarrow ? swipeToOpen.panHandlers : {})}>
-    <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
-    <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} /></Animated.View>
-    <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError || executionError} preferences={preferences} onPreferencesChange={setPreferences} executionProfiles={executionProfiles} executionSettings={executionSettings} onExecutionSettingsChange={update => { setExecutionSettings(current => ({ ...current, ...update })); void updateExecutionSettings(update).catch(error => setExecutionError(errorText(error, 'The execution setting could not be saved.'))); }} onSaveCredential={async (credentialKey, credential) => { try { await saveExecutionCredential(credentialKey, credential); setExecutionError(null); const capabilities = await fetchExecutionCapabilities(); setExecutionProfiles(profilesFromCapabilities(capabilities)); } catch (error) { setExecutionError(errorText(error, 'The credential could not be saved.')); } }} onClose={() => setSettingsOpen(false)} />
+    <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} usage={usage} usageLoading={usageLoading} usageError={usageError} errors={errors} loading={loading} />
+    <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} /></Animated.View>
+    <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError} executionError={executionError} preferences={preferences} onPreferencesChange={setPreferences} executionProfiles={executionProfiles} executionSettings={executionSettings} onExecutionSettingsChange={update => { setExecutionSettings(current => ({ ...current, ...update })); void updateExecutionSettings(update).catch(error => setExecutionError(errorText(error, 'The execution setting could not be saved.'))); }} onSaveCredential={async (credentialKey, credential) => { try { await saveExecutionCredential(credentialKey, credential); setExecutionError(null); const capabilities = await fetchExecutionCapabilities(); setExecutionProfiles(profilesFromCapabilities(capabilities)); } catch (error) { setExecutionError(errorText(error, 'The credential could not be saved.')); } }} onClose={() => setSettingsOpen(false)} />
   </SafeAreaView></EnvironmentBackground>;
 }
 
@@ -663,7 +705,7 @@ const styles = StyleSheet.create({
   chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 22, paddingHorizontal: 22, paddingBottom: 20, gap: 14 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 11, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 16, lineHeight: 23 }, messageTimestamp: { color: 'rgba(142,153,170,0.9)', fontSize: 10, marginTop: 6, textAlign: 'right' },
   jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, zIndex: 5 }, jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
-  composer: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 10 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.cyan }, sendArrow: { color: brand.obsidian, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
+  composer: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 10 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, thinkingButton: { backgroundColor: brand.cyan }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
   attachmentControl: { width: 36, zIndex: 20 }, attachmentMenu: { position: 'absolute', left: -2, bottom: 46, width: 238, borderRadius: 20, padding: 11, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 14 }, attachmentOption: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 8, paddingVertical: 7, borderRadius: 13 }, attachmentOptionTitle: { fontSize: 14, fontWeight: '700' }, attachmentOptionMeta: { fontSize: 11, marginTop: 2 },
   attachmentPreview: { flexGrow: 0, marginHorizontal: 8, marginBottom: 7, maxHeight: 60 }, attachmentPreviewContent: { gap: 8, paddingHorizontal: 3 }, attachmentChip: { width: 220, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, padding: 5, paddingRight: 7, borderRadius: 15 }, attachmentThumbnail: { width: 46, height: 46, borderRadius: 11 }, attachmentFileIcon: { width: 46, height: 46, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, attachmentCopy: { flex: 1, minWidth: 0 }, attachmentName: { fontSize: 12, fontWeight: '700' }, attachmentMeta: { fontSize: 10, marginTop: 3 }, attachmentRemove: { width: 28, height: 38, alignItems: 'center', justifyContent: 'center' }, attachmentRemoveText: { fontSize: 21, lineHeight: 23 },
   liveWaveform: { position: 'absolute', left: 8, right: 8, bottom: 72, height: 52, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', paddingHorizontal: 14, zIndex: 9 }, liveWaveformBar: { width: 3, borderRadius: 2 },

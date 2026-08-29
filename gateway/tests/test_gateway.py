@@ -29,6 +29,16 @@ def test_fleet():
     data = resp.json()
     assert data.get("schema", "fm-fleet-snapshot.v1") == "fm-fleet-snapshot.v1"
 
+def test_usage_returns_quota_axi_summary(monkeypatch):
+    async def fake_usage(provider=None):
+        return {'source': 'quota-axi', 'providers': [{'provider': 'codex', 'status': 'fresh', 'windows': []}]}
+
+    monkeypatch.setattr('app.main.get_usage', fake_usage)
+    resp = client.get('/api/v1/usage', headers={'X-Magistrate-Token': MAGISTRATE_TOKEN})
+    assert resp.status_code == 200
+    assert resp.json()['source'] == 'quota-axi'
+
+
 def test_attention():
     resp = client.get("/api/v1/attention", headers={"X-Magistrate-Token": MAGISTRATE_TOKEN})
     assert resp.status_code == 200
@@ -55,6 +65,26 @@ def test_captain_prompt_empty():
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "error"
+
+def test_events_requires_token():
+    with pytest.raises(Exception):
+        with client.websocket_connect('/api/v1/events?token=wrong'):
+            pass
+
+
+def test_events_stream_normalized_history(monkeypatch):
+    async def fake_history(target, lines):
+        return {'target': target, 'messages': [{'role': 'assistant', 'kind': 'conversation', 'text': 'ready'}]}
+
+    monkeypatch.setattr('app.main.herdr_client.get_agent_history', fake_history)
+    with client.websocket_connect(f'/api/v1/events?token={MAGISTRATE_TOKEN}') as websocket:
+        assert websocket.receive_json() == {'type': 'connected', 'target': 'captain'}
+        websocket.send_text('{"target":"agent-1"}')
+        assert websocket.receive_json() == {'type': 'subscribed', 'target': 'agent-1'}
+        event = websocket.receive_json()
+        assert event['type'] == 'agent_history'
+        assert event['messages'][0]['text'] == 'ready'
+
 
 def test_agent_interrupt_requires_authentication():
     resp = client.post('/api/v1/agents/agent-1/interrupt')
