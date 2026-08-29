@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 FIRSTMATE_HOME = os.getenv('FM_HOME', '/home/spectre/firstmate')
@@ -115,3 +116,73 @@ class FirstmateClient:
                 })
 
         return attention_items
+
+    @staticmethod
+    def _activity_timestamp(value: Any) -> Optional[str]:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        value = value.strip()
+        if len(value) == 10:
+            value += 'T00:00:00Z'
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    async def get_recent_activity(self) -> List[Dict[str, Any]]:
+        """Normalize real task requests and completions from the fleet snapshot."""
+        snapshot = await self.get_snapshot()
+        if snapshot.get('error'):
+            raise RuntimeError(str(snapshot['error']))
+
+        records = list(snapshot.get('backlog', {}).get('records', []))
+        records.extend(snapshot.get('secondmate_landed', {}).get('records', []))
+        items: List[Dict[str, Any]] = []
+        seen = set()
+
+        for record in records:
+            if not isinstance(record, dict) or not record.get('id'):
+                continue
+            record_id = str(record['id'])
+            completion = record.get('completion') if isinstance(record.get('completion'), dict) else {}
+            verb = completion.get('verb')
+            completed_at = self._activity_timestamp(completion.get('date'))
+            requested_at = self._activity_timestamp(record.get('since'))
+
+            if record.get('state') == 'done' or completed_at:
+                if not completed_at or record_id in seen:
+                    continue
+                seen.add(record_id)
+                activity_type = 'pull_request_merged' if verb == 'merged' else 'task_completed'
+                description = 'Merged pull request' if verb == 'merged' else ('Completed report' if verb == 'reported' else 'Completed task')
+                items.append({
+                    'id': f'firstmate:{record_id}:{verb or "done"}',
+                    'type': activity_type,
+                    'title': record.get('title') or record_id,
+                    'description': description,
+                    'occurred_at': completed_at,
+                    'source': 'firstmate',
+                    'project': record.get('repo') or record.get('home_id') or 'Firstmate',
+                    'url': record.get('pr_url'),
+                    'pull_request_number': None,
+                })
+            elif record.get('state') in {'queued', 'in_flight'} and requested_at:
+                if record_id in seen:
+                    continue
+                seen.add(record_id)
+                items.append({
+                    'id': f'firstmate:{record_id}:requested',
+                    'type': 'task_requested',
+                    'title': record.get('title') or record_id,
+                    'description': 'Task requested',
+                    'occurred_at': requested_at,
+                    'source': 'firstmate',
+                    'project': record.get('repo') or 'Firstmate',
+                    'url': None,
+                    'pull_request_number': None,
+                })
+
+        return sorted(items, key=lambda item: item['occurred_at'], reverse=True)

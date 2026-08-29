@@ -32,6 +32,20 @@ def test_list_parser_normalizes_authoritative_fields():
     assert item["url"] == "https://github.com/acme/ship/pull/42"
 
 
+def test_list_parser_preserves_rows_with_multiline_bodies():
+    output = LIST_OUTPUT.replace('## Summary\\nReal data', '## Summary\nReal data')
+    item = GitHubService('acme/ship')._parse_list(output)[0]
+    assert item['number'] == 42
+    assert item['body'] == '## Summary\nReal data'
+
+
+def test_list_parser_reanchors_columns_after_unescaped_body_quotes():
+    output = LIST_OUTPUT.replace('## Summary\\nReal data', 'Summary, with "quoted" detail')
+    item = GitHubService('acme/ship')._parse_list(output)[0]
+    assert item['created_at'] == '2026-08-26T10:00:00Z'
+    assert item['url'].endswith('/pull/42')
+
+
 @pytest.mark.asyncio
 async def test_pagination_and_cache_do_not_repeat_cli_call(monkeypatch):
     service = GitHubService("acme/ship", cache_ttl=60)
@@ -45,6 +59,19 @@ async def test_pagination_and_cache_do_not_repeat_cli_call(monkeypatch):
     assert first["items"][0]["title"] == "Fix navigation, safely"
     assert second["cached"] is True
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_merged_pull_requests_use_real_merge_data(monkeypatch):
+    service = GitHubService("acme/ship")
+    calls = []
+    async def fake_run(*args):
+        calls.append(args)
+        return LIST_OUTPUT.replace(',open,', ',merged,').replace(',2026-08-26T10:00:00Z,,', ',2026-08-26T10:00:00Z,2026-08-27T12:00:00Z,')
+    monkeypatch.setattr(service, '_run', fake_run)
+    items = await service.get_merged_pull_requests()
+    assert items[0]['merged_at'] == '2026-08-27T12:00:00Z'
+    assert calls[0][2:4] == ('--state', 'merged')
 
 
 @pytest.mark.asyncio

@@ -38,4 +38,5 @@ jobs:
             tests/test_stt_adapter.py \
             tests/test_jira_teams_attention_siri.py \
             tests/test_execution_capabilities.py \
-            tests/test_firstmate_attention.py
+            tests/test_firstmate_attention.py \
+            tests/test_recent_activity.py

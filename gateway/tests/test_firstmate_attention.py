@@ -94,5 +94,33 @@ async def test_task_with_no_open_decisions_is_not_attention_worthy(monkeypatch):
     assert items == []
 
 
+@pytest.mark.asyncio
+async def test_recent_activity_uses_only_dated_requests_and_completions(monkeypatch):
+    client = FirstmateClient()
+    snapshot = make_snapshot(tasks=[], records=[
+        {'id': 'new-work', 'title': 'Captain request', 'repo': 'Magistrate', 'state': 'queued', 'since': '2026-08-28'},
+        {'id': 'finished', 'title': 'Finished task', 'repo': 'Magistrate', 'state': 'done', 'completion': {'verb': 'done', 'date': '2026-08-27'}},
+        {'id': 'undated', 'title': 'No invented timestamp', 'state': 'queued'},
+    ])
+    monkeypatch.setattr(client, 'get_snapshot', lambda: _future(snapshot))
+    items = await client.get_recent_activity()
+    assert [item['id'] for item in items] == ['firstmate:new-work:requested', 'firstmate:finished:done']
+    assert items[0]['type'] == 'task_requested'
+    assert items[1]['description'] == 'Completed task'
+
+
+@pytest.mark.asyncio
+async def test_recent_activity_includes_and_deduplicates_landed_records(monkeypatch):
+    client = FirstmateClient()
+    completed = {'id': 'landed', 'title': 'Landed work', 'state': 'done', 'completion': {'verb': 'merged', 'date': '2026-08-28'}, 'pr_url': 'https://github.com/acme/ship/pull/7'}
+    snapshot = make_snapshot(tasks=[], records=[completed])
+    snapshot['secondmate_landed'] = {'records': [{**completed, 'home_id': 'secondmate'}]}
+    monkeypatch.setattr(client, 'get_snapshot', lambda: _future(snapshot))
+    items = await client.get_recent_activity()
+    assert len(items) == 1
+    assert items[0]['type'] == 'pull_request_merged'
+    assert items[0]['url'].endswith('/pull/7')
+
+
 async def _future(value):
     return value
