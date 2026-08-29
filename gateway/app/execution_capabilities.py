@@ -109,9 +109,9 @@ def get_execution_capabilities(user_id: str = 'default_user') -> Dict[str, Any]:
     }
 
 
-def validate_execution_selection(harness_id: str, model_id: str, profile_id: Optional[str] = None) -> Dict[str, str]:
+def validate_execution_selection(harness_id: str, model_id: str, profile_id: Optional[str] = None, user_id: str = 'default_user') -> Dict[str, str]:
     try:
-        capabilities = get_execution_capabilities()
+        capabilities = get_execution_capabilities(user_id)
     except RuntimeError as exc:
         raise ValueError(str(exc)) from exc
     for profile in capabilities['profiles']:

@@ -416,7 +416,7 @@ async def send_captain_prompt(contract: UniversalInputContract, user_id: str = '
         if not contract.harness or not contract.model:
             raise HTTPException(status_code=422, detail='A harness and model must be selected together.')
         try:
-            selection = validate_execution_selection(contract.harness, contract.model)
+            selection = validate_execution_selection(contract.harness, contract.model, user_id=user_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     else:

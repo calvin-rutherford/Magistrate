@@ -356,7 +356,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     let appendedReply = false;
     result.messages.forEach(message => {
       const key = historyKey(message);
-      if (knownKeysRef.current.has(key)) return;
+      // Pi's fallback transcript has no role markers and is normalized as
+      // assistant prose. Match text as well as role+kind so the prompt that
+      // was already rendered locally is not echoed as a second assistant row.
+      const alreadyVisible = getConversationMessages(target).some(existing => existing.text === message.text);
+      if (knownKeysRef.current.has(key) || alreadyVisible) return;
       knownKeysRef.current.add(key);
       // Herdr's terminal transcript carries no wall-clock time (see AGENTS.md), so a
       // message discovered here - rather than typed locally via handleSend - has no

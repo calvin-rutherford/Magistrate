@@ -132,10 +132,11 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         else:
             finish()
     finish()
-    # Pi's renderer can emit transcript prose without the marker glyphs used by
-    # Codex and Claude. Herdr exposes a terminal snapshot rather than a
-    # conversation API, so retain markerless prose while dropping recognizable
-    # command output and terminal chrome. The frontend uses the same fallback.
+    # Pi's terminal renderer intentionally emits plain transcript rows rather
+    # than the marker glyphs used by Codex/Claude. Herdr exposes snapshots, not
+    # a conversation API, so retain those rows as assistant prose instead of
+    # returning an empty history. Drop recognizable command output and terminal
+    # chrome; callers deduplicate locally-authored prompts by text.
     if not messages:
         blocks = re.split(r'\n\s*\n', output.replace('\r', '').strip())
         for block in blocks:
@@ -298,7 +299,14 @@ class HerdrClient:
             # Herdr's prompt command has no launch-time selection flags. Carry
             # the validated selection to Firstmate as structured prompt context
             # while leaving its full-permissions launch behavior unchanged.
-            submitted_text = f'[Magistrate execution: harness={harness}; model={model}]\n{text}'
+            context = f'harness={harness}; model={model}'
+            if provider:
+                context += f'; provider={provider}'
+            if variant:
+                context += f'; variant={variant}'
+            if profile_id:
+                context += f'; profile={profile_id}'
+            submitted_text = f'[Magistrate execution: {context}]\n{text}'
         cmd = ['herdr', 'agent', 'prompt', resolved_target, submitted_text]
         proc = await asyncio.create_subprocess_exec(
             *cmd,

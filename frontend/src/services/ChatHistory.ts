@@ -97,9 +97,11 @@ export function parseAgentHistory(output: string): AgentHistoryMessage[] {
     } else finish();
   }
   finish();
-  // Pi's renderer can emit transcript prose without Codex/Claude marker
-  // glyphs. Keep those real rows available to chat, but drop recognizable
-  // command output and terminal chrome. This mirrors the gateway parser.
+  // Pi's terminal renderer intentionally emits plain transcript rows rather
+  // than the marker glyphs used by Codex/Claude. Herdr exposes snapshots, not
+  // a conversation API, so preserve those rows as assistant prose instead of
+  // returning an empty history. Drop recognizable command output and terminal
+  // chrome; chat deduplicates locally-authored prompts by text when merging.
   if (!messages.length) {
     for (const block of output.replace(/\r/g, '').trim().split(/\n\s*\n/)) {
       const lines = block.split('\n').map(line => line.trim()).filter(line => line && !chromePattern.test(line) && !transientPattern.test(line) && !line.startsWith('───') && !markerlessToolPattern.test(line));
