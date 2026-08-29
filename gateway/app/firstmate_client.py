@@ -51,43 +51,67 @@ class FirstmateClient:
         snapshot = await self.get_snapshot()
         attention_items = []
 
-        tasks = snapshot.get('tasks', [])
-        for task in tasks:
-            t_status = str(task.get('status', '')).lower()
-            attention = task.get('attention') if isinstance(task.get('attention'), dict) else {}
-            attention_kind = attention.get('kind') or task.get('attention_kind')
-            needs_captain = task.get('requires_captain') is True or attention.get('requires_captain') is True
-            # A generic "blocked" state often means infrastructure or an external wait. Only
-            # Firstmate's explicit captain-attention contract is actionable enough to notify.
-            if needs_captain and attention_kind in ('question', 'decision', 'awaiting_answer'):
-                target_id = task.get('id') or task.get('name')
-                attention_items.append({
-                    'id': 'captain-question-' + str(target_id),
-                    'title': task.get('title') or task.get('name') or 'Blocked Task',
-                    'subtitle': attention.get('summary') or task.get('summary') or 'Your answer is needed to continue.',
-                    'type': 'captain_question',
-                    'status': 'needs-decision' if attention_kind == 'decision' else 'awaiting_answer',
-                    'target_id': target_id,
-                    'project': task.get('project', 'Firstmate'),
-                    'revision': attention.get('revision') or task.get('updated_at') or t_status,
-                    'url': f'/attention?item=captain-question-{target_id}'
-                })
+        # fm-fleet-snapshot.sh's task contract carries captain-attention signal under
+        # hints.pending_decision / hints.blocked_event, with the underlying keyed
+        # decisions in hints.open_decisions (each {key, verb, summary}, verb one of
+        # 'needs-decision' or 'blocked'). Older 'attention'/'requires_captain' fields
+        # never existed in this schema, so attention items never surfaced. Readable
+        # titles come from the matching backlog record (tasks carry only ids).
+        records_by_id = {record.get('id'): record for record in snapshot.get('backlog', {}).get('records', []) if record.get('id')}
 
-            pr = task.get('pr') or task.get('pr_url')
-            # Firstmate owns this readiness signal. Do not infer it from task status text.
-            merge_ready = task.get('pr_merge_ready') is True or task.get('merge_decision_required') is True
-            if pr and merge_ready:
-                target_id = task.get('id') or pr
+        for task in snapshot.get('tasks', []):
+            task_id = task.get('id')
+            record = records_by_id.get(task_id, {})
+            title = record.get('title') or task.get('project') or task_id or 'Firstmate Task'
+            project = record.get('repo') or task.get('project') or 'Firstmate'
+            hints = task.get('hints') if isinstance(task.get('hints'), dict) else {}
+            open_decisions = hints.get('open_decisions') or []
+
+            if hints.get('pending_decision'):
+                for decision in (d for d in open_decisions if d.get('verb') == 'needs-decision'):
+                    target_id = decision.get('key') or task_id
+                    attention_items.append({
+                        'id': 'captain-question-' + str(target_id),
+                        'title': title,
+                        'subtitle': decision.get('summary') or hints.get('last_event_text') or 'Your decision is needed to continue.',
+                        'type': 'captain_question',
+                        'status': 'needs-decision',
+                        'target_id': target_id,
+                        'project': project,
+                        'revision': hints.get('last_event_text') or target_id,
+                        'url': f'/attention?item=captain-question-{target_id}'
+                    })
+
+            if hints.get('blocked_event'):
+                for decision in (d for d in open_decisions if d.get('verb') == 'blocked'):
+                    target_id = decision.get('key') or task_id
+                    attention_items.append({
+                        'id': 'captain-question-' + str(target_id),
+                        'title': title,
+                        'subtitle': decision.get('summary') or hints.get('last_event_text') or 'Agent is blocked and needs your input.',
+                        'type': 'captain_question',
+                        'status': 'awaiting_answer',
+                        'target_id': target_id,
+                        'project': project,
+                        'revision': hints.get('last_event_text') or target_id,
+                        'url': f'/attention?item=captain-question-{target_id}'
+                    })
+
+            # A pull request only needs the captain's merge decision once Firstmate
+            # has actually recorded a keyed decision alongside a known PR link.
+            pr = task.get('pr') if isinstance(task.get('pr'), dict) else {}
+            pr_url = pr.get('url')
+            if pr_url and any(d.get('verb') == 'needs-decision' for d in open_decisions):
                 attention_items.append({
-                    'id': 'pr-ready-' + str(target_id),
-                    'title': 'PR Ready: ' + str(task.get('title', 'Pull Request')),
+                    'id': 'pr-ready-' + str(task_id),
+                    'title': 'PR Ready: ' + str(title),
                     'subtitle': 'Checks and review are complete. Your merge decision is needed.',
                     'type': 'pr_ready',
                     'status': 'ready',
-                    'target_id': pr,
-                    'project': task.get('project', 'Firstmate'),
-                    'revision': task.get('pr_head_sha') or task.get('updated_at') or pr,
-                    'url': f'/attention?item=pr-ready-{target_id}'
+                    'target_id': pr_url,
+                    'project': project,
+                    'revision': pr_url,
+                    'url': f'/attention?item=pr-ready-{task_id}'
                 })
 
         return attention_items
