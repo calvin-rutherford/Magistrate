@@ -11,7 +11,7 @@ from typing import Optional, List
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.auth import verify_token, MAGISTRATE_TOKEN
-from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient
+from app.herdr_client import DEFAULT_HISTORY_LINES, HERDR_MAX_READ_LINES, HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection
 from app.contracts import (UniversalInputContract, GestureInputContract,
@@ -330,7 +330,7 @@ async def get_attention(token: str = Depends(verify_token)):
 
 @app.get('/api/v1/captain/output')
 async def get_captain_output(
-    lines: int = Query(HERDR_MAX_READ_LINES, ge=0, le=HERDR_MAX_READ_LINES),
+    lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
     token: str = Depends(verify_token),
 ):
     output = await herdr_client.read_agent_output('captain', lines=lines)
@@ -339,7 +339,7 @@ async def get_captain_output(
 @app.get('/api/v1/agents/{agent_id}/history')
 async def get_agent_history(
     agent_id: str,
-    lines: int = Query(HERDR_MAX_READ_LINES, ge=0, le=HERDR_MAX_READ_LINES),
+    lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
     token: str = Depends(verify_token),
 ):
     return await herdr_client.get_agent_history(agent_id, lines=lines)

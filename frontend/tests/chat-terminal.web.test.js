@@ -32,10 +32,6 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
   const page = await browser.newPage();
   await page.setViewport(viewport);
   await page.evaluateOnNewDocument((noOverrides, responseText) => {
-    // Each test expects a genuinely fresh chat thread, but pages in this suite
-    // share one browser profile/origin, so persisted chat history (AsyncStorage
-    // on web backs onto localStorage) would otherwise leak across tests.
-    try { localStorage.clear(); } catch {}
     const nativeFetch = window.fetch.bind(window);
     window.__magistrateApiCalls = [];
     window.fetch = (resource, options) => {
@@ -330,68 +326,47 @@ test('the agent response is appended to the conversation once the gateway replie
   await page.close();
 });
 
-function messageBubbleSelector() {
-  return '[data-testid^="user-message-"], [data-testid="agent-message"], [data-testid="tool-history-message"]';
-}
-
-// Regression for the captain-reported bug: with substantial history, an unbounded
-// ScrollView made jump-to-latest visibly travel across the entire thread (thousands
-// of pixels, over a second of animation) - indistinguishable from a full reload and
-// rescroll from message 1. Only a bounded window of recent messages should mount by
-// default, older history should load on scroll-up, and jump-to-latest must land on
-// the true newest message quickly.
-test('long history stays windowed, loads older messages on scroll-up, and jump-to-latest reaches the true newest message', async () => {
-  const total = 100;
-  const messages = [];
-  for (let i = 0; i < total; i += 1) {
-    messages.push({ role: 'user', kind: 'conversation', text: `user turn ${i}` });
-    messages.push({ role: 'assistant', kind: 'conversation', text: i === total - 1 ? 'the true latest reply' : `assistant turn ${i}` });
+// Regression for the captain-reported bug: replaying/reconstructing a large
+// Herdr backlog into the chat thread produced infinite-scroll/refresh bugs and
+// a visibly jittering terminal pane. Chat is now live-only: it must not render
+// existing backlog on open, and its history read must stay bounded rather than
+// asking Herdr for its near-unbounded max line count.
+test('chat does not replay existing backlog on open and requests a bounded history read', async () => {
+  const backlog = [];
+  for (let i = 0; i < 100; i += 1) {
+    backlog.push({ role: 'user', kind: 'conversation', text: `backlog user turn ${i}` });
+    backlog.push({ role: 'assistant', kind: 'conversation', text: `backlog assistant turn ${i}` });
   }
   const page = await browser.newPage();
   await page.setViewport({ width: 900, height: 700 });
   await page.evaluateOnNewDocument((historyMessages) => {
-    try { localStorage.clear(); } catch {}
     const nativeFetch = window.fetch.bind(window);
+    window.__historyRequests = [];
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
-      if (url.includes('/history')) return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages: historyMessages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/history')) {
+        window.__historyRequests.push(url);
+        return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages: historyMessages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/execution/capabilities')) return Promise.resolve(new Response(JSON.stringify({ harnesses: [], source: 'test', configured: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([{ id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, messages);
+  }, backlog);
   await page.goto(`${URL}?agentId=w1%3Ap7`, { waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.getElementById('error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
-  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]')?.innerText.includes('the true latest reply'));
+  await page.waitForFunction(() => (window.__historyRequests || []).length > 0);
 
-  const initialCount = (await page.$$(messageBubbleSelector())).length;
-  assert.ok(initialCount < total, `expected only a windowed subset of ${total * 2} messages to be mounted, got ${initialCount}`);
+  // Give the poll a couple of ticks to prove the backlog never gets rendered.
+  await new Promise(resolve => setTimeout(resolve, 3400));
+  assert.equal((await page.$eval('[data-testid="chat-history"]', element => element.innerText)).trim(), '');
 
-  // Scroll to the top of the buffered window; this should load more history
-  // (pagination), growing the mounted count, while roughly preserving the
-  // reader's visual position instead of yanking it to the very top or bottom.
-  await page.evaluate(() => { document.querySelector('[data-testid="chat-history"]').scrollTop = 0; });
-  await page.waitForFunction(count => document.querySelectorAll(
-    '[data-testid^="user-message-"], [data-testid="agent-message"], [data-testid="tool-history-message"]'
-  ).length > count, {}, initialCount);
-  // The scroll re-anchor happens in onContentSizeChange, a paint later than the
-  // DOM node count above, so poll for it rather than reading scrollTop immediately.
-  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').scrollTop > 0, { timeout: 2000 });
-  const scrollTopAfterLoadMore = await page.evaluate(() => document.querySelector('[data-testid="chat-history"]').scrollTop);
-  assert.ok(scrollTopAfterLoadMore > 0, 'loading older history should re-anchor scroll position, not leave the reader at the very top');
-
-  // Jump-to-latest must reach the true bottom of the full thread quickly, not
-  // slowly animate across the entire rendered history.
-  await page.click('[data-testid="jump-to-latest"]');
-  const start = Date.now();
-  await page.waitForFunction(() => {
-    const el = document.querySelector('[data-testid="chat-history"]');
-    return el.scrollTop >= el.scrollHeight - el.clientHeight - 2;
-  }, { timeout: 2000 });
-  assert.ok(Date.now() - start < 2000, 'jump-to-latest took too long, suggesting it is still animating across the full history');
-  const finalHistory = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
-  assert.match(finalHistory, /the true latest reply/);
+  const requestedLines = await page.evaluate(() => {
+    const url = new URL(window.__historyRequests[0], window.location.origin);
+    return Number(url.searchParams.get('lines'));
+  });
+  assert.ok(requestedLines > 0 && requestedLines <= 2000, `expected a small bounded lines= request, got ${requestedLines}`);
   await page.close();
 });
 
