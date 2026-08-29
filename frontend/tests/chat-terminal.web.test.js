@@ -158,6 +158,35 @@ test('mobile drawer slides chat aside, swipes closed, and composer focus is stab
   await page.close();
 });
 
+test('right swipe on the chat screen opens the mobile drawer', async () => {
+  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
+  assert.equal(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity), '0');
+  const shell = await page.$eval('[data-testid="branded-chat-shell"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, height: rect.height }; });
+  const client = await page.createCDPSession();
+  const start = { x: shell.left + 40, y: shell.top + shell.height / 2 };
+  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] });
+  for (let step = 1; step <= 8; step += 1) {
+    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x + step * 28, y: start.y }] });
+  }
+  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.close();
+});
+
+test('right swipe starting in the composer does not open the drawer', async () => {
+  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
+  const composer = await page.$eval('[data-testid="captain-prompt"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, height: rect.height }; });
+  const client = await page.createCDPSession();
+  const start = { x: composer.left + 20, y: composer.top + composer.height / 2 };
+  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] });
+  for (let step = 1; step <= 8; step += 1) {
+    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x + step * 28, y: start.y }] });
+  }
+  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  assert.equal(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity), '0');
+  await page.close();
+});
+
 test('current backend session works without setup and explicit model overrides stay paired', async () => {
   const currentPage = await openChat({ width: 900, height: 700 }, true);
   await submit(currentPage, 'use current');
