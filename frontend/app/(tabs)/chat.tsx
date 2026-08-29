@@ -592,7 +592,7 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' as any }, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
+  page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
   shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
   newSessionControl: { zIndex: 6 }, newSessionButton: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 17 }, newSessionButtonText: { fontSize: 13, fontWeight: '700' },
   newSessionMenu: { position: 'absolute', right: 0, top: 40, width: 260, borderRadius: 18, padding: 14, gap: 10, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 10 }, newSessionMenuText: { fontSize: 12, lineHeight: 17 }, newSessionMenuActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 6 },
