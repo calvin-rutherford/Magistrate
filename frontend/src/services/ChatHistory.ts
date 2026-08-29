@@ -8,6 +8,8 @@ const markerPattern = /^\s*([›❯•⏺●])\s+(.*)$/;
 // Gerunds are deliberately count-qualified: bare "Running ..." also opens prose.
 const toolPattern = /^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()/i;
 const transientPattern = /^(?:Working\s*\(|You have \d+ usage|Session renamed\b|Stop hook feedback\b|Tip:|(?:low|medium|high|xhigh|max|ultra)\s+·\s+\/)/i;
+const routingPrefix = /^\[Magistrate execution:[^\]]+\]\s*/i;
+const markerlessToolPattern = /^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()/i;
 
 const lineBreakPattern = /^(?:[-*•‣]|\d+[.)]\s|#)/;
 // Footer/status overlays herdr captures mid-frame; they can land on an indented
@@ -49,7 +51,8 @@ export function parseAgentHistory(output: string): AgentHistoryMessage[] {
     if (marker) {
       finish();
       splitAt = null;
-      const [, glyph, text] = marker;
+      const [, glyph, rawText] = marker;
+      const text = rawText.replace(routingPrefix, '').trim();
       if (glyph === '›' || glyph === '❯') current = { role: 'user', kind: 'conversation', text };
       else if (!transientPattern.test(text.trim()) && !chromePattern.test(text)) current = { role: 'assistant', kind: toolPattern.test(text.trim()) ? 'tool' : 'conversation', text };
       continue;
@@ -94,6 +97,16 @@ export function parseAgentHistory(output: string): AgentHistoryMessage[] {
     } else finish();
   }
   finish();
+  // Pi's renderer can emit transcript prose without Codex/Claude marker
+  // glyphs. Keep those real rows available to chat, but drop recognizable
+  // command output and terminal chrome. This mirrors the gateway parser.
+  if (!messages.length) {
+    for (const block of output.replace(/\r/g, '').trim().split(/\n\s*\n/)) {
+      const lines = block.split('\n').map(line => line.trim()).filter(line => line && !chromePattern.test(line) && !transientPattern.test(line) && !line.startsWith('───') && !markerlessToolPattern.test(line));
+      const text = unwrapTerminalText(lines.join('\n')).replace(routingPrefix, '').trim();
+      if (text && text !== 'Ask Codex to do anything' && text !== 'Ask Claude anything' && text !== 'Skipping dev server') messages.push({ role: 'assistant', kind: 'conversation', text });
+    }
+  }
   return messages;
 }
 

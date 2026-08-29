@@ -8,6 +8,26 @@ const history: AgentHistoryMessage[] = [
   { role: 'assistant', kind: 'conversation', text: 'The fleet is healthy.' },
 ];
 
+test('Pi markerless transcript rows remain available without exposing command output', () => {
+  const output = [
+    'User question from Pi',
+    '',
+    'Assistant response from Pi with',
+    '  a wrapped line.',
+    '',
+    '[Magistrate execution: harness=pi; model=gpt-5.6-luna; provider=openai-codex; variant=default; profile=pi:default]',
+    'User question from routing',
+    '',
+    '$ npm run test',
+    'Ran 3 commands',
+  ].join('\n');
+  assert.deepEqual(parseAgentHistory(output), [
+    { role: 'assistant', kind: 'conversation', text: 'User question from Pi' },
+    { role: 'assistant', kind: 'conversation', text: 'Assistant response from Pi with a wrapped line.' },
+    { role: 'assistant', kind: 'conversation', text: 'User question from routing' },
+  ]);
+});
+
 test('agent history hides tool calls by default', () => {
   assert.deepEqual(filterAgentHistory(history, false).map(message => message.text), [
     'Please inspect the fleet.',

@@ -25,6 +25,11 @@ _TRANSIENT_SUMMARY = re.compile(
     re.IGNORECASE,
 )
 _TRANSIENT_USER_TEXT = {'Ask Codex to do anything', 'Ask Claude anything', 'Skipping dev server'}
+_ROUTING_PREFIX = re.compile(r'^\[Magistrate execution:[^\]]+\]\s*', re.IGNORECASE)
+_MARKERLESS_TOOL = re.compile(
+    r'^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
+    re.IGNORECASE,
+)
 _LINE_BREAK = re.compile(r'^(?:[-*•‣]|\d+[.)]\s|#)')
 # Footer/status overlays herdr captures mid-frame; they can land on an indented
 # row directly under a message, so they are dropped wherever they appear.
@@ -80,6 +85,7 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
             finish()
             split_at = None
             glyph, text = marker.groups()
+            text = _ROUTING_PREFIX.sub('', text).strip()
             if glyph in ('›', '❯'):
                 current = {'role': 'user', 'kind': 'conversation', 'text': text}
             else:
@@ -126,7 +132,61 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         else:
             finish()
     finish()
+    # Pi's renderer can emit transcript prose without the marker glyphs used by
+    # Codex and Claude. Herdr exposes a terminal snapshot rather than a
+    # conversation API, so retain markerless prose while dropping recognizable
+    # command output and terminal chrome. The frontend uses the same fallback.
+    if not messages:
+        blocks = re.split(r'\n\s*\n', output.replace('\r', '').strip())
+        for block in blocks:
+            lines = []
+            for line in block.splitlines():
+                stripped = line.strip()
+                if (not stripped or _TERMINAL_CHROME.search(stripped)
+                        or _TRANSIENT_SUMMARY.match(stripped)
+                        or stripped.startswith('───')
+                        or _MARKERLESS_TOOL.match(stripped)):
+                    continue
+                lines.append(stripped)
+            text = _ROUTING_PREFIX.sub('', unwrap_terminal_text('\n'.join(lines))).strip()
+            if text and text not in _TRANSIENT_USER_TEXT:
+                messages.append({'role': 'assistant', 'kind': 'conversation', 'text': text})
     return messages
+
+
+def _prompt_response(output: str) -> Optional[str]:
+    """Extract a real synchronous reply, never transport JSON or tool output."""
+    response = output.strip()
+    if not response:
+        return None
+    try:
+        envelope = json.loads(response)
+    except json.JSONDecodeError:
+        # A harness may print a real plain-text reply, but never return a
+        # command summary/status overlay as if it were conversation.
+        if any(_MARKERLESS_TOOL.match(line.strip()) or _TERMINAL_CHROME.search(line.strip())
+               for line in response.splitlines()):
+            parsed = parse_agent_history(response)
+            return next((message['text'] for message in parsed if message['kind'] == 'conversation'), None)
+        return response
+    if not isinstance(envelope, dict):
+        return None
+    # Herdr normally returns a JSON-RPC acknowledgement. It is not a reply,
+    # but preserve an explicitly supplied response/text for verified harnesses.
+    if 'result' in envelope or 'jsonrpc' in envelope:
+        result = envelope.get('result')
+        if isinstance(result, dict):
+            for key in ('response', 'text'):
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+    for key in ('response', 'text'):
+        value = envelope.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
 
 class HerdrClient:
     def __init__(self, socket_path: str = HERDR_SOCKET_PATH):
@@ -212,8 +272,15 @@ class HerdrClient:
         if target in ('captain', 'codex', 'firstmate'):
             agents = await self.list_agents()
             if agents:
+                # Prefer an explicitly named captain/firstmate, then the
+                # verified Codex/Pi panes. Do not silently route a Pi captain
+                # to an unrelated first pane when another harness is present.
                 for ag in agents:
-                    if ag.get('harness') == 'codex' or ag.get('name') in ('captain', 'codex'):
+                    name = (ag.get('name') or '').strip().lower()
+                    if name in ('captain', 'codex', 'firstmate') or name.endswith(' - firstmate'):
+                        return ag.get('pane_id') or ag.get('id')
+                for ag in agents:
+                    if ag.get('harness') in ('codex', 'pi'):
                         return ag.get('pane_id') or ag.get('id')
                 return agents[0].get('pane_id') or agents[0].get('id')
         return target
@@ -237,16 +304,13 @@ class HerdrClient:
         err_str = stderr.decode('utf-8') if stderr else ''
 
         if proc.returncode == 0:
-            response = output_str.strip()
-            try:
-                envelope = json.loads(response)
-            except json.JSONDecodeError:
-                envelope = None
             # `herdr agent prompt` normally prints an RPC acknowledgement. It
-            # is transport metadata, never an assistant message.
-            if isinstance(envelope, dict) and isinstance(envelope.get('result'), dict):
-                response = ''
-            return {'status': 'submitted', 'target': resolved_target, 'response': response or None, 'harness': harness, 'model': model}
+            # is transport metadata, never an assistant message. Verified
+            # harnesses may provide an explicit response/text field, which is
+            # safe to return synchronously; all other replies arrive via the
+            # history poll and are parsed by parse_agent_history().
+            response = _prompt_response(output_str)
+            return {'status': 'submitted', 'target': resolved_target, 'response': response, 'harness': harness, 'model': model}
         else:
             return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(), 'harness': harness, 'model': model}
 

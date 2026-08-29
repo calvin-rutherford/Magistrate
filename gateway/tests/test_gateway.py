@@ -34,6 +34,19 @@ def test_attention():
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
 
+def test_static_spa_deep_links_serve_the_exported_frontend():
+    for path in ('/chat', '/voice'):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert '<!DOCTYPE html>' in response.text
+        assert 'Magistrate' in response.text
+
+
+def test_unknown_api_route_is_not_captured_by_spa_fallback():
+    response = client.get('/api/v1/does-not-exist', headers={'X-Magistrate-Token': MAGISTRATE_TOKEN})
+    assert response.status_code == 404
+
+
 def test_captain_prompt_empty():
     resp = client.post(
         "/api/v1/captain/prompt",

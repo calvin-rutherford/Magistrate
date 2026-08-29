@@ -21,6 +21,26 @@ def test_history_parser_unwraps_hard_wrapped_prose_but_keeps_lists():
     }]
 
 
+def test_history_parser_keeps_pi_markerless_transcript_rows_without_tool_traces():
+    output = """User question from Pi
+
+Assistant response from Pi with
+  a wrapped line.
+
+[Magistrate execution: harness=pi; model=gpt-5.6-luna; provider=openai-codex; variant=default; profile=pi:default]
+User question from routing
+
+$ npm run test
+Ran 3 commands
+"""
+
+    assert parse_agent_history(output) == [
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'User question from Pi'},
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'Assistant response from Pi with a wrapped line.'},
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'User question from routing'},
+    ]
+
+
 def test_history_parser_separates_conversation_from_tool_activity():
     output = """• I’ll inspect the gateway and report back.
 
@@ -48,6 +68,28 @@ def test_history_parser_separates_conversation_from_tool_activity():
         {'role': 'user', 'kind': 'conversation', 'text': 'Please keep tool calls out of the normal history.'},
         {'role': 'assistant', 'kind': 'conversation', 'text': 'Done. The history now contains only the conversation by default.'},
     ]
+
+
+@pytest.mark.asyncio
+async def test_prompt_returns_explicit_harness_reply_but_not_rpc_ack(monkeypatch):
+    process = AsyncMock()
+    process.returncode = 0
+    process.communicate.return_value = (b'{"jsonrpc":"2.0","id":1,"result":{"response":"Pi reply"}}', b'')
+    client = HerdrClient()
+    monkeypatch.setattr(client, 'resolve_target', AsyncMock(return_value='w1:p1'))
+    monkeypatch.setattr('asyncio.create_subprocess_exec', AsyncMock(return_value=process))
+
+    result = await client.prompt_agent('captain', 'hello', harness='pi', model='gpt-5.6-luna')
+
+    assert result['response'] == 'Pi reply'
+
+    process.communicate.return_value = (b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}', b'')
+    result = await client.prompt_agent('captain', 'hello')
+    assert result['response'] is None
+
+    process.communicate.return_value = (b'Ran 2 commands\nRunning 2 commands\n', b'')
+    result = await client.prompt_agent('captain', 'hello')
+    assert result['response'] is None
 
 
 @pytest.mark.asyncio
