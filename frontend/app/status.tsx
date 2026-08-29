@@ -35,7 +35,7 @@ export default function StatusScreen() {
       <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 110 }}>
         {/* GATEWAY SERVER TELEMETRY */}
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>MELKEZIC GATEWAY TELEMETRY</Text>
+          <Text style={styles.sectionTitle}>GATEWAY TELEMETRY</Text>
         </View>
 
         <GlassSurface variant="card" style={styles.card}>

@@ -19,8 +19,8 @@ export default function FleetScreen() {
 
   return (
     <ScrollView style={styles.container}>
-      <Text style={styles.header}>FIRSTMATE CREW & AGENT FLEET</Text>
-      <Text style={styles.subHeader}>Harness: Codex CLI | Server: melkezic-dev-01</Text>
+      <Text style={styles.header}>MAGISTRATE AGENT FLEET</Text>
+      <Text style={styles.subHeader}>Live execution sessions</Text>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>HERDR ACTIVE SESSIONS ({agents.length})</Text>

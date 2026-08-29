@@ -70,7 +70,7 @@ export const GlassDrawer: React.FC<GlassDrawerProps> = ({
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.menuItem} onPress={() => { onNavigate('chat'); onClose(); }}>
-                <Text style={styles.menuItemText}>Firstmate Chat</Text>
+                <Text style={styles.menuItemText}>Magistrate Chat</Text>
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.menuItem} onPress={() => { onNavigate('account'); onClose(); }}>

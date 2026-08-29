@@ -12,7 +12,7 @@
       "bundleIdentifier": "io.magistrate.cockpit",
       "supportsTablet": true,
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Magistrate requires microphone access for voice command interactions with Firstmate.",
+        "NSMicrophoneUsageDescription": "Magistrate requires microphone access for voice interactions.",
         "NSSpeechRecognitionUsageDescription": "Magistrate uses speech recognition to transcribe your voice commands.",
         "NSPhotoLibraryUsageDescription": "Magistrate allows uploading profile photos.",
         "NSCameraUsageDescription": "Magistrate allows taking profile photos.",
