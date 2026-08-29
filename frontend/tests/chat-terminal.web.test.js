@@ -90,6 +90,28 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
   await page.close();
 });
 
+test('attachment menu picks a file, previews it, and explains the gateway upload gap', async () => {
+  const page = await openChat({ width: 1100, height: 760 });
+  await page.click('[data-testid="attachment-menu-button"]');
+  await page.waitForSelector('[data-testid="attachment-menu"]');
+  assert.match(await page.$eval('[data-testid="attachment-menu"]', element => element.innerText), /Photos[\s\S]*Files/);
+
+  const chooserPromise = page.waitForFileChooser();
+  await page.click('[data-testid="attachment-option-files"]');
+  const chooser = await chooserPromise;
+  await chooser.accept([path.join(process.cwd(), 'package.json')]);
+  await page.waitForFunction(() => document.querySelector('[data-testid="attachment-preview"]')?.innerText.includes('package.json'));
+
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForSelector('[data-testid="captain-send-error"]');
+  assert.match(await page.$eval('[data-testid="captain-send-error"]', element => element.innerText), /gateway cannot accept uploads yet/i);
+  assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length), 0);
+
+  await page.click('[data-testid^="remove-file-"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="attachment-preview"]'));
+  await page.close();
+});
+
 test('drawer starts collapsed, expands downward, and preserves conversation history', async () => {
   const page = await openChat({ width: 1100, height: 760 });
   await submit(page, 'keep this message');
