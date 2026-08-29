@@ -28,7 +28,7 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light') {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   if (visualViewportShortfall) {
@@ -91,6 +91,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       return nativeFetch(resource, options);
     };
   }, emptyInventory, promptResponseText, historyRace, !preserveStorage);
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: colorScheme }]);
   await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
   // win hit-testing near the viewport bottom in headless Chrome.
@@ -338,13 +339,14 @@ test('Pi remains an atomic harness/provider/model selection', async () => {
   await page.close();
 });
 
-test('usage drawer reports quota-axi evidence without inventing missing amounts', async () => {
+test('usage lives in Settings and reports quota evidence without inventing amounts', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="drawer-section-usage"]');
-  await page.waitForSelector('[data-testid="drawer-panel-usage"]');
-  const usage = await page.$eval('[data-testid="drawer-panel-usage"]', element => element.innerText);
+  assert.equal(await page.$('[data-testid="drawer-section-usage"]'), null);
+  await page.click('[data-testid="settings-open"]');
+  await page.waitForSelector('[data-testid="settings-usage-section"]');
+  const usage = await page.$eval('[data-testid="settings-usage-section"]', element => element.innerText);
   assert.match(usage, /codex.*plus/i);
   assert.match(usage, /20% left/i);
   await page.close();
@@ -372,9 +374,46 @@ test('account gear opens the lower settings drawer with live network status', as
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
   assert.equal(await page.$eval('[data-testid="settings-network-status"]', element => element.textContent), 'Connected');
   const ratio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
-  assert.ok(ratio >= 0.42 && ratio <= 0.52);
+  assert.ok(ratio >= 0.74 && ratio <= 0.82);
   await page.click('[data-testid="settings-close"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) < 0.05);
+  await page.close();
+});
+
+test('settings default to system theme and automatic background, then persist explicit dark mode across refresh', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light');
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="settings-open"]');
+  await page.waitForSelector('[data-testid="settings-usage-section"]');
+  await page.click('[data-testid="settings-theme"]');
+  assert.equal(await page.$eval('[data-testid="theme-option-system"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
+  assert.equal(await page.$eval('[data-testid="background-option-auto"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
+  await page.click('[data-testid="theme-option-dark"]');
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('10, 14, 20'));
+  await page.close();
+
+  const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'dark');
+  await refreshed.click('[data-testid="brand-drawer-toggle"]');
+  await refreshed.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await refreshed.click('[data-testid="settings-open"]');
+  await refreshed.click('[data-testid="settings-theme"]');
+  assert.equal(await refreshed.$eval('[data-testid="theme-option-dark"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
+  assert.match(await refreshed.$eval('[data-testid="branded-chat-shell"]', element => getComputedStyle(element).backgroundColor), /rgba\(10, 14, 20, 0\.78\)/);
+  await refreshed.close();
+});
+
+test('system theme follows the OS palette without retaining a stale light surface', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'dark');
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="settings-open"]');
+  await page.click('[data-testid="settings-theme"]');
+  await page.click('[data-testid="theme-option-system"]');
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('10, 14, 20'));
+  assert.equal(await page.$eval('[data-testid="theme-option-system"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('255, 255, 255'));
   await page.close();
 });
 

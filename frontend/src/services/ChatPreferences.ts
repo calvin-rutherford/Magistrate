@@ -36,11 +36,18 @@ export async function loadChatPreferences(): Promise<ChatPreferences> {
     CHAT_BACKGROUND_KEY,
     CHAT_CUSTOM_BACKGROUND_KEY,
   ]);
+  const storedBackground = validBackgrounds.has(background[1] as WeatherSceneKey)
+    ? background[1] as WeatherSceneKey
+    : DEFAULT_CHAT_PREFERENCES.background;
+  // A custom scene is only valid when its persisted image is still present.
+  // Otherwise a removed/expired upload must not resurrect stale presentation
+  // state after a refresh.
+  const hasCustomBackground = storedBackground === 'custom' && Boolean(customBackground[1]);
   const preferences: ChatPreferences = {
     showToolCalls: toolCalls[1] === 'true',
     themeMode: validThemeModes.has(themeMode[1] as ChatThemeMode) ? themeMode[1] as ChatThemeMode : DEFAULT_CHAT_PREFERENCES.themeMode,
-    background: validBackgrounds.has(background[1] as WeatherSceneKey) ? background[1] as WeatherSceneKey : DEFAULT_CHAT_PREFERENCES.background,
-    customBackgroundUri: customBackground[1] || undefined,
+    background: hasCustomBackground ? 'custom' : storedBackground === 'custom' ? DEFAULT_CHAT_PREFERENCES.background : storedBackground,
+    customBackgroundUri: hasCustomBackground ? customBackground[1] || undefined : undefined,
   };
   applyChatAppearance(preferences);
   return preferences;
@@ -83,7 +90,14 @@ export async function saveThemeMode(themeMode: ChatThemeMode): Promise<void> {
 
 export async function saveChatBackground(background: WeatherSceneKey): Promise<void> {
   setActiveBackground(background);
-  await AsyncStorage.setItem(CHAT_BACKGROUND_KEY, background);
+  if (background === 'custom') {
+    await AsyncStorage.setItem(CHAT_BACKGROUND_KEY, background);
+  } else {
+    // Built-in choices supersede an uploaded image; do not leave a stale
+    // custom URI that can reappear on the next hydration.
+    await AsyncStorage.multiSet([[CHAT_BACKGROUND_KEY, background]]);
+    await AsyncStorage.removeItem(CHAT_CUSTOM_BACKGROUND_KEY);
+  }
 }
 
 export async function saveCustomBackground(uri: string): Promise<void> {

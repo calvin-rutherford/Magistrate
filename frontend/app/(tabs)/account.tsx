@@ -14,13 +14,7 @@ import { useRouter } from 'expo-router';
 export default function AccountScreen() {
   const router = useRouter();
 
-  const [profile, setProfile] = useState<UserProfile>({
-    user_id: 'default_user',
-    name: 'Spectre Operator',
-    email: 'spectre@magistrate.io',
-    avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=400&auto=format&fit=crop',
-    bio: 'Magistrate Operator'
-  });
+  const [profile, setProfile] = useState<UserProfile | null>(null);
 
   const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
   const [uploading, setUploading] = useState<boolean>(false);
@@ -43,10 +37,9 @@ export default function AccountScreen() {
         if (prof.avatar_url && prof.avatar_url.startsWith('/uploads')) {
           prof.avatar_url = 'http://100.84.181.23:8000' + prof.avatar_url;
         }
-                if (prof.active_theme) {
-          setActiveThemeKey(prof.active_theme as any);
-          setActiveBackground(prof.active_theme as any);
-        }
+        // The locally persisted appearance is authoritative. The profile
+        // value is legacy metadata and must not overwrite an explicit device
+        // choice during hydration.
         setProfile(prof);
       }
       if (provs && provs.length > 0) {
@@ -58,8 +51,11 @@ export default function AccountScreen() {
   };
 
   useEffect(() => {
+    loadChatPreferences().then(preferences => {
+      setActiveThemeKey(preferences.background);
+      setCustomBackgroundUri(preferences.customBackgroundUri);
+    }).catch(() => {});
     loadAccountData();
-    loadChatPreferences().then(preferences => { if (preferences.background !== 'auto' || preferences.customBackgroundUri) setActiveThemeKey(preferences.background); setCustomBackgroundUri(preferences.customBackgroundUri); }).catch(() => {});
   }, []);
 
   const handlePickAvatar = async () => {
@@ -86,7 +82,7 @@ export default function AccountScreen() {
           if (fullUrl.startsWith('/uploads')) {
             fullUrl = 'http://100.84.181.23:8000' + fullUrl;
           }
-          setProfile(prev => ({ ...prev, avatar_url: fullUrl }));
+          setProfile(prev => prev ? { ...prev, avatar_url: fullUrl } : prev);
         }
       } catch (e) {
         console.error('Avatar upload error:', e);
@@ -186,7 +182,7 @@ export default function AccountScreen() {
         <GlassSurface variant="card" style={styles.profileCard}>
           <View style={styles.avatarRow}>
             <TouchableOpacity onPress={handlePickAvatar} activeOpacity={0.8} style={styles.avatarTouch}>
-              <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
+              {profile?.avatar_url ? <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} /> : <View style={[styles.avatarImage, styles.avatarPlaceholder]}><Text style={styles.avatarPlaceholderText}>?</Text></View>}
               {uploading ? (
                 <View style={styles.avatarOverlay}>
                   <ActivityIndicator color="#FFFFFF" />
@@ -199,8 +195,8 @@ export default function AccountScreen() {
             </TouchableOpacity>
 
             <View style={styles.profileInfo}>
-              <Text style={styles.profileName}>{profile.name}</Text>
-              <Text style={styles.profileEmail}>{profile.email}</Text>
+              <Text style={styles.profileName}>{profile?.name || 'Account profile unavailable'}</Text>
+              <Text style={styles.profileEmail}>{profile?.email || 'Connect an account to see profile details.'}</Text>
               <TouchableOpacity onPress={handlePickAvatar} style={styles.uploadBtn}>
                 <Text style={styles.uploadBtnText}>CHANGE PHOTO ↗</Text>
               </TouchableOpacity>
@@ -313,6 +309,7 @@ export default function AccountScreen() {
           <Text style={styles.settingLabel}>SELECTABLE BACKGROUND THEME</Text>
           <View style={styles.themeRow}>
             {[
+              { key: 'auto', label: 'Automatic' },
               { key: 'dusk-mountain', label: 'Dusk Mountain' },
               { key: 'clear-day', label: 'Clear Day' },
               { key: 'clear-night', label: 'Clear Night' },
@@ -356,7 +353,7 @@ const styles = StyleSheet.create({
   profileCard: { padding: 18, marginVertical: 8, borderRadius: 18 },
   avatarRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   avatarTouch: { position: 'relative' },
-  avatarImage: { width: 68, height: 68, borderRadius: 34, borderWidth: 2, borderColor: '#FFFFFF' },
+  avatarImage: { width: 68, height: 68, borderRadius: 34, borderWidth: 2, borderColor: '#FFFFFF' }, avatarPlaceholder: { backgroundColor: 'rgba(255,255,255,0.12)', justifyContent: 'center', alignItems: 'center' }, avatarPlaceholderText: { color: '#FFFFFF', fontSize: 24, fontWeight: '700' },
   avatarOverlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 34, justifyContent: 'center', alignItems: 'center' },
   avatarBadge: { position: 'absolute', bottom: -2, right: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: '#FFFFFF', justifyContent: 'center', alignItems: 'center' },
   avatarBadgeText: { fontSize: 11 },
