@@ -16,13 +16,13 @@ export const SIRI_INTENT_REGISTRY: SiriIntentTrigger[] = [
   },
   {
     id: 'siri_talk_firstmate',
-    phrase: 'Talk to Firstmate',
+    phrase: 'Talk to Magistrate',
     targetPath: '/chat',
     params: { record: 'true' }
   },
   {
     id: 'siri_command_firstmate',
-    phrase: 'Command Firstmate',
+    phrase: 'Command Magistrate',
     targetPath: '/chat',
     params: { record: 'true' }
   },

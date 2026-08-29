@@ -104,7 +104,7 @@ export default function VoiceScreen() {
       <GlassSurface variant="card" style={styles.statusBox}><Text accessibilityLiveRegion="polite" style={styles.statusText}>{status}</Text></GlassSurface>
       <Text style={styles.targetLabel}>TARGET</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.targetRow}>
-        <TouchableOpacity testID="target-captain" onPress={() => setTarget('captain')} style={[styles.targetChip, target === 'captain' && styles.targetSelected]}><Text style={styles.chipText}>Firstmate</Text></TouchableOpacity>
+        <TouchableOpacity testID="target-captain" onPress={() => setTarget('captain')} style={[styles.targetChip, target === 'captain' && styles.targetSelected]}><Text style={styles.chipText}>Magistrate</Text></TouchableOpacity>
         {targets.filter(item => item.id !== 'captain').map(item => <TouchableOpacity key={item.id} onPress={() => setTarget(item.id)} style={[styles.targetChip, target === item.id && styles.targetSelected]}><Text style={styles.chipText}>{item.name}</Text></TouchableOpacity>)}
       </ScrollView>
       <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Stop recording' : 'Start recording'}
@@ -131,7 +131,7 @@ export default function VoiceScreen() {
       </GlassSurface>}
       {response ? <GlassSurface variant="card" style={styles.transcriptCard}><Text style={styles.cardLabel}>CORRELATED RESPONSE · {pendingMove?.move_id}</Text><Text accessibilityLiveRegion="polite" style={styles.bodyText}>{response}</Text></GlassSurface> : null}
       {error ? <Text testID="voice-error" accessibilityLiveRegion="assertive" style={styles.errorText}>{error}</Text> : null}
-      {voiceState === 'REVIEW' && <View style={styles.actions}><TouchableOpacity testID="submit-voice-move" onPress={resolveAndSubmit} style={styles.primary}><Text style={styles.buttonText}>SUBMIT TO {target === 'captain' ? 'FIRSTMATE' : target}</Text></TouchableOpacity><TouchableOpacity onPress={cancel} style={styles.secondary}><Text style={styles.buttonText}>CANCEL</Text></TouchableOpacity></View>}
+      {voiceState === 'REVIEW' && <View style={styles.actions}><TouchableOpacity testID="submit-voice-move" onPress={resolveAndSubmit} style={styles.primary}><Text style={styles.buttonText}>SUBMIT TO {target === 'captain' ? 'MAGISTRATE' : target}</Text></TouchableOpacity><TouchableOpacity onPress={cancel} style={styles.secondary}><Text style={styles.buttonText}>CANCEL</Text></TouchableOpacity></View>}
       {voiceState === 'LISTENING' && <TouchableOpacity onPress={cancel} style={styles.secondary}><Text style={styles.buttonText}>CANCEL RECORDING</Text></TouchableOpacity>}
     </ScrollView>
   </EnvironmentBackground>;

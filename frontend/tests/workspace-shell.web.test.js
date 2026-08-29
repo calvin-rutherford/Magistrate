@@ -45,21 +45,21 @@ async function open(url) {
   return page;
 }
 
-test('root and explicit home are standalone homepage routes', async () => {
+test('root and explicit home resolve to the standalone chat shell', async () => {
   for (const route of ['/', '/home']) {
     const page = await open(BASE + route);
-    await page.waitForFunction(() => document.body.innerText.includes('AGENT FLEET'));
+    await page.waitForSelector('[data-testid="branded-chat-shell"]');
     assert.equal(await page.$('[data-testid="workspace-shell"]'), null);
-    assert.equal(await page.$('[data-testid="chat-canvas"]'), null);
+    assert.ok(await page.$('[data-testid="captain-prompt"]'));
     await page.close();
   }
 });
 
 test('chat is a standalone route and preserves agent target deep links', async () => {
   const page = await open(`${BASE}/chat?agentId=w1%3Ap7`);
-  await page.waitForSelector('[data-testid="chat-canvas"]');
+  await page.waitForSelector('[data-testid="branded-chat-shell"]');
   assert.equal(await page.$('[data-testid="workspace-shell"]'), null);
-  assert.match(await page.$eval('[data-testid="chat-target"]', node => node.textContent), /w1:p7/);
+  assert.match(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('placeholder')), /w1:p7/);
   assert.equal(new URL(page.url()).pathname, '/chat');
   await page.close();
 });

@@ -66,7 +66,7 @@ export default function ARGlassesSetupScreen() {
           <View style={styles.qrBox}>
             <Text style={styles.qrText}>{"{ ws: '100.84.181.23:8000', v: '1.0' }"}</Text>
           </View>
-          <Text style={styles.qrSubText}>Scan or enter this payload into your AR device to authenticate with Firstmate.</Text>
+          <Text style={styles.qrSubText}>Scan or enter this payload into your AR device to authenticate with Magistrate.</Text>
         </GlassSurface>
 
         <View style={styles.sectionHeader}>

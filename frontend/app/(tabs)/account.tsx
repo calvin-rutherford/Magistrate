@@ -18,7 +18,7 @@ export default function AccountScreen() {
     name: 'Spectre Operator',
     email: 'spectre@magistrate.io',
     avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=400&auto=format&fit=crop',
-    bio: 'Firstmate Master Operator'
+    bio: 'Magistrate Operator'
   });
 
   const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
@@ -247,7 +247,7 @@ export default function AccountScreen() {
           </View>
 
           <View style={styles.settingToggleRow}>
-            <Text style={styles.settingToggleLabel}>AUTO-SPEAK FIRSTMATE</Text>
+            <Text style={styles.settingToggleLabel}>AUTO-SPEAK MAGISTRATE</Text>
             <TouchableOpacity
               style={[styles.toggleBtn, autoSpeak ? styles.toggleBtnActive : undefined]}
               onPress={() => setAutoSpeak(!autoSpeak)}

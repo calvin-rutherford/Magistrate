@@ -8,6 +8,7 @@
     "expo-audio": "~57.0.4",
     "expo-av": "^16.0.8",
     "expo-blur": "~57.0.2",
+    "expo-clipboard": "~57.0.1",
     "expo-constants": "~57.0.3",
     "expo-device": "~57.0.1",
     "expo-font": "~57.0.0",
@@ -37,6 +38,8 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "eslint": "^9.0.0",
+    "eslint-config-expo": "~57.0.2",
     "puppeteer-core": "^24.43.1",
     "typescript": "~6.0.3"
   },

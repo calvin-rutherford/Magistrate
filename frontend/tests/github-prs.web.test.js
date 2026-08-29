@@ -39,8 +39,11 @@ async function pageWithGitHubData(url = BASE, externalUrl = 'https://github.com/
   return page;
 }
 
-test('Home opens an in-app PR detail before GitHub', async () => {
+test('Recent Activity opens an in-app PR detail before GitHub', async () => {
   const page = await pageWithGitHubData();
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="drawer-section-activity"]');
   await page.waitForFunction(() => document.body.innerText.includes('Real pull request'));
   await page.locator('::-p-text(Real pull request)').click();
   await page.waitForFunction(() => location.pathname.includes('pr-detail') && document.body.innerText.includes('Authoritative body'));

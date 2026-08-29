@@ -57,7 +57,7 @@ export default function OctoberAssistant({ colors, onTranscription }: Props) {
     // In a real pipeline, we would upload the recording.getURI() to Whisper API.
     // For scaffolding, we simulate transcription after a brief delay.
     setTimeout(() => {
-      onTranscription("Ahoy. Run Firstmate bootstrap diagnostics only.");
+      onTranscription("Run Magistrate bootstrap diagnostics only.");
     }, 1000);
     
     setRecording(null);
