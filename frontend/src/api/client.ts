@@ -157,6 +157,23 @@ export interface GitHubPRPage {
   cached: boolean;
 }
 
+export interface RecentActivityItem {
+  id: string;
+  type: 'pull_request_merged' | 'task_completed' | 'task_requested';
+  title: string;
+  description: string;
+  occurred_at: string;
+  source: 'firstmate' | 'github';
+  project: string;
+  url: string | null;
+  pull_request_number: number | null;
+}
+
+export interface RecentActivityFeed {
+  items: RecentActivityItem[];
+  sources: { firstmate: 'available' | 'unavailable'; github: 'available' | 'unavailable' };
+}
+
 export async function fetchHealth() {
   const res = await fetch(GATEWAY_URL + '/health', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
@@ -211,6 +228,15 @@ export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]>
   const data = await checkedJson<unknown>(res);
   if (!Array.isArray(data)) throw new Error('Gateway returned invalid attention data.');
   return data as UnifiedAttentionRecord[];
+}
+
+export async function fetchRecentActivity(limit = 20): Promise<RecentActivityFeed> {
+  const res = await fetch(`${GATEWAY_URL}/recent-activity?limit=${limit}`, {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  const data = await checkedJson<RecentActivityFeed>(res);
+  if (!data || !Array.isArray(data.items)) throw new Error('Gateway returned invalid recent activity data.');
+  return data;
 }
 
 export async function fetchUserProfile(): Promise<UserProfile> {

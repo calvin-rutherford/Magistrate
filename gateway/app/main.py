@@ -21,6 +21,7 @@ from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
 from app.db import init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
 from app.github_service import github_service
+from app.recent_activity import RecentActivityService
 from app.attention_service import attention_service
 from app.notifications import register_push_token, reconcile_notification_events, acknowledge_notification_events, update_notification_preferences
 from app.providers.github import GitHubProviderAdapter
@@ -54,6 +55,7 @@ app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name=
 
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
+recent_activity_service = RecentActivityService(fm_client, github_service)
 stt_adapter = VoiceInputAdapter()
 voice_move_service = VoiceMoveService(herdr_client)
 
@@ -235,6 +237,13 @@ async def list_github_pulls(page: int = Query(1, ge=1), per_page: int = Query(20
 async def get_github_pull(number: int, refresh: bool = Query(False), token: str = Depends(verify_token)):
     try:
         return await github_service.get_pull_request(number, refresh)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+@app.get('/api/v1/recent-activity')
+async def get_recent_activity(limit: int = Query(20, ge=1, le=50), refresh: bool = Query(False), token: str = Depends(verify_token)):
+    try:
+        return await recent_activity_service.get_recent_activity(limit, refresh)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

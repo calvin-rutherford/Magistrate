@@ -7,7 +7,7 @@ import { AccessibilityInfo, Alert, Image, KeyboardAvoidingView, NativeScrollEven
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
-import { AgentInfo, AuthProviderInfo, ExecutionHarness, fetchAgentHistory, fetchAgents, fetchAuthProviders, fetchExecutionCapabilities, fetchGitHubPRs, fetchHealth, fetchUnifiedAttention, GitHubPR, HealthInfo, interruptAgent, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord } from '../../src/api/client';
+import { AgentInfo, AuthProviderInfo, ExecutionHarness, fetchAgentHistory, fetchAgents, fetchAuthProviders, fetchExecutionCapabilities, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, HealthInfo, interruptAgent, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord } from '../../src/api/client';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
@@ -384,10 +384,15 @@ function FleetAgentRow({ agent, activeStatus, dark, onOpenChat }: { agent: Agent
   </View>;
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onOpenSettings, onOpenAgent, agents, attention, prs, providers, errors, loading }: {
+function activityDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onOpenSettings, onOpenAgent, agents, attention, activity, providers, errors, loading }: {
   open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onOpenSettings: () => void;
   onOpenAgent: (agentId: string) => void;
-  agents: AgentInfo[]; attention: UnifiedAttentionRecord[]; prs: GitHubPR[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; prs?: string | null; providers?: string | null }; loading: boolean;
+  agents: AgentInfo[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
 }) {
   const router = useRouter();
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
@@ -397,7 +402,11 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
     if (item.url?.startsWith('/')) router.push(item.url as any);
     else { const result = await openExternalUrl(item.external_url || item.url); if (!result.ok) Alert.alert('Unable to open attention item', result.message); }
   };
-  const rows = [{ key: 'attention' as const, icon: '!', title: 'Attention', count: activeAttention.length }, { key: 'fleet' as const, icon: '⌘', title: 'Fleet Summary', count: agents.length }, { key: 'activity' as const, icon: '↗', title: 'Recent Activity' }, { key: 'connections' as const, icon: '⌁', title: 'Connections' }];
+  const openActivityItem = async (item: RecentActivityItem) => {
+    if (item.pull_request_number) router.push(`/pr-detail?number=${item.pull_request_number}` as any);
+    else if (item.url) { const result = await openExternalUrl(item.url); if (!result.ok) Alert.alert('Unable to open activity', result.message); }
+  };
+  const rows = [{ key: 'attention' as const, icon: '!', title: 'Attention', count: activeAttention.length }, { key: 'fleet' as const, icon: '⌘', title: 'Fleet Summary', count: agents.length }, { key: 'activity' as const, icon: '↗', title: 'Recent Activity', count: activity.length }, { key: 'connections' as const, icon: '⌁', title: 'Connections' }];
   return <Animated.View accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: dark ? 'rgba(10,14,20,0.98)' : 'rgba(255,255,255,0.98)' }, animatedStyle]} {...panHandlers}>
     <Text style={[styles.drawerWordmark, { color: text }]}>Magistrate</Text>
     <ScrollView style={styles.drawerScroll} contentContainerStyle={styles.drawerScrollContent} keyboardShouldPersistTaps="handled">
@@ -410,7 +419,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
         ) : row.key === 'fleet' ? (
           loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No live agent sessions are available." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <FleetAgentRow key={agent.id} agent={agent} activeStatus={displayStatus} dark={dark} onOpenChat={() => onOpenAgent(agent.id)} />)
         ) : row.key === 'activity' ? (
-          errors.prs ? <PanelText text={errors.prs} muted={brand.critical} /> : prs.length === 0 ? <PanelText text="No meaningful recent activity is available." muted={muted} /> : prs.slice(0, 4).map(pr => <TouchableOpacity key={pr.id || pr.number} onPress={() => router.push(`/pr-detail?number=${pr.number}` as any)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>PR #{pr.number}: {pr.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{pr.repository} · {pr.review_status}</Text></TouchableOpacity>)
+          loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)
         ) : errors.providers ? <PanelText text={errors.providers} muted={brand.critical} /> : providers.length === 0 ? <PanelText text="No connected account data is available." muted={muted} /> : providers.map(provider => <View key={provider.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{provider.provider}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{provider.status}{provider.username ? ` · ${provider.username}` : ''}</Text></View>)}</View> : null}
       </View>)}
     </ScrollView>
@@ -437,19 +446,19 @@ export default function ChatScreen() {
   const router = useRouter();
   const dark = isDarkTheme(useColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
   const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [showToolCalls, setShowToolCalls] = useState(false);
-  const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [prs, setPrs] = useState<GitHubPR[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [health, setHealth] = useState<HealthInfo | null>(null);
   const [loading, setLoading] = useState(true); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
-  const [errors, setErrors] = useState<{ agents?: string | null; attention?: string | null; prs?: string | null; providers?: string | null }>({});
+  const [errors, setErrors] = useState<{ agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }>({});
   const drawerProgress = useSharedValue(0); const settingsProgress = useSharedValue(0);
   useEffect(() => { AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion); const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion); return () => sub.remove(); }, []);
   useEffect(() => { drawerProgress.value = withTiming(drawerOpen ? 1 : 0, { duration: reducedMotion ? 1 : drawerOpen ? 260 : 340, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [drawerOpen, drawerProgress, reducedMotion]);
   useEffect(() => { settingsProgress.value = withTiming(settingsOpen ? 1 : 0, { duration: reducedMotion ? 1 : 300, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [settingsOpen, settingsProgress, reducedMotion]);
   useEffect(() => {
     let mounted = true;
-    Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchGitHubPRs(), fetchAuthProviders(), fetchHealth()]).then(([agentResult, attentionResult, prsResult, providerResult, healthResult]) => {
+    Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchRecentActivity(), fetchAuthProviders(), fetchHealth()]).then(([agentResult, attentionResult, activityResult, providerResult, healthResult]) => {
       if (!mounted) return;
-      setErrors({ agents: agentResult.status === 'rejected' ? errorText(agentResult.reason, 'Agent data could not be loaded.') : null, attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null, prs: prsResult.status === 'rejected' ? errorText(prsResult.reason, 'Recent activity could not be loaded.') : null, providers: providerResult.status === 'rejected' ? errorText(providerResult.reason, 'Connections data could not be loaded.') : null });
-      if (agentResult.status === 'fulfilled') setAgents(agentResult.value); if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value); if (prsResult.status === 'fulfilled') setPrs(prsResult.value.items); if (providerResult.status === 'fulfilled') setProviders(providerResult.value);
+      setErrors({ agents: agentResult.status === 'rejected' ? errorText(agentResult.reason, 'Agent data could not be loaded.') : null, attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null, activity: activityResult.status === 'rejected' ? errorText(activityResult.reason, 'Recent activity could not be loaded.') : null, providers: providerResult.status === 'rejected' ? errorText(providerResult.reason, 'Connections data could not be loaded.') : null });
+      if (agentResult.status === 'fulfilled') setAgents(agentResult.value); if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value); if (activityResult.status === 'fulfilled') setActivity(activityResult.value.items); if (providerResult.status === 'fulfilled') setProviders(providerResult.value);
       if (healthResult.status === 'fulfilled') setHealth(healthResult.value); else setHealthError(errorText(healthResult.reason, 'Network status could not be loaded.'));
       setLoading(false); setHealthLoading(false);
     }); return () => { mounted = false; };
@@ -462,7 +471,7 @@ export default function ChatScreen() {
     onPanResponderRelease: (_, g) => { if (g.dx < -55 || g.vx < -0.35) setDrawerOpen(false); },
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page}>
-    <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} prs={prs} providers={providers} errors={errors} loading={loading} />
+    <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
     <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} /></Animated.View>
     <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError} showToolCalls={showToolCalls} onShowToolCallsChange={setShowToolCalls} onClose={() => setSettingsOpen(false)} />
   </SafeAreaView></EnvironmentBackground>;
