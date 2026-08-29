@@ -1,8 +1,8 @@
 import asyncio
 import json
 import os
-import subprocess
 import re
+import subprocess
 from typing import Dict, Any, List, Optional
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
@@ -10,11 +10,27 @@ HERDR_MAX_READ_LINES = 2**32 - 1
 
 _HISTORY_MARKER = re.compile(r'^\s*([›❯•⏺●])\s+(.*)$')
 _TOOL_SUMMARY = re.compile(
-    r'^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|SessionStart\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
+    r'^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|SessionStart\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
     re.IGNORECASE,
 )
 _TRANSIENT_SUMMARY = re.compile(r'^(?:Working\s*\(|You have \d+ usage|Session renamed\b)', re.IGNORECASE)
 _TRANSIENT_USER_TEXT = {'Ask Codex to do anything', 'Ask Claude anything', 'Skipping dev server'}
+_LINE_BREAK = re.compile(r'^(?:[-*•‣]|\d+[.)]\s|#)')
+
+
+def unwrap_terminal_text(text: str) -> str:
+    """Rejoin prose hard-wrapped at the terminal width, keeping list items and paragraph breaks."""
+    blocks: List[str] = []
+    for line in text.split('\n'):
+        trimmed = line.strip()
+        if not trimmed:
+            blocks.append('')
+            continue
+        if blocks and blocks[-1] and not _LINE_BREAK.match(trimmed):
+            blocks[-1] += trimmed if blocks[-1][-1] in '-/' else ' ' + trimmed
+        else:
+            blocks.append(trimmed)
+    return re.sub(r'\n{2,}', '\n\n', '\n'.join(blocks)).strip()
 
 
 def parse_agent_history(output: str) -> List[Dict[str, str]]:
@@ -23,7 +39,8 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
     Herdr intentionally exposes terminal snapshots rather than a harness-specific
     conversation API. Codex and Claude both render stable prompt/response markers;
     everything else (chrome, spinners, separators, and the live composer) is
-    ignored. Tool summaries remain typed separately so clients can hide them.
+    ignored. Conversational prose is unwrapped from the terminal's hard wrapping,
+    and tool summaries remain typed separately so clients can hide them.
     """
     messages: List[Dict[str, str]] = []
     current: Optional[Dict[str, str]] = None
@@ -32,7 +49,7 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         nonlocal current
         if not current:
             return
-        text = current['text'].strip()
+        text = unwrap_terminal_text(current['text']) if current['kind'] == 'conversation' else current['text'].strip()
         if text and text not in _TRANSIENT_USER_TEXT:
             messages.append({**current, 'text': text})
         current = None
@@ -175,7 +192,16 @@ class HerdrClient:
         err_str = stderr.decode('utf-8') if stderr else ''
 
         if proc.returncode == 0:
-            return {'status': 'submitted', 'target': resolved_target, 'response': output_str.strip(), 'harness': harness, 'model': model}
+            response = output_str.strip()
+            try:
+                envelope = json.loads(response)
+            except json.JSONDecodeError:
+                envelope = None
+            # `herdr agent prompt` normally prints an RPC acknowledgement. It
+            # is transport metadata, never an assistant message.
+            if isinstance(envelope, dict) and isinstance(envelope.get('result'), dict):
+                response = ''
+            return {'status': 'submitted', 'target': resolved_target, 'response': response or None, 'harness': harness, 'model': model}
         else:
             return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(), 'harness': harness, 'model': model}
 

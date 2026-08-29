@@ -4,6 +4,23 @@ import pytest
 from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient, parse_agent_history
 
 
+def test_history_parser_unwraps_hard_wrapped_prose_but_keeps_lists():
+    output = """• Implemented and opened PR #24
+  (https://github.com/example/pull/24).
+
+  - Dark alpha: 0.98 → 0.784
+  - Visually verified desktop/mobile in both
+    themes
+"""
+
+    assert parse_agent_history(output) == [{
+        'role': 'assistant',
+        'kind': 'conversation',
+        'text': 'Implemented and opened PR #24 (https://github.com/example/pull/24).\n\n'
+                '- Dark alpha: 0.98 → 0.784\n- Visually verified desktop/mobile in both themes',
+    }]
+
+
 def test_history_parser_separates_conversation_from_tool_activity():
     output = """• I’ll inspect the gateway and report back.
 

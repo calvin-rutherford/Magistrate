@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "dependencies": {
     "@expo/ui": "~57.0.4",
+    "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.4",
     "expo-audio": "~57.0.4",
     "expo-av": "^16.0.8",

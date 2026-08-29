@@ -7,6 +7,7 @@ build/
 .expo/
 *.db
 *.sqlite
+*.sqlite3
 uploads/
 .venv/
 __pycache__/

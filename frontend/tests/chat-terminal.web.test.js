@@ -183,7 +183,7 @@ test('account gear opens the lower settings drawer with live network status', as
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
   assert.equal(await page.$eval('[data-testid="settings-network-status"]', element => element.textContent), 'Connected');
   const ratio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
-  assert.ok(ratio >= 0.4 && ratio <= 0.48);
+  assert.ok(ratio >= 0.42 && ratio <= 0.52);
   await page.click('[data-testid="settings-close"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) < 0.05);
   await page.close();
@@ -208,6 +208,8 @@ test('fleet agent opens its conversation, hides tools by default, and settings c
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   await page.click('[data-testid="settings-open"]');
+  await page.waitForSelector('[data-testid="settings-theme"]');
+  await page.click('[data-testid="settings-theme"]');
   await page.waitForSelector('[data-testid="settings-tool-calls-toggle"]');
   await page.click('[data-testid="settings-tool-calls-toggle"]');
   await page.waitForSelector('[data-testid="tool-history-message"]');

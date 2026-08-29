@@ -109,7 +109,8 @@ test('Home renders live agent identity and makes the agent card actionable', asy
 
   await page.locator('::-p-text(Live captain)').click();
   await page.waitForFunction(() => location.pathname === '/chat' && document.body.innerText.includes('Live captain'));
-  assert.match(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('placeholder')), /w1:p7/);
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
+  assert.match(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('aria-label')), /w1:p7/);
   await page.close();
 });
 
