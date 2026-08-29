@@ -14,7 +14,11 @@ export const TIME_IMAGES: Record<TimePeriod, ImageSourcePropType> = {
 
 let activeSceneKey: WeatherSceneKey = 'auto';
 let customImageUri = '';
-export function setActiveBackground(sceneKey: WeatherSceneKey, customUri?: string) { activeSceneKey = sceneKey; if (customUri) customImageUri = customUri; }
+export function setActiveBackground(sceneKey: WeatherSceneKey, customUri?: string) {
+  activeSceneKey = sceneKey;
+  if (sceneKey === 'custom' && customUri) customImageUri = customUri;
+  if (sceneKey !== 'custom') customImageUri = '';
+}
 export function getCurrentTimePeriod(date: Date = new Date()): TimePeriod {
   const hours = date.getHours();
   if (hours >= 5 && hours < 8) return 'dawn';

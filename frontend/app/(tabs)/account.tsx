@@ -7,6 +7,7 @@ import { EnvironmentBackground } from '../../src/components/EnvironmentBackgroun
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, updateUserProfile, updateNotificationPreferences, UserProfile, AuthProviderInfo } from '../../src/api/client';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
+import { loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
 
@@ -24,6 +25,7 @@ export default function AccountScreen() {
   const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
   const [uploading, setUploading] = useState<boolean>(false);
   const [activeThemeKey, setActiveThemeKey] = useState<WeatherSceneKey>('dusk-mountain');
+  const [customBackgroundUri, setCustomBackgroundUri] = useState<string | undefined>();
 
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
   const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
@@ -57,6 +59,7 @@ export default function AccountScreen() {
 
   useEffect(() => {
     loadAccountData();
+    loadChatPreferences().then(preferences => { if (preferences.background !== 'auto' || preferences.customBackgroundUri) setActiveThemeKey(preferences.background); setCustomBackgroundUri(preferences.customBackgroundUri); }).catch(() => {});
   }, []);
 
   const handlePickAvatar = async () => {
@@ -108,16 +111,22 @@ export default function AccountScreen() {
     });
 
     if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
-      const customUri = pickerResult.assets[0].uri;
+      const asset = pickerResult.assets[0];
+      if (asset.fileSize && asset.fileSize > 10 * 1024 * 1024) { Alert.alert('Photo Too Large', 'Choose an image smaller than 10 MB.'); return; }
+      if (asset.mimeType && !asset.mimeType.startsWith('image/')) { Alert.alert('Unsupported File', 'Choose a supported image file.'); return; }
+      const customUri = asset.uri;
       setActiveThemeKey('custom');
-      setActiveBackground('custom', customUri);
+      setCustomBackgroundUri(customUri);
+      await saveCustomBackground(customUri);
     }
   };
 
   const handleSelectBackground = async (key: WeatherSceneKey) => {
     setActiveThemeKey(key);
+    setCustomBackgroundUri(undefined);
     setActiveBackground(key);
     try {
+      await saveChatBackground(key);
       await updateUserProfile({ active_theme: key });
     } catch (e) {
       console.error('Failed to save background theme');
@@ -320,9 +329,11 @@ export default function AccountScreen() {
             ))}
           </View>
 
-          <TouchableOpacity style={styles.customBgBtn} onPress={handlePickCustomBackground}>
-            <Text style={styles.customBgBtnText}>UPLOAD CUSTOM PHOTO 📷</Text>
+          {customBackgroundUri ? <Image source={{ uri: customBackgroundUri }} style={styles.customBackgroundPreview} resizeMode="cover" accessibilityLabel="Custom background preview" /> : null}
+          <TouchableOpacity testID="account-custom-background-upload" style={styles.customBgBtn} onPress={handlePickCustomBackground}>
+            <Text style={styles.customBgBtnText}>{customBackgroundUri ? 'REPLACE CUSTOM PHOTO 📷' : 'UPLOAD CUSTOM PHOTO 📷'}</Text>
           </TouchableOpacity>
+          {customBackgroundUri ? <TouchableOpacity testID="account-custom-background-remove" style={styles.customBgRemoveBtn} onPress={async () => { setCustomBackgroundUri(undefined); setActiveThemeKey('auto'); await removeCustomBackground(); }}><Text style={styles.customBgBtnText}>REMOVE CUSTOM PHOTO</Text></TouchableOpacity> : null}
         </GlassSurface>
       </ScrollView>
     </EnvironmentBackground>
@@ -378,6 +389,6 @@ const styles = StyleSheet.create({
   themePillActive: { backgroundColor: 'rgba(255, 255, 255, 0.25)', borderColor: '#FFFFFF' },
   themeText: { fontFamily: 'monospace', fontSize: 11, color: 'rgba(255, 255, 255, 0.7)' },
   themeTextActive: { color: '#FFFFFF', fontWeight: 'bold' },
-  customBgBtn: { marginTop: 14, backgroundColor: 'rgba(255, 255, 255, 0.12)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: '#FFFFFF', alignItems: 'center' },
+  customBgBtn: { marginTop: 14, backgroundColor: 'rgba(255, 255, 255, 0.12)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: '#FFFFFF', alignItems: 'center' }, customBackgroundPreview: { width: '100%', height: 110, borderRadius: 12, marginTop: 14 }, customBgRemoveBtn: { marginTop: 8, backgroundColor: 'rgba(255, 98, 95, 0.18)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: '#FFB4B2', alignItems: 'center' },
   customBgBtnText: { fontFamily: 'monospace', color: '#FFFFFF', fontWeight: 'bold', fontSize: 11 }
 });
