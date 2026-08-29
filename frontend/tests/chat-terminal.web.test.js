@@ -259,6 +259,19 @@ test('mic button records real audio, shows a live waveform, and fills the compos
   await page.close();
 });
 
+test('the composer mic and wrench icons render 10% larger than the base icon size', async () => {
+  // Pinned because a rebase that takes the composer wholesale silently reverts
+  // these to the 18px default.
+  const page = await openChat({ width: 900, height: 700 });
+  const box = async selector => page.$eval(selector, element => {
+    const rect = element.querySelector('svg').getBoundingClientRect();
+    return { width: Number(rect.width.toFixed(2)), height: Number(rect.height.toFixed(2)) };
+  });
+  assert.deepEqual(await box('[data-testid="inline-mic-button"]'), { width: 19.8, height: 19.8 });
+  assert.deepEqual(await box('[data-testid="model-menu-button"]'), { width: 19.8, height: 19.8 });
+  await page.close();
+});
+
 test('a herdr RPC acknowledgement envelope never reaches the conversation', async () => {
   // Gateways one deploy behind still return herdr's raw acknowledgement in
   // `response`; it is transport metadata, not the agent's message.
