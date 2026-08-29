@@ -28,7 +28,7 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   if (visualViewportShortfall) {
@@ -39,12 +39,15 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       Object.defineProperty(window.visualViewport, 'height', { get: () => window.innerHeight - shortfall });
     }, visualViewportShortfall);
   }
-  await page.evaluateOnNewDocument((noOverrides, responseText) => {
+  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace) => {
     const nativeFetch = window.fetch.bind(window);
+    let promptSent = false;
+    let historyRequests = 0;
     window.__magistrateApiCalls = [];
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/captain/prompt')) {
+        promptSent = true;
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
         return Promise.resolve(new Response(JSON.stringify({ status: 'submitted', target: 'captain', response: responseText }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
@@ -57,11 +60,21 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-      if (url.includes('/api/v1/agents/w1%3Ap7/history')) return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages: [
+      if (url.includes('/api/v1/agents/w1%3Ap7/history')) {
+        if (simulateHistoryRace) {
+          historyRequests += 1;
+          const messages = promptSent ? [{ role: 'assistant', kind: 'conversation', text: responseText }] : [];
+          const payload = JSON.stringify({ target: 'w1:p7', messages });
+          return historyRequests === 1
+            ? new Promise(resolve => setTimeout(() => resolve(new Response(payload, { status: 200, headers: { 'Content-Type': 'application/json' } })), 400))
+            : Promise.resolve(new Response(payload, { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        }
+        return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages: [
         { role: 'user', kind: 'conversation', text: 'Please check the deployment.' },
         { role: 'assistant', kind: 'tool', text: 'Ran 3 commands' },
         { role: 'assistant', kind: 'conversation', text: 'The deployment is healthy.' },
       ] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([{ id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/attention/unified')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -70,7 +83,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, emptyInventory, promptResponseText);
+  }, emptyInventory, promptResponseText, historyRace);
   await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
   // win hit-testing near the viewport bottom in headless Chrome.
@@ -417,6 +430,16 @@ test('a herdr RPC acknowledgement envelope never reaches the conversation', asyn
   await page.close();
 });
 
+test('a response appearing while the initial history read is in flight is not lost', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, 'Reply arrived via history.', URL, 0, true);
+  await submit(page, 'race response');
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('Reply arrived via history.'), { timeout: 10_000 });
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /race response/);
+  assert.match(history, /Reply arrived via history\./);
+  await page.close();
+});
+
 test('the agent response is appended to the conversation once the gateway replies', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, 'Understood, working on it now.');
   await submit(page, 'status please');
@@ -424,6 +447,15 @@ test('the agent response is appended to the conversation once the gateway replie
   const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.match(history, /status please/);
   assert.match(history, /Understood, working on it now\./);
+  await page.close();
+});
+
+test('an explicitly wrapped response is unwrapped without displaying transport JSON', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, JSON.stringify({ jsonrpc: '2.0', id: 8, result: { response: 'Wrapped reply from the agent.' } }));
+  await submit(page, 'wrapped response');
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('Wrapped reply from the agent.'));
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.doesNotMatch(history, /\{"response"/);
   await page.close();
 });
 

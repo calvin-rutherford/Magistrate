@@ -6,6 +6,17 @@ from app.herdr_client import HerdrClient
 
 
 @pytest.mark.asyncio
+async def test_resolve_target_prefers_pi_captain_over_unrelated_codex():
+    client = HerdrClient()
+    client.list_agents = AsyncMock(return_value=[
+        {'id': 'codex-pane', 'name': 'reviewer', 'harness': 'codex'},
+        {'id': 'pi-pane', 'name': 'π - firstmate', 'harness': 'pi'},
+    ])
+
+    assert await client.resolve_target('captain') == 'pi-pane'
+
+
+@pytest.mark.asyncio
 async def test_list_agents_preserves_live_identity_without_demo_defaults():
     client = HerdrClient()
     client.get_snapshot = AsyncMock(return_value={
