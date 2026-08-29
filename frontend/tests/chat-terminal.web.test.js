@@ -32,6 +32,10 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
   const page = await browser.newPage();
   await page.setViewport(viewport);
   await page.evaluateOnNewDocument((noOverrides, responseText) => {
+    // Each test expects a genuinely fresh chat thread, but pages in this suite
+    // share one browser profile/origin, so persisted chat history (AsyncStorage
+    // on web backs onto localStorage) would otherwise leak across tests.
+    try { localStorage.clear(); } catch {}
     const nativeFetch = window.fetch.bind(window);
     window.__magistrateApiCalls = [];
     window.fetch = (resource, options) => {

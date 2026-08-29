@@ -12,7 +12,7 @@ import { EnvironmentBackground } from '../../src/components/EnvironmentBackgroun
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { AgentHistoryMessage, filterAgentHistory } from '../../src/services/ChatHistory';
-import { appendConversationMessage, ConversationMessage, resetConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, clearConversationMessages, ConversationMessage, hydrateConversationMessages, resetConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, saveChatBackground, saveThemeMode, saveToolCallVisibility, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl } from '../../src/utils/externalLinks';
@@ -182,19 +182,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [capabilityLoading, setCapabilityLoading] = useState(true);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [webViewportHeight, setWebViewportHeight] = useState<number | null>(null);
+  const [confirmNewSession, setConfirmNewSession] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const atBottomRef = useRef(true);
   const historyRequestRef = useRef(0);
+  const messagesRef = useRef(messages);
   const targetLabel = target === 'captain' ? 'Magistrate' : target;
   const capture = useVoiceInputAdapter();
+
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   useEffect(() => {
     const request = ++historyRequestRef.current;
     setSendError(null); setIsThinking(false);
-    // The captain thread is shared with Voice Mode (see ConversationSession),
-    // so it persists across remounts; agent threads are replayed from Herdr.
-    if (target === 'captain') return () => { historyRequestRef.current += 1; };
+    // The captain thread is shared with Voice Mode (see ConversationSession)
+    // and persisted to disk, so reopening the app replays it from storage
+    // instead of the Herdr terminal transcript, which has no Voice Mode turns.
+    if (target === 'captain') { void hydrateConversationMessages(target); return () => { historyRequestRef.current += 1; }; }
     resetConversationMessages(target);
     // A working agent can briefly leave an empty terminal snapshot (redraw or
     // alternate screen), so retry a few times before accepting an empty history.
@@ -300,6 +305,38 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!atBottomRef.current) setHasNewMessages(true);
     requestAnimationFrame?.(() => { if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: true }); });
   };
+  // Merges anything new in the Herdr transcript into the visible thread.
+  // Messages already in the store (typed locally, replayed from Herdr, or
+  // appended by a prior call) are matched by role+kind+text and skipped, so
+  // this is safe to call repeatedly. Returns whether a new assistant reply
+  // was appended, for callers waiting on one.
+  const syncFromHistory = async (): Promise<boolean> => {
+    const result = await fetchAgentHistory(target);
+    if (result.messages.length === 0) return false;
+    const known = new Set(messagesRef.current.map(message => `${message.role}|${message.kind || 'conversation'}|${message.text}`));
+    let appendedReply = false;
+    result.messages.forEach(message => {
+      const key = `${message.role}|${message.kind}|${message.text}`;
+      if (known.has(key)) return;
+      known.add(key);
+      appendMessage({ id: `live-${Date.now()}-${Math.random().toString(36).slice(2)}`, role: message.role, kind: message.kind, text: message.text, sentAt: message.role === 'user' ? Date.now() : undefined, source: 'text' });
+      if (message.role === 'assistant' && message.kind === 'conversation') appendedReply = true;
+    });
+    return appendedReply;
+  };
+  // Live auto-refresh: whichever agent is behind `target` may produce new
+  // terminal output without this device having sent the prompt (Herdr has no
+  // push channel, see AGENTS.md), so poll on an interval independent of the
+  // faster post-send poll below.
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try { if (await syncFromHistory() && !cancelled) setIsThinking(false); }
+      catch { /* Transient network/Herdr hiccup: retry on the next tick. */ }
+    };
+    const interval = setInterval(() => void poll(), 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [target]);
   const handleSend = async () => {
     const trimmed = promptText.trim();
     if (attachments.length) {
@@ -323,23 +360,13 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         return;
       }
       // Herdr only acknowledges the prompt; the agent answers asynchronously in
-      // its terminal, so poll history until its conversational reply lands.
+      // its terminal, so poll faster than the background auto-refresh until
+      // its conversational reply lands.
       const request = ++historyRequestRef.current;
       const pollForReply = async () => {
         if (request !== historyRequestRef.current) return;
-        try {
-          const result = await fetchAgentHistory(target);
-          const lastPrompt = result.messages.map(message => message.role === 'user' ? message.text.trim() : '').lastIndexOf(trimmed);
-          const replies = lastPrompt < 0 ? [] : result.messages.slice(lastPrompt + 1).filter(message => message.role === 'assistant' && message.kind === 'conversation');
-          if (replies.length) {
-            // Replaying history would discard the captain's Voice Mode turns,
-            // which never appear in the terminal snapshot.
-            if (target === 'captain') replies.forEach((message, index) => appendMessage({ id: `a-${Date.now()}-${index}`, role: 'assistant', kind: 'conversation', text: message.text, source: 'text' }));
-            else resetConversationMessages(target, historyMessages(result.messages));
-            setIsThinking(false);
-            return;
-          }
-        } catch { /* Keep polling: submission succeeded and the gateway may still be settling. */ }
+        try { if (await syncFromHistory()) { setIsThinking(false); return; } }
+        catch { /* Keep polling: submission succeeded and the gateway may still be settling. */ }
         setTimeout(() => void pollForReply(), 1000);
       };
       void pollForReply();
@@ -355,7 +382,21 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const selectMessage = () => { if (activeMessage) setSelectableMessageId(activeMessage.id); setMessageActionsId(null); };
 
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.784)' : 'rgba(255,255,255,0.8)' }, webViewportHeight ? { height: webViewportHeight } : null]}>
-    <View style={styles.shellHeader}><TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity></View>
+    <View style={styles.shellHeader}>
+      <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity>
+      <View style={styles.newSessionControl}>
+        <TouchableOpacity testID="new-session-button" accessibilityRole="button" accessibilityLabel="Start a new session" accessibilityState={{ expanded: confirmNewSession }} onPress={() => setConfirmNewSession(value => !value)} style={styles.newSessionButton} activeOpacity={0.75}>
+          <Text style={[styles.newSessionButtonText, { color: confirmNewSession ? brand.cyan : muted }]}>New session</Text>
+        </TouchableOpacity>
+        {confirmNewSession ? <View testID="new-session-confirm-menu" accessibilityViewIsModal style={[styles.newSessionMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
+          <Text style={[styles.newSessionMenuText, { color: text }]}>Clear this thread and start fresh? History already sent to {targetLabel} is not affected.</Text>
+          <View style={styles.newSessionMenuActions}>
+            <TouchableOpacity testID="new-session-cancel" accessibilityRole="button" onPress={() => setConfirmNewSession(false)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>Cancel</Text></TouchableOpacity>
+            <TouchableOpacity testID="new-session-confirm" accessibilityRole="button" onPress={() => { clearConversationMessages(target); setConfirmNewSession(false); setSendError(null); setIsThinking(false); setEditingMessageId(null); }} style={styles.messageAction}><Text style={[styles.messageActionText, { color: brand.critical }]}>Start new session</Text></TouchableOpacity>
+          </View>
+        </View> : null}
+      </View>
+    </View>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
       {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.text}</Text></View>)}
     </ScrollView>
@@ -547,7 +588,9 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden' }, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
-  shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
+  shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
+  newSessionControl: { zIndex: 6 }, newSessionButton: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 17 }, newSessionButtonText: { fontSize: 13, fontWeight: '700' },
+  newSessionMenu: { position: 'absolute', right: 0, top: 40, width: 260, borderRadius: 18, padding: 14, gap: 10, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 10 }, newSessionMenuText: { fontSize: 12, lineHeight: 17 }, newSessionMenuActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 6 },
   chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 22, paddingHorizontal: 22, paddingBottom: 20, gap: 14 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 11, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 16, lineHeight: 23 }, messageTimestamp: { color: 'rgba(142,153,170,0.9)', fontSize: 10, marginTop: 6, textAlign: 'right' },
   jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, zIndex: 5 }, jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
