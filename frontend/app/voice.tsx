@@ -223,7 +223,9 @@ export default function VoiceScreen() {
 
   const endConversation = () => {
     endingRef.current = true; turnInFlightRef.current = true; ttsService.stop();
-    void captureRef.current.cancel().finally(() => router.back());
+    // Voice mode can be deep-linked (or reloaded) with no history behind it,
+    // where router.back() is a no-op and would trap the captain here.
+    void captureRef.current.cancel().finally(() => { if (router.canGoBack()) router.back(); else router.replace('/chat' as any); });
   };
 
   const currentCopy = stateCopy[voiceState];
