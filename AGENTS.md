@@ -3,6 +3,7 @@
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
 - Frontend-specific instructions live in `frontend/AGENTS.md`; read them before changing Expo code.
+- Herdr exposes no conversation API; agent chat history is parsed from terminal snapshots by `parse_agent_history` in `gateway/app/herdr_client.py` (see its docstring for the marker conventions).
 - `gateway/app/firstmate_client.py`'s `get_attention_items` reads the live `fm-fleet-snapshot.sh --json` schema: captain-attention signal lives at `task.hints.pending_decision` / `hints.blocked_event`, with the actual keyed decisions in `hints.open_decisions` (`{key, verb, summary}`, verb `needs-decision` or `blocked`). Tasks carry only ids; join against `snapshot.backlog.records` for a human-readable title.
 
 ## Maintaining this file
