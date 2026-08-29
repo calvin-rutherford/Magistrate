@@ -109,3 +109,17 @@ test('voice mode listens continuously: transcribes a turn, answers in the thread
   assert.equal(new URL(page.url()).pathname, '/voice');
   await page.close();
 });
+
+test('ending a deep-linked voice session still lands back in chat', async () => {
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 860 });
+  await page.evaluateOnNewDocument(stubSpeechSynthesis);
+  // No chat entry in this tab's history, so router.back() alone cannot exit.
+  await page.goto(VOICE_URL, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
+  await page.waitForSelector('[data-testid="end-voice-conversation"]');
+  await page.click('[data-testid="end-voice-conversation"]');
+  await page.waitForFunction(() => window.location.pathname === '/chat', { timeout: 20_000 });
+  await page.waitForSelector('[data-testid="branded-chat-shell"]');
+  await page.close();
+});
