@@ -28,9 +28,17 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
+  if (visualViewportShortfall) {
+    // Simulate a mobile browser handing the page a visualViewport a few px
+    // shorter than window.innerHeight right after a navigation (address bar
+    // still animating), with no on-screen keyboard involved.
+    await page.evaluateOnNewDocument(shortfall => {
+      Object.defineProperty(window.visualViewport, 'height', { get: () => window.innerHeight - shortfall });
+    }, visualViewportShortfall);
+  }
   await page.evaluateOnNewDocument((noOverrides, responseText) => {
     const nativeFetch = window.fetch.bind(window);
     window.__magistrateApiCalls = [];
@@ -151,6 +159,75 @@ test('mobile drawer slides chat aside, swipes closed, and composer focus is stab
   const after = await page.$eval('[data-testid="branded-chat-shell"]', element => ({ left: element.getBoundingClientRect().left, width: element.getBoundingClientRect().width }));
   assert.ok(Math.abs(after.left - before.left) < 2);
   assert.ok(Math.abs(after.width - before.width) < 2);
+  await page.close();
+});
+
+// Regression for a viewport jump right after navigating into Chat: mobile
+// browsers hand the page a visualViewport that can be a few px shorter than
+// window.innerHeight immediately after a navigation (the address bar is
+// still animating), with no keyboard open. The chat canvas used to snapshot
+// that mismatch unconditionally on mount and pin an explicit height, which
+// then snapped back once a later resize/paint corrected it - a visible jump
+// before the screen ever settled. It must only pin a height once the visual
+// viewport is genuinely smaller than the window (a real on-screen keyboard).
+test('entering chat with a momentarily short visualViewport (no keyboard) does not pin a stale canvas height', async () => {
+  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true }, false, '', URL, 4);
+  const height = await page.$eval('[data-testid="branded-chat-shell"]', element => element.style.height);
+  assert.equal(height, '', 'the canvas must not pin an explicit height when no keyboard is open');
+  const rect = await page.$eval('[data-testid="branded-chat-shell"]', element => element.getBoundingClientRect().height);
+  assert.ok(rect > 647, `the canvas should retain the settled layout height, got ${rect}`);
+  await page.close();
+});
+
+// Regression for browser zoom-on-focus: mobile Safari/Chrome zoom the whole
+// page in when a focused text input's computed font-size is under 16px.
+// Cover every text input reachable from the chat screen, not just the
+// composer, so a future input doesn't silently reintroduce the zoom.
+test('every focusable text input on the chat screen stays at 16px or larger to avoid mobile zoom-on-focus', async () => {
+  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
+  await page.focus('[data-testid="captain-prompt"]');
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => getComputedStyle(element).fontSize), '16px');
+  const scaleAfterComposerFocus = await page.evaluate(() => window.visualViewport.scale);
+  assert.equal(scaleAfterComposerFocus, 1, 'focusing the composer must not change the page scale');
+
+  // Check every text input rendered by ChatCanvas. The drawer's rename field
+  // uses the same mobile-safe minimum in the stylesheet, while this assertion
+  // stays independent of asynchronous fleet data and tests the actual focus
+  // path that can trigger browser zoom.
+  const inputSizes = await page.$$eval('input, textarea', elements => elements.map(element => ({ type: element.type, size: Number.parseFloat(getComputedStyle(element).fontSize) })));
+  assert.ok(inputSizes.length > 0);
+  assert.ok(inputSizes.every(input => input.size >= 16), `all chat text inputs must be at least 16px: ${JSON.stringify(inputSizes)}`);
+  await page.close();
+});
+
+// Regression: navigating into Chat from another route (a real SPA
+// transition, not a fresh page load) must not change the page scale or
+// resize the layout viewport - it's a client-side route change, so anything
+// that looks like a "zoom" here is the app's own doing, not the browser's.
+test('navigating into chat from another screen preserves the viewport scale and size', async () => {
+  const page = await browser.newPage();
+  await page.setViewport({ width: 390, height: 667, isMobile: true, hasTouch: true });
+  await page.evaluateOnNewDocument(() => {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (resource, options) => {
+      const url = typeof resource === 'string' ? resource : resource.url;
+      if (url.includes('/api/v1/')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      return nativeFetch(resource, options);
+    };
+  });
+  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => { const toast = document.getElementById('error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
+  await page.waitForSelector('a[href="/chat"]');
+  const before = await page.evaluate(() => ({ scale: window.visualViewport.scale, innerWidth: window.innerWidth, innerHeight: window.innerHeight }));
+
+  // Use the real anchor's click handler, while avoiding Puppeteer's hit-test
+  // sensitivity when the mobile home layout is still settling.
+  await page.$eval('a[href="/chat"]', element => element.click());
+  await page.waitForSelector('[data-testid="branded-chat-shell"]');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const after = await page.evaluate(() => ({ scale: window.visualViewport.scale, innerWidth: window.innerWidth, innerHeight: window.innerHeight }));
+
+  assert.deepEqual(after, before, 'navigating into chat must not change the viewport scale or size');
   await page.close();
 });
 
