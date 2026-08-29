@@ -6,15 +6,15 @@ const read = relative => fs.readFileSync(path.join(__dirname, '..', relative), '
 
 test('custom theme uses persisted preferences and has safe upload controls', () => {
   const preferences = read('src/services/ChatPreferences.ts');
-  const chat = read('app/(tabs)/chat.tsx');
+  const account = read('app/(tabs)/account.tsx');
   assert.match(preferences, /CHAT_CUSTOM_BACKGROUND_KEY/);
   assert.match(preferences, /saveCustomBackground/);
   assert.match(preferences, /removeCustomBackground/);
-  assert.match(chat, /custom-background-upload/);
-  assert.match(chat, /custom-background-preview/);
-  assert.match(chat, /custom-background-remove/);
-  assert.match(chat, /10 \* 1024 \* 1024/);
-  assert.match(chat, /result\.canceled/);
+  assert.match(account, /account-custom-background-upload/);
+  assert.match(account, /customBackgroundPreview/);
+  assert.match(account, /account-custom-background-remove/);
+  assert.match(account, /10 \* 1024 \* 1024/);
+  assert.match(account, /pickerResult\.canceled/);
 });
 
 test('custom background rendering is isolated from built-in weather scenes', () => {
