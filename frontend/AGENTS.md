@@ -20,7 +20,7 @@ Sharp edges when driving the web build in headless Chrome:
 
 ## Chat history rendering
 
-`ChatCanvas` (`app/(tabs)/chat.tsx`) is a live-only feed: `ConversationSession` is an in-memory-only store (no `AsyncStorage`), so every screen load starts empty, and there is no "New Session" control. On mount it reads a small bounded amount of Herdr scrollback (`CHAT_HISTORY_LINES` in `src/api/client.ts`, mirrored by `DEFAULT_HISTORY_LINES` in `gateway/app/herdr_client.py`) only to seed `knownKeysRef` for live-poll dedup — that backlog is never rendered. Genuinely new messages stream in via `syncFromHistory`'s poll and get appended to the thread. Don't reintroduce full-backlog replay or cross-reload persistence without re-checking the captain-reported bugs this was reverted for (infinite scroll/refresh, jittering terminal pane). Messages discovered by the live-refresh poll leave `sentAt` unset like other Herdr-replayed history (no reliable wall-clock time) rather than stamping `Date.now()`, which previously showed the poll's tick time instead of the real send time.
+`ChatCanvas` (`app/(tabs)/chat.tsx`) renders normalized messages persisted by `ConversationSession` separately from Herdr terminal scrollback. Initial history is bounded by `CHAT_HISTORY_LINES`; older pages use stable cursor IDs on upward scroll. New messages arrive through the gateway `/api/v1/events` stream and `syncFromHistory` polling remains the fallback. Working agents can expose transiently empty snapshots, so consumers must tolerate them. Messages discovered from Herdr leave `sentAt` unset (no reliable wall-clock time); locally sent messages retain their original timestamp.
 
 ## Backend model selection contract
 

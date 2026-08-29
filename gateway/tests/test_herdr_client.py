@@ -56,3 +56,14 @@ async def test_list_agents_preserves_live_identity_without_demo_defaults():
             'workspace_id': None,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_recognizes_firstmate_pi_pane():
+    client = HerdrClient()
+    client.list_agents = AsyncMock(return_value=[
+        {'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'π - firstmate', 'harness': 'pi'},
+        {'id': 'w1:p2', 'pane_id': 'w1:p2', 'name': 'π - Magistrate', 'harness': 'pi'},
+    ])
+
+    assert await client.resolve_target('captain') == 'w1:p1'

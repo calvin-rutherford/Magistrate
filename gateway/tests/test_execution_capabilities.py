@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.auth import MAGISTRATE_TOKEN
+from app.usage import _summarize_provider
 
 
 HEADERS = {'X-Magistrate-Token': MAGISTRATE_TOKEN}
@@ -30,6 +31,18 @@ def inventory():
     }
 
 
+def test_usage_summary_preserves_only_authenticated_quota_evidence():
+    summary = _summarize_provider({
+        'provider': 'codex', 'plan': 'plus',
+        'state': {'status': 'fresh', 'stale': False},
+        'windows': [{'label': 'week', 'percentRemaining': 20, 'resetsAt': 'tomorrow', 'ignored': 'not exposed'}],
+    })
+    assert summary == {
+        'provider': 'codex', 'plan': 'plus', 'status': 'fresh', 'stale': False,
+        'windows': [{'label': 'week', 'percentRemaining': 20, 'resetsAt': 'tomorrow'}],
+    }
+
+
 def test_capability_inventory_exposes_only_verified_harnesses(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
 
@@ -42,6 +55,78 @@ def test_capability_inventory_exposes_only_verified_harnesses(monkeypatch):
         'verified': True,
         'models': [{'id': 'gpt-5', 'label': 'GPT-5'}],
     }]
+
+
+def test_unified_profiles_keep_harness_provider_model_variant_and_auth(monkeypatch):
+    configured = inventory()
+    configured['harnesses'][0].update({'provider': 'openai-codex'})
+    configured['harnesses'][0]['models'][0].update({
+        'variant': 'luna', 'profile_id': 'pi:luna',
+        'auth': {'required': True, 'credential_key': 'openai-codex'},
+    })
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(configured))
+
+    response = client.get('/api/v1/execution/capabilities?user_id=unified-profile-test', headers=HEADERS)
+
+    assert response.status_code == 200
+    profile = response.json()['profiles'][0]
+    assert profile['id'] == 'pi:luna'
+    assert profile['harness'] == {'id': 'codex', 'label': 'Codex CLI'}
+    assert profile['provider']['id'] == 'openai-codex'
+    assert profile['variant'] == 'luna'
+    assert profile['auth']['status'] == 'required'
+    assert profile['availability'] == 'unavailable'
+    assert response.json()['routing']['migration_supported'] is False
+
+
+def test_execution_settings_persist_defaults_and_clear_selection(monkeypatch):
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
+    response = client.get('/api/v1/execution/settings?user_id=settings-test', headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json()['switching_behavior'] == 'migrate'
+    assert response.json()['unavailable_behavior'] == 'error'
+
+    response = client.put('/api/v1/execution/settings?user_id=settings-test', headers=HEADERS, json={
+        'profile_id': 'codex:gpt-5', 'switching_behavior': 'new-session',
+    })
+    assert response.status_code == 200
+    assert response.json()['profile_id'] == 'codex:gpt-5'
+    assert response.json()['switching_behavior'] == 'new-session'
+
+    response = client.put('/api/v1/execution/settings?user_id=settings-test', headers=HEADERS, json={'profile_id': None})
+    assert response.status_code == 200
+    assert response.json()['profile_id'] is None
+    assert response.json()['switching_behavior'] == 'new-session'
+
+
+def test_execution_credential_is_encrypted_and_changes_profile_auth(monkeypatch):
+    configured = inventory()
+    configured['harnesses'][0]['provider'] = 'openai-codex'
+    configured['harnesses'][0]['models'][0]['auth'] = {'required': True, 'credential_key': 'openai-codex'}
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(configured))
+    response = client.put('/api/v1/execution/credentials/openai-codex', headers=HEADERS, json={'credential': 'secret-value'})
+    assert response.status_code == 200
+    assert response.json() == {'credential_key': 'openai-codex', 'configured': True, 'updated_at': response.json()['updated_at']}
+    assert response.json()['updated_at']
+    profile = client.get('/api/v1/execution/capabilities', headers=HEADERS).json()['profiles'][0]
+    assert profile['auth']['status'] == 'configured'
+    assert profile['availability'] == 'available'
+
+
+def test_prompt_accepts_atomic_profile_selection(monkeypatch):
+    configured = inventory()
+    configured['harnesses'][0].update({'id': 'pi', 'label': 'Pi', 'provider': 'openai-codex'})
+    configured['harnesses'][0]['models'][0].update({'id': 'gpt-5.6-luna', 'label': 'GPT-5.6 Luna', 'variant': 'default', 'profile_id': 'pi:default'})
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(configured))
+    prompt_agent = AsyncMock(return_value={'status': 'submitted'})
+    monkeypatch.setattr(main_module.herdr_client, 'prompt_agent', prompt_agent)
+
+    response = client.post('/api/v1/captain/prompt', headers=HEADERS, json={
+        'text': 'hello', 'profile_id': 'pi:default'
+    })
+
+    assert response.status_code == 200
+    prompt_agent.assert_awaited_once_with('captain', 'hello', profile_id='pi:default', harness='pi', model='gpt-5.6-luna', provider='openai-codex', variant='default')
 
 
 def test_prompt_rejects_selection_outside_inventory(monkeypatch):
@@ -80,7 +165,7 @@ def test_prompt_passes_validated_selection_to_real_prompt_path(monkeypatch):
     })
 
     assert response.status_code == 200
-    prompt_agent.assert_awaited_once_with('captain', 'hello', harness='codex', model='gpt-5')
+    prompt_agent.assert_awaited_once_with('captain', 'hello', profile_id='codex:gpt-5', harness='codex', provider='unknown', model='gpt-5', variant='gpt-5')
 
 
 def test_invalid_inventory_is_reported_without_exposing_configuration(monkeypatch):

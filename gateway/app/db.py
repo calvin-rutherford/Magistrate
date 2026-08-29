@@ -355,6 +355,30 @@ def init_db():
     )
     ''')
 
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS execution_credentials (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        credential_key TEXT NOT NULL,
+        secret_enc TEXT NOT NULL,
+        created_at INTEGER,
+        updated_at INTEGER,
+        UNIQUE(user_id, credential_key),
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS execution_preferences (
+        user_id TEXT PRIMARY KEY,
+        profile_id TEXT,
+        switching_behavior TEXT NOT NULL DEFAULT 'migrate',
+        unavailable_behavior TEXT NOT NULL DEFAULT 'error',
+        updated_at INTEGER,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+
     cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = 'default_user'")
     if not cursor.fetchone():
         now = int(time.time())
@@ -501,5 +525,95 @@ def disconnect_account(user_id: str, provider: str) -> bool:
     conn.commit()
     conn.close()
     return True
+
+
+def get_execution_credential_status(user_id: str = 'default_user') -> Dict[str, bool]:
+    """Return only credential-presence flags; secret values never leave this module."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            'SELECT credential_key, secret_enc FROM execution_credentials WHERE user_id = ?',
+            (user_id,),
+        ).fetchall()
+        return {key: bool(value) for key, value in rows}
+    finally:
+        conn.close()
+
+
+def save_execution_credential(user_id: str, credential_key: str, secret: str) -> Dict[str, Any]:
+    if not credential_key or not secret:
+        raise ValueError('A provider and credential are required.')
+    init_db()
+    now = int(time.time())
+    encrypted = encrypt_token(secret)
+    credential_id = f'{user_id}_{credential_key}'
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute('''
+        INSERT INTO execution_credentials (id, user_id, credential_key, secret_enc, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, credential_key) DO UPDATE SET secret_enc=excluded.secret_enc, updated_at=excluded.updated_at
+        ''', (credential_id, user_id, credential_key, encrypted, now, now))
+        conn.commit()
+    finally:
+        conn.close()
+    return {'credential_key': credential_key, 'configured': True, 'updated_at': now}
+
+
+def delete_execution_credential(user_id: str, credential_key: str) -> bool:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute('DELETE FROM execution_credentials WHERE user_id = ? AND credential_key = ?', (user_id, credential_key))
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
+def get_execution_preferences(user_id: str = 'default_user') -> Dict[str, Any]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT profile_id, switching_behavior, unavailable_behavior FROM execution_preferences WHERE user_id = ?',
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        'profile_id': row[0] if row else None,
+        'switching_behavior': row[1] if row else 'migrate',
+        'unavailable_behavior': row[2] if row else 'error',
+    }
+
+
+def save_execution_preferences(
+    user_id: str = 'default_user',
+    *,
+    profile_id: Optional[str] = None,
+    switching_behavior: str = 'migrate',
+    unavailable_behavior: str = 'error',
+) -> Dict[str, Any]:
+    if switching_behavior not in {'migrate', 'new-session'}:
+        raise ValueError('Switching behavior must be migrate or new-session.')
+    if unavailable_behavior not in {'error', 'fallback'}:
+        raise ValueError('Unavailable behavior must be error or fallback.')
+    init_db()
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute('''
+        INSERT INTO execution_preferences (user_id, profile_id, switching_behavior, unavailable_behavior, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET profile_id=excluded.profile_id,
+          switching_behavior=excluded.switching_behavior, unavailable_behavior=excluded.unavailable_behavior,
+          updated_at=excluded.updated_at
+        ''', (user_id, profile_id, switching_behavior, unavailable_behavior, now))
+        conn.commit()
+    finally:
+        conn.close()
+    return {'profile_id': profile_id, 'switching_behavior': switching_behavior, 'unavailable_behavior': unavailable_behavior}
 
 init_db()

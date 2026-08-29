@@ -28,7 +28,7 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   if (visualViewportShortfall) {
@@ -39,7 +39,8 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       Object.defineProperty(window.visualViewport, 'height', { get: () => window.innerHeight - shortfall });
     }, visualViewportShortfall);
   }
-  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace) => {
+  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage) => {
+    if (clearStorage) { localStorage.clear(); sessionStorage.clear(); }
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let historyRequests = 0;
@@ -56,9 +57,15 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
           harnesses: noOverrides ? [] : [
             { id: 'codex', label: 'Codex', verified: true, models: [{ id: 'gpt-5', label: 'GPT-5' }] },
             { id: 'reviewer', label: 'Reviewer', verified: true, models: [{ id: 'review-model', label: 'Review Model' }] },
+          ], profiles: noOverrides ? [] : [
+            { id: 'codex:gpt-5', variant: 'gpt-5', label: 'GPT-5', harness: { id: 'codex', label: 'Codex' }, provider: { id: 'openai-codex', label: 'OpenAI Codex' }, model: { id: 'gpt-5', label: 'GPT-5' }, verified: true, available: true, availability: 'available', auth: { required: false, credential_key: 'openai-codex', status: 'not-required' } },
+            { id: 'reviewer:review-model', variant: 'review-model', label: 'Review Model', harness: { id: 'reviewer', label: 'Reviewer' }, provider: { id: 'anthropic', label: 'Anthropic' }, model: { id: 'review-model', label: 'Review Model' }, verified: true, available: true, availability: 'available', auth: { required: false, credential_key: 'anthropic', status: 'not-required' } },
+            { id: 'pi:default', variant: 'default', label: 'GPT-5.6 Luna', harness: { id: 'pi', label: 'Pi' }, provider: { id: 'openai-codex', label: 'OpenAI Codex' }, model: { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' }, verified: true, available: true, availability: 'available', auth: { required: false, credential_key: 'openai-codex', status: 'not-required' } },
           ], source: 'test', configured: !noOverrides,
         }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
+      if (url.includes('/api/v1/execution/settings')) return Promise.resolve(new Response(JSON.stringify({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/usage')) return Promise.resolve(new Response(JSON.stringify({ generated_at: '2026-08-29T18:00:00Z', schema_version: 5, source: 'quota-axi', providers: [{ provider: 'codex', plan: 'plus', status: 'fresh', stale: false, windows: [{ label: 'week', percentRemaining: 20 }] }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/agents/w1%3Ap7/history')) {
         if (simulateHistoryRace) {
@@ -83,7 +90,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, emptyInventory, promptResponseText, historyRace);
+  }, emptyInventory, promptResponseText, historyRace, !preserveStorage);
   await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
   // win hit-testing near the viewport bottom in headless Chrome.
@@ -312,7 +319,47 @@ test('current backend session works without setup and explicit model overrides s
   const overrideBody = JSON.parse(await overridePage.evaluate(() => window.__magistrateApiCalls.find(call => call.url.includes('/captain/prompt')).body));
   assert.equal(overrideBody.harness, 'reviewer');
   assert.equal(overrideBody.model, 'review-model');
+  assert.equal(overrideBody.profile_id, 'reviewer:review-model');
   await overridePage.close();
+});
+
+test('Pi remains an atomic harness/provider/model selection', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="model-menu-button"]');
+  const option = await page.$('[data-testid="model-option-pi-gpt-5-6-luna"]');
+  assert.ok(option);
+  assert.match(await option.evaluate(element => element.getAttribute('aria-label')), /Pi, OpenAI Codex, GPT-5.6 Luna/);
+  await option.click();
+  await submit(page, 'use pi');
+  const body = JSON.parse(await page.evaluate(() => window.__magistrateApiCalls.find(call => call.url.includes('/captain/prompt')).body));
+  assert.equal(body.profile_id, 'pi:default');
+  assert.equal(body.harness, 'pi');
+  assert.equal(body.model, 'gpt-5.6-luna');
+  await page.close();
+});
+
+test('usage drawer reports quota-axi evidence without inventing missing amounts', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="drawer-section-usage"]');
+  await page.waitForSelector('[data-testid="drawer-panel-usage"]');
+  const usage = await page.$eval('[data-testid="drawer-panel-usage"]', element => element.innerText);
+  assert.match(usage, /codex.*plus/i);
+  assert.match(usage, /20% left/i);
+  await page.close();
+});
+
+test('additional messages queue while the first response is pending', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '');
+  await submit(page, 'first request');
+  await page.focus('[data-testid="captain-prompt"]');
+  await page.keyboard.type('second request');
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForSelector('[data-testid="queued-message-count"]');
+  assert.match(await page.$eval('[data-testid="queued-message-count"]', element => element.innerText), /1 queued/);
+  assert.ok(await page.$('[data-testid="thinking-dots"]'));
+  await page.close();
 });
 
 test('account gear opens the lower settings drawer with live network status', async () => {
@@ -440,6 +487,19 @@ test('a response appearing while the initial history read is in flight is not lo
   await page.close();
 });
 
+test('normalized chat messages persist across a page reload without replaying terminal history', async () => {
+  const first = await openChat({ width: 900, height: 700 });
+  await submit(first, 'persist this normalized turn');
+  await first.close();
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
+  await pageWaitForText(reloaded, 'persist this normalized turn');
+  assert.match(await reloaded.$eval('[data-testid="chat-history"]', element => element.innerText), /persist this normalized turn/);
+  await reloaded.close();
+});
+
+async function pageWaitForText(page, text) {
+  await page.waitForFunction(expected => document.querySelector('[data-testid="chat-history"]')?.innerText.includes(expected), {}, text);
+}
 test('the agent response is appended to the conversation once the gateway replies', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, 'Understood, working on it now.');
   await submit(page, 'status please');

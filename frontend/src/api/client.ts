@@ -22,6 +22,7 @@ export interface AgentControlResult {
 }
 
 export interface AgentHistoryMessage {
+  id?: string;
   role: 'user' | 'assistant';
   kind: 'conversation' | 'tool';
   text: string;
@@ -30,6 +31,36 @@ export interface AgentHistoryMessage {
 export interface AgentHistoryResult {
   target: string;
   messages: AgentHistoryMessage[];
+  next_before?: string | null;
+  next_after?: string | null;
+  has_more_before?: boolean;
+  has_more_after?: boolean;
+}
+
+export interface UsageWindow {
+  id?: string;
+  label?: string;
+  kind?: string;
+  resetsAt?: string;
+  percentRemaining?: number;
+  spentUsd?: number;
+  limitUsd?: number;
+}
+
+export interface UsageProvider {
+  provider: string;
+  plan: string | null;
+  status: string;
+  stale: boolean | null;
+  windows: UsageWindow[];
+  error?: string;
+}
+
+export interface UsageSummary {
+  generated_at: string | null;
+  schema_version: number | null;
+  providers: UsageProvider[];
+  source: 'quota-axi' | string;
 }
 
 export interface HealthInfo {
@@ -43,6 +74,12 @@ export interface HealthInfo {
 export interface ExecutionModel {
   id: string;
   label: string;
+  provider?: string;
+  variant?: string;
+  profile_id?: string;
+  available?: boolean;
+  availability?: 'available' | 'unavailable' | string;
+  auth?: { required: boolean; credential_key: string; status: string };
 }
 
 export interface ExecutionHarness {
@@ -52,10 +89,35 @@ export interface ExecutionHarness {
   models: ExecutionModel[];
 }
 
+export interface ExecutionProfile {
+  id: string;
+  variant: string;
+  label: string;
+  harness: { id: string; label: string };
+  provider: { id: string; label: string };
+  model: { id: string; label: string };
+  verified: boolean;
+  available: boolean;
+  availability: 'available' | 'unavailable' | string;
+  availability_reason?: string | null;
+  auth: { required: boolean; credential_key: string; status: string };
+}
+
 export interface ExecutionCapabilities {
   harnesses: ExecutionHarness[];
+  profiles?: ExecutionProfile[];
   source: string;
   configured: boolean;
+  routing?: { selection_supported: boolean; migration_supported: boolean; mode: string };
+}
+
+export interface ExecutionSettings {
+  profile_id: string | null;
+  switching_behavior: 'migrate' | 'new-session';
+  unavailable_behavior: 'error' | 'fallback';
+  migration_supported: boolean;
+  credential_storage?: string;
+  credentials?: Array<{ credential_key: string; configured: boolean }>;
 }
 
 export interface TaskInfo {
@@ -291,11 +353,47 @@ export async function fetchAuthProviders(): Promise<AuthProviderInfo[]> {
   return res.json();
 }
 
+export async function fetchUsage(): Promise<UsageSummary> {
+  const res = await fetch(GATEWAY_URL + '/usage', {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  const data = await checkedJson<UsageSummary>(res);
+  if (!data || !Array.isArray(data.providers)) throw new Error('Gateway returned invalid usage data.');
+  return data;
+}
+
 export async function fetchExecutionCapabilities(): Promise<ExecutionCapabilities> {
   const res = await fetch(GATEWAY_URL + '/execution/capabilities', {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
-  return checkedJson<ExecutionCapabilities>(res);
+  const data = await checkedJson<unknown>(res);
+  if (!data || typeof data !== 'object' || !Array.isArray((data as any).harnesses) || ('profiles' in data && !Array.isArray((data as any).profiles))) throw new Error('Gateway returned invalid execution capabilities.');
+  return data as ExecutionCapabilities;
+}
+
+export async function fetchExecutionSettings(): Promise<ExecutionSettings> {
+  const res = await fetch(GATEWAY_URL + '/execution/settings', {
+    headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
+  });
+  const data = await checkedJson<unknown>(res);
+  if (!data || typeof data !== 'object' || !['migrate', 'new-session'].includes((data as any).switching_behavior) || !['error', 'fallback'].includes((data as any).unavailable_behavior) || !('profile_id' in data)) throw new Error('Gateway returned invalid execution settings.');
+  return data as ExecutionSettings;
+}
+
+export async function updateExecutionSettings(update: Partial<Pick<ExecutionSettings, 'profile_id' | 'switching_behavior' | 'unavailable_behavior'>>): Promise<ExecutionSettings> {
+  const res = await fetch(GATEWAY_URL + '/execution/settings', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify(update)
+  });
+  return checkedJson<ExecutionSettings>(res);
+}
+
+export async function saveExecutionCredential(credentialKey: string, credential: string): Promise<{ credential_key: string; configured: boolean }> {
+  const res = await fetch(GATEWAY_URL + '/execution/credentials/' + encodeURIComponent(credentialKey), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Magistrate-Token': DEVICE_TOKEN },
+    body: JSON.stringify({ credential })
+  });
+  return checkedJson<{ credential_key: string; configured: boolean }>(res);
 }
 
 export async function connectAuthProvider(provider: string): Promise<any> {
@@ -399,8 +497,11 @@ export async function fetchCaptainOutput(lines: number = CHAT_HISTORY_LINES) {
   return checkedJson<{ output?: string }>(res);
 }
 
-export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HISTORY_LINES): Promise<AgentHistoryResult> {
-  const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/history?lines=' + lines, {
+export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HISTORY_LINES, cursor?: { before?: string; after?: string }): Promise<AgentHistoryResult> {
+  const params = new URLSearchParams({ lines: String(lines) });
+  if (cursor?.before) params.set('before', cursor.before);
+  if (cursor?.after) params.set('after', cursor.after);
+  const res = await fetch(GATEWAY_URL + '/agents/' + encodeURIComponent(agentId) + '/history?' + params.toString(), {
     headers: { 'X-Magistrate-Token': DEVICE_TOKEN }
   });
   // The live gateway may be one deploy behind the app. Captain output has the
@@ -415,7 +516,7 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
   return data;
 }
 
-export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string) {
+export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null) {
   const res = await fetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
     headers: {
@@ -428,7 +529,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       type: 'prompt',
       text,
       target,
-      ...(harness && model ? { harness, model } : {})
+      ...(profileId !== undefined ? { profile_id: profileId, ...(harness && model ? { harness, model } : {}) } : harness && model ? { harness, model } : {})
     })
   });
   return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);

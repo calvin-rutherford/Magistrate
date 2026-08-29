@@ -46,6 +46,11 @@ function ActiveMark({ size, coreColor }: { size: number; coreColor: string }) {
   </Svg>;
 }
 
+function EnergyWaves({ amplitude, active }: { amplitude: number; active: boolean }) {
+  const levels = [0.55, 0.82, 1, 0.72, 0.48];
+  return <View testID="voice-energy-waves" pointerEvents="none" style={styles.energyWaves}>{levels.map((level, index) => <View key={index} style={[styles.energyBar, { height: 22 + (active ? amplitude * 74 * level : 8), opacity: active ? 0.22 + amplitude * 0.65 : 0.08, backgroundColor: [brand.green, brand.cyan, brand.violet, brand.cyan, brand.magenta][index] }]} />)}</View>;
+}
+
 function Waveform({ samples, listening }: { samples: number[]; listening: boolean }) {
   return <View testID="voice-waveform" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.waveform}>
     {samples.map((sample, index) => {
@@ -69,7 +74,9 @@ export default function VoiceScreen() {
   const [pendingKey, setPendingKey] = useState('');
   const [waveSamples, setWaveSamples] = useState<number[]>(() => new Array(38).fill(0.04));
   const [reducedMotion, setReducedMotion] = useState(false);
+  const [, setBackgroundReady] = useState(false);
   const messages = useConversationMessages('captain');
+  useEffect(() => { void loadChatPreferences().then(() => setBackgroundReady(true)); }, []);
   const capture = useVoiceInputAdapter(setIntermediate);
   const captureRef = useRef(capture);
   const stateRef = useRef<VoiceState>(voiceState);
@@ -255,8 +262,9 @@ export default function VoiceScreen() {
   const surfaceColor = dark ? 'rgba(17,23,34,0.78)' : 'rgba(255,255,255,0.82)';
   const borderColor = dark ? brand.borderDark : brand.borderLight;
   // useWindowDimensions can report 0x0 on the first web render; clamp so SVG sizes stay valid.
-  const markSize = compact ? Math.min(Math.max(width * 0.54, 140), 220) : Math.min(width * 0.28, 270);
-  const stageSize = compact ? Math.min(Math.max(width - 34, 200), 360) : Math.min(width * 0.46, 520);
+  // Keep the control compact while giving the mark more visual weight.
+  const markSize = (compact ? Math.min(Math.max(width * 0.54, 140), 220) : Math.min(width * 0.28, 270)) * 1.2;
+  const stageSize = (compact ? Math.min(Math.max(width - 34, 200), 360) : Math.min(width * 0.46, 520)) * 0.95;
   const visibleMessages = messages.slice(-3);
   const rippleScale = Animated.multiply(
     ripple.interpolate({ inputRange: [0, 1], outputRange: [0.78, 1.34] }),
@@ -294,6 +302,7 @@ export default function VoiceScreen() {
           <Animated.View style={[styles.ripple, { borderColor: brand.green, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
           <Animated.View style={[styles.ripple, styles.rippleMid, { borderColor: brand.cyan, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
           <Animated.View style={[styles.ripple, styles.rippleInner, { borderColor: brand.magenta, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
+          <EnergyWaves amplitude={capture.amplitude} active={voiceState === 'LISTENING'} />
           <Animated.View style={[styles.markHalo, { shadowColor: voiceState === 'THINKING' ? brand.violet : brand.cyan, transform: [{ translateY: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }, { scale: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.015] }) }] }]}><ActiveMark size={markSize} coreColor={dark ? brand.paper : brand.ink} /></Animated.View>
         </TouchableOpacity>
 
@@ -348,6 +357,7 @@ const styles = StyleSheet.create({
   ripple: { position: 'absolute', width: '54%', height: '54%', borderRadius: 999, borderWidth: 2, pointerEvents: 'none' },
   rippleMid: { width: '44%', height: '44%', borderWidth: 1.5 }, rippleInner: { width: '34%', height: '34%', borderWidth: 1 },
   markHalo: { alignItems: 'center', justifyContent: 'center', shadowOpacity: 0.45, shadowRadius: 32, shadowOffset: { width: 0, height: 10 } },
+  energyWaves: { position: 'absolute', width: '48%', height: '34%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, zIndex: 0 }, energyBar: { width: 3, borderRadius: 999 },
   waveform: { width: '100%', maxWidth: 560, height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 10, marginTop: -12 },
   waveBar: { width: 3, borderRadius: 999 },
   liveTranscript: { minHeight: 66, width: '100%', maxWidth: 720, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10 },

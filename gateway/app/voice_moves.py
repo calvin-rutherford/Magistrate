@@ -32,7 +32,10 @@ class VoiceMoveService:
         if request.idempotency_key in self._results:
             return self._results[request.idempotency_key]
         agents = await self.herdr.list_agents()
-        target = self._resolve_target(request.target, agents)
+        if hasattr(self.herdr, 'resolve_target'):
+            target = await self.herdr.resolve_target(request.target)
+        else:
+            target = self._resolve_target(request.target, agents)
         utterance = request.utterance.strip()
         intent, impact = self._classify(utterance)
         move_id = f'vm_{hashlib.sha256(request.idempotency_key.encode()).hexdigest()[:16]}'

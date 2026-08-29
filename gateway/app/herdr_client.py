@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import hashlib
 from typing import Dict, Any, List, Optional
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
@@ -132,10 +133,11 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         else:
             finish()
     finish()
-    # Pi's renderer can emit transcript prose without the marker glyphs used by
-    # Codex and Claude. Herdr exposes a terminal snapshot rather than a
-    # conversation API, so retain markerless prose while dropping recognizable
-    # command output and terminal chrome. The frontend uses the same fallback.
+    # Pi's terminal renderer intentionally emits plain transcript rows rather
+    # than the marker glyphs used by Codex/Claude. Herdr exposes snapshots, not
+    # a conversation API, so retain those rows as assistant prose instead of
+    # returning an empty history. Drop recognizable command output and terminal
+    # chrome; callers deduplicate locally-authored prompts by text.
     if not messages:
         blocks = re.split(r'\n\s*\n', output.replace('\r', '').strip())
         for block in blocks:
@@ -272,9 +274,11 @@ class HerdrClient:
         if target in ('captain', 'codex', 'firstmate'):
             agents = await self.list_agents()
             if agents:
-                # Prefer an explicitly named captain/firstmate, then the
-                # verified Codex/Pi panes. Do not silently route a Pi captain
-                # to an unrelated first pane when another harness is present.
+                # Firstmate currently names Pi panes "π - firstmate" / "π -
+                # Magistrate". Prefer an explicit captain name, then a known
+                # verified harness, rather than silently selecting the first pane.
+                # Do not silently route a Pi captain to an unrelated first pane
+                # when another harness is present.
                 for ag in agents:
                     name = (ag.get('name') or '').strip().lower()
                     if name in ('captain', 'codex', 'firstmate') or name.endswith(' - firstmate'):
@@ -285,14 +289,25 @@ class HerdrClient:
                 return agents[0].get('pane_id') or agents[0].get('id')
         return target
 
-    async def prompt_agent(self, target: str, text: str, harness: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
+    async def prompt_agent(
+        self, target: str, text: str, harness: Optional[str] = None,
+        model: Optional[str] = None, profile_id: Optional[str] = None,
+        provider: Optional[str] = None, variant: Optional[str] = None,
+    ) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)
         submitted_text = text
         if harness and model:
             # Herdr's prompt command has no launch-time selection flags. Carry
             # the validated selection to Firstmate as structured prompt context
             # while leaving its full-permissions launch behavior unchanged.
-            submitted_text = f'[Magistrate execution: harness={harness}; model={model}]\n{text}'
+            context = f'harness={harness}; model={model}'
+            if provider:
+                context += f'; provider={provider}'
+            if variant:
+                context += f'; variant={variant}'
+            if profile_id:
+                context += f'; profile={profile_id}'
+            submitted_text = f'[Magistrate execution: {context}]\n{text}'
         cmd = ['herdr', 'agent', 'prompt', resolved_target, submitted_text]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -310,9 +325,19 @@ class HerdrClient:
             # safe to return synchronously; all other replies arrive via the
             # history poll and are parsed by parse_agent_history().
             response = _prompt_response(output_str)
-            return {'status': 'submitted', 'target': resolved_target, 'response': response, 'harness': harness, 'model': model}
+            return {
+                'status': 'submitted', 'target': resolved_target, 'response': response,
+                'harness': harness, 'provider': provider, 'model': model, 'variant': variant,
+                'profile_id': profile_id,
+                'routing': {'selection_supported': True, 'migration_supported': False, 'mode': 'prompt-context'},
+            }
         else:
-            return {'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(), 'harness': harness, 'model': model}
+            return {
+                'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(),
+                'harness': harness, 'provider': provider, 'model': model, 'variant': variant,
+                'profile_id': profile_id,
+                'routing': {'selection_supported': True, 'migration_supported': False, 'mode': 'prompt-context'},
+            }
 
     async def read_agent_output(self, target: str, lines: int = HERDR_MAX_READ_LINES, source: str = 'recent-unwrapped') -> str:
         resolved_target = await self.resolve_target(target)
@@ -337,10 +362,39 @@ class HerdrClient:
             return await self.read_agent_output(resolved_target, lines=lines, source='visible')
         return stdout.decode('utf-8', errors='replace') if stdout else ''
 
-    async def get_agent_history(self, target: str, lines: int = HERDR_MAX_READ_LINES) -> Dict[str, Any]:
+    async def get_agent_history(
+        self, target: str, lines: int = DEFAULT_HISTORY_LINES,
+        before: Optional[str] = None, after: Optional[str] = None,
+    ) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)
         output = await self.read_agent_output(resolved_target, lines=lines)
-        return {'target': resolved_target, 'messages': parse_agent_history(output)}
+        messages = parse_agent_history(output)
+        # Herdr exposes terminal text rather than durable message IDs. Hashing
+        # normalized content gives clients stable cursors within retained
+        # scrollback while keeping the public response independent of ANSI rows.
+        entries = []
+        for message in messages:
+            key = f"{message.get('role')}|{message.get('kind')}|{message.get('text')}"
+            entries.append({**message, 'id': hashlib.sha256(key.encode()).hexdigest()[:20]})
+        start = 0
+        end = len(entries)
+        ids = [entry['id'] for entry in entries]
+        if before:
+            if before not in ids:
+                raise ValueError('The history cursor is no longer available.')
+            end = ids.index(before)
+            start = max(0, end - 200)
+        elif after:
+            if after not in ids:
+                raise ValueError('The history cursor is no longer available.')
+            start = ids.index(after) + 1
+        page = entries[start:end]
+        return {
+            'target': resolved_target, 'messages': page,
+            'next_before': page[0]['id'] if start > 0 and page else None,
+            'next_after': page[-1]['id'] if end < len(entries) and page else None,
+            'has_more_before': start > 0, 'has_more_after': end < len(entries),
+        }
 
     async def rename_agent(self, target: str, name: str) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)

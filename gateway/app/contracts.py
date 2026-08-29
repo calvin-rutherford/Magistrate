@@ -9,7 +9,18 @@ class UniversalInputContract(BaseModel):
     text: Optional[str] = None
     target: str = 'captain'
     harness: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    provider: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
     model: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    variant: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    profile_id: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+
+class ExecutionSettingsContract(BaseModel):
+    profile_id: Optional[str] = Field(default=None, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    switching_behavior: Optional[Literal['migrate', 'new-session']] = None
+    unavailable_behavior: Optional[Literal['error', 'fallback']] = None
+
+class ExecutionCredentialContract(BaseModel):
+    credential: str = Field(min_length=1, max_length=10000)
 
 class GestureInputContract(BaseModel):
     action: str
