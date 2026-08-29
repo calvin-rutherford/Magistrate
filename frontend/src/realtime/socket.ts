@@ -1,5 +1,4 @@
-const HTTP_GATEWAY_URL = 'http://100.84.181.23:8000/api/v1';
-const DEVICE_TOKEN = 'magistrate-device-token-12345';
+import { GATEWAY_URL, getGatewaySessionToken } from '../api/client';
 
 export type EventCallback = (data: any) => void;
 
@@ -14,13 +13,21 @@ export class RealtimeClient {
     this.target = target;
   }
 
-  connect() {
+  async connect() {
     if (this.stopped || typeof WebSocket === 'undefined' || this.socket?.readyState === WebSocket.OPEN) return;
+    const token = await getGatewaySessionToken();
+    if (!token || this.stopped) {
+      this.reconnectTimer = setTimeout(() => this.connect(), 3000);
+      return;
+    }
     try {
-      const wsUrl = HTTP_GATEWAY_URL.replace(/^http/, 'ws') + `/events?token=${encodeURIComponent(DEVICE_TOKEN)}`;
+      const wsUrl = GATEWAY_URL.replace(/^http/, 'ws') + '/events';
       this.socket = new WebSocket(wsUrl);
       this.socket.onopen = () => {
-        this.socket?.send(JSON.stringify({ type: 'subscribe', target: this.target }));
+        // Browser WebSocket APIs cannot set Authorization headers. Authenticate
+        // before subscribing; unlike the old implementation this is not a URL
+        // query parameter and cannot leak through proxy access logs.
+        this.socket?.send(JSON.stringify({ type: 'auth', token, target: this.target }));
       };
       this.socket.onmessage = event => {
         try {

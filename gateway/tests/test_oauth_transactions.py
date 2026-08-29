@@ -22,26 +22,29 @@ HEADERS = {'X-Magistrate-Token': 'magistrate-device-token-12345'}
 @pytest.fixture
 def transaction_db(monkeypatch, tmp_path):
     monkeypatch.setattr(database, 'DB_PATH', str(tmp_path / 'oauth.sqlite3'))
+    monkeypatch.setenv('GITHUB_OAUTH_CLIENT_ID', 'test-client')
+    monkeypatch.setenv('GITHUB_OAUTH_CLIENT_SECRET', 'test-secret')
+    monkeypatch.setenv('MAGISTRATE_OAUTH_CALLBACK_BASE_URL', 'https://gateway.test')
     return OAuthTransactionStore()
 
 
-def state_from_connect(user_id='alice', redirect_uri=DEFAULT_REDIRECT_URI, provider='github'):
+def state_from_connect(redirect_uri=DEFAULT_REDIRECT_URI, provider='github'):
     response = client.get(
         f'/api/v1/auth/{provider}/connect',
-        params={'user_id': user_id, 'redirect_uri': redirect_uri},
+        params={'redirect_uri': redirect_uri},
         headers=HEADERS,
         follow_redirects=False,
     )
-    return response, parse_qs(urlsplit(response.headers['location']).query)['state'][0]
+    return response, parse_qs(urlsplit(response.json()['auth_url']).query)['state'][0]
 
 
 def test_connect_uses_opaque_state_and_allowlisted_redirect(transaction_db):
     response, state = state_from_connect()
 
-    assert response.status_code == 307
+    assert response.status_code == 200
     assert '::' not in state
     transaction = transaction_db.consume(state, 'github', now=1)
-    assert transaction.principal_id == 'alice'
+    assert transaction.principal_id == 'default_user'
     assert transaction.redirect_uri == DEFAULT_REDIRECT_URI
 
 
@@ -64,8 +67,8 @@ def test_connect_allows_explicit_loopback_redirect(transaction_db, monkeypatch):
 
     response, state = state_from_connect(redirect_uri=redirect_uri)
 
-    assert response.status_code == 307
-    assert parse_qs(urlsplit(response.headers['location']).query)['state'][0] == state
+    assert response.status_code == 200
+    assert parse_qs(urlsplit(response.json()['auth_url']).query)['state'][0] == state
 
 
 def test_store_rejects_principal_mismatch_without_consuming(transaction_db):
@@ -128,11 +131,11 @@ def test_callback_rejects_provider_mismatch_without_exchange_or_write(transactio
 
 
 def test_successful_callback_consumes_once_before_exchange_and_writes_once(transaction_db, monkeypatch):
-    response, state = state_from_connect(user_id='alice')
-    assert response.status_code == 307
+    response, state = state_from_connect()
+    assert response.status_code == 200
     adapter = gateway.providers['github']
     monkeypatch.setattr(adapter, 'exchange_code', AsyncMock(return_value={'access_token': 'access-token'}))
-    monkeypatch.setattr(adapter, 'get_user_profile', AsyncMock(return_value={'username': 'alice-gh'}))
+    monkeypatch.setattr(adapter, 'get_user_profile', AsyncMock(return_value={'username': 'alice-gh', 'id': 'alice-gh-id'}))
     write = Mock(wraps=gateway.upsert_connected_account)
     monkeypatch.setattr(gateway, 'upsert_connected_account', write)
 
@@ -145,7 +148,7 @@ def test_successful_callback_consumes_once_before_exchange_and_writes_once(trans
     assert callback.status_code == 307
     assert callback.headers['location'] == 'magistrate://account?status=success'
     assert write.call_count == 1
-    assert write.call_args.kwargs['user_id'] == 'alice'
+    assert write.call_args.kwargs['user_id'] == 'default_user'
 
     replay = client.get(
         '/api/v1/auth/github/callback',
@@ -158,8 +161,8 @@ def test_successful_callback_consumes_once_before_exchange_and_writes_once(trans
 
 
 def test_exchange_failure_redirects_safely_without_credential_write(transaction_db, monkeypatch):
-    response, state = state_from_connect(user_id='alice')
-    assert response.status_code == 307
+    response, state = state_from_connect()
+    assert response.status_code == 200
     adapter = gateway.providers['github']
     monkeypatch.setattr(adapter, 'exchange_code', AsyncMock(side_effect=RuntimeError('provider failure')))
     write = Mock()

@@ -17,20 +17,22 @@ STATUS_PATTERN = re.compile(r'\b(status|fleet|list (?:the )?agents|what(?:\'s| i
 @dataclass
 class PendingConfirmation:
     digest: str
+    idempotency_key: str
     expires_at: float
 
 class VoiceMoveService:
     def __init__(self, herdr_client: Any):
         self.herdr = herdr_client
-        self._confirmations: Dict[str, PendingConfirmation] = {}
-        self._results: Dict[str, Dict[str, Any]] = {}
+        self._confirmations: Dict[tuple[str, str], PendingConfirmation] = {}
+        self._results: Dict[tuple[str, str], Dict[str, Any]] = {}
 
-    async def handle(self, request: VoiceMoveRequest) -> Dict[str, Any]:
+    async def handle(self, request: VoiceMoveRequest, principal_id: str = 'default_user') -> Dict[str, Any]:
         now = time.time()
-        self._confirmations = {token: pending for token, pending in self._confirmations.items()
+        self._confirmations = {key: pending for key, pending in self._confirmations.items()
                                if pending.expires_at >= now}
-        if request.idempotency_key in self._results:
-            return self._results[request.idempotency_key]
+        result_key = (principal_id, request.idempotency_key)
+        if result_key in self._results:
+            return self._results[result_key]
         agents = await self.herdr.list_agents()
         if hasattr(self.herdr, 'resolve_target'):
             target = await self.herdr.resolve_target(request.target)
@@ -51,14 +53,17 @@ class VoiceMoveService:
         if not request.execute:
             if base['requires_confirmation']:
                 token = secrets.token_urlsafe(24)
-                self._confirmations[token] = PendingConfirmation(
-                    self._digest(utterance, target, intent), time.time() + 60)
+                self._confirmations[(principal_id, token)] = PendingConfirmation(
+                    self._digest(utterance, target, intent, request.idempotency_key),
+                    request.idempotency_key, time.time() + 60)
                 return {**base, 'status': 'confirmation_required', 'confirmation_token': token,
                         'confirmation_message': self._confirmation_message(intent, target, utterance)}
             return {**base, 'status': 'ready'}
         if base['requires_confirmation']:
-            pending = self._confirmations.pop(request.confirmation_token or '', None)
-            if not pending or pending.expires_at < time.time() or pending.digest != self._digest(utterance, target, intent):
+            pending = self._confirmations.pop((principal_id, request.confirmation_token or ''), None)
+            if (not pending or pending.expires_at < time.time()
+                    or pending.idempotency_key != request.idempotency_key
+                    or pending.digest != self._digest(utterance, target, intent, request.idempotency_key)):
                 return {**base, 'status': 'confirmation_expired',
                         'error': 'Confirmation is missing, expired, or does not match this move.'}
         if intent == 'agent_status':
@@ -74,7 +79,7 @@ class VoiceMoveService:
             result = {**base, 'status': 'completed' if ok else 'error',
                       'response': action.get('response') or (f'Request submitted to {target}.' if ok else ''),
                       'error': action.get('error')}
-        self._results[request.idempotency_key] = result
+        self._results[result_key] = result
         return result
 
     @staticmethod
@@ -101,8 +106,8 @@ class VoiceMoveService:
         return 'prompt_agent', VoiceImpact.PROMPT
 
     @staticmethod
-    def _digest(text: str, target: str, intent: str) -> str:
-        return hashlib.sha256(f'{text}\0{target}\0{intent}'.encode()).hexdigest()
+    def _digest(text: str, target: str, intent: str, idempotency_key: str) -> str:
+        return hashlib.sha256(f'{text}\0{target}\0{intent}\0{idempotency_key}'.encode()).hexdigest()
 
     @staticmethod
     def _confirmation_message(intent: str, target: str, text: str) -> str:
