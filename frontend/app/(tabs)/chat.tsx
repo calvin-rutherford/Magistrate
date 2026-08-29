@@ -147,6 +147,13 @@ function UserMessage({ message, textColor, selectable, onLongPress }: { message:
 }
 
 const historyMessages = (messages: AgentHistoryMessage[]): ConversationMessage[] => messages.map((message, index) => ({ ...message, id: `history-${index}`, source: 'text' as const }));
+// Rendering the entire thread every time makes a long-lived chat's ScrollView content
+// thousands of pixels tall, so an animated scrollToEnd() from a scrolled-up position has
+// to visually travel across all of it - indistinguishable from a full reload-and-rescroll.
+// Keep only the most recent window mounted by default; scrolling near the top loads more.
+const DEFAULT_VISIBLE_MESSAGES = 40;
+const LOAD_MORE_MESSAGES = 40;
+const NEAR_TOP_THRESHOLD = 120;
 function conversationalPromptResponse(response: unknown): string | null {
   if (typeof response !== 'string' || !response.trim()) return null;
   try {
@@ -183,19 +190,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [webViewportHeight, setWebViewportHeight] = useState<number | null>(null);
   const [confirmNewSession, setConfirmNewSession] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE_MESSAGES);
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const atBottomRef = useRef(true);
   const historyRequestRef = useRef(0);
   const messagesRef = useRef(messages);
+  const contentHeightRef = useRef(0);
+  const scrollOffsetRef = useRef(0);
+  const pendingPrependRef = useRef(false);
   const targetLabel = target === 'captain' ? 'Magistrate' : target;
   const capture = useVoiceInputAdapter();
+  const visibleMessages = useMemo(() => messages.length > visibleCount ? messages.slice(-visibleCount) : messages, [messages, visibleCount]);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   useEffect(() => {
     const request = ++historyRequestRef.current;
-    setSendError(null); setIsThinking(false);
+    setSendError(null); setIsThinking(false); setVisibleCount(DEFAULT_VISIBLE_MESSAGES);
     // The captain thread is shared with Voice Mode (see ConversationSession)
     // and persisted to disk, so reopening the app replays it from storage
     // instead of the Herdr terminal transcript, which has no Voice Mode turns.
@@ -265,8 +277,26 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    scrollOffsetRef.current = contentOffset.y;
+    contentHeightRef.current = contentSize.height;
     const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
     atBottomRef.current = atBottom; setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
+    // Load older history only when the reader scrolls near the top of the buffered
+    // window, not on every poll/append - see DEFAULT_VISIBLE_MESSAGES above.
+    if (contentOffset.y < NEAR_TOP_THRESHOLD && !pendingPrependRef.current && visibleCount < messagesRef.current.length) {
+      pendingPrependRef.current = true;
+      setVisibleCount(count => Math.min(count + LOAD_MORE_MESSAGES, messagesRef.current.length));
+    }
+  };
+  // Prepending older messages grows the content above the viewport, which would
+  // otherwise yank the visible messages down; re-anchor scroll position by the
+  // exact height that was added once the prepended rows have actually laid out.
+  const handleContentSizeChange = (_width: number, height: number) => {
+    if (!pendingPrependRef.current) { contentHeightRef.current = height; return; }
+    const grew = height - contentHeightRef.current;
+    if (grew > 0) scrollRef.current?.scrollTo({ y: scrollOffsetRef.current + grew, animated: false });
+    contentHeightRef.current = height;
+    pendingPrependRef.current = false;
   };
   const addAttachments = (selected: ComposerAttachment[]) => {
     setAttachments(current => [...current, ...selected]);
@@ -319,7 +349,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       const key = `${message.role}|${message.kind}|${message.text}`;
       if (known.has(key)) return;
       known.add(key);
-      appendMessage({ id: `live-${Date.now()}-${Math.random().toString(36).slice(2)}`, role: message.role, kind: message.kind, text: message.text, sentAt: message.role === 'user' ? Date.now() : undefined, source: 'text' });
+      // Herdr's terminal transcript carries no wall-clock time (see AGENTS.md), so a
+      // message discovered here - rather than typed locally via handleSend - has no
+      // real send time. Stamping it with Date.now() would show "now" instead of when
+      // it was actually sent, so leave it unset like other Herdr-replayed history.
+      appendMessage({ id: `live-${Date.now()}-${Math.random().toString(36).slice(2)}`, role: message.role, kind: message.kind, text: message.text, sentAt: undefined, source: 'text' });
       if (message.role === 'assistant' && message.kind === 'conversation') appendedReply = true;
     });
     return appendedReply;
@@ -397,8 +431,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         </View> : null}
       </View>
     </View>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
-      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.text}</Text></View>)}
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} onContentSizeChange={handleContentSizeChange} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
+      {filterAgentHistory(visibleMessages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.text}</Text></View>)}
     </ScrollView>
     {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { atBottomRef.current = true; setHasNewMessages(false); setIsScrolledUp(false); scrollRef.current?.scrollToEnd({ animated: true }); }}><Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text></TouchableOpacity> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
