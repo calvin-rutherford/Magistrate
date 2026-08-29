@@ -24,6 +24,10 @@ Sharp edges when driving the web build in headless Chrome:
 
 `src/input/VoiceInputAdapter.ts` (`useVoiceInputAdapter`) is the one seam for microphone capture: it wraps `expo-audio` recording, exposes live `amplitude` (0-1, ~100ms cadence) for waveform UI, and on web also drives the Web Speech API for interim transcript callbacks. Pair `capture.stop()` with `transcribeVoiceAudio()` from `src/api/client.ts` to get a final transcript from the gateway's `/voice/transcribe` endpoint. Test it in headless Chrome by launching Puppeteer with `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` so `getUserMedia` resolves without real hardware.
 
+## Web push notifications
+
+`src/services/NotificationManager.ts` polls `/api/v1/notifications/events` and delivers via the real `Notification` Web API on `Platform.OS === 'web'` (native uses `expo-notifications`, which has no web implementation). It only checks `Notification.permission`, never calls `requestPermission()` itself — that happens exclusively from the captain-facing `NotificationPermissionPrompt` component (shown once, gated by `NotificationPermissionPreferences.ts`), since silently requesting permission from a background poll is bad UX and unreliable outside a user gesture. `InAppNotificationStack` is the fallback UI for denied/unsupported browsers. Verify with `npm run test:notifications` (not wired into CI — see the puppeteer web suites excluded from `.github/workflows/frontend.yml`).
+
 ## Local dev environment
 
 If `npx tsc`/`expo start` fails with `Cannot find module 'expo-*'` even though it's listed in `package.json`, the worktree's `node_modules` is stale — run `npm install` (not `npm ci`, to avoid rewriting the lockfile) before debugging further.

@@ -96,15 +96,9 @@ class NotificationManagerService {
     const BrowserNotification = (globalThis as any).Notification;
     if (typeof BrowserNotification !== 'function') return false;
 
-    let permission = BrowserNotification.permission;
-    if (permission === 'default' && typeof BrowserNotification.requestPermission === 'function') {
-      try {
-        permission = await BrowserNotification.requestPermission();
-      } catch {
-        return false;
-      }
-    }
-    if (permission !== 'granted') return false;
+    // Permission is requested only from the explicit captain-facing prompt
+    // (NotificationPermissionPrompt), never silently from this background poll.
+    if (BrowserNotification.permission !== 'granted') return false;
 
     const copy = copyFor(events);
     try {
