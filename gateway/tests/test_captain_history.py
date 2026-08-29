@@ -92,3 +92,69 @@ async def test_herdr_read_falls_back_to_visible_output_for_working_agents(monkey
     assert create_process.await_args_list[1].args[:7] == (
         'herdr', 'agent', 'read', 'w1:p1', '--source', 'visible', '--lines'
     )
+
+
+def test_history_parser_types_claude_unmarked_tool_rows_as_tool_activity():
+    """Claude renders tool activity as an unmarked row after a blank line."""
+    output = """● Two more of the four rebases are confirmed clean — merging
+  both now.
+
+  Ran 4 shell commands
+
+● Stop hook feedback
+
+● Running all frontend suites (not just CI's subset) plus
+  gateway:
+
+  Searched for 1 pattern, ran 10 shell commands
+
+● Rebasing onto the new tip:
+
+  Running 5 shell commands…
+  ⎿  $ cd /workspace && npx tsc --noEmit
+
+✽ Combobulating… (9m 12s · ↓ 12.7k tokens)
+"""
+
+    messages = parse_agent_history(output)
+    assert [(m['role'], m['kind']) for m in messages] == [
+        ('assistant', 'conversation'),
+        ('assistant', 'tool'),
+        ('assistant', 'conversation'),
+        ('assistant', 'tool'),
+        ('assistant', 'conversation'),
+        ('assistant', 'tool'),
+    ]
+    conversation = [m['text'] for m in messages if m['kind'] == 'conversation']
+    assert conversation == [
+        'Two more of the four rebases are confirmed clean — merging both now.',
+        "Running all frontend suites (not just CI's subset) plus gateway:",
+        'Rebasing onto the new tip:',
+    ]
+    assert all('shell command' not in text for text in conversation)
+    assert 'Stop hook feedback' not in ' '.join(m['text'] for m in messages)
+
+
+def test_history_parser_drops_mid_frame_chrome_and_retypes_tool_detail_rows():
+    """Herdr snapshots catch status overlays mid-frame, sometimes over a message."""
+    output = """● Five of six merged now — only chat cleanup (#29) remains.
+  Jump to bottom (ctrl+End) ↓
+
+● Stop hook feed 1 new message (ctrl+End) ↓
+
+● Hardening that, then verifying the real pattern:
+
+  Running cd "/workspace" && npx tsc --noEmit…
+
+  ⎿  $ cd "/workspace" && npx tsc --noEmit
+
+✻ Cogitated for 7s · done 10:43 PM · 2 shells still running
+                                          ● high · /effort
+"""
+
+    messages = parse_agent_history(output)
+    assert [(m['kind'], m['text'].split('\n')[0]) for m in messages] == [
+        ('conversation', 'Five of six merged now — only chat cleanup (#29) remains.'),
+        ('conversation', 'Hardening that, then verifying the real pattern:'),
+        ('tool', 'Running cd "/workspace" && npx tsc --noEmit…'),
+    ]

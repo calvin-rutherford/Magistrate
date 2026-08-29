@@ -259,6 +259,21 @@ test('mic button records real audio, shows a live waveform, and fills the compos
   await page.close();
 });
 
+test('a herdr RPC acknowledgement envelope never reaches the conversation', async () => {
+  // Gateways one deploy behind still return herdr's raw acknowledgement in
+  // `response`; it is transport metadata, not the agent's message.
+  const envelope = JSON.stringify({ jsonrpc: '2.0', id: 7, result: { ok: true, target: 'captain' } });
+  const page = await openChat({ width: 900, height: 700 }, false, envelope);
+  await submit(page, 'status please');
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /status please/);
+  assert.doesNotMatch(history, /jsonrpc/);
+  assert.doesNotMatch(history, /result/);
+  assert.doesNotMatch(history, /[{}]/);
+  await page.close();
+});
+
 test('the agent response is appended to the conversation once the gateway replies', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, 'Understood, working on it now.');
   await submit(page, 'status please');
