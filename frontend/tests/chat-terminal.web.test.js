@@ -135,6 +135,25 @@ test('drawer starts collapsed, expands downward, and preserves conversation hist
   await page.close();
 });
 
+test('drawer scales every icon by 20% without showing dropdown arrows or changing its controls', async () => {
+  const page = await openChat({ width: 1100, height: 760 });
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  const sizes = await page.evaluate(() => ({
+    row: getComputedStyle(document.querySelector('[data-testid="drawer-section-attention-icon"]')).fontSize,
+    account: getComputedStyle(document.querySelector('[data-testid="drawer-account-icon"]')).fontSize,
+    gear: document.querySelector('[data-testid="settings-gear-icon"]').getBoundingClientRect().width,
+    rowHitTarget: document.querySelector('[data-testid="drawer-section-attention"]').getBoundingClientRect().height,
+  }));
+  assert.equal(sizes.row, '16.8px');
+  assert.equal(sizes.account, '22.8px');
+  assert.ok(Math.abs(sizes.gear - 21.6) < 0.02);
+  assert.equal(sizes.rowHitTarget, 42);
+  assert.doesNotMatch(await page.$eval('[data-testid="magistrate-drawer"]', element => element.innerText), /⌃|⌄/);
+
+  await page.close();
+});
+
 test('mobile drawer slides chat aside, swipes closed, and composer focus is stable', async () => {
   const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
   const before = await page.$eval('[data-testid="branded-chat-shell"]', element => ({ left: element.getBoundingClientRect().left, width: element.getBoundingClientRect().width }));
