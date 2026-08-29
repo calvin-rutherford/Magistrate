@@ -28,7 +28,7 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '') {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   await page.evaluateOnNewDocument((noOverrides, responseText) => {
@@ -49,7 +49,12 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-      if (url.includes('/api/v1/agents')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/agents/w1%3Ap7/history')) return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages: [
+        { role: 'user', kind: 'conversation', text: 'Please check the deployment.' },
+        { role: 'assistant', kind: 'tool', text: 'Ran 3 commands' },
+        { role: 'assistant', kind: 'conversation', text: 'The deployment is healthy.' },
+      ] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([{ id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/attention/unified')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/auth/providers')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -58,7 +63,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       return nativeFetch(resource, options);
     };
   }, emptyInventory, promptResponseText);
-  await page.goto(URL, { waitUntil: 'networkidle0' });
+  await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
   // win hit-testing near the viewport bottom in headless Chrome.
   await page.evaluate(() => { const toast = document.getElementById('error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
@@ -153,9 +158,50 @@ test('account gear opens the lower settings drawer with live network status', as
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
   assert.equal(await page.$eval('[data-testid="settings-network-status"]', element => element.textContent), 'Connected');
   const ratio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
-  assert.ok(ratio >= 0.32 && ratio <= 0.4);
+  assert.ok(ratio >= 0.4 && ratio <= 0.48);
   await page.click('[data-testid="settings-close"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) < 0.05);
+  await page.close();
+});
+
+test('fleet agent opens its conversation, hides tools by default, and settings can reveal them', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="drawer-section-fleet"]');
+  await page.waitForSelector('[data-testid="fleet-agent-w1:p7"]');
+  await page.click('[data-testid="fleet-agent-w1:p7"]');
+  await page.waitForFunction(() => new URL(location.href).searchParams.get('agentId') === 'w1:p7');
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The deployment is healthy.'));
+  let history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /Please check the deployment/);
+  assert.match(history, /The deployment is healthy/);
+  assert.doesNotMatch(history, /Ran 3 commands/);
+  assert.equal(await page.$('[data-testid="tool-history-message"]'), null);
+
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) < 0.05);
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="settings-open"]');
+  await page.waitForSelector('[data-testid="settings-tool-calls-toggle"]');
+  await page.click('[data-testid="settings-tool-calls-toggle"]');
+  await page.waitForSelector('[data-testid="tool-history-message"]');
+  history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /Ran 3 commands/);
+  await page.close();
+});
+
+test('fleet ellipsis shows real status and quick commands', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="drawer-section-fleet"]');
+  await page.click('[data-testid="fleet-agent-w1:p7-menu"]');
+  const popover = await page.$eval('[data-testid="fleet-agent-w1:p7-popover"]', element => element.innerText);
+  assert.match(popover, /STATUS\s+WORKING/);
+  assert.match(popover, /ACTIVE STATUS\s+ACTIVE/);
+  assert.match(popover, /INTERRUPT/);
+  assert.match(popover, /RENAME/);
   await page.close();
 });
 
