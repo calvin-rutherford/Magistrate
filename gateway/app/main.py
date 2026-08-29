@@ -47,9 +47,10 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-UPLOADS_DIR = '/home/spectre/Magistrate/gateway/uploads/avatars'
+GATEWAY_DIR = Path(__file__).resolve().parent.parent
+UPLOADS_DIR = GATEWAY_DIR / 'uploads' / 'avatars'
 os.makedirs(UPLOADS_DIR, exist_ok=True)
-app.mount('/uploads', StaticFiles(directory='/home/spectre/Magistrate/gateway/uploads'), name='uploads')
+app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
 
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
