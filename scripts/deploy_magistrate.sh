@@ -5,8 +5,28 @@ set -euo pipefail
 # checkout and never resets, stashes, or overwrites local changes.
 DEPLOY_DIR="${MAGISTRATE_DEPLOY_DIR:-/home/spectre/firstmate/projects/Magistrate-deploy}"
 SERVICE="${MAGISTRATE_SERVICE:-magistrate-gateway.service}"
-HEALTH_URL="${MAGISTRATE_HEALTH_URL:-http://127.0.0.1:8000/api/v1/health}"
+READINESS_URL="${MAGISTRATE_READINESS_URL:-http://127.0.0.1:8000/api/v1/health}"
+HEALTH_URL="${MAGISTRATE_HEALTH_URL:-$READINESS_URL}"
+READINESS_TIMEOUT_SECONDS="${MAGISTRATE_READINESS_TIMEOUT_SECONDS:-30}"
+READINESS_INTERVAL_SECONDS="${MAGISTRATE_READINESS_INTERVAL_SECONDS:-1}"
+READINESS_CURL_TIMEOUT_SECONDS="${MAGISTRATE_READINESS_CURL_TIMEOUT_SECONDS:-2}"
 LOCK_PATH="${MAGISTRATE_DEPLOY_LOCK:-${TMPDIR:-/tmp}/magistrate-deploy.lock}"
+
+is_positive_integer() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+is_nonnegative_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+if ! is_positive_integer "$READINESS_TIMEOUT_SECONDS"; then
+  echo "refusing deploy: MAGISTRATE_READINESS_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 1
+fi
+if ! is_nonnegative_integer "$READINESS_INTERVAL_SECONDS"; then
+  echo "refusing deploy: MAGISTRATE_READINESS_INTERVAL_SECONDS must be a non-negative integer" >&2
+  exit 1
+fi
+if ! is_positive_integer "$READINESS_CURL_TIMEOUT_SECONDS"; then
+  echo "refusing deploy: MAGISTRATE_READINESS_CURL_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 1
+fi
 
 if [[ ! -e "$DEPLOY_DIR/.git" ]]; then
   echo "deployment checkout not found: $DEPLOY_DIR" >&2
@@ -66,6 +86,25 @@ if [[ "$DB_PATH" != /* || "$DB_PATH" == "$DEPLOY_DIR"/* ]]; then
   echo "refusing deploy: MAGISTRATE_DB_PATH must be an absolute path outside the deployment checkout" >&2
   exit 1
 fi
+CORS_ORIGINS="$(awk -F= '$1 == "MAGISTRATE_CORS_ORIGINS" { sub(/^[[:space:]]+/, "", $2); print $2; exit }' "$ENV_FILE")"
+CORS_ORIGINS="${CORS_ORIGINS%\"}"; CORS_ORIGINS="${CORS_ORIGINS#\"}"
+if [[ "$CORS_ORIGINS" == *\** ]]; then
+  echo "refusing deploy: MAGISTRATE_CORS_ORIGINS must contain explicit origins" >&2
+  exit 1
+fi
+IFS=',' read -r -a cors_origins <<< "$CORS_ORIGINS"
+for origin in "${cors_origins[@]}"; do
+  origin="$(printf '%s' "$origin" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [[ ! "$origin" =~ ^https://[^[:space:],]+$ ]]; then
+    echo "refusing deploy: MAGISTRATE_CORS_ORIGINS must contain HTTPS origins" >&2
+    exit 1
+  fi
+done
+
+command -v curl >/dev/null 2>&1 || {
+  echo "refusing deploy: curl is required for gateway readiness verification" >&2
+  exit 1
+}
 
 (
   cd "$DEPLOY_DIR/frontend"
@@ -81,17 +120,37 @@ for asset in index.html chat.html voice.html; do
 done
 
 systemctl --user restart "$SERVICE"
-systemctl --user is-active --quiet "$SERVICE"
-# An authenticated health response is expected to be 200 in production, but a
-# 401/403 still proves the freshly restarted HTTP process is reachable without
-# putting the device token in deployment logs or GitHub secrets.
-if command -v curl >/dev/null 2>&1; then
-  health_status="$(curl --silent --show-error --connect-timeout 5 --max-time 10 --output /dev/null --write-out '%{http_code}' "$HEALTH_URL" || true)"
+
+# systemd's unit state can briefly be inactive while a restart is in flight.
+# Poll the HTTP endpoint instead: 2xx proves the application answered, while
+# 401/403 proves the protected production process is reachable without a secret.
+# A 000 (connection refused) is expected during the bounded restart window.
+readiness_started="$SECONDS"
+readiness_deadline=$((readiness_started + READINESS_TIMEOUT_SECONDS))
+readiness_attempt=0
+last_health_status="unreachable"
+while :; do
+  readiness_attempt=$((readiness_attempt + 1))
+  health_status="$(curl --silent --connect-timeout "$READINESS_CURL_TIMEOUT_SECONDS" \
+    --max-time "$READINESS_CURL_TIMEOUT_SECONDS" --output /dev/null \
+    --write-out '%{http_code}' "$READINESS_URL" 2>/dev/null || true)"
+  health_status="${health_status:-unreachable}"
   case "$health_status" in
-    2??|401|403) ;;
-    *) echo "deployment service is active but health endpoint returned HTTP ${health_status:-unreachable}" >&2; exit 1 ;;
+    2??|401|403)
+      readiness_elapsed=$((SECONDS - readiness_started))
+      echo "gateway readiness verified after ${readiness_elapsed}s (attempt ${readiness_attempt}, HTTP ${health_status})"
+      break
+      ;;
   esac
-fi
+  last_health_status="$health_status"
+  if (( SECONDS >= readiness_deadline )); then
+    service_state="$(systemctl --user is-active "$SERVICE" 2>/dev/null || true)"
+    service_state="${service_state:-unknown}"
+    echo "gateway readiness timed out after ${READINESS_TIMEOUT_SECONDS}s (attempts ${readiness_attempt}; last HTTP response ${last_health_status}; systemd state ${service_state})" >&2
+    exit 1
+  fi
+  sleep "$READINESS_INTERVAL_SECONDS"
+done
 
 # GitHub Actions intentionally performs only the unauthenticated reachability
 # check above. A trusted operator can opt into the complete smoke, which reads
