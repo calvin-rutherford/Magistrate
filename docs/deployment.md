@@ -29,10 +29,18 @@ Run `scripts/deploy_magistrate.sh` from a trusted shell for a manual update. The
 script fetches `origin/main`, refuses dirty or divergent checkouts, performs a
 fast-forward-only update, runs the supported `npx expo export -p web` build,
 checks that `index.html`, `chat.html`, and `voice.html` exist, restarts
-`magistrate-gateway.service`, and verifies that the HTTP process is reachable.
-It also rejects missing production auth settings and checkout-local SQLite paths
-before running the build. The health probe intentionally accepts an unauthenticated
-401/403 as proof of process reachability; validate the authenticated path with an
+`magistrate-gateway.service`, and polls the HTTP process for up to 30 seconds
+(the local URL defaults to `http://127.0.0.1:8000/api/v1/health` and can be
+overridden with `MAGISTRATE_READINESS_URL`; timeout, poll interval, and
+per-request timeout are configurable with `MAGISTRATE_READINESS_TIMEOUT_SECONDS`,
+`MAGISTRATE_READINESS_INTERVAL_SECONDS`, and
+`MAGISTRATE_READINESS_CURL_TIMEOUT_SECONDS`). Connection refusal (`HTTP
+000`) during the expected systemd restart window is retried; timeout output
+includes the last HTTP response and systemd state. Readiness accepts 2xx,
+401, or 403 responses, so it verifies application reachability rather than
+mistaking a merely existing process for a healthy deployment. It also rejects
+missing production auth settings, wildcard/non-HTTPS CORS, and checkout-local
+SQLite paths before running the build. Validate the authenticated path with an
 operator-issued Bearer session during the release smoke check.
 It never resets, stashes, or discards deployment-only commits.
 
@@ -48,8 +56,12 @@ MAGISTRATE_TRUSTED_SMOKE=1 \
 
 That smoke proves session issuance, protected session validation, authenticated
 `/health`, and authenticated `/agents` (the Herdr-backed application path). The
-Actions workflow separately checks unauthenticated HTTPS reachability and the
-static frontend, so it never handles the bootstrap secret.
+Actions workflow separately performs only secret-free, unauthenticated
+reachability checks (plus the static frontend); it never reads the bootstrap
+secret or handles a bearer token. A Tailscale HTTPS reverse proxy may remain
+the configured external health/smoke URL, and must continue to pass HTTP
+`Upgrade`/`Connection` headers so the gateway's WSS `/api/v1/events` endpoint
+keeps working.
 
 ## SQLite backup and migration
 

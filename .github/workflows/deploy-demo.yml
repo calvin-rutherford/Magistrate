@@ -60,7 +60,7 @@ jobs:
           printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
 
-      - name: Fast-forward, build, restart, and verify
+      - name: Fast-forward, build, restart, and poll local readiness
         env:
           DEPLOY_HOST: ${{ secrets.MAGISTRATE_DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.MAGISTRATE_DEPLOY_USER }}
@@ -70,7 +70,9 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "MAGISTRATE_DEPLOY_DIR='$DEPLOY_DIR' MAGISTRATE_SERVICE='$SERVICE' '$DEPLOY_DIR/scripts/deploy_magistrate.sh'"
 
-      - name: Verify demo HTTP endpoint
+      # This job is intentionally secret-free: authenticated session issuance
+      # belongs only to the trusted deployment-host smoke script.
+      - name: Verify unauthenticated demo reachability
         env:
           DEPLOY_HOST: ${{ secrets.MAGISTRATE_DEPLOY_HOST }}
         run: |
