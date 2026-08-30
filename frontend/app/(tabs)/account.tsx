@@ -5,11 +5,12 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, connectAuthProvider, updateUserProfile, updateNotificationPreferences, GATEWAY_URL, UserProfile, AuthProviderInfo } from '../../src/api/client';
+import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, connectAuthProvider, updateUserProfile, updateNotificationPreferences, fetchVoiceInputCapabilities, GATEWAY_URL, UserProfile, AuthProviderInfo } from '../../src/api/client';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
-import { loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground } from '../../src/services/ChatPreferences';
+import { loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveVoiceInputMode } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
+import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 
 export default function AccountScreen() {
   const router = useRouter();
@@ -22,6 +23,8 @@ export default function AccountScreen() {
   const [customBackgroundUri, setCustomBackgroundUri] = useState<string | undefined>();
 
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
+  const [voiceInputMode, setVoiceInputMode] = useState<VoiceInputMode>('automatic');
+  const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
   const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
   const [autoListen, setAutoListen] = useState<boolean>(true);
   const [attentionNotifications, setAttentionNotifications] = useState<boolean>(true);
@@ -51,10 +54,18 @@ export default function AccountScreen() {
   };
 
   useEffect(() => {
-    loadChatPreferences().then(preferences => {
-      setActiveThemeKey(preferences.background);
-      setCustomBackgroundUri(preferences.customBackgroundUri);
-    }).catch(() => {});
+    Promise.allSettled([loadChatPreferences(), fetchVoiceInputCapabilities()]).then(([preferencesResult, capabilityResult]) => {
+      if (preferencesResult.status === 'fulfilled') {
+        setActiveThemeKey(preferencesResult.value.background);
+        setCustomBackgroundUri(preferencesResult.value.customBackgroundUri);
+        setVoiceInputMode(preferencesResult.value.voiceInputMode);
+      }
+      if (capabilityResult.status === 'fulfilled') {
+        const local = getLocalVoiceCapabilities(capabilityResult.value.serverConfigured);
+        const serverOpenai = capabilityFor(capabilityResult.value, 'openai');
+        setVoiceCapabilities({ ...local, serverProvider: capabilityResult.value.serverProvider, serverConfigured: capabilityResult.value.serverConfigured, modes: local.modes.map(item => item.id === 'openai' ? serverOpenai : item) });
+      }
+    });
     loadAccountData();
   }, []);
 
@@ -270,6 +281,9 @@ export default function AccountScreen() {
               <Text style={styles.toggleBtnText}>{autoListen ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>
           </View>
+          <Text testID="account-voice-input-label" style={styles.settingLabel}>VOICE INPUT MODE</Text>
+          <Text style={styles.settingHint}>Speech is placed in the chat composer for review. OpenAI credentials never leave the gateway.</Text>
+          <View testID="account-voice-input-options" style={styles.voiceModeRow}>{VOICE_INPUT_MODE_OPTIONS.map(option => { const capability = capabilityFor(voiceCapabilities, option.id); const selected = voiceInputMode === option.id; const disabled = capability.available === 'unavailable'; return <TouchableOpacity key={option.id} testID={`account-voice-mode-${option.id}`} accessibilityRole="button" accessibilityLabel={`${option.label}: ${capability.reason || option.description}`} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={() => { setVoiceInputMode(option.id); void saveVoiceInputMode(option.id); }} style={[styles.voiceModePill, selected ? styles.voiceModePillActive : undefined, disabled ? styles.voiceModePillDisabled : undefined]}><Text style={[styles.voiceModeText, selected ? styles.voiceModeTextActive : undefined]}>{option.label}</Text></TouchableOpacity>; })}</View>
         </GlassSurface>
 
         {/* CONNECTED OAUTH PROVIDERS */}
@@ -382,6 +396,12 @@ const styles = StyleSheet.create({
   toggleBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   toggleBtnActive: { backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF' },
   toggleBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
+  voiceModeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
+  voiceModePill: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
+  voiceModePillActive: { backgroundColor: 'rgba(36, 216, 255, 0.28)', borderColor: '#24D8FF' },
+  voiceModePillDisabled: { opacity: 0.45 },
+  voiceModeText: { fontFamily: 'monospace', fontSize: 10, color: 'rgba(255,255,255,0.7)' },
+  voiceModeTextActive: { color: '#FFFFFF', fontWeight: 'bold' },
   themeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   themePill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },
   themePillActive: { backgroundColor: 'rgba(255, 255, 255, 0.25)', borderColor: '#FFFFFF' },

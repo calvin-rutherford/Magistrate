@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useEffect, useState } from 'react';
 import { Appearance, useColorScheme } from 'react-native';
 import { setActiveBackground, WeatherSceneKey } from './environmentTheme';
+import { DEFAULT_VOICE_INPUT_MODE, VOICE_INPUT_MODE_KEY, VoiceInputMode } from './VoiceInputModes';
 
 export const TOOL_CALL_VISIBILITY_KEY = 'magistrate.chat.show-tool-calls';
 export const CHAT_THEME_MODE_KEY = 'magistrate.chat.theme-mode';
@@ -15,6 +16,7 @@ export type ChatPreferences = {
   themeMode: ChatThemeMode;
   background: WeatherSceneKey;
   customBackgroundUri?: string;
+  voiceInputMode: VoiceInputMode;
 };
 
 export const DEFAULT_CHAT_PREFERENCES: ChatPreferences = {
@@ -22,19 +24,22 @@ export const DEFAULT_CHAT_PREFERENCES: ChatPreferences = {
   themeMode: 'system',
   background: 'auto',
   customBackgroundUri: undefined,
+  voiceInputMode: DEFAULT_VOICE_INPUT_MODE,
 };
 
 const validThemeModes = new Set<ChatThemeMode>(['system', 'dark', 'light']);
+const validVoiceInputModes = new Set<VoiceInputMode>(['automatic', 'browser', 'native', 'openai']);
 const validBackgrounds = new Set<WeatherSceneKey>([
   'auto', 'dusk-mountain', 'clear-day', 'clear-night', 'clouds', 'rain', 'storm', 'sunset', 'minimal-dark', 'custom',
 ]);
 
 export async function loadChatPreferences(): Promise<ChatPreferences> {
-  const [toolCalls, themeMode, background, customBackground] = await AsyncStorage.multiGet([
+  const [toolCalls, themeMode, background, customBackground, voiceInputMode] = await AsyncStorage.multiGet([
     TOOL_CALL_VISIBILITY_KEY,
     CHAT_THEME_MODE_KEY,
     CHAT_BACKGROUND_KEY,
     CHAT_CUSTOM_BACKGROUND_KEY,
+    VOICE_INPUT_MODE_KEY,
   ]);
   const storedBackground = validBackgrounds.has(background[1] as WeatherSceneKey)
     ? background[1] as WeatherSceneKey
@@ -48,6 +53,9 @@ export async function loadChatPreferences(): Promise<ChatPreferences> {
     themeMode: validThemeModes.has(themeMode[1] as ChatThemeMode) ? themeMode[1] as ChatThemeMode : DEFAULT_CHAT_PREFERENCES.themeMode,
     background: hasCustomBackground ? 'custom' : storedBackground === 'custom' ? DEFAULT_CHAT_PREFERENCES.background : storedBackground,
     customBackgroundUri: hasCustomBackground ? customBackground[1] || undefined : undefined,
+    voiceInputMode: validVoiceInputModes.has(voiceInputMode[1] as VoiceInputMode)
+      ? voiceInputMode[1] as VoiceInputMode
+      : DEFAULT_CHAT_PREFERENCES.voiceInputMode,
   };
   applyChatAppearance(preferences);
   return preferences;
@@ -81,6 +89,11 @@ export function applyChatAppearance(preferences: Pick<ChatPreferences, 'themeMod
 
 export async function saveToolCallVisibility(showToolCalls: boolean): Promise<void> {
   await AsyncStorage.setItem(TOOL_CALL_VISIBILITY_KEY, String(showToolCalls));
+}
+
+export async function saveVoiceInputMode(mode: VoiceInputMode): Promise<void> {
+  if (!validVoiceInputModes.has(mode)) throw new Error('Unsupported voice input mode.');
+  await AsyncStorage.setItem(VOICE_INPUT_MODE_KEY, mode);
 }
 
 export async function saveThemeMode(themeMode: ChatThemeMode): Promise<void> {

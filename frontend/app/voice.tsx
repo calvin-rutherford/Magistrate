@@ -11,6 +11,7 @@ import { appendConversationMessage, useConversationMessages } from '../src/servi
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
 import { loadChatPreferences, useChatColorScheme } from '../src/services/ChatPreferences';
+import { capabilityFor, getLocalVoiceCapabilities, resolveVoiceInputMode, VoiceInputCapabilities, VoiceInputMode } from '../src/services/VoiceInputModes';
 import { ACTIVE_MARK_SPIRAL, ACTIVE_MARK_TRIANGLE, audioEnergyScale, clampAudioPeak, waveformBarHeight } from '../src/services/VoiceVisuals';
 
 const brand = {
@@ -70,6 +71,10 @@ export default function VoiceScreen() {
   const [finalTranscript, setFinalTranscript] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [voiceMode, setVoiceMode] = useState<VoiceInputMode>('automatic');
+  const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
+  const [voiceSetupReady, setVoiceSetupReady] = useState(false);
+  const modeNoticeRef = useRef('');
   const [pendingMove, setPendingMove] = useState<VoiceMoveResult | null>(null);
   const [pendingKey, setPendingKey] = useState('');
   const [waveSamples, setWaveSamples] = useState<number[]>(() => new Array(38).fill(0.04));
@@ -77,7 +82,7 @@ export default function VoiceScreen() {
   const [, setBackgroundReady] = useState(false);
   const messages = useConversationMessages('captain');
   useEffect(() => { void loadChatPreferences().then(() => setBackgroundReady(true)); }, []);
-  const capture = useVoiceInputAdapter(setIntermediate);
+  const capture = useVoiceInputAdapter(setIntermediate, voiceMode);
   const captureRef = useRef(capture);
   const stateRef = useRef<VoiceState>(voiceState);
   const intermediateRef = useRef(intermediate);
@@ -102,7 +107,16 @@ export default function VoiceScreen() {
   useEffect(() => {
     // Voice is a deep-linkable page, so apply the persisted account background
     // here too rather than relying on the chat screen having mounted first.
-    void loadChatPreferences().catch(() => undefined);
+    let mounted = true;
+    Promise.all([loadChatPreferences()]).then(([preferences]) => {
+      if (!mounted) return;
+      const selected = preferences.voiceInputMode;
+      const capabilities = getLocalVoiceCapabilities();
+      const resolved = resolveVoiceInputMode(selected, capabilities);
+      setVoiceCapabilities(capabilities); setVoiceMode(resolved.mode); modeNoticeRef.current = resolved.fallbackReason || '';
+      setVoiceSetupReady(true);
+    }).catch(() => { if (mounted) setVoiceSetupReady(true); });
+    return () => { mounted = false; };
   }, []);
 
   useEffect(() => {
@@ -142,9 +156,11 @@ export default function VoiceScreen() {
   }, []);
 
   const beginListening = useCallback(async () => {
-    if (endingRef.current || turnInFlightRef.current) return;
+    if (endingRef.current || turnInFlightRef.current || !voiceSetupReady) return;
+    const capability = capabilityFor(voiceCapabilities, voiceMode);
+    if (capability.available === 'unavailable') { fail(capability.reason || `${capability.label} is unavailable.`); return; }
     ttsService.stop();
-    setError(''); setNotice(''); setIntermediate(''); setFinalTranscript(''); setPendingMove(null); setPendingKey('');
+    setError(''); setNotice(modeNoticeRef.current); setIntermediate(''); setFinalTranscript(''); setPendingMove(null); setPendingKey('');
     setWaveSamples(new Array(38).fill(0.04));
     setVoiceState('STARTING');
     try {
@@ -154,7 +170,7 @@ export default function VoiceScreen() {
       heardSpeechRef.current = false;
       setVoiceState('LISTENING');
     } catch (cause) { fail(cause); }
-  }, [fail]);
+  }, [fail, voiceCapabilities, voiceMode, voiceSetupReady]);
 
   const deliverResponse = useCallback((result: VoiceMoveResult) => {
     if (result.status !== 'completed') throw new Error(result.error || 'Firstmate did not complete the request.');
@@ -177,7 +193,7 @@ export default function VoiceScreen() {
         setNotice('Keep speaking a little longer so Magistrate can hear the full turn.');
         return;
       }
-      const transcription = await transcribeVoiceAudio(recording.uri, recording.mimeType, recording.filename);
+      const transcription = voiceMode === 'browser' ? { text: recording.transcript || '', is_final: true } : await transcribeVoiceAudio(recording.uri, recording.mimeType, recording.filename);
       const utterance = transcription.text?.trim() || intermediateRef.current.trim();
       if (!utterance) {
         turnInFlightRef.current = false;
@@ -200,7 +216,7 @@ export default function VoiceScreen() {
       const result = await submitVoiceMove(utterance, 'captain', key, true);
       deliverResponse(result);
     } catch (cause) { fail(cause); }
-  }, [beginListening, deliverResponse, fail, sessionId]);
+  }, [beginListening, deliverResponse, fail, sessionId, voiceMode]);
 
   useEffect(() => {
     if (voiceState !== 'LISTENING') return;
@@ -222,13 +238,14 @@ export default function VoiceScreen() {
   }, [audioPeak, finishTurn, reducedMotion, voiceState]);
 
   useEffect(() => {
-    const timer = setTimeout(() => { void beginListening(); }, 180);
+    const timer = setTimeout(() => { void beginListening(); }, voiceSetupReady ? 180 : 0);
+    if (!voiceSetupReady) return () => clearTimeout(timer);
     return () => {
       clearTimeout(timer); endingRef.current = true;
       void captureRef.current.cancel();
       ttsService.stop();
     };
-  }, [beginListening]);
+  }, [beginListening, voiceSetupReady]);
 
   const confirmMove = async () => {
     if (!pendingMove || !pendingKey || turnInFlightRef.current) return;
@@ -293,6 +310,7 @@ export default function VoiceScreen() {
           <View style={[styles.statusDot, { backgroundColor: voiceState === 'THINKING' ? brand.violet : voiceState === 'ERROR' ? brand.critical : brand.cyan }]} />
           <Text testID="voice-state" accessibilityRole="header" accessibilityLiveRegion="polite" style={[styles.stateTitle, compact && styles.stateTitleCompact, { color: textColor }]}>{currentCopy.title}</Text>
           <Text style={[styles.stateDetail, { color: mutedColor }]}>{currentCopy.detail}</Text>
+          <Text testID="voice-input-mode" style={[styles.modeLabel, { color: mutedColor }]}>Input: {capabilityFor(voiceCapabilities, voiceMode).label}</Text>
         </View>
 
         <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState) }} onPress={handleMainControl} {...(hoverHandlers as any)} disabled={['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
@@ -353,6 +371,7 @@ const styles = StyleSheet.create({
   stateTitle: { fontFamily: interfaceFont, fontSize: 36, lineHeight: 42, fontWeight: '600', letterSpacing: -0.7 },
   stateTitleCompact: { fontSize: 30, lineHeight: 35 },
   stateDetail: { fontFamily: interfaceFont, fontSize: 13, lineHeight: 19, marginTop: 5, textAlign: 'center' },
+  modeLabel: { fontFamily: interfaceFont, fontSize: 10, lineHeight: 15, marginTop: 5, textAlign: 'center', textTransform: 'uppercase', letterSpacing: 0.8 },
   stage: { position: 'relative', alignItems: 'center', justifyContent: 'center', marginTop: 3 }, stageTriangle: { position: 'absolute', pointerEvents: 'none' },
   ripple: { position: 'absolute', width: '54%', height: '54%', borderRadius: 999, borderWidth: 2, pointerEvents: 'none' },
   rippleMid: { width: '44%', height: '44%', borderWidth: 1.5 }, rippleInner: { width: '34%', height: '34%', borderWidth: 1 },

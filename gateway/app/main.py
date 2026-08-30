@@ -428,6 +428,22 @@ async def put_notification_preferences(contract: NotificationPreferencesContract
         raise HTTPException(status_code=422, detail=str(exc))
 
 # VOICE STT TRANSCRIPTION ENDPOINT
+@app.get('/api/v1/voice/capabilities')
+async def get_voice_capabilities(principal: Principal = Depends(require_scope('voice'))):
+    """Return speech capability flags without exposing server credentials."""
+    capability = stt_adapter.capabilities()
+    return {
+        'schema_version': 'voice-capabilities.v1',
+        'provider': capability['provider'],
+        'configured': capability['configured'],
+        'model': capability['model'],
+        'reason': capability['reason'],
+        'modes': [{
+            'id': 'openai', 'label': 'Gateway OpenAI',
+            'available': capability['configured'], 'reason': capability['reason'],
+        }],
+    }
+
 @app.post('/api/v1/voice/transcribe')
 async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source: str = Form('iphone'), principal: Principal = Depends(require_scope('voice'))):
     if not file:

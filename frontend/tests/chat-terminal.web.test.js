@@ -95,6 +95,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/attention/unified')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/auth/providers')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/voice/capabilities')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'voice-capabilities.v1', provider: 'openai', configured: true, modes: [{ id: 'openai', label: 'Gateway OpenAI', available: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/voice/transcribe')) return Promise.resolve(new Response(JSON.stringify({ text: 'test transcript from mic', is_final: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
@@ -487,6 +488,24 @@ test('two-second hold exposes edit, copy, selection, and a sent timestamp', asyn
   await page.locator('::-p-text(Edit)').click();
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'editable message');
   await page.close();
+});
+
+test('voice input mode selection is explicit and persists without sending a prompt', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false);
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.click('[data-testid="settings-open"]');
+  await page.waitForSelector('[data-testid="settings-voice-mode-options"]');
+  await page.click('[data-testid="voice-mode-option-openai"]');
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.input-mode')), 'openai');
+  assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length), 0);
+  await page.close();
+  const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
+  await refreshed.click('[data-testid="brand-drawer-toggle"]');
+  await refreshed.click('[data-testid="settings-open"]');
+  await refreshed.waitForSelector('[data-testid="voice-mode-option-openai"]');
+  assert.equal(await refreshed.evaluate(() => localStorage.getItem('magistrate.voice.input-mode')), 'openai');
+  assert.match(await refreshed.$eval('[data-testid="settings-voice-input-section"]', element => element.innerText), /Gateway OpenAI/);
+  await refreshed.close();
 });
 
 test('mic button records real audio, shows a live waveform, and fills the composer with the transcript', async () => {

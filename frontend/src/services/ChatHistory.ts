@@ -112,6 +112,21 @@ export function parseAgentHistory(output: string): AgentHistoryMessage[] {
   return messages;
 }
 
+export function isRenderableToolCall(message: Pick<AgentHistoryMessage, 'kind' | 'text'>): boolean {
+  const text = message.text.trim();
+  return message.kind === 'tool' && Boolean(text) && !chromePattern.test(text) && (
+    /^(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching|Searching)\b/i.test(text) || markerlessToolPattern.test(text)
+  );
+}
+
+export function toolCallPreview(text: string): string {
+  const value = text.trim().replace(/\s+/g, ' ');
+  if (/^(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\b/i.test(value)) return value.split(/\s+/)[0] + '…';
+  return value.length > 96 ? `${value.slice(0, 93)}…` : value;
+}
+
 export function filterAgentHistory<T extends AgentHistoryMessage>(messages: T[], showToolCalls: boolean): T[] {
-  return showToolCalls ? messages : messages.filter(message => message.kind === 'conversation');
+  return showToolCalls
+    ? messages.filter(message => message.kind === 'conversation' || isRenderableToolCall(message))
+    : messages.filter(message => message.kind === 'conversation');
 }

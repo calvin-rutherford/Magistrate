@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSyncExternalStore } from 'react';
 import { parseAgentHistory } from '../services/ChatHistory';
+import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
 
 // Production builds must provide an HTTPS gateway (usually same-origin on web).
 // HTTP localhost is intentionally limited to local development.
@@ -675,6 +676,17 @@ export async function fetchGitHubPR(number: number, refresh = false): Promise<Gi
 
 async function requireOk<T>(res: Response): Promise<T> {
   return checkedJson<T>(res);
+}
+
+export async function fetchVoiceInputCapabilities(): Promise<VoiceInputCapabilities> {
+  const res = await authorizedFetch(GATEWAY_URL + '/voice/capabilities');
+  const data = await checkedJson<{ modes?: Array<{ id: VoiceInputMode; label: string; available: boolean; reason?: string }>; provider?: string; configured?: boolean }>(res);
+  if (!Array.isArray(data.modes)) throw new Error('Gateway returned invalid voice capabilities.');
+  return {
+    modes: data.modes.map(mode => ({ id: mode.id, label: mode.label, available: mode.available ? 'available' : 'unavailable', reason: mode.reason })),
+    serverProvider: data.provider,
+    serverConfigured: data.configured,
+  };
 }
 
 export async function transcribeVoiceAudio(audioUri: string, mimeType: string, filename: string): Promise<{ text: string; is_final: boolean }> {

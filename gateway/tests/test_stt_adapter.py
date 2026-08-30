@@ -4,6 +4,15 @@ import pytest
 from app.stt_adapter import TranscriptionError, VoiceInputAdapter
 
 
+def test_capabilities_never_include_server_credentials(monkeypatch):
+    adapter = VoiceInputAdapter()
+    adapter.api_key = 'server-secret'
+    capability = adapter.capabilities()
+    assert capability['configured'] is True
+    assert 'api_key' not in capability
+    assert 'server-secret' not in str(capability)
+
+
 @pytest.mark.asyncio
 async def test_transcription_requires_real_audio_and_configuration():
     adapter = VoiceInputAdapter()
