@@ -190,6 +190,20 @@ def _prompt_response(output: str) -> Optional[str]:
     return None
 
 
+async def _run_cli(*args: str) -> tuple[bytes, bytes, int]:
+    """Run a Herdr CLI command, tolerating an unavailable local runtime."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return b'', b'Herdr is unavailable.', 127
+    stdout, stderr = await proc.communicate()
+    return stdout or b'', stderr or b'', proc.returncode if proc.returncode is not None else 1
+
+
 class HerdrClient:
     def __init__(self, socket_path: str = HERDR_SOCKET_PATH):
         self.socket_path = socket_path
@@ -215,13 +229,8 @@ class HerdrClient:
             return await self._cli_rpc_fallback(method, params)
 
     async def _cli_rpc_fallback(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        proc = await asyncio.create_subprocess_exec(
-            'herdr', 'api', 'snapshot',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode == 0 and stdout:
+        stdout, stderr, returncode = await _run_cli('herdr', 'api', 'snapshot')
+        if returncode == 0 and stdout:
             try:
                 return json.loads(stdout.decode('utf-8'))
             except json.JSONDecodeError:
@@ -233,12 +242,7 @@ class HerdrClient:
         if 'result' in res and 'snapshot' in res['result']:
             return res['result']['snapshot']
         
-        proc = await asyncio.create_subprocess_exec(
-            'herdr', 'api', 'snapshot',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
+        stdout, _, _ = await _run_cli('herdr', 'api', 'snapshot')
         if stdout:
             try:
                 data = json.loads(stdout.decode('utf-8'))
@@ -309,16 +313,11 @@ class HerdrClient:
                 context += f'; profile={profile_id}'
             submitted_text = f'[Magistrate execution: {context}]\n{text}'
         cmd = ['herdr', 'agent', 'prompt', resolved_target, submitted_text]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr, returncode = await _run_cli(*cmd)
         output_str = stdout.decode('utf-8') if stdout else ''
         err_str = stderr.decode('utf-8') if stderr else ''
 
-        if proc.returncode == 0:
+        if returncode == 0:
             # `herdr agent prompt` normally prints an RPC acknowledgement. It
             # is transport metadata, never an assistant message. Verified
             # harnesses may provide an explicit response/text field, which is
@@ -333,7 +332,7 @@ class HerdrClient:
             }
         else:
             return {
-                'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip(),
+                'status': 'error', 'target': resolved_target, 'error': err_str.strip() or output_str.strip() or 'Herdr is unavailable.',
                 'harness': harness, 'provider': provider, 'model': model, 'variant': variant,
                 'profile_id': profile_id,
                 'routing': {'selection_supported': True, 'migration_supported': False, 'mode': 'prompt-context'},
@@ -349,13 +348,8 @@ class HerdrClient:
             'herdr', 'agent', 'read', resolved_target,
             '--source', source, '--lines', str(lines), '--format', 'text'
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode not in (None, 0) and source != 'visible':
+        stdout, _, returncode = await _run_cli(*cmd)
+        if returncode != 0 and source != 'visible':
             # Active alternate-screen agents cannot expose scrollback while
             # working. Their visible viewport still contains the latest live
             # conversation, so return that instead of an empty history.
@@ -398,13 +392,8 @@ class HerdrClient:
 
     async def rename_agent(self, target: str, name: str) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)
-        proc = await asyncio.create_subprocess_exec(
-            'herdr', 'agent', 'rename', resolved_target, name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode == 0:
+        stdout, stderr, returncode = await _run_cli('herdr', 'agent', 'rename', resolved_target, name)
+        if returncode == 0:
             return {'status': 'renamed', 'target': resolved_target, 'name': name}
         return {
             'status': 'error',
@@ -415,13 +404,8 @@ class HerdrClient:
     async def interrupt_agent(self, target: str) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)
         cmd = ['herdr', 'agent', 'send-keys', resolved_target, 'C-c']
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode == 0:
+        stdout, stderr, returncode = await _run_cli(*cmd)
+        if returncode == 0:
             return {'status': 'interrupted', 'target': resolved_target}
         else:
             return {'status': 'error', 'target': resolved_target, 'error': stderr.decode('utf-8').strip()}
@@ -447,16 +431,11 @@ class HerdrClient:
         else:
             cmd = ['herdr', 'agent', 'send-keys', resolved_target, key]
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr, returncode = await _run_cli(*cmd)
         return {
             'status': 'submitted',
             'target': resolved_target,
             'key': key,
             'response': stdout.decode('utf-8').strip(),
-            'error': stderr.decode('utf-8').strip() if proc.returncode != 0 else None
+            'error': stderr.decode('utf-8').strip() if returncode != 0 else None
         }
