@@ -5,13 +5,35 @@ The production gateway and its static Expo web build live together in
 `WorkingDirectory`, `EnvironmentFile`, and `MAGISTRATE_DIST_DIR` all point at
 that persistent checkout. The deployment checkout owns its `.env`; keep that
 file out of Git and do not copy it from a dirty development checkout during a
-routine update.
+routine update. Production startup is fail-closed: the file must set
+`MAGISTRATE_ENV=production`, `MAGISTRATE_DB_PATH` to an absolute path outside
+the checkout, `MAGISTRATE_BOOTSTRAP_SECRET`, `MAGISTRATE_SECRET_KEY`, and
+`MAGISTRATE_CORS_ORIGINS` (HTTPS origins only). The SQLite file and its
+rollback/backup copies therefore survive frontend exports and Git updates.
+
+A minimal deployment-only configuration is:
+
+```dotenv
+MAGISTRATE_ENV=production
+MAGISTRATE_DB_PATH=/var/lib/magistrate/magistrate.sqlite3
+MAGISTRATE_BOOTSTRAP_SECRET=<operator-generated-secret>
+MAGISTRATE_SECRET_KEY=<generated-fernet-key>
+MAGISTRATE_CORS_ORIGINS=https://magistrate.example
+```
+
+Set restrictive permissions on the env file and database directory. Rotate the
+bootstrap and Fernet keys through the approved secret-management procedure;
+never commit them or put them in a frontend build.
 
 Run `scripts/deploy_magistrate.sh` from a trusted shell for a manual update. The
 script fetches `origin/main`, refuses dirty or divergent checkouts, performs a
 fast-forward-only update, runs the supported `npx expo export -p web` build,
 checks that `index.html`, `chat.html`, and `voice.html` exist, restarts
 `magistrate-gateway.service`, and verifies that the HTTP process is reachable.
+It also rejects missing production auth settings and checkout-local SQLite paths
+before running the build. The health probe intentionally accepts an unauthenticated
+401/403 as proof of process reachability; validate the authenticated path with an
+operator-issued Bearer session during the release smoke check.
 It never resets, stashes, or discards deployment-only commits.
 
 ## Automatic demo redeploy

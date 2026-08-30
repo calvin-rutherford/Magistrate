@@ -45,6 +45,10 @@ async function openAttention({ notificationMode, eventBatch = events } = {}) {
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
+      if (url.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/notifications/events/ack')) {
         window.__notificationCalls.push({ url, method: options?.method, body: options?.body });
         return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));

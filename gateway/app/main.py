@@ -86,23 +86,14 @@ voice_move_service = VoiceMoveService(herdr_client)
 @app.websocket('/api/v1/events')
 async def agent_events(websocket: WebSocket):
     """Authenticate in the first frame; credentials never travel in a URL."""
-    query_token = websocket.query_params.get('token')
     principal = None
     requested_target = None
-    # Only the old checked-in regression suite may use its legacy query token;
-    # deployed clients and every non-test environment must use the first frame.
-    if query_token:
-        from app.auth import MAGISTRATE_TOKEN, Principal as AuthPrincipal
-        if os.getenv('MAGISTRATE_ENV', '').lower() != 'test' or not MAGISTRATE_TOKEN or query_token != MAGISTRATE_TOKEN:
-            await websocket.close(code=1008)
-            return
-        principal = AuthPrincipal('default_user', frozenset({'read'}), 'legacy-test', 2**31)
     await websocket.accept()
     try:
         if principal is None:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
             message = json.loads(raw)
-            token = message.get('token') if isinstance(message, dict) else None
+            token = message.get('token') if isinstance(message, dict) and message.get('type') == 'auth' else None
             requested_target = message.get('target') if isinstance(message, dict) else None
             if not isinstance(token, str):
                 await websocket.close(code=1008)
@@ -160,13 +151,26 @@ async def create_session(request: SessionRequest):
     return issue_session(request.bootstrap_secret)
 
 
+@app.get('/api/v1/auth/session')
+async def inspect_session(principal: Principal = Depends(verify_token)):
+    """Small protected validation endpoint independent of Herdr/Firstmate."""
+    return {
+        'authenticated': True,
+        'user_id': principal.user_id,
+        'scopes': sorted(principal.scopes),
+        'expires_at': principal.expires_at,
+    }
+
+
 @app.post('/api/v1/auth/session/revoke')
 async def revoke_current_session(principal: Principal = Depends(verify_token), authorization: Optional[str] = Header(None)):
     if not authorization:
         raise HTTPException(status_code=400, detail='Bearer session required')
     _, _, token = authorization.partition(' ')
+    if not token:
+        raise HTTPException(status_code=400, detail='Bearer session required')
     revoke_session(token)
-    return {'status': 'revoked'}
+    return {'status': 'revoked', 'session_id': principal.session_id}
 
 jira_adapter = JiraProviderAdapter()
 teams_adapter = TeamsProviderAdapter()

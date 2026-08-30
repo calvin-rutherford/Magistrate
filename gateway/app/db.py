@@ -2,14 +2,23 @@ import os
 import sqlite3
 import base64
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Dict, Any, List, Optional, Tuple
 from cryptography.fernet import Fernet
 from cryptography.fernet import InvalidToken
 
-DB_PATH = os.getenv('MAGISTRATE_DB_PATH', '/home/spectre/Magistrate/gateway/magistrate.db')
+# Deployments must provide an absolute path outside the checkout so upgrades
+# cannot replace or strand the operator's SQLite state. Development and tests
+# get a worktree-local default; production init_db() fails closed if the path
+# was omitted.
+_environment_at_import = os.getenv('MAGISTRATE_ENV', '').strip().lower()
+_configured_db_path = os.getenv('MAGISTRATE_DB_PATH', '').strip()
 DEFAULT_CIPHERTEXT_VERSION = 'v1'
 DEVELOPMENT_MODES = frozenset({'dev', 'development', 'test', 'testing'})
+DB_PATH = _configured_db_path
+if not DB_PATH and _environment_at_import in DEVELOPMENT_MODES:
+    DB_PATH = str(Path(__file__).resolve().parents[1] / 'magistrate.db')
 LEGACY_MIGRATION_FLAG = 'MAGISTRATE_ALLOW_LEGACY_MIGRATION'
 ROTATION_FLAG = 'MAGISTRATE_KEY_ROTATION_ENABLED'
 MAX_ROTATION_ROWS = 1_000
@@ -302,7 +311,16 @@ def rotate_oauth_credentials(
 
 def init_db():
     validate_secret_configuration()
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    if not DB_PATH:
+        raise SecretConfigurationError(
+            'MAGISTRATE_DB_PATH is required outside explicit development/test mode'
+        )
+    db_parent = os.path.dirname(DB_PATH)
+    if not db_parent:
+        raise SecretConfigurationError('MAGISTRATE_DB_PATH must name an absolute persistent path')
+    if not os.path.isabs(DB_PATH):
+        raise SecretConfigurationError('MAGISTRATE_DB_PATH must be an absolute persistent path')
+    os.makedirs(db_parent, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -376,6 +394,18 @@ def init_db():
         unavailable_behavior TEXT NOT NULL DEFAULT 'error',
         updated_at INTEGER,
         FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS gateway_sessions (
+        session_id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked_at INTEGER
     )
     ''')
 

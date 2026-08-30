@@ -99,7 +99,7 @@ def test_identity_comes_from_session_not_query(monkeypatch):
 
 def test_missing_or_query_only_credentials_are_rejected():
     assert client.get('/api/v1/fleet').status_code == 401
-    assert client.get('/api/v1/fleet?token=magistrate-device-token-12345').status_code == 401
+    assert client.get('/api/v1/fleet?token=not-a-credential').status_code == 401
 
 
 @pytest.mark.parametrize('method,path,payload', [

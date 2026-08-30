@@ -47,3 +47,7 @@ jobs:
         run: npm run test:ambient
       - name: Run voice-session tests
         run: npx tsx --test tests/voice-session.test.ts
+      - name: Run browser authentication lifecycle tests
+        run: npm run test:auth
+      - name: Run browser chat regressions
+        run: npm run test:chat

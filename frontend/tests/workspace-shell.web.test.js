@@ -32,6 +32,10 @@ async function open(url) {
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (resource, options) => {
       const requestUrl = typeof resource === 'string' ? resource : resource.url;
+      if (requestUrl.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (requestUrl.includes('/agents')) return Promise.resolve(new Response(JSON.stringify([{ id: 'w1:p7', name: 'Live agent', status: 'working', harness: 'codex' }]), { status: 200 }));
       if (requestUrl.includes('/attention/unified')) return Promise.resolve(new Response('[]', { status: 200 }));
       if (requestUrl.includes('/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200 }));

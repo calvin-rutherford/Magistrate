@@ -40,8 +40,30 @@ else
   exit 1
 fi
 
-if [[ ! -f "$DEPLOY_DIR/gateway/.env" ]]; then
-  echo "refusing deploy: missing $DEPLOY_DIR/gateway/.env" >&2
+ENV_FILE="$DEPLOY_DIR/gateway/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "refusing deploy: missing $ENV_FILE" >&2
+  exit 1
+fi
+
+# Authentication and encrypted credentials depend on production-only settings.
+# Fail before the build/restart rather than allowing systemd to start a process
+# that silently falls back to a checkout-local database or development mode.
+required_env=(MAGISTRATE_ENV MAGISTRATE_DB_PATH MAGISTRATE_BOOTSTRAP_SECRET MAGISTRATE_SECRET_KEY MAGISTRATE_CORS_ORIGINS)
+for key in "${required_env[@]}"; do
+  if ! grep -Eq "^${key}=[^#[:space:]]" "$ENV_FILE"; then
+    echo "refusing deploy: $key is missing or empty in $ENV_FILE" >&2
+    exit 1
+  fi
+done
+if ! grep -Eq '^MAGISTRATE_ENV=production([[:space:]]|$)' "$ENV_FILE"; then
+  echo "refusing deploy: MAGISTRATE_ENV must be production" >&2
+  exit 1
+fi
+DB_PATH="$(awk -F= '$1 == "MAGISTRATE_DB_PATH" { sub(/^[[:space:]]+/, "", $2); print $2; exit }' "$ENV_FILE")"
+DB_PATH="${DB_PATH%\"}"; DB_PATH="${DB_PATH#\"}"
+if [[ "$DB_PATH" != /* || "$DB_PATH" == "$DEPLOY_DIR"/* ]]; then
+  echo "refusing deploy: MAGISTRATE_DB_PATH must be an absolute path outside the deployment checkout" >&2
   exit 1
 fi
 

@@ -1,8 +1,9 @@
 from fastapi.testclient import TestClient
 
 from app.main import app, voice_move_service
+from conftest import TEST_HEADERS
 
-HEADERS = {'X-Magistrate-Token': 'magistrate-device-token-12345'}
+HEADERS = TEST_HEADERS
 client = TestClient(app)
 
 class FakeHerdr:

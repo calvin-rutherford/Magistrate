@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 import app.db as database
 import app.main as gateway
+from app.auth import issue_session
 from app.main import app
 from app.oauth_transactions import (
     DEFAULT_REDIRECT_URI,
@@ -13,15 +14,19 @@ from app.oauth_transactions import (
     OAuthTransactionStore,
     REDIRECT_URI_ENV,
 )
+from conftest import TEST_HEADERS
 
 
 client = TestClient(app)
-HEADERS = {'X-Magistrate-Token': 'magistrate-device-token-12345'}
+HEADERS = TEST_HEADERS
 
 
 @pytest.fixture
 def transaction_db(monkeypatch, tmp_path):
     monkeypatch.setattr(database, 'DB_PATH', str(tmp_path / 'oauth.sqlite3'))
+    global HEADERS
+    token = issue_session('test-bootstrap-secret')['session_token']
+    HEADERS = {'Authorization': f'Bearer {token}'}
     monkeypatch.setenv('GITHUB_OAUTH_CLIENT_ID', 'test-client')
     monkeypatch.setenv('GITHUB_OAUTH_CLIENT_SECRET', 'test-secret')
     monkeypatch.setenv('MAGISTRATE_OAUTH_CALLBACK_BASE_URL', 'https://gateway.test')

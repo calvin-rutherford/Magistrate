@@ -68,8 +68,12 @@ async function openHome({ agentsStatus = 200, agents = null, attention = [] } = 
       requires_attention: true,
       url: 'https://github.com/acme/ship/pull/42'
     };
-    window.fetch = resource => {
+    window.fetch = (resource, options) => {
       const requestUrl = typeof resource === 'string' ? resource : resource.url;
+      if (requestUrl.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (requestUrl.includes('/agents')) {
         return Promise.resolve(new Response(JSON.stringify(agentsStatus === 200 ? (agents || [agent]) : { detail: 'Agent service unavailable' }), {
           status: agentsStatus,

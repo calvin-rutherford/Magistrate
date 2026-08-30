@@ -1,8 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app.auth import MAGISTRATE_TOKEN
 from app.main import app, recent_activity_service
+from conftest import TEST_HEADERS
 from app.recent_activity import RecentActivityService
 
 
@@ -52,7 +52,7 @@ def test_recent_activity_endpoint_is_authenticated_and_returns_feed(monkeypatch)
     assert client.get('/api/v1/recent-activity').status_code == 401
     response = client.get(
         '/api/v1/recent-activity?limit=8&refresh=true',
-        headers={'X-Magistrate-Token': MAGISTRATE_TOKEN},
+        headers=TEST_HEADERS,
     )
     assert response.status_code == 200
     assert response.json()['items'] == []

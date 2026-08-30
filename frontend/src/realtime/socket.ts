@@ -7,20 +7,29 @@ export class RealtimeClient {
   private listeners: EventCallback[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  private connecting = false;
   private target: string;
 
   constructor(target = 'captain') {
     this.target = target;
   }
 
+  private scheduleReconnect() {
+    if (this.stopped || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connect();
+    }, 3000);
+  }
+
   async connect() {
-    if (this.stopped || typeof WebSocket === 'undefined' || this.socket?.readyState === WebSocket.OPEN) return;
-    const token = await getGatewaySessionToken();
-    if (!token || this.stopped) {
-      this.reconnectTimer = setTimeout(() => this.connect(), 3000);
-      return;
-    }
+    if (this.stopped || this.connecting || typeof WebSocket === 'undefined' || this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
+    this.connecting = true;
     try {
+      const token = await getGatewaySessionToken();
+      // A missing token means the React auth gate is closing this client. Do not
+      // manufacture a reconnect loop while logout/expiry invalidates the session.
+      if (!token || this.stopped) return;
       const wsUrl = GATEWAY_URL.replace(/^http/, 'ws') + '/events';
       this.socket = new WebSocket(wsUrl);
       this.socket.onopen = () => {
@@ -36,11 +45,14 @@ export class RealtimeClient {
       };
       this.socket.onclose = () => {
         this.socket = null;
-        if (!this.stopped) this.reconnectTimer = setTimeout(() => this.connect(), 3000);
+        void getGatewaySessionToken().then(currentToken => { if (currentToken) this.scheduleReconnect(); });
       };
       this.socket.onerror = () => { /* onclose schedules the fallback reconnect */ };
     } catch {
-      this.reconnectTimer = setTimeout(() => this.connect(), 3000);
+      this.socket = null;
+      this.scheduleReconnect();
+    } finally {
+      this.connecting = false;
     }
   }
 
