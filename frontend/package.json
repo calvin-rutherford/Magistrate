@@ -59,7 +59,7 @@
     "test:home": "node --test tests/home-realdata.web.test.js",
     "test:agent-status": "npx tsx --test tests/agent-status.test.ts",
     "test:chat-history": "npx tsx --test tests/chat-history.test.ts",
-    "test:voice": "npx tsx --test tests/voice-session.test.ts tests/voice-branding.test.ts && node --test tests/voice-page.web.test.js",
+    "test:voice": "npx tsx --test tests/voice-session.test.ts tests/voice-branding.test.ts tests/voice-input-modes.test.ts && node --test tests/voice-page.web.test.js",
     "test:notifications": "node --test tests/notifications.web.test.js",
     "test:github": "node --test tests/github-prs.web.test.js",
     "test:ambient": "node --test tests/ambient-source.test.js"

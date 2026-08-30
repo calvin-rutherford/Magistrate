@@ -20,6 +20,16 @@ class VoiceInputAdapter:
         self.model = os.getenv('VOICE_STT_MODEL', 'gpt-4o-mini-transcribe')
         self.base_url = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
 
+    def capabilities(self) -> Dict[str, Any]:
+        """Expose capability metadata, never credential material, to clients."""
+        configured = self.provider == 'openai' and bool(self.api_key)
+        return {
+            'provider': self.provider,
+            'configured': configured,
+            'model': self.model,
+            'reason': None if configured else 'The gateway speech provider is not configured.',
+        }
+
     async def transcribe_audio(self, audio_bytes: bytes, source: str = 'iphone',
                                content_type: str = 'application/octet-stream',
                                filename: str = 'speech.m4a') -> Dict[str, Any]:

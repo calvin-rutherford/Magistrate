@@ -53,6 +53,15 @@ def test_live_github_prs():
         prs = res.json()
         assert isinstance(prs, (list, dict))
 
+def test_voice_capabilities_do_not_expose_credentials():
+    res = client.get('/api/v1/voice/capabilities', headers=HEADERS)
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['schema_version'] == 'voice-capabilities.v1'
+    assert all('api_key' not in item for item in payload['modes'])
+    assert 'OPENAI_API_KEY' not in str(payload)
+
+
 def test_voice_transcribe():
     res = client.post('/api/v1/voice/transcribe', data={'source': 'iphone'}, headers=HEADERS)
     assert res.status_code == 400
