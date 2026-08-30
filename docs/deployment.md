@@ -36,6 +36,51 @@ before running the build. The health probe intentionally accepts an unauthentica
 operator-issued Bearer session during the release smoke check.
 It never resets, stashes, or discards deployment-only commits.
 
+GitHub Actions must not receive the bootstrap secret. For the complete trusted-host
+smoke, run this on the deployment host after the update (it reads `gateway/.env`
+without printing the secret or the issued bearer):
+
+```sh
+MAGISTRATE_TRUSTED_SMOKE=1 \
+  MAGISTRATE_DEPLOY_DIR=/home/spectre/firstmate/projects/Magistrate-deploy \
+  /home/spectre/firstmate/projects/Magistrate-deploy/scripts/deploy_magistrate.sh
+```
+
+That smoke proves session issuance, protected session validation, authenticated
+`/health`, and authenticated `/agents` (the Herdr-backed application path). The
+Actions workflow separately checks unauthenticated HTTPS reachability and the
+static frontend, so it never handles the bootstrap secret.
+
+## SQLite backup and migration
+
+`MAGISTRATE_DB_PATH` is deployment state, not release state. Keep its directory
+owned by the service account and mode `0700`, and the database mode `0600`.
+Before an upgrade or key rotation, make an online SQLite backup and record its
+revision; the SQLite backup API is safe while the service is running:
+
+```sh
+set -eu
+DB=/var/lib/magistrate/magistrate.sqlite3
+BACKUP=/var/lib/magistrate/backups/magistrate-$(date -u +%Y%m%dT%H%M%SZ).sqlite3
+install -d -m 700 /var/lib/magistrate/backups
+python3 - "$DB" "$BACKUP" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as backup:
+    source.backup(backup)
+PY
+chmod 600 "$BACKUP"
+sqlite3 "$BACKUP" 'pragma integrity_check;'
+```
+
+The gateway's `init_db()` uses additive `CREATE TABLE IF NOT EXISTS` schema
+initialization, so restarting it with the same absolute path preserves profiles,
+provider credentials, execution settings, and bearer-session rows. Verify
+expiry/revocation and restart persistence with the gateway suite and trusted
+smoke. To restore, stop the user unit, preserve the failed database, copy the
+selected backup back to `MAGISTRATE_DB_PATH`, restore ownership/mode, start the
+unit, and rerun the smoke. Never replace the path with a checkout-local file or
+delete it as part of a frontend deploy.
+
 ## Automatic demo redeploy
 
 `.github/workflows/deploy-demo.yml` runs on every push to `main` (the signal

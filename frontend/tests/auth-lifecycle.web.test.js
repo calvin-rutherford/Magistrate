@@ -45,6 +45,7 @@ async function open(mode = 'normal', preserveStorage = false) {
     }
     const nativeFetch = window.fetch.bind(window);
     const state = { mode, valid: false, calls: [], authCalls: [] };
+    const expiresAt = mode === 'expiry' ? Math.floor(Date.now() / 1000) + 20 : 4102444800;
     let validationFailures = mode === 'validation-failure' ? 1 : 0;
     window.__authLifecycle = state;
     const json = (payload, status = 200) => Promise.resolve(new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } }));
@@ -58,7 +59,7 @@ async function open(mode = 'normal', preserveStorage = false) {
           try { body = JSON.parse(options.body || '{}'); } catch {}
           if (body.bootstrap_secret !== 'valid-bootstrap') return json({ detail: 'Invalid session bootstrap credential' }, 401);
           state.valid = true;
-          return json({ session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' });
+          return json({ session_token: 'browser-test-session', token_type: 'Bearer', expires_at: expiresAt, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' });
         }
         const authorization = options.headers?.Authorization || options.headers?.get?.('Authorization');
         if (validationFailures > 0) {
@@ -67,7 +68,7 @@ async function open(mode = 'normal', preserveStorage = false) {
         }
         if (authorization === 'Bearer browser-test-session') {
           state.valid = true;
-          return json({ authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' });
+          return json({ authenticated: true, expires_at: expiresAt, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' });
         }
         return json({ detail: 'Invalid or expired session' }, 401);
       }
@@ -158,6 +159,14 @@ test('a validated bearer and expiry metadata survive reload without re-bootstrap
   const authCalls = await page.evaluate(() => window.__authLifecycle.authCalls);
   assert.equal(authCalls.filter(call => call.method === 'POST').length, 0);
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.gateway.session')).expires_at), 4102444800);
+  await page.close();
+});
+
+test('obvious expiry invalidates the session, unmounts protected activity, and returns to login', async () => {
+  const page = await open('expiry');
+  await connect(page);
+  await page.waitForSelector('[data-testid="bootstrap-secret"]', { timeout: 30000 });
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
   await page.close();
 });
 

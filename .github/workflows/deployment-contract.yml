@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/deploy_magistrate.sh'
       - 'scripts/test_deploy_magistrate.sh'
+      - 'scripts/smoke_magistrate.sh'
       - '.github/workflows/deploy-demo.yml'
       - '.github/workflows/deployment-contract.yml'
   push:
@@ -12,6 +13,7 @@ on:
     paths:
       - 'scripts/deploy_magistrate.sh'
       - 'scripts/test_deploy_magistrate.sh'
+      - 'scripts/smoke_magistrate.sh'
       - '.github/workflows/deploy-demo.yml'
       - '.github/workflows/deployment-contract.yml'
 

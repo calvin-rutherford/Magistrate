@@ -66,7 +66,7 @@ function sessionFromPayload(payload: unknown): GatewaySession | null {
   const value = payload as Record<string, unknown>;
   const token = typeof value.session_token === 'string' ? value.session_token : typeof value.token === 'string' ? value.token : null;
   const expiresAt = typeof value.expires_at === 'number' ? value.expires_at : null;
-  if (!token || !token.trim() || !expiresAt || !Number.isSafeInteger(expiresAt)) return null;
+  if (!token || !token.trim() || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) return null;
   const scopes = Array.isArray(value.scopes) ? value.scopes.filter((scope): scope is string => typeof scope === 'string') : [];
   return { token, expiresAt, scopes, userId: typeof value.user_id === 'string' ? value.user_id : undefined };
 }
@@ -158,7 +158,7 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
   if (!response.ok) throw responseError(response, payload);
   const serverSession = sessionFromPayload(payload);
   const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
-  if (value.authenticated !== true || typeof value.expires_at !== 'number') throw new Error('Gateway returned an invalid session validation response.');
+  if (value.authenticated !== true || typeof value.expires_at !== 'number' || !Number.isSafeInteger(value.expires_at) || value.expires_at <= Math.floor(Date.now() / 1000)) throw new Error('Gateway returned an invalid session validation response.');
   const validated = { ...session, expiresAt: value.expires_at, scopes: Array.isArray(value.scopes) ? value.scopes.filter((scope): scope is string => typeof scope === 'string') : session.scopes, userId: typeof value.user_id === 'string' ? value.user_id : session.userId };
   if (serverSession?.token) validated.token = serverSession.token;
   sessionToken = validated.token;

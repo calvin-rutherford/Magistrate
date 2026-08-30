@@ -1,7 +1,10 @@
 # Friend beta security boundary
 
-Magistrate's initial friend beta is a restricted, single-user deployment. The
-server operator configures `MAGISTRATE_BOOTSTRAP_SECRET`,
+Magistrate's active friend-beta architecture is Expo/React Native → FastAPI
+Gateway → Herdr → Firstmate. The legacy Django subsystem remains in the
+repository for its existing consumers; it is not part of this beta request path
+and is neither expanded nor removed. The beta is a restricted, single-user
+deployment. The server operator configures `MAGISTRATE_BOOTSTRAP_SECRET`,
 `MAGISTRATE_BOOTSTRAP_USER_ID`, `MAGISTRATE_SESSION_SCOPES`, and an explicit
 `MAGISTRATE_CORS_ORIGINS`. The app exchanges the operator-provided bootstrap
 secret for a short-lived, revocable bearer session; no gateway token or runner

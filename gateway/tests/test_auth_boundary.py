@@ -20,6 +20,19 @@ def test_session_requires_server_configured_bootstrap(monkeypatch):
     assert response.status_code == 503
 
 
+def test_session_validation_is_protected_and_non_cacheable(monkeypatch):
+    monkeypatch.setenv('MAGISTRATE_BOOTSTRAP_SECRET', 'validation-secret')
+    issued = client.post('/api/v1/auth/session', json={'bootstrap_secret': 'validation-secret'})
+    token = issued.json()['session_token']
+    assert issued.headers['cache-control'] == 'no-store'
+    validation = client.get('/api/v1/auth/session', headers=headers(token))
+    assert validation.status_code == 200
+    assert validation.headers['cache-control'] == 'no-store'
+    assert validation.json()['authenticated'] is True
+    assert validation.json()['expires_at'] > int(time.time())
+    assert client.get('/api/v1/auth/session').status_code == 401
+
+
 def test_session_is_opaque_scoped_and_revocable(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_BOOTSTRAP_SECRET', 'correct-secret')
     monkeypatch.setenv('MAGISTRATE_SESSION_SCOPES', 'read,account')

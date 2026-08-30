@@ -98,4 +98,18 @@ fi
 test "$(git -C "$DEPLOY" rev-parse HEAD)" = "$LOCAL_HEAD"
 test -f "$DEPLOY/local-only"
 
+# The trusted smoke consumes the deployment env file but must not expose either
+# the bootstrap secret or the issued bearer in its output.
+cat > "$STUBS/curl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *'/auth/session'* ]]; then
+  printf '{"session_token":"smoke-only-token","expires_at":4102444800}'
+fi
+EOF
+chmod +x "$STUBS/curl"
+SMOKE_OUTPUT="$(PATH="$STUBS:$PATH" MAGISTRATE_ENV_FILE="$DEPLOY/gateway/.env" MAGISTRATE_HEALTH_URL='http://127.0.0.1:8000/api/v1/health' bash scripts/smoke_magistrate.sh)"
+test "$SMOKE_OUTPUT" = 'authenticated deployment smoke passed (health and /agents)'
+! grep -Fq 'test-bootstrap' <<<"$SMOKE_OUTPUT"
+! grep -Fq 'smoke-only-token' <<<"$SMOKE_OUTPUT"
+
 echo 'deployment safeguards passed'

@@ -93,4 +93,13 @@ if command -v curl >/dev/null 2>&1; then
   esac
 fi
 
+# GitHub Actions intentionally performs only the unauthenticated reachability
+# check above. A trusted operator can opt into the complete smoke, which reads
+# the bootstrap secret on the host and checks issuance, authenticated health,
+# and one Herdr-backed application endpoint without logging credentials.
+if [[ "${MAGISTRATE_TRUSTED_SMOKE:-0}" == "1" ]]; then
+  MAGISTRATE_DEPLOY_DIR="$DEPLOY_DIR" MAGISTRATE_HEALTH_URL="$HEALTH_URL" \
+    "$DEPLOY_DIR/scripts/smoke_magistrate.sh"
+fi
+
 echo "deployed $(git -C "$DEPLOY_DIR" rev-parse --short HEAD) with frontend dist from $DEPLOY_DIR/frontend/dist"

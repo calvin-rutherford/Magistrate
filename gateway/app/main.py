@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Header, WebSocket, WebSocketDisconnect, Query, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Depends, Header, Response, WebSocket, WebSocketDisconnect, Query, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -147,13 +147,16 @@ class SessionRequest(BaseModel):
 
 
 @app.post('/api/v1/auth/session')
-async def create_session(request: SessionRequest):
+async def create_session(request: SessionRequest, response: Response):
+    # Bearer issuance must never be cached by a browser, proxy, or shared CDN.
+    response.headers['Cache-Control'] = 'no-store'
     return issue_session(request.bootstrap_secret)
 
 
 @app.get('/api/v1/auth/session')
-async def inspect_session(principal: Principal = Depends(verify_token)):
+async def inspect_session(response: Response, principal: Principal = Depends(verify_token)):
     """Small protected validation endpoint independent of Herdr/Firstmate."""
+    response.headers['Cache-Control'] = 'no-store'
     return {
         'authenticated': True,
         'user_id': principal.user_id,
@@ -163,7 +166,8 @@ async def inspect_session(principal: Principal = Depends(verify_token)):
 
 
 @app.post('/api/v1/auth/session/revoke')
-async def revoke_current_session(principal: Principal = Depends(verify_token), authorization: Optional[str] = Header(None)):
+async def revoke_current_session(response: Response, principal: Principal = Depends(verify_token), authorization: Optional[str] = Header(None)):
+    response.headers['Cache-Control'] = 'no-store'
     if not authorization:
         raise HTTPException(status_code=400, detail='Bearer session required')
     _, _, token = authorization.partition(' ')

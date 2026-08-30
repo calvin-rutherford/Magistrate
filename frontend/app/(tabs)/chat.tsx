@@ -727,9 +727,10 @@ export default function ChatScreen() {
     onMoveShouldSetPanResponder: (_, g) => isNarrow && drawerOpen && g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy),
     onPanResponderRelease: (_, g) => { if (g.dx < -55 || g.vx < -0.35) setDrawerOpen(false); },
   }), [drawerOpen, isNarrow]);
-  // Composer sits in the bottom ~140px; excluding that band keeps this from hijacking text-selection drags there.
+  // Keep a generous bottom exclusion band so this cannot hijack text-selection
+  // or horizontal scrolling gestures that begin in the composer.
   const swipeToOpen = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_, g) => isNarrow && !drawerOpen && g.y0 < height - 140 && g.dx > 8 && Math.abs(g.dx) > Math.abs(g.dy),
+    onMoveShouldSetPanResponder: (_, g) => isNarrow && !drawerOpen && g.y0 < height - 220 && g.dx > 8 && Math.abs(g.dx) > Math.abs(g.dy),
     onPanResponderRelease: (_, g) => { if (g.dx > 55 || g.vx > 0.35) setDrawerOpen(true); },
   }), [drawerOpen, isNarrow, height]);
   return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page} {...(isNarrow ? swipeToOpen.panHandlers : {})}>
