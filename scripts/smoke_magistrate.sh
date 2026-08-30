@@ -40,6 +40,9 @@ session_token="$(printf '%s' "$session_json" | python3 -c 'import json, sys; val
 unset session_json
 
 curl --silent --fail --connect-timeout 5 --max-time 15 \
+  -H "Authorization: Bearer $session_token" "$api_root/auth/session" >/dev/null 2>&1 \
+  || fail "authenticated session validation"
+curl --silent --fail --connect-timeout 5 --max-time 15 \
   -H "Authorization: Bearer $session_token" "$HEALTH_URL" >/dev/null 2>&1 \
   || fail "authenticated health"
 curl --silent --fail --connect-timeout 5 --max-time 15 \
