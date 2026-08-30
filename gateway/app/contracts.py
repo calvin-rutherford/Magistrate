@@ -2,6 +2,12 @@ from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, List
 
+class UploadedAttachmentContract(BaseModel):
+    upload_id: str = Field(min_length=16, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+    filename: str = Field(min_length=1, max_length=160)
+    media_type: str = Field(min_length=1, max_length=128)
+    size: int = Field(ge=0, le=25 * 1024 * 1024)
+
 class UniversalInputContract(BaseModel):
     source: str = 'iphone'
     modality: str = 'text'
@@ -13,6 +19,7 @@ class UniversalInputContract(BaseModel):
     model: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
     variant: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
     profile_id: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    attachments: Optional[List[UploadedAttachmentContract]] = Field(default=None, max_length=10)
 
 class ExecutionSettingsContract(BaseModel):
     profile_id: Optional[str] = Field(default=None, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
@@ -33,6 +40,7 @@ class NotificationPreferencesContract(BaseModel):
     enabled: bool = True
     quiet_start: Optional[int] = None
     quiet_end: Optional[int] = None
+    mode: Literal['restricted', 'moderate', 'full'] = 'moderate'
 
 class RenameAgentContract(BaseModel):
     name: str = Field(min_length=1, max_length=32, pattern=r'^[a-z][a-z0-9_-]{0,31}$')

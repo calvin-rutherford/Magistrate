@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Header, Response, WebSocket, WebSocketDisconnect, Query, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Depends, Header, Response, Request, WebSocket, WebSocketDisconnect, Query, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +27,11 @@ from app.db import (init_db, get_profile, update_profile, get_connected_accounts
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
 from app.attention_service import attention_service
-from app.notifications import register_push_token, reconcile_notification_events, acknowledge_notification_events, update_notification_preferences
+from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
+                               list_registered_push_users, registered_local_hour,
+                               reconcile_notification_events, dispatch_notification_events,
+                               acknowledge_notification_events, get_notification_preferences,
+                               update_notification_preferences)
 from app.providers.github import GitHubProviderAdapter
 from app.providers.twitter import TwitterProviderAdapter
 from app.providers.discord import DiscordProviderAdapter
@@ -37,6 +41,7 @@ from app.providers.teams import TeamsProviderAdapter
 from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
 from app.usage import get_usage
 from app.ar_glasses import router as ar_router
+from app.uploads import MAX_UPLOAD_BYTES, save_upload, get_upload
 
 init_db()
 
@@ -81,6 +86,43 @@ fm_client = FirstmateClient()
 recent_activity_service = RecentActivityService(fm_client, github_service)
 stt_adapter = VoiceInputAdapter()
 voice_move_service = VoiceMoveService(herdr_client)
+_notification_reconciler_task = None
+
+
+async def _reconcile_registered_notifications() -> None:
+    """Poll source-of-truth attention server-side for background push delivery."""
+    try:
+        interval = max(15, int(os.getenv('MAGISTRATE_NOTIFICATION_POLL_SECONDS', '30')))
+    except ValueError:
+        interval = 30
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            items = await attention_service.get_unified_attention_items()
+            for user_id in list_registered_push_users():
+                await dispatch_notification_events(user_id, items, local_hour=registered_local_hour(user_id))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A source/provider outage must not kill the reconciler; the next
+            # interval retries and the Attention tab remains the fallback.
+            print('Notification reconciler unavailable:', exc)
+
+
+@app.on_event('startup')
+async def start_notification_reconciler():
+    global _notification_reconciler_task
+    if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
+        _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
+
+
+@app.on_event('shutdown')
+async def stop_notification_reconciler():
+    global _notification_reconciler_task
+    if _notification_reconciler_task:
+        _notification_reconciler_task.cancel()
+        await asyncio.gather(_notification_reconciler_task, return_exceptions=True)
+        _notification_reconciler_task = None
 
 
 @app.websocket('/api/v1/events')
@@ -403,8 +445,40 @@ async def get_usage_summary(provider: Optional[str] = None, principal: Principal
 
 # PUSH NOTIFICATIONS ENDPOINT
 @app.post('/api/v1/notifications/register')
-async def register_notifications(push_token: str = Form(...), platform: str = Form('ios'), principal: Principal = Depends(require_scope('notifications'))):
-    return register_push_token(user_id=principal.user_id, push_token=push_token, platform=platform)
+async def register_notifications(
+    request: Request,
+    push_token: Optional[str] = Form(None),
+    platform: str = Form('ios'),
+    timezone_offset_minutes: Optional[int] = Form(None),
+    principal: Principal = Depends(require_scope('notifications')),
+):
+    # Native clients use multipart FormData; JSON keeps the authenticated
+    # contract convenient for device-registration integrations and tests.
+    if push_token is None and request.headers.get('content-type', '').startswith('application/json'):
+        payload = await request.json()
+        if isinstance(payload, dict):
+            push_token = payload.get('push_token')
+            platform = payload.get('platform', platform)
+            timezone_offset_minutes = payload.get('timezone_offset_minutes', timezone_offset_minutes)
+    try:
+        if timezone_offset_minutes is not None:
+            timezone_offset_minutes = int(timezone_offset_minutes)
+        return register_push_token(user_id=principal.user_id, push_token=push_token, platform=platform, timezone_offset_minutes=timezone_offset_minutes)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+@app.delete('/api/v1/notifications/register')
+async def unregister_notifications(principal: Principal = Depends(require_scope('notifications'))):
+    return revoke_push_token(principal.user_id)
+
+@app.get('/api/v1/notifications/preferences')
+async def get_notifications_preferences(principal: Principal = Depends(require_scope('notifications'))):
+    return get_notification_preferences(principal.user_id)
+
+@app.get('/api/v1/notifications/status')
+async def get_notifications_status(principal: Principal = Depends(require_scope('notifications'))):
+    registered = get_registered_push_token(principal.user_id)
+    return {'native_push': 'registered' if registered else 'unavailable', 'platform': registered['platform'] if registered else None}
 
 @app.get('/api/v1/notifications/events')
 async def get_notification_events(
@@ -412,8 +486,12 @@ async def get_notification_events(
     local_hour: Optional[int] = None,
     principal: Principal = Depends(require_scope('notifications')),
 ):
+    # Foreground is intentionally ignored for server delivery. A client poll
+    # must never consume a transition before the gateway has sent the remote
+    # push; web clients still receive the returned feed for browser fallback.
+    del foreground
     items = await attention_service.get_unified_attention_items()
-    return reconcile_notification_events(principal.user_id, items, foreground=foreground, local_hour=local_hour)
+    return await dispatch_notification_events(principal.user_id, items, local_hour=local_hour)
 
 @app.post('/api/v1/notifications/events/ack')
 async def ack_notification_events(contract: NotificationAckContract, principal: Principal = Depends(require_scope('notifications'))):
@@ -423,7 +501,7 @@ async def ack_notification_events(contract: NotificationAckContract, principal: 
 @app.put('/api/v1/notifications/preferences')
 async def put_notification_preferences(contract: NotificationPreferencesContract, principal: Principal = Depends(require_scope('notifications'))):
     try:
-        return update_notification_preferences(principal.user_id, contract.enabled, contract.quiet_start, contract.quiet_end)
+        return update_notification_preferences(principal.user_id, contract.enabled, contract.quiet_start, contract.quiet_end, contract.mode)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -443,6 +521,32 @@ async def get_voice_capabilities(principal: Principal = Depends(require_scope('v
             'available': capability['configured'], 'reason': capability['reason'],
         }],
     }
+
+@app.post('/api/v1/uploads')
+async def upload_chat_files(files: List[UploadFile] = File(...), principal: Principal = Depends(require_scope('command'))):
+    if not files:
+        raise HTTPException(status_code=400, detail='At least one file is required.')
+    uploaded = []
+    for file in files:
+        content = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail='Files must be smaller than 25 MB.')
+        try:
+            uploaded.append(save_upload(principal.user_id, file.filename or 'upload', file.content_type, content))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {'uploads': uploaded}
+
+
+@app.get('/api/v1/uploads/{upload_id}')
+async def download_chat_file(upload_id: str, principal: Principal = Depends(require_scope('command'))):
+    if not re.fullmatch(r'^[A-Za-z0-9_-]{16,64}$', upload_id):
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    upload = get_upload(principal.user_id, upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    return FileResponse(upload['path'], media_type=upload['media_type'], filename=upload['filename'])
+
 
 @app.post('/api/v1/voice/transcribe')
 async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source: str = Form('iphone'), principal: Principal = Depends(require_scope('voice'))):
@@ -599,7 +703,18 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
                 if preference['unavailable_behavior'] != 'fallback':
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
                 selection = None
-    return await herdr_client.prompt_agent(contract.target, contract.text, **(selection or {}))
+    prompt_text = contract.text or ''
+    if contract.attachments:
+        # Attachment ids are opaque and must belong to this session's principal;
+        # client-supplied filenames/sizes are never trusted for authorization.
+        attachment_names = []
+        for attachment in contract.attachments:
+            stored = get_upload(principal.user_id, attachment.upload_id)
+            if not stored:
+                raise HTTPException(status_code=404, detail='One or more attached files are unavailable.')
+            attachment_names.append(stored['filename'])
+        prompt_text = prompt_text + ('\n\n' if prompt_text else '') + 'Attached files: ' + ', '.join(attachment_names)
+    return await herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
 
 @app.post('/api/v1/agents/{agent_id}/send-key')
 async def send_agent_key(agent_id: str, key: str = Query('Enter'), principal: Principal = Depends(require_scope('command'))):

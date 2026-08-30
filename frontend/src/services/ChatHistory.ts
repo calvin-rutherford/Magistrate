@@ -121,8 +121,13 @@ export function isRenderableToolCall(message: Pick<AgentHistoryMessage, 'kind' |
 
 export function toolCallPreview(text: string): string {
   const value = text.trim().replace(/\s+/g, ' ');
-  if (/^(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\b/i.test(value)) return value.split(/\s+/)[0] + '…';
-  return value.length > 96 ? `${value.slice(0, 93)}…` : value;
+  // Tool rows can contain command text, paths, token counts, and provider
+  // metadata. The transcript should expose only the tool in use.
+  const namedTool = value.match(/^(Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\b/i);
+  if (namedTool) return namedTool[1];
+  const activity = value.match(/^(Running|Calling|Reading|Writing|Editing|Exploring|Fetching|Searching|Ran|Called|Searched|Viewed|Created|Updated|Deleted|Downloaded|Committed|Pushed)\b/i);
+  if (!activity) return 'Tool';
+  return /^(Running|Calling|Reading|Writing|Editing|Exploring|Fetching|Searching)$/i.test(activity[1]) ? `${activity[1]}…` : activity[1];
 }
 
 export function filterAgentHistory<T extends AgentHistoryMessage>(messages: T[], showToolCalls: boolean): T[] {

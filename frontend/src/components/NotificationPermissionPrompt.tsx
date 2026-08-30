@@ -44,8 +44,8 @@ export function NotificationPermissionPrompt() {
         <Text style={styles.eyebrow}>STAY IN THE LOOP</Text>
         <Text style={styles.title}>Enable browser notifications?</Text>
         <Text style={styles.body}>
-          Magistrate can alert you here when the captain needs a decision, even when this tab
-          isn't focused.
+          Magistrate can alert you while this tab is open and your browser permits it. Native
+          devices use authenticated remote push in the beta build.
         </Text>
         <View style={styles.actions}>
           <TouchableOpacity

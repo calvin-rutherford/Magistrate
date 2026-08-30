@@ -28,8 +28,11 @@ class AttentionService:
                     'priority': 'HIGH',
                     'status': att.get('status', 'blocked'),
                     'url': att.get('url', '/attention'),
+                    'deep_link': att.get('deep_link'),
+                    'target_id': att.get('target_id'),
                     'requires_action': True,
                     'notification_kind': att.get('type'),
+                    'consequential': att.get('consequential') is True,
                     'revision': att.get('revision')
                 })
         except Exception as e:
@@ -51,8 +54,10 @@ class AttentionService:
                         'url': f'/pr-detail?number={pr.get("number")}',
                         'requires_action': True,
                         'external_url': pr.get('url'),
-                        'notification_kind': 'pr_ready' if pr.get('merge_decision_required') is True else None,
-                        'revision': pr.get('head_sha') or pr.get('updated_at')
+                        'notification_kind': 'pr_ready',
+                        'consequential': pr.get('merge_decision_required') is True,
+                        'revision': pr.get('head_sha') or pr.get('updated_at'),
+                        'deep_link': f'/pr-detail?number={pr.get("number")}' if pr.get('number') is not None else None
                     })
         except Exception as e:
             print('Error fetching GitHub attention:', e)
@@ -69,8 +74,11 @@ class AttentionService:
                         'subtitle': issue.get('title'),
                         'priority': issue.get('priority', 'HIGH'),
                         'status': issue.get('status', 'IN PROGRESS'),
-                        'url': issue.get('url', 'https://eversana.atlassian.net'),
-                        'requires_action': True
+                        'url': f'/attention?item=jira-{issue.get("key")}',
+                        'external_url': issue.get('url'),
+                        'requires_action': True,
+                        'notification_kind': 'blocker',
+                        'revision': issue.get('updated_at') or issue.get('status')
                     })
         except Exception as e:
             print('Error fetching Jira attention:', e)
@@ -87,8 +95,11 @@ class AttentionService:
                         'subtitle': m.get('summary'),
                         'priority': 'HIGH',
                         'status': 'unread_mention',
-                        'url': m.get('url', 'https://teams.microsoft.com'),
-                        'requires_action': True
+                        'url': f'/attention?item={m.get("id", "teams-msg")}',
+                        'external_url': m.get('url'),
+                        'requires_action': True,
+                        'notification_kind': 'captain_question',
+                        'revision': m.get('updated_at') or m.get('id')
                     })
         except Exception as e:
             print('Error fetching Teams attention:', e)
