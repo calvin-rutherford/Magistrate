@@ -4,11 +4,11 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.auth import MAGISTRATE_TOKEN
 from app.usage import _summarize_provider
+from conftest import TEST_HEADERS
 
 
-HEADERS = {'X-Magistrate-Token': MAGISTRATE_TOKEN}
+HEADERS = TEST_HEADERS
 client = TestClient(main_module.app)
 
 

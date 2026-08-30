@@ -5,14 +5,81 @@ The production gateway and its static Expo web build live together in
 `WorkingDirectory`, `EnvironmentFile`, and `MAGISTRATE_DIST_DIR` all point at
 that persistent checkout. The deployment checkout owns its `.env`; keep that
 file out of Git and do not copy it from a dirty development checkout during a
-routine update.
+routine update. Production startup is fail-closed: the file must set
+`MAGISTRATE_ENV=production`, `MAGISTRATE_DB_PATH` to an absolute path outside
+the checkout, `MAGISTRATE_BOOTSTRAP_SECRET`, `MAGISTRATE_SECRET_KEY`, and
+`MAGISTRATE_CORS_ORIGINS` (HTTPS origins only). The SQLite file and its
+rollback/backup copies therefore survive frontend exports and Git updates.
+
+A minimal deployment-only configuration is:
+
+```dotenv
+MAGISTRATE_ENV=production
+MAGISTRATE_DB_PATH=/var/lib/magistrate/magistrate.sqlite3
+MAGISTRATE_BOOTSTRAP_SECRET=<operator-generated-secret>
+MAGISTRATE_SECRET_KEY=<generated-fernet-key>
+MAGISTRATE_CORS_ORIGINS=https://magistrate.example
+```
+
+Set restrictive permissions on the env file and database directory. Rotate the
+bootstrap and Fernet keys through the approved secret-management procedure;
+never commit them or put them in a frontend build.
 
 Run `scripts/deploy_magistrate.sh` from a trusted shell for a manual update. The
 script fetches `origin/main`, refuses dirty or divergent checkouts, performs a
 fast-forward-only update, runs the supported `npx expo export -p web` build,
 checks that `index.html`, `chat.html`, and `voice.html` exist, restarts
 `magistrate-gateway.service`, and verifies that the HTTP process is reachable.
+It also rejects missing production auth settings and checkout-local SQLite paths
+before running the build. The health probe intentionally accepts an unauthenticated
+401/403 as proof of process reachability; validate the authenticated path with an
+operator-issued Bearer session during the release smoke check.
 It never resets, stashes, or discards deployment-only commits.
+
+GitHub Actions must not receive the bootstrap secret. For the complete trusted-host
+smoke, run this on the deployment host after the update (it reads `gateway/.env`
+without printing the secret or the issued bearer):
+
+```sh
+MAGISTRATE_TRUSTED_SMOKE=1 \
+  MAGISTRATE_DEPLOY_DIR=/home/spectre/firstmate/projects/Magistrate-deploy \
+  /home/spectre/firstmate/projects/Magistrate-deploy/scripts/deploy_magistrate.sh
+```
+
+That smoke proves session issuance, protected session validation, authenticated
+`/health`, and authenticated `/agents` (the Herdr-backed application path). The
+Actions workflow separately checks unauthenticated HTTPS reachability and the
+static frontend, so it never handles the bootstrap secret.
+
+## SQLite backup and migration
+
+`MAGISTRATE_DB_PATH` is deployment state, not release state. Keep its directory
+owned by the service account and mode `0700`, and the database mode `0600`.
+Before an upgrade or key rotation, make an online SQLite backup and record its
+revision; the SQLite backup API is safe while the service is running:
+
+```sh
+set -eu
+DB=/var/lib/magistrate/magistrate.sqlite3
+BACKUP=/var/lib/magistrate/backups/magistrate-$(date -u +%Y%m%dT%H%M%SZ).sqlite3
+install -d -m 700 /var/lib/magistrate/backups
+python3 - "$DB" "$BACKUP" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as backup:
+    source.backup(backup)
+PY
+chmod 600 "$BACKUP"
+sqlite3 "$BACKUP" 'pragma integrity_check;'
+```
+
+The gateway's `init_db()` uses additive `CREATE TABLE IF NOT EXISTS` schema
+initialization, so restarting it with the same absolute path preserves profiles,
+provider credentials, execution settings, and bearer-session rows. Verify
+expiry/revocation and restart persistence with the gateway suite and trusted
+smoke. To restore, stop the user unit, preserve the failed database, copy the
+selected backup back to `MAGISTRATE_DB_PATH`, restore ownership/mode, start the
+unit, and rerun the smoke. Never replace the path with a checkout-local file or
+delete it as part of a frontend deploy.
 
 ## Automatic demo redeploy
 

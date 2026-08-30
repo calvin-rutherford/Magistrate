@@ -23,20 +23,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build the exported frontend for SPA contract tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npx expo export -p web
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install dependencies
         run: uv sync
-      - name: Run tests
-        run: |
-          PYTHONPATH=. uv run pytest -v \
-            tests/test_db_secrets.py \
-            tests/test_oauth_transactions.py \
-            tests/test_notification_transitions.py \
-            tests/test_github_service.py \
-            tests/test_stt_adapter.py \
-            tests/test_jira_teams_attention_siri.py \
-            tests/test_execution_capabilities.py \
-            tests/test_firstmate_attention.py \
-            tests/test_recent_activity.py
+      - name: Run complete hermetic gateway suite
+        run: PYTHONPATH=. uv run pytest -v

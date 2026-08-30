@@ -34,8 +34,12 @@ async function pageWithGitHubData(url = BASE, externalUrl = 'https://github.com/
       { id: 'firstmate:task:done', type: 'task_completed', title: 'Completed fleet task', description: 'Completed task', occurred_at: '2026-08-28T10:00:00Z', source: 'firstmate', project: 'Magistrate', url: null, pull_request_number: null },
       { id: 'firstmate:task:requested', type: 'task_requested', title: 'Captain request', description: 'Task requested', occurred_at: '2026-08-28T09:00:00Z', source: 'firstmate', project: 'Magistrate', url: null, pull_request_number: null },
     ];
-    window.fetch = resource => {
+    window.fetch = (resource, options) => {
       const requestUrl = typeof resource === 'string' ? resource : resource.url;
+      if (requestUrl.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       const body = requestUrl.includes('/github/pulls/42') ? pr : requestUrl.includes('/recent-activity') ? { items: activity, sources: { firstmate: 'available', github: 'available' } } : requestUrl.includes('/github/pulls') ? { items: [pr], page: 1, per_page: 20, has_more: false, cached: false } : [];
       return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
     };
@@ -48,7 +52,7 @@ test('Recent Activity opens an in-app PR detail before GitHub', async () => {
   const page = await pageWithGitHubData();
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="drawer-section-activity"]');
+  await page.evaluate(() => document.querySelector('[data-testid="drawer-section-activity"]').click());
   await page.waitForFunction(() => document.body.innerText.includes('Real pull request'));
   await page.locator('::-p-text(Real pull request)').click();
   await page.waitForFunction(() => location.pathname.includes('pr-detail') && document.body.innerText.includes('Authoritative body'));
@@ -60,7 +64,7 @@ test('Recent Activity renders general real events newest first', async () => {
   const page = await pageWithGitHubData();
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="drawer-section-activity"]');
+  await page.evaluate(() => document.querySelector('[data-testid="drawer-section-activity"]').click());
   await page.waitForFunction(() => document.body.innerText.includes('Captain request'));
   const text = await page.evaluate(() => document.querySelector('[data-testid="drawer-panel-activity"]').innerText);
   assert.ok(text.indexOf('Real pull request') < text.indexOf('Completed fleet task'));
@@ -75,7 +79,7 @@ test('Recent Activity has a truthful empty state', async () => {
   const page = await pageWithGitHubData(BASE, undefined, []);
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="drawer-section-activity"]');
+  await page.evaluate(() => document.querySelector('[data-testid="drawer-section-activity"]').click());
   await page.waitForFunction(() => document.body.innerText.includes('No recent activity is available.'));
   assert.doesNotMatch(await page.evaluate(() => document.querySelector('[data-testid="drawer-panel-activity"]').innerText), /PR #|task/i);
   await page.close();

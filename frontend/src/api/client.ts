@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSyncExternalStore } from 'react';
 import { parseAgentHistory } from '../services/ChatHistory';
 
 // Production builds must provide an HTTPS gateway (usually same-origin on web).
@@ -15,49 +16,248 @@ function assertGatewayTransport(): void {
   }
 }
 assertGatewayTransport();
+
+export type GatewaySessionStatus = 'checking' | 'authentication-required' | 'authenticated';
+export interface GatewaySession {
+  token: string;
+  expiresAt: number;
+  scopes: string[];
+  userId?: string;
+}
+export interface GatewaySessionSnapshot {
+  status: GatewaySessionStatus;
+  session: GatewaySession | null;
+  error: string | null;
+}
+
+export class GatewayAuthError extends Error {
+  constructor(message = 'Authentication required') { super(message); this.name = 'GatewayAuthError'; }
+}
+export class GatewayNetworkError extends Error {
+  constructor(message = 'Gateway is unavailable. Check the connection and try again.') { super(message); this.name = 'GatewayNetworkError'; }
+}
+
 const SESSION_STORAGE_KEY = 'magistrate.gateway.session';
 const rawFetch = (...args: Parameters<typeof fetch>) => fetch(...args);
 let sessionToken: string | null = null;
-let sessionPromise: Promise<string | null> | null = null;
+let sessionInfo: GatewaySession | null = null;
+let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+let restorePromise: Promise<GatewaySession | null> | null = null;
+let invalidationPromise: Promise<void> | null = null;
+let sessionSnapshot: GatewaySessionSnapshot = { status: 'checking', session: null, error: null };
+const sessionListeners = new Set<() => void>();
 
-export async function createGatewaySession(bootstrapSecret?: string): Promise<string> {
-  const response = await rawFetch(`${GATEWAY_URL}/auth/session`, {
+function publish(snapshot: GatewaySessionSnapshot): void {
+  sessionSnapshot = snapshot;
+  sessionListeners.forEach(listener => listener());
+}
+
+export function subscribeGatewaySession(listener: () => void): () => void {
+  sessionListeners.add(listener);
+  return () => sessionListeners.delete(listener);
+}
+
+export function useGatewaySession(): GatewaySessionSnapshot {
+  return useSyncExternalStore(subscribeGatewaySession, () => sessionSnapshot, () => sessionSnapshot);
+}
+
+function sessionFromPayload(payload: unknown): GatewaySession | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const value = payload as Record<string, unknown>;
+  const token = typeof value.session_token === 'string' ? value.session_token : typeof value.token === 'string' ? value.token : null;
+  const expiresAt = typeof value.expires_at === 'number' ? value.expires_at : null;
+  if (!token || !token.trim() || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) return null;
+  const scopes = Array.isArray(value.scopes) ? value.scopes.filter((scope): scope is string => typeof scope === 'string') : [];
+  return { token, expiresAt, scopes, userId: typeof value.user_id === 'string' ? value.user_id : undefined };
+}
+
+function storedSessionPayload(session: GatewaySession): Record<string, unknown> {
+  return { token: session.token, expires_at: session.expiresAt, scopes: session.scopes, user_id: session.userId };
+}
+
+function clearExpiryTimer(): void {
+  if (expiryTimer) clearTimeout(expiryTimer);
+  expiryTimer = null;
+}
+
+function scheduleExpiry(session: GatewaySession): void {
+  clearExpiryTimer();
+  const delay = session.expiresAt * 1000 - Date.now();
+  if (delay <= 0) { void invalidateGatewaySession('Your session has expired.'); return; }
+  // Browsers clamp delays above the signed 32-bit timer limit. Re-arm for
+  // distant test/development expiries instead of allowing an immediate wrap.
+  expiryTimer = setTimeout(() => {
+    if (sessionInfo?.token === session.token && sessionInfo.expiresAt === session.expiresAt) scheduleExpiry(session);
+  }, Math.min(delay, 2_147_000_000));
+}
+
+async function persistSession(session: GatewaySession): Promise<void> {
+  sessionToken = session.token;
+  sessionInfo = session;
+  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(storedSessionPayload(session)));
+  scheduleExpiry(session);
+}
+
+function setSessionCandidate(session: GatewaySession): void {
+  sessionToken = session.token;
+  sessionInfo = session;
+  clearExpiryTimer();
+  publish({ status: 'checking', session, error: null });
+}
+
+function responseDetail(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const value = payload as Record<string, unknown>;
+  for (const key of ['detail', 'error', 'message']) {
+    if (typeof value[key] === 'string' && value[key].trim()) return value[key].trim();
+  }
+  return null;
+}
+
+async function readResponsePayload(response: Response): Promise<unknown> {
+  const text = await response.text().catch(() => '');
+  if (!text.trim()) return null;
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+function responseError(response: Response, payload: unknown): Error {
+  return new Error(responseDetail(payload) || `Request failed (${response.status})`);
+}
+
+async function fetchRaw(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  try { return await rawFetch(input, init); }
+  catch { throw new GatewayNetworkError(); }
+}
+
+export async function createGatewaySession(bootstrapSecret?: string): Promise<GatewaySession> {
+  const response = await fetchRaw(`${GATEWAY_URL}/auth/session`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(bootstrapSecret ? { bootstrap_secret: bootstrapSecret } : {})
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || typeof payload.session_token !== 'string') {
-    throw new Error(payload.detail || `Session creation failed (${response.status})`);
+  const payload = await readResponsePayload(response);
+  if (!response.ok) throw responseError(response, payload);
+  const session = sessionFromPayload(payload);
+  if (!session) throw new Error('Gateway returned an invalid session.');
+  await persistSession(session);
+  setSessionCandidate(session);
+  return session;
+}
+
+export async function validateGatewaySession(): Promise<GatewaySession> {
+  const session = sessionInfo || (sessionToken ? { token: sessionToken, expiresAt: 0, scopes: [] } : null);
+  if (!session || (session.expiresAt > 0 && session.expiresAt * 1000 <= Date.now())) {
+    await invalidateGatewaySession('Your session has expired.');
+    throw new GatewayAuthError('Authentication required');
   }
-  sessionToken = payload.session_token as string;
-  await AsyncStorage.setItem(SESSION_STORAGE_KEY, sessionToken);
-  return sessionToken;
+  const response = await fetchRaw(`${GATEWAY_URL}/auth/session`, { headers: { Authorization: `Bearer ${session.token}` } });
+  const payload = await readResponsePayload(response);
+  if (response.status === 401) {
+    await invalidateGatewaySession('Your session is no longer valid.');
+    throw new GatewayAuthError('Your session is no longer valid.');
+  }
+  if (!response.ok) throw responseError(response, payload);
+  const serverSession = sessionFromPayload(payload);
+  const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  if (value.authenticated !== true || typeof value.expires_at !== 'number' || !Number.isSafeInteger(value.expires_at) || value.expires_at <= Math.floor(Date.now() / 1000)) throw new Error('Gateway returned an invalid session validation response.');
+  const validated = { ...session, expiresAt: value.expires_at, scopes: Array.isArray(value.scopes) ? value.scopes.filter((scope): scope is string => typeof scope === 'string') : session.scopes, userId: typeof value.user_id === 'string' ? value.user_id : session.userId };
+  if (serverSession?.token) validated.token = serverSession.token;
+  sessionToken = validated.token;
+  sessionInfo = validated;
+  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(storedSessionPayload(validated))).catch(() => {});
+  scheduleExpiry(validated);
+  publish({ status: 'authenticated', session: validated, error: null });
+  return validated;
+}
+
+export async function restoreGatewaySession(): Promise<GatewaySession | null> {
+  if (sessionSnapshot.status === 'authenticated' && sessionInfo) return sessionInfo;
+  if (restorePromise) return restorePromise;
+  restorePromise = (async () => {
+    publish({ status: 'checking', session: sessionInfo, error: null });
+    let stored: string | null = null;
+    try { stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY); }
+    catch { publish({ status: 'authentication-required', session: null, error: 'Saved session storage is unavailable.' }); return null; }
+    let candidate: GatewaySession | null = null;
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as Record<string, unknown>;
+        candidate = sessionFromPayload({ session_token: parsed.token, expires_at: parsed.expires_at, scopes: parsed.scopes, user_id: parsed.user_id });
+      } catch { candidate = null; }
+    }
+    if (candidate && candidate.expiresAt * 1000 <= Date.now()) {
+      await invalidateGatewaySession('Your saved session has expired.');
+      candidate = null;
+    }
+    if (!candidate && process.env.NODE_ENV !== 'production') {
+      // Development may explicitly opt into server-side auto-session. A
+      // production bundle never probes issuance without the operator secret.
+      try { await createGatewaySession(); candidate = sessionInfo; }
+      catch { /* The normal production path is the explicit bootstrap form. */ }
+    }
+    // A user can submit the bootstrap form while the optional development
+    // auto-session probe is still settling. Prefer the newer manual candidate
+    // rather than letting that stale restore attempt reopen the gate.
+    if (!candidate && sessionInfo) candidate = sessionInfo;
+    if (!candidate) {
+      publish({ status: 'authentication-required', session: null, error: null });
+      return null;
+    }
+    if (stored) setSessionCandidate(candidate);
+    try { return await validateGatewaySession(); }
+    catch (error) {
+      if (!(error instanceof GatewayAuthError)) publish({ status: 'authentication-required', session: candidate, error: error instanceof Error ? error.message : 'Gateway session could not be validated.' });
+      return null;
+    }
+  })().finally(() => { restorePromise = null; });
+  return restorePromise;
+}
+
+export async function invalidateGatewaySession(message = 'Authentication required'): Promise<void> {
+  if (invalidationPromise) return invalidationPromise;
+  invalidationPromise = (async () => {
+    sessionToken = null;
+    sessionInfo = null;
+    clearExpiryTimer();
+    await AsyncStorage.removeItem(SESSION_STORAGE_KEY).catch(() => {});
+    publish({ status: 'authentication-required', session: null, error: message });
+  })().finally(() => { invalidationPromise = null; });
+  return invalidationPromise;
+}
+
+export async function logoutGatewaySession(): Promise<void> {
+  const token = sessionToken;
+  if (token) {
+    try {
+      await fetchRaw(`${GATEWAY_URL}/auth/session/revoke`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+    } catch { /* Local logout must complete even if the gateway is unavailable. */ }
+  }
+  await invalidateGatewaySession('You have been signed out.');
 }
 
 export async function clearGatewaySession(): Promise<void> {
-  sessionToken = null;
-  sessionPromise = null;
-  await AsyncStorage.removeItem(SESSION_STORAGE_KEY).catch(() => {});
+  await invalidateGatewaySession('Authentication required');
 }
 
 export async function getGatewaySessionToken(): Promise<string | null> {
-  if (sessionToken) return sessionToken;
-  if (!sessionPromise) {
-    sessionPromise = AsyncStorage.getItem(SESSION_STORAGE_KEY).then(async stored => {
-      if (stored) { sessionToken = stored; return stored; }
-      // In development the server may explicitly opt into an auto-session. No
-      // credential is embedded here; production requires an operator bootstrap.
-      try { return await createGatewaySession(); } catch { return null; }
-    }).finally(() => { sessionPromise = null; });
+  if (!sessionToken || sessionSnapshot.status !== 'authenticated') return null;
+  if (sessionInfo && sessionInfo.expiresAt * 1000 <= Date.now()) {
+    await invalidateGatewaySession('Your session has expired.');
+    return null;
   }
-  return sessionPromise;
+  return sessionToken;
 }
 
 export async function authorizedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const token = await getGatewaySessionToken();
+  if (!token) throw new GatewayAuthError();
   const headers = new Headers(init.headers || {});
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  return rawFetch(input, { ...init, headers });
+  headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetchRaw(input, { ...init, headers });
+  if (response.status === 401) {
+    await invalidateGatewaySession('Your session is no longer valid.');
+    throw new GatewayAuthError('Your session is no longer valid.');
+  }
+  return response;
 }
 
 export interface AgentInfo {
@@ -210,8 +410,7 @@ export async function fetchNotificationEvents(foreground: boolean): Promise<{ ev
   const hour = new Date().getHours();
   const res = await authorizedFetch(`${GATEWAY_URL}/notifications/events?foreground=${foreground}&local_hour=${hour}`, {
   });
-  if (!res.ok) throw new Error(`Notification events failed: ${res.status}`);
-  return res.json();
+  return checkedJson<{ events: NotificationEvent[] }>(res);
 }
 
 export async function acknowledgeNotificationEvents(itemIds: string[]): Promise<void> {
@@ -219,7 +418,7 @@ export async function acknowledgeNotificationEvents(itemIds: string[]): Promise<
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ item_ids: itemIds })
   });
-  if (!res.ok) throw new Error(`Notification acknowledgement failed: ${res.status}`);
+  await checkedJson(res);
 }
 
 export async function updateNotificationPreferences(enabled: boolean, quietHours: boolean): Promise<void> {
@@ -227,7 +426,7 @@ export async function updateNotificationPreferences(enabled: boolean, quietHours
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled, quiet_start: quietHours ? 22 : null, quiet_end: quietHours ? 7 : null })
   });
-  if (!res.ok) throw new Error(`Notification preferences failed: ${res.status}`);
+  await checkedJson(res);
 }
 
 export interface UserProfile {
@@ -305,7 +504,7 @@ export async function fetchHealth() {
 export async function fetchRuntime() {
   const res = await authorizedFetch(GATEWAY_URL + '/runtime', {
   });
-  return res.json();
+  return checkedJson(res);
 }
 
 export async function fetchAgents(): Promise<AgentInfo[]> {
@@ -317,13 +516,13 @@ export async function fetchAgents(): Promise<AgentInfo[]> {
 export async function fetchFleet() {
   const res = await authorizedFetch(GATEWAY_URL + '/fleet', {
   });
-  return res.json();
+  return checkedJson(res);
 }
 
 export async function fetchAttention(): Promise<AttentionItem[]> {
   const res = await authorizedFetch(GATEWAY_URL + '/attention', {
   });
-  return res.json();
+  return checkedJson<AttentionItem[]>(res);
 }
 
 export interface UnifiedAttentionRecord {
@@ -357,7 +556,7 @@ export async function fetchRecentActivity(limit = 20): Promise<RecentActivityFee
 export async function fetchUserProfile(): Promise<UserProfile> {
   const res = await authorizedFetch(GATEWAY_URL + '/account/profile', {
   });
-  return res.json();
+  return checkedJson<UserProfile>(res);
 }
 
 export async function updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
@@ -368,8 +567,7 @@ export async function updateUserProfile(profile: Partial<UserProfile>): Promise<
   const res = await authorizedFetch(GATEWAY_URL + '/account/profile', {
     method: 'POST', body: formData
   });
-  if (!res.ok) throw new Error(`Profile update failed: ${res.status}`);
-  return res.json();
+  return checkedJson<UserProfile>(res);
 }
 
 export async function uploadUserAvatar(imageUri: string, mimeType: string = 'image/jpeg'): Promise<any> {
@@ -392,13 +590,13 @@ export async function uploadUserAvatar(imageUri: string, mimeType: string = 'ima
     },
     body: formData
   });
-  return res.json();
+  return checkedJson(res);
 }
 
 export async function fetchAuthProviders(): Promise<AuthProviderInfo[]> {
   const res = await authorizedFetch(GATEWAY_URL + '/auth/providers', {
   });
-  return res.json();
+  return checkedJson<AuthProviderInfo[]>(res);
 }
 
 export async function fetchUsage(): Promise<UsageSummary> {
@@ -448,23 +646,16 @@ export async function connectAuthProvider(provider: string, redirectUri: string)
 }
 
 export async function disconnectAuthProvider(provider: string): Promise<any> {
-  const res = await authorizedFetch(GATEWAY_URL + '/auth/' + provider + '/disconnect', {
+  const res = await authorizedFetch(GATEWAY_URL + '/auth/' + encodeURIComponent(provider) + '/disconnect', {
     method: 'POST',
   });
-  return res.json();
+  return checkedJson(res);
 }
 
 async function checkedJson<T>(res: Response): Promise<T> {
-  let data: any = null;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error(res.ok ? 'Gateway returned an invalid response.' : `Request failed (${res.status})`);
-  }
-  if (!res.ok) {
-    const detail = typeof data?.detail === 'string' ? data.detail : typeof data?.error === 'string' ? data.error : null;
-    throw new Error(detail || `Request failed (${res.status})`);
-  }
+  const data = await readResponsePayload(res);
+  if (!res.ok) throw responseError(res, data);
+  if (data === null) throw new Error('Gateway returned an invalid response.');
   return data as T;
 }
 
@@ -482,10 +673,8 @@ export async function fetchGitHubPR(number: number, refresh = false): Promise<Gi
   return checkedJson<GitHubPR>(res);
 }
 
-async function requireOk(res: Response): Promise<any> {
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload.detail || payload.error || `Gateway request failed (${res.status})`);
-  return payload;
+async function requireOk<T>(res: Response): Promise<T> {
+  return checkedJson<T>(res);
 }
 
 export async function transcribeVoiceAudio(audioUri: string, mimeType: string, filename: string): Promise<{ text: string; is_final: boolean }> {
@@ -502,7 +691,7 @@ export async function transcribeVoiceAudio(audioUri: string, mimeType: string, f
     },
     body: formData
   });
-  return requireOk(res);
+  return requireOk<{ text: string; is_final: boolean }>(res);
 }
 
 export interface VoiceMoveResult {
@@ -519,7 +708,7 @@ export async function submitVoiceMove(utterance: string, target: string, idempot
     body: JSON.stringify({ schema_version: 'voice-move.v1', utterance, target, source: 'voice-page',
       idempotency_key: idempotencyKey, execute, confirmation_token: confirmationToken })
   });
-  return requireOk(res);
+  return requireOk<VoiceMoveResult>(res);
 }
 
 // Herdr exposes its read count as uint32 and bounds retained history separately

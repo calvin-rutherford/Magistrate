@@ -5,9 +5,10 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.providers.jira import JiraProviderAdapter
 from app.providers.teams import TeamsProviderAdapter
+from conftest import TEST_HEADERS
 
 client = TestClient(app)
-HEADERS = {'X-Magistrate-Token': 'magistrate-device-token-12345'}
+HEADERS = TEST_HEADERS
 
 def test_jira_provider():
     adapter = JiraProviderAdapter()

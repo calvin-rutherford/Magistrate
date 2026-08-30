@@ -9,5 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Deployment secrets and persistent local state
+.env
+*.sqlite3
+
 # Test artifacts (created by tests/conftest.py)
 tests/.gateway-test.sqlite3

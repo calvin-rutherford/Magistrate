@@ -6,6 +6,19 @@ from app.herdr_client import HerdrClient
 
 
 @pytest.mark.asyncio
+async def test_missing_herdr_cli_is_a_degraded_state_not_a_gateway_error(monkeypatch):
+    monkeypatch.setattr('asyncio.create_subprocess_exec', AsyncMock(side_effect=FileNotFoundError))
+    client = HerdrClient(socket_path='/missing/herdr.sock')
+
+    snapshot = await client.get_snapshot()
+    assert snapshot['agents'] == []
+    assert await client.read_agent_output('captain') == ''
+    prompt = await client.prompt_agent('captain', 'hello')
+    assert prompt['status'] == 'error'
+    assert prompt['error'] == 'Herdr is unavailable.'
+
+
+@pytest.mark.asyncio
 async def test_resolve_target_prefers_pi_captain_over_unrelated_codex():
     client = HerdrClient()
     client.list_agents = AsyncMock(return_value=[

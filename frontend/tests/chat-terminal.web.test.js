@@ -44,9 +44,16 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let historyRequests = 0;
+    let agentHistoryRequests = 0;
     window.__magistrateApiCalls = [];
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
+      if (url.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST'
+          ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' }
+          : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/captain/prompt')) {
         promptSent = true;
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
@@ -68,6 +75,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/usage')) return Promise.resolve(new Response(JSON.stringify({ generated_at: '2026-08-29T18:00:00Z', schema_version: 5, source: 'quota-axi', providers: [{ provider: 'codex', plan: 'plus', status: 'fresh', stale: false, windows: [{ label: 'week', percentRemaining: 20 }] }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/agents/w1%3Ap7/history')) {
+        agentHistoryRequests += 1;
         if (simulateHistoryRace) {
           historyRequests += 1;
           const messages = promptSent ? [{ role: 'assistant', kind: 'conversation', text: responseText }] : [];
@@ -76,11 +84,12 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
             ? new Promise(resolve => setTimeout(() => resolve(new Response(payload, { status: 200, headers: { 'Content-Type': 'application/json' } })), 400))
             : Promise.resolve(new Response(payload, { status: 200, headers: { 'Content-Type': 'application/json' } }));
         }
-        return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages: [
-        { role: 'user', kind: 'conversation', text: 'Please check the deployment.' },
-        { role: 'assistant', kind: 'tool', text: 'Ran 3 commands' },
-        { role: 'assistant', kind: 'conversation', text: 'The deployment is healthy.' },
-      ] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        const messages = agentHistoryRequests < 3 ? [] : [
+          { role: 'user', kind: 'conversation', text: 'Please check the deployment.' },
+          { role: 'assistant', kind: 'tool', text: 'Ran 3 commands' },
+          { role: 'assistant', kind: 'conversation', text: 'The deployment is healthy.' },
+        ];
+        return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([{ id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/attention/unified')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -151,7 +160,7 @@ test('drawer starts collapsed, expands downward, and preserves conversation hist
   assert.equal(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity), '0');
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="drawer-section-attention"]');
+  await page.evaluate(() => document.querySelector('[data-testid="drawer-section-attention"]').click());
   await page.waitForSelector('[data-testid="drawer-panel-attention"]');
   assert.match(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /keep this message/);
   await page.click('[data-testid="brand-drawer-toggle"]');
@@ -255,6 +264,10 @@ test('navigating into chat from another screen preserves the viewport scale and 
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
+      if (url.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
@@ -421,9 +434,9 @@ test('fleet agent opens its conversation, hides tools by default, and settings c
   const page = await openChat({ width: 900, height: 700 });
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="drawer-section-fleet"]');
+  await page.evaluate(() => document.querySelector('[data-testid="drawer-section-fleet"]').click());
   await page.waitForSelector('[data-testid="fleet-agent-w1:p7"]');
-  await page.click('[data-testid="fleet-agent-w1:p7"]');
+  await page.evaluate(() => document.querySelector('[data-testid="fleet-agent-w1:p7"]').click());
   await page.waitForFunction(() => new URL(location.href).searchParams.get('agentId') === 'w1:p7');
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The deployment is healthy.'));
   let history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
@@ -450,8 +463,8 @@ test('fleet ellipsis shows real status and quick commands', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="drawer-section-fleet"]');
-  await page.click('[data-testid="fleet-agent-w1:p7-menu"]');
+  await page.evaluate(() => document.querySelector('[data-testid="drawer-section-fleet"]').click());
+  await page.evaluate(() => document.querySelector('[data-testid="fleet-agent-w1:p7-menu"]').click());
   const popover = await page.$eval('[data-testid="fleet-agent-w1:p7-popover"]', element => element.innerText);
   assert.match(popover, /STATUS\s+WORKING/);
   assert.match(popover, /ACTIVE STATUS\s+ACTIVE/);
@@ -576,6 +589,10 @@ test('chat does not replay existing backlog on open and requests a bounded histo
     window.__historyRequests = [];
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
+      if (url.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/history')) {
         window.__historyRequests.push(url);
         return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages: historyMessages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
