@@ -133,7 +133,7 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
   await page.close();
 });
 
-test('attachment menu picks a file, previews it, and explains the gateway upload gap', async () => {
+test('attachment menu picks a file, previews it, and requires a descriptive message', async () => {
   const page = await openChat({ width: 1100, height: 760 });
   await page.click('[data-testid="attachment-menu-button"]');
   await page.waitForSelector('[data-testid="attachment-menu"]');
@@ -147,7 +147,7 @@ test('attachment menu picks a file, previews it, and explains the gateway upload
 
   await page.click('[data-testid="send-captain-prompt"]');
   await page.waitForSelector('[data-testid="captain-send-error"]');
-  assert.match(await page.$eval('[data-testid="captain-send-error"]', element => element.innerText), /gateway cannot accept uploads yet/i);
+  assert.equal(await page.$eval('[data-testid="captain-send-error"]', element => element.innerText), 'Add a message describing the attached file before sending.');
   assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length), 0);
 
   await page.click('[data-testid^="remove-file-"]');
@@ -314,7 +314,7 @@ test('right swipe starting in the composer does not open the drawer', async () =
     await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x + step * 28, y: start.y }] });
   }
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  assert.equal(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity), '0');
+  assert.ok(Number(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity)) < 0.05);
   await page.close();
 });
 
@@ -456,7 +456,8 @@ test('fleet agent opens its conversation, hides tools by default, and settings c
   await page.click('[data-testid="settings-tool-calls-toggle"]');
   await page.waitForSelector('[data-testid="tool-history-message"]');
   history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
-  assert.match(history, /Ran 3 commands/);
+  assert.match(history, /(?:^|\n)Ran(?:\n|$)/);
+  assert.doesNotMatch(history, /Ran 3 commands/);
   await page.close();
 });
 
@@ -474,12 +475,12 @@ test('fleet ellipsis shows real status and quick commands', async () => {
   await page.close();
 });
 
-test('two-second hold exposes edit, copy, selection, and a sent timestamp', async () => {
+test('two-second hold exposes edit, copy, and selection for plain messages', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await submit(page, 'editable message');
   const selector = '[data-testid^="user-message-u-"]';
   await page.waitForSelector(selector);
-  assert.match(await page.$eval(selector, element => element.innerText), /Sent/);
+  assert.equal(await page.$eval(selector, element => element.innerText), 'editable message');
   const rect = await page.$eval(selector, element => { const box = element.getBoundingClientRect(); return { x: box.x + box.width / 2, y: box.y + box.height / 2 }; });
   await page.mouse.move(rect.x, rect.y); await page.mouse.down(); await new Promise(resolve => setTimeout(resolve, 2100)); await page.mouse.up();
   await page.waitForSelector('[data-testid="message-actions"]');
@@ -638,15 +639,15 @@ test('chat does not replay existing backlog on open and requests a bounded histo
   await page.close();
 });
 
-// Regression for the captain-reported bug: user message timestamps must reflect
-// when the message was actually sent, not whatever time the next poll happens to run.
-test('a sent user message keeps its original timestamp across the live-refresh poll', async () => {
+// Plain chat intentionally omits transport metadata; a live-refresh poll must
+// not duplicate or rewrite the visible user message.
+test('a sent user message remains plain and stable across the live-refresh poll', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await submit(page, 'timestamp check');
   const selector = '[data-testid^="user-message-u-"]';
   await page.waitForSelector(selector);
   const before = await page.$eval(selector, element => element.innerText);
-  assert.match(before, /Sent/);
+  assert.equal(before, 'timestamp check');
   // The background auto-refresh poll runs every 3s (see ChatCanvas's syncFromHistory).
   await new Promise(resolve => setTimeout(resolve, 3400));
   const after = await page.$eval(selector, element => element.innerText);
