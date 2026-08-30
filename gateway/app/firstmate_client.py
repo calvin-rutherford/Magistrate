@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
@@ -62,6 +63,8 @@ class FirstmateClient:
 
         for task in snapshot.get('tasks', []):
             task_id = task.get('id')
+            agent_target = task.get('agent_id') or task.get('agent') or task.get('pane_id')
+            agent_link = f'/chat?agentId={agent_target}' if agent_target else None
             record = records_by_id.get(task_id, {})
             title = record.get('title') or task.get('project') or task_id or 'Firstmate Task'
             project = record.get('repo') or task.get('project') or 'Firstmate'
@@ -80,7 +83,8 @@ class FirstmateClient:
                         'target_id': target_id,
                         'project': project,
                         'revision': hints.get('last_event_text') or target_id,
-                        'url': f'/attention?item=captain-question-{target_id}'
+                        'url': f'/attention?item=captain-question-{target_id}',
+                        'deep_link': agent_link
                     })
 
             if hints.get('blocked_event'):
@@ -95,7 +99,8 @@ class FirstmateClient:
                         'target_id': target_id,
                         'project': project,
                         'revision': hints.get('last_event_text') or target_id,
-                        'url': f'/attention?item=captain-question-{target_id}'
+                        'url': f'/attention?item=captain-question-{target_id}',
+                        'deep_link': agent_link
                     })
 
             # A pull request only needs the captain's merge decision once Firstmate
@@ -108,11 +113,13 @@ class FirstmateClient:
                     'title': 'PR Ready: ' + str(title),
                     'subtitle': 'Checks and review are complete. Your merge decision is needed.',
                     'type': 'pr_ready',
+                    'consequential': True,
                     'status': 'ready',
                     'target_id': pr_url,
                     'project': project,
                     'revision': pr_url,
-                    'url': f'/attention?item=pr-ready-{task_id}'
+                    'url': f'/attention?item=pr-ready-{task_id}',
+                    'deep_link': agent_link or (f'/pr-detail?number={match.group(1)}' if (match := re.search(r'/pull/(\d+)', pr_url)) else None)
                 })
 
         return attention_items

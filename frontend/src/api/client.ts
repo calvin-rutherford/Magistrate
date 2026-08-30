@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSyncExternalStore } from 'react';
 import { parseAgentHistory } from '../services/ChatHistory';
 import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
+import { OperatingPermissionMode } from '../services/OperatingPermissionModes';
 
 // Production builds must provide an HTTPS gateway (usually same-origin on web).
 // HTTP localhost is intentionally limited to local development.
@@ -229,6 +230,11 @@ export async function logoutGatewaySession(): Promise<void> {
   const token = sessionToken;
   if (token) {
     try {
+      // Revoke the device's server-side delivery registration before ending
+      // the session; a signed-out device must not keep receiving attention.
+      await fetchRaw(`${GATEWAY_URL}/notifications/register`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    } catch { /* Best effort while offline. The next authenticated session can re-register. */ }
+    try {
       await fetchRaw(`${GATEWAY_URL}/auth/session/revoke`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
     } catch { /* Local logout must complete even if the gateway is unavailable. */ }
   }
@@ -402,12 +408,20 @@ export interface AttentionItem {
 }
 
 export interface NotificationEvent extends AttentionItem {
-  notification_kind: 'captain_question' | 'pr_ready';
+  notification_kind: 'captain_question' | 'pr_ready' | 'blocker' | 'stall' | 'failure' | 'milestone' | 'completion' | 'consequential_decision';
   url: string;
+  deep_link?: string | null;
   revision?: string;
 }
 
-export async function fetchNotificationEvents(foreground: boolean): Promise<{ events: NotificationEvent[] }> {
+export interface NotificationPreferences {
+  enabled: boolean;
+  quiet_start: number | null;
+  quiet_end: number | null;
+  mode: OperatingPermissionMode;
+}
+
+export async function fetchNotificationEvents(foreground: boolean): Promise<{ events: NotificationEvent[]; delivery?: string }> {
   const hour = new Date().getHours();
   const res = await authorizedFetch(`${GATEWAY_URL}/notifications/events?foreground=${foreground}&local_hour=${hour}`, {
   });
@@ -422,11 +436,30 @@ export async function acknowledgeNotificationEvents(itemIds: string[]): Promise<
   await checkedJson(res);
 }
 
-export async function updateNotificationPreferences(enabled: boolean, quietHours: boolean): Promise<void> {
+export async function fetchNotificationPreferences(): Promise<NotificationPreferences> {
+  const res = await authorizedFetch(GATEWAY_URL + '/notifications/preferences');
+  return checkedJson<NotificationPreferences>(res);
+}
+
+export async function updateNotificationPreferences(enabled: boolean, quietHours: boolean, mode: OperatingPermissionMode = 'moderate'): Promise<NotificationPreferences> {
   const res = await authorizedFetch(GATEWAY_URL + '/notifications/preferences', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled, quiet_start: quietHours ? 22 : null, quiet_end: quietHours ? 7 : null })
+    body: JSON.stringify({ enabled, mode, quiet_start: quietHours ? 22 : null, quiet_end: quietHours ? 7 : null })
   });
+  return checkedJson<NotificationPreferences>(res);
+}
+
+export async function registerNativePushToken(pushToken: string, platform: 'ios' | 'android' | 'native'): Promise<{ status: string; platform: string }> {
+  const formData = new FormData();
+  formData.append('push_token', pushToken);
+  formData.append('platform', platform);
+  formData.append('timezone_offset_minutes', String(new Date().getTimezoneOffset()));
+  const res = await authorizedFetch(GATEWAY_URL + '/notifications/register', { method: 'POST', body: formData });
+  return checkedJson<{ status: string; platform: string }>(res);
+}
+
+export async function revokeNativePushToken(): Promise<void> {
+  const res = await authorizedFetch(GATEWAY_URL + '/notifications/register', { method: 'DELETE' });
   await checkedJson(res);
 }
 
@@ -534,6 +567,8 @@ export interface UnifiedAttentionRecord {
   priority?: string;
   status?: string;
   url: string;
+  deep_link?: string | null;
+  target_id?: string;
   requires_action?: boolean;
   external_url?: string;
 }
@@ -569,6 +604,27 @@ export async function updateUserProfile(profile: Partial<UserProfile>): Promise<
     method: 'POST', body: formData
   });
   return checkedJson<UserProfile>(res);
+}
+
+export interface ChatUpload {
+  upload_id: string;
+  filename: string;
+  media_type: string;
+  size: number;
+}
+
+export async function uploadChatFile(uri: string, filename: string, mimeType: string = 'application/octet-stream'): Promise<ChatUpload> {
+  const formData = new FormData();
+  if (typeof window !== 'undefined') {
+    const response = await rawFetch(uri);
+    formData.append('files', await response.blob(), filename);
+  } else {
+    formData.append('files', { uri, name: filename, type: mimeType } as any);
+  }
+  const res = await authorizedFetch(GATEWAY_URL + '/uploads', { method: 'POST', body: formData });
+  const data = await checkedJson<{ uploads?: ChatUpload[] }>(res);
+  if (!data.uploads?.length) throw new Error('Gateway returned no upload record.');
+  return data.uploads[0];
 }
 
 export async function uploadUserAvatar(imageUri: string, mimeType: string = 'image/jpeg'): Promise<any> {
@@ -755,7 +811,7 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
   return data;
 }
 
-export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null) {
+export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[]) {
   const res = await authorizedFetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
     headers: {
@@ -767,7 +823,8 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       type: 'prompt',
       text,
       target,
-      ...(profileId !== undefined ? { profile_id: profileId, ...(harness && model ? { harness, model } : {}) } : harness && model ? { harness, model } : {})
+      ...(profileId !== undefined ? { profile_id: profileId, ...(harness && model ? { harness, model } : {}) } : harness && model ? { harness, model } : {}),
+      ...(attachments?.length ? { attachments } : {})
     })
   });
   return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);

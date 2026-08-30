@@ -5,12 +5,14 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, connectAuthProvider, updateUserProfile, updateNotificationPreferences, fetchVoiceInputCapabilities, GATEWAY_URL, UserProfile, AuthProviderInfo } from '../../src/api/client';
+import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, connectAuthProvider, updateUserProfile, updateNotificationPreferences, fetchNotificationPreferences, fetchVoiceInputCapabilities, GATEWAY_URL, UserProfile, AuthProviderInfo } from '../../src/api/client';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveVoiceInputMode } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
+import { loadOperatingPermissionMode, saveOperatingPermissionMode, OPERATING_PERMISSION_MODE_OPTIONS, OperatingPermissionMode } from '../../src/services/OperatingPermissionModes';
+import { notificationManager, NativePushStatus } from '../../src/services/NotificationManager';
 
 export default function AccountScreen() {
   const router = useRouter();
@@ -29,6 +31,8 @@ export default function AccountScreen() {
   const [autoListen, setAutoListen] = useState<boolean>(true);
   const [attentionNotifications, setAttentionNotifications] = useState<boolean>(true);
   const [quietHours, setQuietHours] = useState<boolean>(true);
+  const [operatingPermissionMode, setOperatingPermissionMode] = useState<OperatingPermissionMode>('moderate');
+  const [nativePushStatus, setNativePushStatus] = useState<NativePushStatus>(() => notificationManager.getPushStatus());
 
   const loadAccountData = async () => {
     try {
@@ -54,7 +58,8 @@ export default function AccountScreen() {
   };
 
   useEffect(() => {
-    Promise.allSettled([loadChatPreferences(), fetchVoiceInputCapabilities()]).then(([preferencesResult, capabilityResult]) => {
+    const unsubscribePushStatus = notificationManager.subscribePushStatus(setNativePushStatus);
+    Promise.allSettled([loadChatPreferences(), fetchVoiceInputCapabilities(), fetchNotificationPreferences(), loadOperatingPermissionMode()]).then(([preferencesResult, capabilityResult, notificationResult, localModeResult]) => {
       if (preferencesResult.status === 'fulfilled') {
         setActiveThemeKey(preferencesResult.value.background);
         setCustomBackgroundUri(preferencesResult.value.customBackgroundUri);
@@ -65,8 +70,16 @@ export default function AccountScreen() {
         const serverOpenai = capabilityFor(capabilityResult.value, 'openai');
         setVoiceCapabilities({ ...local, serverProvider: capabilityResult.value.serverProvider, serverConfigured: capabilityResult.value.serverConfigured, modes: local.modes.map(item => item.id === 'openai' ? serverOpenai : item) });
       }
+      if (notificationResult.status === 'fulfilled') {
+        setAttentionNotifications(notificationResult.value.enabled);
+        setQuietHours(notificationResult.value.quiet_start !== null && notificationResult.value.quiet_end !== null);
+        setOperatingPermissionMode(notificationResult.value.mode);
+      } else if (localModeResult.status === 'fulfilled') {
+        setOperatingPermissionMode(localModeResult.value);
+      }
     });
     loadAccountData();
+    return unsubscribePushStatus;
   }, []);
 
   const handlePickAvatar = async () => {
@@ -164,13 +177,15 @@ export default function AccountScreen() {
     ttsService.setSettings({ enabled });
   };
 
-  const saveNotificationSettings = async (enabled: boolean, quiet: boolean) => {
+  const saveNotificationSettings = async (enabled: boolean, quiet: boolean, mode: OperatingPermissionMode = operatingPermissionMode) => {
     setAttentionNotifications(enabled);
     setQuietHours(quiet);
+    setOperatingPermissionMode(mode);
+    await saveOperatingPermissionMode(mode).catch(() => undefined);
     try {
-      await updateNotificationPreferences(enabled, quiet);
+      await updateNotificationPreferences(enabled, quiet, mode);
     } catch {
-      Alert.alert('Settings unavailable', 'Notification preferences could not be saved.');
+      Alert.alert('Settings unavailable', 'Notification preferences could not be saved. The previous server policy remains active.');
     }
   };
 
@@ -222,12 +237,13 @@ export default function AccountScreen() {
         <GlassSurface variant="card" style={styles.settingsCard}>
           <View style={styles.settingToggleRow}>
             <View style={styles.settingCopy}>
-              <Text style={styles.settingToggleLabel}>ACTIONABLE ITEMS</Text>
-              <Text style={styles.settingHint}>Questions and PR merge decisions only</Text>
+              <Text style={styles.settingToggleLabel}>CAPTAIN ATTENTION</Text>
+              <Text style={styles.settingHint}>Remote native push or open-browser fallback.</Text>
             </View>
             <TouchableOpacity
+              testID="account-attention-notifications-toggle"
               style={[styles.toggleBtn, attentionNotifications ? styles.toggleBtnActive : undefined]}
-              onPress={() => saveNotificationSettings(!attentionNotifications, quietHours)}
+              onPress={() => void saveNotificationSettings(!attentionNotifications, quietHours)}
             >
               <Text style={styles.toggleBtnText}>{attentionNotifications ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>
@@ -238,12 +254,25 @@ export default function AccountScreen() {
               <Text style={styles.settingHint}>10 PM–7 AM, device local time</Text>
             </View>
             <TouchableOpacity
+              testID="account-quiet-hours-toggle"
               style={[styles.toggleBtn, quietHours ? styles.toggleBtnActive : undefined]}
-              onPress={() => saveNotificationSettings(attentionNotifications, !quietHours)}
+              onPress={() => void saveNotificationSettings(attentionNotifications, !quietHours)}
             >
               <Text style={styles.toggleBtnText}>{quietHours ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>
           </View>
+          <Text testID="account-operating-permission-label" style={[styles.settingLabel, { marginTop: 14 }]}>OPERATING PERMISSION MODE</Text>
+          <Text style={styles.settingHint}>Alert volume only. This never grants merge, destructive, irreversible, security-sensitive, or external-public authority; Firstmate and captain confirmation rules still apply.</Text>
+          <View testID="account-operating-permission-options" style={styles.permissionModeColumn}>
+            {OPERATING_PERMISSION_MODE_OPTIONS.map(option => {
+              const selected = operatingPermissionMode === option.id;
+              return <TouchableOpacity key={option.id} testID={`account-operating-permission-${option.id}`} accessibilityRole="button" accessibilityLabel={`${option.label}: ${option.description}`} accessibilityState={{ selected }} onPress={() => void saveNotificationSettings(attentionNotifications, quietHours, option.id)} style={[styles.permissionModeOption, selected ? styles.permissionModeOptionActive : undefined]}><Text style={[styles.permissionModeTitle, selected ? styles.permissionModeTitleActive : undefined]}>{option.label}</Text><Text style={styles.settingHint}>{option.description}</Text></TouchableOpacity>;
+            })}
+          </View>
+          <Text testID="account-native-push-status" style={styles.pushStatusText}>
+            {nativePushStatus === 'registered' ? 'Native push: registered with Gateway.' : nativePushStatus === 'permission-denied' ? 'Native push permission denied. In-app attention remains available.' : nativePushStatus === 'unavailable' ? 'Native push unavailable here (use a physical device/release build with EAS push credentials).' : nativePushStatus === 'offline' ? 'Gateway or push service offline. Retrying while connected.' : 'Native push status: ' + nativePushStatus + '.'}
+          </Text>
+          <Text style={styles.settingHint}>Web notifications require an open, eligible browser tab; native push is the beta background channel.</Text>
         </GlassSurface>
 
         {/* VOICE & AUDIO SETTINGS */}
@@ -387,7 +416,8 @@ const styles = StyleSheet.create({
   socialToggleBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   socialBtnConnected: { backgroundColor: 'rgba(255, 255, 255, 0.15)', borderColor: '#FFFFFF' },
   socialBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
-  settingsCard: { padding: 18, borderRadius: 18 },
+  // Settings cards have a little more breathing room for the mode controls.
+  settingsCard: { padding: 21, borderRadius: 18 },
   settingLabel: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', marginBottom: 8 },
   settingToggleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 6 },
   settingToggleLabel: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: '#FFFFFF' },
@@ -396,6 +426,12 @@ const styles = StyleSheet.create({
   toggleBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   toggleBtnActive: { backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF' },
   toggleBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
+  permissionModeColumn: { gap: 7, marginTop: 10 },
+  permissionModeOption: { padding: 10, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
+  permissionModeOptionActive: { backgroundColor: 'rgba(36, 216, 255, 0.22)', borderColor: '#24D8FF' },
+  permissionModeTitle: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255,255,255,0.75)' },
+  permissionModeTitleActive: { color: '#FFFFFF' },
+  pushStatusText: { marginTop: 12, fontSize: 10, lineHeight: 15, color: 'rgba(255,255,255,0.72)' },
   voiceModeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
   voiceModePill: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   voiceModePillActive: { backgroundColor: 'rgba(36, 216, 255, 0.28)', borderColor: '#24D8FF' },

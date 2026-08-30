@@ -263,9 +263,15 @@ class HerdrClient:
             agent_id = ag.get('pane_id') or ag.get('id') or ag.get('name')
             if not agent_id:
                 continue
+            display_name = ag.get('terminal_title_stripped') or ag.get('name') or ag.get('label') or agent_id
+            # Herdr may expose the generic harness title as the pane name. In
+            # that case the stable pane identity is more truthful than
+            # displaying "Magistrate" or "Firstmate" for every worker.
+            if str(display_name).strip().lower() in {'magistrate', 'firstmate', 'π - magistrate', 'π - firstmate'}:
+                display_name = ag.get('pane_id') or agent_id
             formatted_agents.append({
                 'id': agent_id,
-                'name': ag.get('name') or ag.get('label') or ag.get('terminal_title_stripped') or agent_id,
+                'name': display_name,
                 'harness': ag.get('agent') or ag.get('harness'),
                 'status': status,
                 'pane_id': ag.get('pane_id'),

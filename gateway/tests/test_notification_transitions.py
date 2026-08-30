@@ -1,3 +1,4 @@
+import pytest
 import app.notifications as notifications
 
 
@@ -67,3 +68,68 @@ def test_disabled_preferences_suppress_without_losing_transition(monkeypatch, tm
     assert notifications.reconcile_notification_events('captain', [item()])['events'] == []
     notifications.update_notification_preferences('captain', True, None, None)
     assert [event['id'] for event in notifications.reconcile_notification_events('captain', [item()])['events']] == ['question-1']
+
+
+def test_permission_modes_filter_without_losing_future_transition(monkeypatch, tmp_path):
+    setup_db(monkeypatch, tmp_path)
+    pr = item('pr-1', kind='pr_ready')
+    notifications.update_notification_preferences('captain', True, None, None, 'restricted')
+    assert notifications.reconcile_notification_events('captain', [pr])['events'] == []
+    notifications.update_notification_preferences('captain', True, None, None, 'moderate')
+    assert [event['id'] for event in notifications.reconcile_notification_events('captain', [pr])['events']] == ['pr-1']
+    notifications.acknowledge_notification_events('captain', ['pr-1'])
+    notifications.update_notification_preferences('captain', True, None, None, 'full')
+    assert notifications.reconcile_notification_events('captain', [pr])['events'] == []
+
+
+@pytest.mark.asyncio
+async def test_remote_push_retries_and_deduplicates_by_fingerprint(monkeypatch, tmp_path):
+    setup_db(monkeypatch, tmp_path)
+    notifications.register_push_token('captain', 'ExponentPushToken[real-device]', 'ios')
+    calls = []
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+        @property
+        def is_success(self):
+            return 200 <= self.status_code < 300
+        def json(self):
+            return self._payload
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def post(self, *args, **kwargs):
+            calls.append(kwargs['json'])
+            return Response(503, {}) if len(calls) == 1 else Response(200, {'data': {'status': 'ok'}})
+
+    monkeypatch.setattr(notifications.httpx, 'AsyncClient', Client)
+    result = await notifications.dispatch_notification_events('captain', [item()])
+    assert result['delivery'] == 'sent'
+    assert len(calls) == 2
+    assert calls[0]['data']['url'] == '/attention?item=question-1'
+    assert (await notifications.dispatch_notification_events('captain', [item()]))['events'] == []
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_quiet_hours_defer_and_revocation_stops_remote_delivery(monkeypatch, tmp_path):
+    setup_db(monkeypatch, tmp_path)
+    notifications.register_push_token('captain', 'ExponentPushToken[real-device]', 'ios')
+    sent = []
+
+    async def fake_send(*args, **kwargs):
+        sent.append(args)
+        return {'status': 'sent'}
+
+    monkeypatch.setattr(notifications, 'send_push_notification', fake_send)
+    notifications.update_notification_preferences('captain', True, 22, 7, 'moderate')
+    quiet = await notifications.dispatch_notification_events('captain', [item()], local_hour=23)
+    assert quiet['events'] == [] and sent == []
+    awake = await notifications.dispatch_notification_events('captain', [item()], local_hour=8)
+    assert awake['delivery'] == 'sent' and len(sent) == 1
+    notifications.revoke_push_token('captain')
+    assert notifications.get_registered_push_token('captain') is None
