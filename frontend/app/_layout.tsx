@@ -8,6 +8,7 @@ import { NotificationPermissionPrompt } from '../src/components/NotificationPerm
 import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import {
   createGatewaySession,
+  invalidateGatewaySession,
   restoreGatewaySession,
   useGatewaySession,
   validateGatewaySession,
@@ -64,7 +65,9 @@ export default function RootLayout() {
       if (Platform.OS === 'web') window.scrollTo(0, 0);
       setBootstrapSecret('');
     } catch (error) {
-      setSessionError(error instanceof Error ? error.message : 'Session could not be validated.');
+      const message = error instanceof Error ? error.message : 'Session could not be validated.';
+      setSessionError(message);
+      await invalidateGatewaySession(message);
     } finally {
       setSessionSubmitting(false);
     }

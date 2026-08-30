@@ -45,6 +45,7 @@ async function open(mode = 'normal', preserveStorage = false) {
     }
     const nativeFetch = window.fetch.bind(window);
     const state = { mode, valid: false, calls: [], authCalls: [] };
+    let validationFailures = mode === 'validation-failure' ? 1 : 0;
     window.__authLifecycle = state;
     const json = (payload, status = 200) => Promise.resolve(new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } }));
     window.fetch = (resource, options = {}) => {
@@ -60,6 +61,10 @@ async function open(mode = 'normal', preserveStorage = false) {
           return json({ session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' });
         }
         const authorization = options.headers?.Authorization || options.headers?.get?.('Authorization');
+        if (validationFailures > 0) {
+          validationFailures -= 1;
+          return json({ detail: 'Transient session validation failure' }, 503);
+        }
         if (authorization === 'Bearer browser-test-session') {
           state.valid = true;
           return json({ authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' });
@@ -129,6 +134,19 @@ test('fresh browser gates protected routes, rejects invalid bootstrap, then reac
   await page.waitForFunction(() => document.body.innerText.includes('Authenticated reply from Firstmate.'));
   assert.ok(await page.evaluate(() => window.__authLifecycle.calls.length > 0));
   assert.ok(await page.evaluate(() => window.__authLifecycle.calls.every(call => call.authorization === `Bearer ${'browser-test-session'}`)));
+  await page.close();
+});
+
+test('a transient validation failure returns to the login gate and permits retry', async () => {
+  const page = await open('validation-failure');
+  await page.type('[data-testid="bootstrap-secret"]', 'valid-bootstrap');
+  await page.click('[data-testid="connect-session"]');
+  await page.waitForSelector('[data-testid="session-error"]');
+  assert.match(await page.$eval('[data-testid="session-status"]', node => node.textContent), /SESSION REQUIRED/);
+  assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
+
+  await page.click('[data-testid="connect-session"]');
+  await page.waitForSelector('[data-testid="branded-chat-shell"]');
   await page.close();
 });
 
