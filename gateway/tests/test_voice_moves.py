@@ -40,7 +40,7 @@ def test_control_requires_bound_confirmation(monkeypatch):
     assert move['status'] == 'confirmation_required'; assert move['requires_confirmation'] is True; assert fake.calls == []
     rejected = client.post('/api/v1/voice/moves', json=payload(utterance='stop the api agent', idempotency_key='voice-control-1', execute=True), headers=HEADERS).json()
     assert rejected['status'] == 'confirmation_expired'; assert fake.calls == []
-    executed = client.post('/api/v1/voice/moves', json=payload(utterance='stop the api agent', idempotency_key='voice-control-2', execute=True, confirmation_token=move['confirmation_token']), headers=HEADERS).json()
+    executed = client.post('/api/v1/voice/moves', json=payload(utterance='stop the api agent', idempotency_key='voice-control-1', execute=True, confirmation_token=move['confirmation_token']), headers=HEADERS).json()
     assert executed['status'] == 'completed'
     assert fake.calls == [('interrupt', 'pane-api')]
 

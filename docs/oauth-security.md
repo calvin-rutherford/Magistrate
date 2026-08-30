@@ -21,6 +21,6 @@ The state lifetime defaults to 10 minutes and can be shortened or configured up
 to one hour with `MAGISTRATE_OAUTH_STATE_TTL_SECONDS`. This flow does not make
 the callback endpoint require the app's gateway header: the provider redirect
 has no such header, and the one-time server-side transaction is the callback's
-integrity boundary. Replacing the existing shared-token principal model remains
-the responsibility of `SEC-AUTH`; this package never trusts a callback-supplied
-user or redirect value.
+integrity boundary. Gateway connect requests use the server-issued session
+principal described in `docs/friend-beta-security.md`; this package never
+trusts a callback-supplied user or redirect value.

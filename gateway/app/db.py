@@ -474,14 +474,23 @@ def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]
         })
     return result
 
-def upsert_connected_account(user_id: str, provider: str, provider_username: str, status: str = 'connected', scopes: List[str] = [], access_token: str = '') -> Dict[str, Any]:
+def upsert_connected_account(
+    user_id: str,
+    provider: str,
+    provider_username: str,
+    status: str = 'connected',
+    scopes: Optional[List[str]] = None,
+    access_token: str = '',
+    provider_user_id: str = '',
+) -> Dict[str, Any]:
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     now = int(time.time())
 
     account_id = f'{user_id}_{provider}'
-    scopes_str = ','.join(scopes)
+    scopes_str = ','.join(scopes or [])
+    provider_identity = provider_user_id or provider_username
 
     cursor.execute('''
     INSERT INTO connected_accounts (id, user_id, provider, provider_user_id, provider_username, status, scopes, created_at, updated_at)
@@ -491,7 +500,7 @@ def upsert_connected_account(user_id: str, provider: str, provider_username: str
         status=excluded.status,
         scopes=excluded.scopes,
         updated_at=excluded.updated_at
-    ''', (account_id, user_id, provider, provider_username, provider_username, status, scopes_str, now, now))
+    ''', (account_id, user_id, provider, provider_identity, provider_username, status, scopes_str, now, now))
 
     if access_token:
         cred_id = f'cred_{account_id}'

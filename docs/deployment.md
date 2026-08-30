@@ -45,5 +45,6 @@ Resolve any reported dirty/divergent state by preserving and reviewing its
 unique work, then retry. Do not use `git reset --hard`, `git stash`, or a force
 push. If host credentials are unavailable, the remaining manual step is to have
 the deployment owner configure the four repository secrets (or run the command
-from a trusted host) and then verify `http://100.84.181.23:8000/api/v1/health`
-with `X-Magistrate-Token`.
+from a trusted host) and then verify the configured HTTPS gateway health URL
+with an issued Bearer session. Do not put the deployment host, runner address,
+or bootstrap secret in Git.

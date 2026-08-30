@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 # this disposable worktree and make the permitted non-production mode explicit.
 os.environ.setdefault('MAGISTRATE_ENV', 'test')
 os.environ.setdefault('MAGISTRATE_SECRET_KEY', Fernet.generate_key().decode('ascii'))
-os.environ.setdefault(
-    'MAGISTRATE_DB_PATH', str(Path(__file__).parent / '.gateway-test.sqlite3')
-)
+TEST_DB_PATH = Path(__file__).parent / '.gateway-test.sqlite3'
+# A disposable test database must not leak state between local invocations.
+TEST_DB_PATH.unlink(missing_ok=True)
+os.environ.setdefault('MAGISTRATE_DB_PATH', str(TEST_DB_PATH))

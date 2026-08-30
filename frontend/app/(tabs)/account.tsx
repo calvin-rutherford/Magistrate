@@ -5,7 +5,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, updateUserProfile, updateNotificationPreferences, UserProfile, AuthProviderInfo } from '../../src/api/client';
+import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, connectAuthProvider, updateUserProfile, updateNotificationPreferences, GATEWAY_URL, UserProfile, AuthProviderInfo } from '../../src/api/client';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
@@ -35,7 +35,7 @@ export default function AccountScreen() {
       ]);
       if (prof) {
         if (prof.avatar_url && prof.avatar_url.startsWith('/uploads')) {
-          prof.avatar_url = 'http://100.84.181.23:8000' + prof.avatar_url;
+          prof.avatar_url = GATEWAY_URL.replace(/\/api\/v1$/, '') + prof.avatar_url;
         }
         // The locally persisted appearance is authoritative. The profile
         // value is legacy metadata and must not overwrite an explicit device
@@ -80,7 +80,7 @@ export default function AccountScreen() {
         if (res.avatar_url) {
           let fullUrl = res.avatar_url;
           if (fullUrl.startsWith('/uploads')) {
-            fullUrl = 'http://100.84.181.23:8000' + fullUrl;
+            fullUrl = GATEWAY_URL.replace(/\/api\/v1$/, '') + fullUrl;
           }
           setProfile(prev => prev ? { ...prev, avatar_url: fullUrl } : prev);
         }
@@ -132,10 +132,10 @@ export default function AccountScreen() {
   // REAL OAUTH BROWSER AUTHENTICATION FLOW WITH AUTO DISMISSAL
   const handleRealOAuthConnect = async (providerInfo: any) => {
     const returnUrl = Linking.createURL('/account');
-    const authUrl = `http://100.84.181.23:8000/api/v1/auth/${providerInfo.provider}/connect?token=dummy&redirect_uri=${encodeURIComponent(returnUrl)}`;
 
     try {
-      const result = await WebBrowser.openAuthSessionAsync(authUrl, returnUrl);
+      const connect = await connectAuthProvider(providerInfo.provider, returnUrl);
+      const result = await WebBrowser.openAuthSessionAsync(connect.auth_url, returnUrl);
       // The browser automatically dismisses when the returnUrl is hit.
       if (result.type === 'success') {
         loadAccountData();
@@ -289,11 +289,12 @@ export default function AccountScreen() {
                 </Text>
               </View>
               <TouchableOpacity
-                style={[styles.socialToggleBtn, s.status === 'connected' ? styles.socialBtnConnected : undefined]}
+                disabled={!s.available}
+                style={[styles.socialToggleBtn, s.status === 'connected' ? styles.socialBtnConnected : undefined, !s.available ? { opacity: 0.55 } : undefined]}
                 onPress={() => handleRealOAuthConnect(s)}
               >
                 <Text style={styles.socialBtnText}>
-                  {s.status === 'connected' ? 'CONNECTED ✓' : 'CONNECT +'}
+                  {s.status === 'connected' ? 'CONNECTED ✓' : s.available ? 'CONNECT +' : 'UNAVAILABLE'}
                 </Text>
               </TouchableOpacity>
             </View>

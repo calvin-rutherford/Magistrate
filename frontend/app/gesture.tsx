@@ -3,43 +3,50 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-nati
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import { GlassSurface } from '../src/components/GlassSurface';
 import { useRouter } from 'expo-router';
+import { GATEWAY_URL, getGatewaySessionToken } from '../src/api/client';
 
 export default function ARGlassesSetupScreen() {
   const router = useRouter();
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const wsUrl = 'ws://100.84.181.23:8000/ws/ar-interface';
+  const wsUrl = GATEWAY_URL.replace(/^http/, 'ws').replace(/\/api\/v1$/, '') + '/ws/ar-interface';
 
   useEffect(() => {
     let ws: WebSocket;
-    try {
-      ws = new WebSocket(wsUrl);
-      ws.onopen = () => {
-        setWsConnected(true);
-        setLogs(prev => [...prev, '[SYSTEM] Connected to AR Interface WebSocket']);
-      };
-      ws.onmessage = (e) => {
-        setLogs(prev => [...prev, `[RX] ${e.data}`]);
-      };
-      ws.onclose = () => {
-        setWsConnected(false);
-        setLogs(prev => [...prev, '[SYSTEM] WebSocket Disconnected']);
-      };
-    } catch (e) {
-      console.error('WS Error:', e);
-    }
+    getGatewaySessionToken().then(token => {
+      if (!token) return;
+      try {
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ type: 'auth', token }));
+          setWsConnected(true);
+          setLogs(prev => [...prev, '[SYSTEM] Connected to AR Interface WebSocket']);
+        };
+        ws.onmessage = (e) => {
+          setLogs(prev => [...prev, `[RX] ${e.data}`]);
+        };
+        ws.onclose = () => {
+          setWsConnected(false);
+          setLogs(prev => [...prev, '[SYSTEM] WebSocket Disconnected']);
+        };
+      } catch (e) {
+        console.error('WS Error:', e);
+      }
+    });
     return () => {
       if (ws) ws.close();
     };
   }, []);
 
-  const sendTestCommand = (modality: string, payload: string) => {
+  const sendTestCommand = async (modality: string, payload: string) => {
     if (!wsConnected) return;
     try {
+      const token = await getGatewaySessionToken();
+      if (!token) return;
       const ws = new WebSocket(wsUrl);
       ws.onopen = () => {
-        const data = { type: 'input', modality, payload };
-        ws.send(JSON.stringify(data));
+        ws.send(JSON.stringify({ type: 'auth', token }));
+        ws.send(JSON.stringify({ type: 'input', modality, payload }));
         setLogs(prev => [...prev, `[TX] Sent ${modality} command: ${payload}`]);
         setTimeout(() => ws.close(), 1000);
       };
@@ -64,7 +71,7 @@ export default function ARGlassesSetupScreen() {
         <GlassSurface variant="card" style={styles.qrCard}>
           <Text style={styles.qrTitle}>PAIRING CODE</Text>
           <View style={styles.qrBox}>
-            <Text style={styles.qrText}>{"{ ws: '100.84.181.23:8000', v: '1.0' }"}</Text>
+            <Text style={styles.qrText}>Authenticated gateway pairing</Text>
           </View>
           <Text style={styles.qrSubText}>Scan or enter this payload into your AR device to authenticate with Magistrate.</Text>
         </GlassSurface>
