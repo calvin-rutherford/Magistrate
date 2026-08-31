@@ -109,6 +109,15 @@ export function prependConversationMessages(target: string, messages: Conversati
   messagesByTarget.set(target, next); persist(target, next); emit(target);
 }
 
+export function insertConversationMessageAfter(target: string, afterId: string, message: ConversationMessage) {
+  const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
+  if (current.some(existing => existing.id === message.id)) return;
+  const index = current.findIndex(existing => existing.id === afterId);
+  if (index < 0) return;
+  const next = [...current.slice(0, index + 1), message, ...current.slice(index + 1)];
+  messagesByTarget.set(target, next); persist(target, next); emit(target);
+}
+
 export function resetConversationMessages(target: string, messages: ConversationMessage[] = EMPTY_MESSAGES) {
   messagesByTarget.set(target, messages); persist(target, messages); emit(target);
 }

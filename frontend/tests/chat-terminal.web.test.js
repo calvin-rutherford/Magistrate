@@ -107,7 +107,10 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/usage')) return Promise.resolve(new Response(JSON.stringify({ generated_at: '2026-08-29T18:00:00Z', schema_version: 5, source: 'quota-axi', providers: [{ provider: 'codex', plan: 'plus', status: 'fresh', stale: false, windows: [{ label: 'week', percentRemaining: 20 }] }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (historyScenario && url.includes('/api/v1/agents/captain/history')) {
-        if (!promptSent || historyScenario.manual) return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        if (!promptSent || historyScenario.manual) {
+          const initialMessages = Array.isArray(historyScenario.initialMessages) ? historyScenario.initialMessages : [];
+          return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: initialMessages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        }
         postPromptHistoryRequests += 1;
         const response = new Response(JSON.stringify({ target: 'captain', messages: historyScenario.messages }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         return postPromptHistoryRequests === 1 && historyScenario.delay
@@ -791,6 +794,54 @@ test('the agent response is appended to the conversation once the gateway replie
   const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.match(history, /status please/);
   assert.match(history, /Understood, working on it now\./);
+  await page.close();
+});
+
+test('reload reconciles a persisted captain message with its server primary response', async () => {
+  const serverMessages = [
+    { id: 'reloaded-user', role: 'user', kind: 'conversation', text: 'reconcile this persisted turn' },
+    { id: 'reloaded-agent', role: 'assistant', kind: 'conversation', text: 'The persisted primary response.' },
+  ];
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [
+    { id: 'u-stale', role: 'user', kind: 'conversation', text: 'reconcile this persisted turn', source: 'text', audience: 'captain', delivery: 'sent', sentAt: 123 },
+  ], false, { initialMessages: serverMessages, messages: serverMessages, manual: true });
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The persisted primary response.'));
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /reconcile this persisted turn/);
+  assert.match(history, /The persisted primary response/);
+  assert.ok(history.indexOf('reconcile this persisted turn') < history.indexOf('The persisted primary response'));
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain')));
+  assert.deepEqual(persisted.map(message => message.text), ['reconcile this persisted turn', 'The persisted primary response.']);
+  await page.close();
+});
+
+test('an unmatched internal audience cannot be resurrected during reload repair', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [
+    { id: 'u-captain-only', role: 'user', kind: 'conversation', text: 'captain-only turn', source: 'text', audience: 'captain', delivery: 'sent' },
+  ], false, { initialMessages: [
+    { id: 'internal-user', role: 'user', kind: 'conversation', text: 'internal worker turn' },
+    { id: 'internal-reply', role: 'assistant', kind: 'conversation', text: 'Internal worker reply must stay hidden.' },
+  ], manual: true });
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /captain-only turn/);
+  assert.doesNotMatch(history, /Internal worker reply/);
+  await page.close();
+});
+
+test('a delayed primary response remains paired with its captain message', async () => {
+  const messages = [
+    { id: 'delayed-user', role: 'user', kind: 'conversation', text: 'delayed persistence turn' },
+    { id: 'delayed-agent', role: 'assistant', kind: 'conversation', text: 'The delayed primary response.' },
+  ];
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
+    initialMessages: [], messages, delay: 1500, promptDelay: 2500,
+  });
+  await submit(page, 'delayed persistence turn');
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The delayed primary response.'), { timeout: 10_000 });
+  const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /delayed persistence turn/);
+  assert.match(history, /The delayed primary response/);
   await page.close();
 });
 
