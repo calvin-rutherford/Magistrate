@@ -417,7 +417,7 @@ export interface ExecutionSettings {
   unavailable_behavior: 'error' | 'fallback';
   migration_supported: boolean;
   credential_storage?: string;
-  credentials?: Array<{ credential_key: string; configured: boolean }>;
+  credentials?: { credential_key: string; configured: boolean }[];
 }
 
 export interface TaskInfo {
@@ -584,7 +584,7 @@ export interface GitHubPR {
   mergeable: string;
   summary: string;
   body: string;
-  reviews: Array<{ author: string; state: string; submitted_at?: string }>;
+  reviews: { author: string; state: string; submitted_at?: string }[];
   created_at: string | null;
   updated_at: string | null;
   merged_at: string | null;
@@ -875,7 +875,7 @@ async function requireOk<T>(res: Response): Promise<T> {
 
 export async function fetchVoiceInputCapabilities(): Promise<VoiceInputCapabilities> {
   const res = await authorizedFetch(GATEWAY_URL + '/voice/capabilities');
-  const data = await checkedJson<{ modes?: Array<{ id: VoiceInputMode; label: string; available: boolean; reason?: string }>; provider?: string; configured?: boolean }>(res);
+  const data = await checkedJson<{ modes?: { id: VoiceInputMode; label: string; available: boolean; reason?: string }[]; provider?: string; configured?: boolean }>(res);
   if (!Array.isArray(data.modes)) throw new Error('Gateway returned invalid voice capabilities.');
   return {
     modes: data.modes.map(mode => ({ id: mode.id, label: mode.label, available: mode.available ? 'available' : 'unavailable', reason: mode.reason })),

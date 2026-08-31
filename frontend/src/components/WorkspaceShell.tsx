@@ -34,7 +34,7 @@ const sectionLabels: Record<WorkspaceSection, string> = {
   'pull-requests': 'Pull requests'
 };
 
-const navItems: Array<{ id: WorkspaceSection; icon: string; short: string }> = [
+const navItems: { id: WorkspaceSection; icon: string; short: string }[] = [
   { id: 'situation', icon: '◉', short: 'SITUATION' },
   { id: 'fleet', icon: '⌘', short: 'FLEET' },
   { id: 'attention', icon: '!', short: 'ATTENTION' },
