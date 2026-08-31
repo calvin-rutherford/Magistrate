@@ -1,8 +1,13 @@
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.herdr_client import HerdrClient
+
+
+FIXTURES = Path(__file__).parent / 'fixtures'
 
 
 @pytest.mark.asyncio
@@ -19,14 +24,27 @@ async def test_missing_herdr_cli_is_a_degraded_state_not_a_gateway_error(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_resolve_target_prefers_pi_captain_over_unrelated_codex():
+async def test_resolve_target_uses_the_deployed_firstmate_workspace_not_an_active_pi_worker():
+    """Regression: the deployed captain prompt was injected into the task worker."""
+    snapshot = json.loads((FIXTURES / 'deployed-captain-routing.json').read_text())
     client = HerdrClient()
-    client.list_agents = AsyncMock(return_value=[
-        {'id': 'codex-pane', 'name': 'reviewer', 'harness': 'codex'},
-        {'id': 'pi-pane', 'name': 'π - firstmate', 'harness': 'pi'},
-    ])
+    client.get_snapshot = AsyncMock(return_value=snapshot)
 
-    assert await client.resolve_target('captain') == 'pi-pane'
+    assert await client.resolve_target('captain') == 'w4:p1'
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_fails_closed_when_only_workers_exist():
+    client = HerdrClient()
+    client.get_snapshot = AsyncMock(return_value={
+        'workspaces': [{'workspace_id': 'worker-space', 'label': 'release worker'}],
+        'agents': [{
+            'workspace_id': 'worker-space', 'pane_id': 'pi-worker',
+            'terminal_title_stripped': 'π - Magistrate', 'agent': 'pi',
+        }],
+    })
+
+    assert await client.resolve_target('captain') == 'captain'
 
 
 @pytest.mark.asyncio
@@ -87,11 +105,27 @@ async def test_list_agents_prefers_real_name_over_generic_harness_title_and_neve
 
 
 @pytest.mark.asyncio
-async def test_resolve_target_recognizes_firstmate_pi_pane():
+async def test_resolve_target_preserves_an_explicit_legacy_firstmate_name():
     client = HerdrClient()
-    client.list_agents = AsyncMock(return_value=[
-        {'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'π - firstmate', 'harness': 'pi'},
-        {'id': 'w1:p2', 'pane_id': 'w1:p2', 'name': 'π - Magistrate', 'harness': 'pi'},
-    ])
+    client.get_snapshot = AsyncMock(return_value={
+        'agents': [{'pane_id': 'w1:p1', 'name': 'firstmate', 'agent': 'pi'}],
+    })
+
+    assert await client.resolve_target('captain') == 'w1:p1'
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_recognizes_firstmate_pi_workspace():
+    client = HerdrClient()
+    client.get_snapshot = AsyncMock(return_value={
+        'workspaces': [
+            {'workspace_id': 'w1', 'label': 'firstmate'},
+            {'workspace_id': 'w2', 'label': 'release worker'},
+        ],
+        'agents': [
+            {'workspace_id': 'w1', 'pane_id': 'w1:p1', 'agent': 'pi'},
+            {'workspace_id': 'w2', 'pane_id': 'w2:p1', 'agent': 'pi'},
+        ],
+    })
 
     assert await client.resolve_target('captain') == 'w1:p1'

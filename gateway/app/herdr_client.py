@@ -453,11 +453,10 @@ class HerdrClient:
         # version at all and callers see the real disconnected state.
         return {'agents': [], 'workspaces': [], 'tabs': [], 'panes': []}
 
-    async def list_agents(self) -> List[Dict[str, Any]]:
-        snapshot = await self.get_snapshot()
-        agents = snapshot.get('agents', [])
+    @staticmethod
+    def _format_agents(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         formatted_agents = []
-        for ag in agents:
+        for ag in snapshot.get('agents', []):
             raw_status = ag.get('agent_status')
             status = raw_status.get('state') if isinstance(raw_status, dict) else raw_status
             status = status or 'unknown'
@@ -484,23 +483,44 @@ class HerdrClient:
             })
         return formatted_agents
 
+    async def list_agents(self) -> List[Dict[str, Any]]:
+        return self._format_agents(await self.get_snapshot())
+
     async def resolve_target(self, target: str) -> str:
-        if target in ('captain', 'codex', 'firstmate'):
-            agents = await self.list_agents()
-            if agents:
-                # Firstmate currently names Pi panes "π - firstmate" / "π -
-                # Magistrate". Prefer an explicit captain name, then a known
-                # verified harness, rather than silently selecting the first pane.
-                # Do not silently route a Pi captain to an unrelated first pane
-                # when another harness is present.
-                for ag in agents:
-                    name = (ag.get('name') or '').strip().lower()
-                    if name in ('captain', 'codex', 'firstmate') or name.endswith(' - firstmate'):
-                        return ag.get('pane_id') or ag.get('id')
-                for ag in agents:
-                    if ag.get('harness') in ('codex', 'pi'):
-                        return ag.get('pane_id') or ag.get('id')
-                return agents[0].get('pane_id') or agents[0].get('id')
+        if target not in ('captain', 'codex', 'firstmate'):
+            return target
+
+        # A harness is not a routing role. The deployed host can have many Pi
+        # and Codex workers, and selecting the first one made captain prompts
+        # interrupt whichever task happened to be listed first. Herdr's stable
+        # role signal is the parent workspace label (the primary conversation
+        # lives in the "firstmate" workspace), not a worker's harness or
+        # terminal title (every Pi worker can render "π - Magistrate").
+        snapshot = await self.get_snapshot()
+        agents = self._format_agents(snapshot)
+        captain_workspaces = {
+            str(workspace.get('workspace_id') or workspace.get('id') or '')
+            for workspace in snapshot.get('workspaces', [])
+            if str(workspace.get('label') or workspace.get('name') or '').strip().lower()
+            in ('captain', 'firstmate')
+        }
+        for ag in agents:
+            if str(ag.get('workspace_id') or '') in captain_workspaces:
+                return ag.get('pane_id') or ag.get('id')
+
+        # Preserve an explicitly configured pane identity for older snapshots
+        # that do not expose workspace labels. Use configured names/labels, not
+        # terminal titles: every Pi worker can render "π - Magistrate".
+        for raw in snapshot.get('agents', []):
+            name = str(raw.get('name') or raw.get('label') or '').strip().lower()
+            if name in ('captain', 'firstmate') or name.endswith(' - firstmate'):
+                return raw.get('pane_id') or raw.get('id') or raw.get('name')
+        # Never fall back from captain or firstmate to an arbitrary worker
+        # merely because its harness is known.
+        if target == 'codex':
+            for ag in agents:
+                if ag.get('harness') == 'codex':
+                    return ag.get('pane_id') or ag.get('id')
         return target
 
     async def prompt_agent(
