@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AgentHistoryMessage, filterAgentHistory, isHarnessArtifact, isRenderableToolCall, parseAgentHistory, sanitizeAgentHistory, toolCallPreview } from '../src/services/ChatHistory';
+import { AgentHistoryMessage, filterAgentHistory, isHarnessArtifact, isRawTerminalArtifact, isRenderableToolCall, parseAgentHistory, sanitizeAgentHistory, toolCallPreview } from '../src/services/ChatHistory';
 
 const history: AgentHistoryMessage[] = [
   { role: 'user', kind: 'conversation', text: 'Please inspect the fleet.' },
@@ -63,9 +63,11 @@ test('normalized history rejects harness metadata even when transport mislabeled
     { role: 'assistant', kind: 'conversation', text: 'FIRSTMATE_OP: v1 watcher wake' },
     { role: 'assistant', kind: 'conversation', text: '/calm animation status' },
     { role: 'assistant', kind: 'conversation', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
+    { role: 'assistant', kind: 'conversation', text: '$ cat /tmp/raw-terminal' },
     { role: 'assistant', kind: 'tool', text: 'raw pane_id=w1:p2 runtime metadata' },
   ];
   assert.equal(isHarnessArtifact(incoming[3].text), true);
+  assert.equal(isRawTerminalArtifact(incoming[6].text), true);
   assert.deepEqual(sanitizeAgentHistory(incoming).map(message => message.text), ['Keep this real question.', 'Can you explain /calm and jsonrpc?', 'Actual agent answer.']);
 });
 

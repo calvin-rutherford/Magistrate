@@ -867,9 +867,10 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
   return data;
 }
 
-export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[], messageId?: string) {
+export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[], messageId?: string, signal?: AbortSignal) {
   const res = await authorizedFetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
     },

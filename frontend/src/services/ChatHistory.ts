@@ -16,6 +16,7 @@ const ansiPattern = /\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const chromePattern = /\(ctrl\+(?:End|Home)\)|Jump to bottom|Update installed · Restart|⏵⏵|⏸\s|auto mode on ·|esc to interrupt|ctrl\+\w+ to /i;
 const harnessArtifactPattern = /^(?:FIRSTMATE_OP\b|WAKE_(?:ACK|DRAIN|REQUIRED)\b|Planning\b|Clarifying\b|Initiating\b|Inspecting\b|Identifying\b|Verifying\b|Queuing\b|Error:\s|Took \d|Command exited with code\b|\(no output\)|\.\.\. \(\d+ earlier lines|help\[\d+\]:|\/calm\b|calm(?:ing)?(?: animation| status)?\b|edit\s*$|(?:pane|tab|workspace)(?:_id)?\s*[:=]|window=[^\s]+|worktree=\/|~\/[^\s]+ \([^)]*\)\s*$|[↑↓]\S.*\bCH\d|─{3,})/i;
 const systemNoticePattern = /^(?:⛵\s+[^:]+:|Run bin\/fm-wake-drain\.sh\b|Watcher continuity is extension-owned\b)/i;
+const rawTerminalPattern = /^(?:\$\s|⎿\s|(?:bash|read|edit|write|glob|grep|task|websearch|webfetch)\s*\(|[^\s@]+@[^\s:]+:[^\n]*[$#]\s)/i;
 
 const stripAnsi = (text: string) => text.replace(ansiPattern, '');
 
@@ -31,6 +32,10 @@ export function unwrapTerminalText(text: string): string {
     else blocks.push(trimmed);
   }
   return blocks.join('\n').replace(/\n{2,}/g, '\n\n').trim();
+}
+
+export function isRawTerminalArtifact(text: string): boolean {
+  return rawTerminalPattern.test(stripAnsi(text).trim());
 }
 
 export function isHarnessArtifact(text: string): boolean {
@@ -167,7 +172,7 @@ export function sanitizeAgentHistory<T extends AgentHistoryMessage>(messages: T[
     // User-authored text is never reclassified by content: a captain may
     // legitimately discuss JSON-RPC, /calm, pane ids, or any other artifact.
     if (message.role === 'user') return message.kind === 'conversation';
-    return message.kind === 'tool' ? isRenderableToolCall(message) : !isHarnessArtifact(message.text);
+    return message.kind === 'tool' ? isRenderableToolCall(message) : !isHarnessArtifact(message.text) && !isRawTerminalArtifact(message.text);
   });
 }
 

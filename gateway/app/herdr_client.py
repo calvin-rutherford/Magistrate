@@ -46,6 +46,7 @@ _HARNESS_ARTIFACT = re.compile(
     re.IGNORECASE,
 )
 _SYSTEM_NOTICE = re.compile(r'^(?:⛵\s+[^:]+:|Run bin/fm-wake-drain\.sh\b|Watcher continuity is extension-owned\b)', re.IGNORECASE)
+_RAW_TERMINAL = re.compile(r'^(?:\$\s|⎿\s|(?:bash|read|edit|write|glob|grep|task|websearch|webfetch)\s*\(|[^\s@]+@[^\s:]+:[^\n]*[$#]\s)', re.IGNORECASE)
 
 
 def unwrap_terminal_text(text: str) -> str:
@@ -83,7 +84,7 @@ def _parse_pi_ansi_history(output: str) -> List[Dict[str, str]]:
     def finish_assistant() -> None:
         nonlocal assistant_lines
         text = unwrap_terminal_text('\n'.join(assistant_lines))
-        if text and not _is_harness_artifact(text):
+        if text and not _is_harness_artifact(text) and not _RAW_TERMINAL.match(text):
             messages.append({'role': 'assistant', 'kind': 'conversation', 'text': text})
         assistant_lines = []
 
@@ -145,7 +146,7 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         if not current:
             return
         text = unwrap_terminal_text(current['text']) if current['kind'] == 'conversation' else current['text'].strip()
-        if text and text not in _TRANSIENT_USER_TEXT and not _is_harness_artifact(text):
+        if text and text not in _TRANSIENT_USER_TEXT and not _is_harness_artifact(text) and (current['kind'] == 'tool' or not _RAW_TERMINAL.match(text)):
             messages.append({**current, 'text': text})
         current = None
 
