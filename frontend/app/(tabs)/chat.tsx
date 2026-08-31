@@ -13,7 +13,7 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { filterAgentHistory, isHarnessArtifact, sanitizeAgentHistory, toolCallPreview } from '../../src/services/ChatHistory';
-import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, prependConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, insertConversationMessageAfter, prependConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl } from '../../src/utils/externalLinks';
@@ -360,6 +360,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         await hydration;
         const result = await fetchAgentHistory(target);
         if (request !== historyRequestRef.current) return;
+        reconcileCaptainHistory(result.messages);
         // A working agent can briefly leave an empty terminal snapshot (redraw
         // or alternate screen); retry a few times before accepting it as empty.
         if (result.messages.length === 0 && attempt < 5) {
@@ -367,6 +368,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           return loadHistory(attempt + 1);
         }
         result.messages.forEach(message => {
+          // While a captain request is active, do not consume assistant/tool
+          // identities from the seed before the prompt boundary is observed.
+          // A bounded snapshot can omit the prompt row; the normal sync path
+          // must get another chance to associate the eventual reply.
+          if (target === 'captain' && activePromptRef.current && message.role === 'assistant') return;
           const key = historyKey(message);
           const optimisticCount = optimisticCountsRef.current.get(key) || 0;
           if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
@@ -562,7 +568,69 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // For the captain thread, an exact locally-submitted prompt opens the only
   // rendering boundary. Unknown user rows (worker prompts/replies), idle agent
   // prose, and standalone tools are remembered for dedupe but never appended.
-  const appendHistoryMessages = (incoming: Array<{ id?: string; role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }>): boolean => {
+  //
+  // A seed can finish after a prompt was submitted (or after a reload). If it
+  // sees the prompt and its reply together, blindly recording both identities
+  // as "known" drops the reply without ever rendering it. Recover only a
+  // response segment whose user row exactly matches an unresolved captain
+  // message already in the normalized store; this repairs that race without
+  // replaying the old terminal backlog.
+  function reconcileCaptainHistory(incoming: { id?: string; role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }[]) {
+    if (target !== 'captain') return;
+    const history = sanitizeAgentHistory(incoming);
+    const local = getConversationMessages(target);
+    const unresolved = local.reduce((result, message, index) => {
+      if (message.role !== 'user' || message.audience !== 'captain' || message.delivery === 'failed' || message.delivery === 'cancelled') return result;
+      const nextUser = local.slice(index + 1).findIndex(item => item.role === 'user');
+      const end = nextUser < 0 ? local.length : index + 1 + nextUser;
+      const hasReply = local.slice(index + 1, end).some(item => item.role === 'assistant' && item.kind !== 'tool');
+      if (!hasReply) result.push({ message, index });
+      return result;
+    }, [] as { message: ConversationMessage; index: number }[]);
+    if (!unresolved.length) return;
+
+    type CaptainHistoryEntry = { id?: string; role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string };
+    type CaptainHistorySegment = { prompt: CaptainHistoryEntry; reply: CaptainHistoryEntry | null; toolResults: string[] };
+    const segments: CaptainHistorySegment[] = [];
+    let segment: CaptainHistorySegment | null = null;
+    history.forEach(message => {
+      if (message.role === 'user') {
+        segment = { prompt: message, reply: null, toolResults: [] };
+        segments.push(segment);
+      } else if (segment && message.kind === 'tool') {
+        const preview = toolCallPreview(message.text).slice(0, 48);
+        if (!segment.toolResults.includes(preview) && segment.toolResults.length < 6) segment.toolResults.push(preview);
+      } else if (segment && message.kind === 'conversation' && !segment.reply) {
+        segment.reply = message;
+      }
+    });
+
+    const matches: Array<{ local: { message: ConversationMessage; index: number }; segment: typeof segments[number] }> = [];
+    const available = [...unresolved];
+    // Match from the latest occurrence so an old repeated phrase cannot steal
+    // the response belonging to the current locally persisted turn.
+    [...segments].reverse().forEach(candidate => {
+      if (!candidate.reply) return;
+      const matchAt = available.findLastIndex(item => item.message.text.trim() === candidate.prompt.text.trim());
+      if (matchAt < 0) return;
+      const [localMessage] = available.splice(matchAt, 1);
+      matches.push({ local: localMessage, segment: candidate });
+    });
+    matches.sort((left, right) => left.local.index - right.local.index).forEach(({ local: localMessage, segment: candidate }) => {
+      const reply = candidate.reply;
+      if (!reply) return;
+      const id = reply.id || stableHistoryId(reply);
+      insertConversationMessageAfter(target, localMessage.message.id, {
+        id, role: 'assistant', kind: 'conversation', text: reply.text, sentAt: undefined, source: 'text', audience: 'primary',
+        toolResults: candidate.toolResults.length ? candidate.toolResults : undefined,
+      });
+      if (activePromptRef.current?.messageId === localMessage.message.id) {
+        activePromptRef.current = null;
+        setIsThinking(false);
+      }
+    });
+  }
+  const appendHistoryMessages = (incoming: { id?: string; role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }[]): boolean => {
     let appendedReply = false;
     sanitizeAgentHistory(incoming).forEach(message => {
       const key = historyKey(message);
@@ -619,6 +687,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   };
   const syncFromHistory = async (): Promise<boolean> => {
     const result = await fetchAgentHistory(target);
+    reconcileCaptainHistory(result.messages);
     return appendHistoryMessages(result.messages);
   };
 
@@ -634,7 +703,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       // not let an early socket replay server history before the authoritative
       // initial seed has established identities for this mounted canvas.
       void historyReadyRef.current.then(() => {
-        if (active && appendHistoryMessages(event.messages)) setIsThinking(false);
+        if (!active) return;
+        reconcileCaptainHistory(event.messages);
+        if (appendHistoryMessages(event.messages)) setIsThinking(false);
       });
     });
     void realtime.connect();

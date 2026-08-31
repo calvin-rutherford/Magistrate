@@ -175,7 +175,7 @@ export default function VoiceScreen() {
   const deliverResponse = useCallback((result: VoiceMoveResult) => {
     if (result.status !== 'completed') throw new Error(result.error || 'Firstmate did not complete the request.');
     const responseText = result.response?.trim() || `Request completed by ${result.target}.`;
-    appendConversationMessage('captain', { id: `voice-a-${Date.now()}`, role: 'assistant', text: responseText, sentAt: Date.now(), source: 'voice' });
+    appendConversationMessage('captain', { id: `voice-a-${Date.now()}`, role: 'assistant', text: responseText, sentAt: Date.now(), source: 'voice', audience: 'primary' });
     setVoiceState('SPEAKING');
     turnInFlightRef.current = false;
     ttsService.speakChunk(responseText, () => { if (!endingRef.current) void beginListening(); });
