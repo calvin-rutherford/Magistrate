@@ -2,9 +2,12 @@ import { GATEWAY_URL, getGatewaySessionToken } from '../api/client';
 
 export type EventCallback = (data: any) => void;
 
+const activeClientsByTarget = new Map<string, number>();
+
 export class RealtimeClient {
   private socket: WebSocket | null = null;
-  private listeners: EventCallback[] = [];
+  private listeners = new Set<EventCallback>();
+  private registeredActive = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private connecting = false;
@@ -31,6 +34,14 @@ export class RealtimeClient {
       // manufacture a reconnect loop while logout/expiry invalidates the session.
       if (!token || this.stopped) return;
       const wsUrl = GATEWAY_URL.replace(/^http/, 'ws') + '/events';
+      if (!this.registeredActive) {
+        const active = (activeClientsByTarget.get(this.target) || 0) + 1;
+        activeClientsByTarget.set(this.target, active);
+        this.registeredActive = true;
+        if (typeof __DEV__ !== 'undefined' && __DEV__ && active > 1) {
+          console.warn(`[Magistrate chat] ${active} realtime clients are mounted for ${this.target}; stable message ids will deduplicate events, but check for a duplicate ChatCanvas mount.`);
+        }
+      }
       this.socket = new WebSocket(wsUrl);
       this.socket.onopen = () => {
         // Browser WebSocket APIs cannot set Authorization headers. Authenticate
@@ -62,10 +73,16 @@ export class RealtimeClient {
     this.reconnectTimer = null;
     this.socket?.close();
     this.socket = null;
+    if (this.registeredActive) {
+      const active = (activeClientsByTarget.get(this.target) || 1) - 1;
+      if (active > 0) activeClientsByTarget.set(this.target, active);
+      else activeClientsByTarget.delete(this.target);
+      this.registeredActive = false;
+    }
   }
 
   subscribe(callback: EventCallback) {
-    this.listeners.push(callback);
-    return () => { this.listeners = this.listeners.filter(listener => listener !== callback); };
+    this.listeners.add(callback);
+    return () => { this.listeners.delete(callback); };
   }
 }

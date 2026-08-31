@@ -28,7 +28,7 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = [], liveUpdates = false) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = [], liveUpdates = false, chatHistoryScenario = null) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   if (visualViewportShortfall) {
@@ -39,11 +39,28 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       Object.defineProperty(window.visualViewport, 'height', { get: () => window.innerHeight - shortfall });
     }, visualViewportShortfall);
   }
-  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages, simulateLiveUpdates) => {
+  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages, simulateLiveUpdates, historyScenario) => {
     if (clearStorage) { localStorage.clear(); sessionStorage.clear(); }
     if (initialMessages.length) localStorage.setItem('magistrate.chat.messages.captain', JSON.stringify(initialMessages));
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
+    let postPromptHistoryRequests = 0;
+    if (historyScenario) {
+      class FakeWebSocket {
+        static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
+        constructor() { this.readyState = FakeWebSocket.CONNECTING; setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }, 10); }
+        send() {
+          const emit = () => {
+            if (!promptSent || this.readyState !== FakeWebSocket.OPEN) { setTimeout(emit, 20); return; }
+            const payload = JSON.stringify({ type: 'agent_history', target: 'captain', messages: historyScenario.messages });
+            setTimeout(() => { this.onmessage?.({ data: payload }); this.onmessage?.({ data: payload }); }, historyScenario.delay || 0);
+          };
+          emit();
+        }
+        close() { this.readyState = FakeWebSocket.CLOSED; this.onclose?.(); }
+      }
+      window.WebSocket = FakeWebSocket;
+    }
     let uploadCount = 0;
     let historyRequests = 0;
     let agentHistoryRequests = 0;
@@ -83,6 +100,14 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/execution/settings')) return Promise.resolve(new Response(JSON.stringify({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/usage')) return Promise.resolve(new Response(JSON.stringify({ generated_at: '2026-08-29T18:00:00Z', schema_version: 5, source: 'quota-axi', providers: [{ provider: 'codex', plan: 'plus', status: 'fresh', stale: false, windows: [{ label: 'week', percentRemaining: 20 }] }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (historyScenario && url.includes('/api/v1/agents/captain/history')) {
+        if (!promptSent) return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        postPromptHistoryRequests += 1;
+        const response = new Response(JSON.stringify({ target: 'captain', messages: historyScenario.messages }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        return postPromptHistoryRequests === 1 && historyScenario.delay
+          ? new Promise(resolve => setTimeout(() => resolve(response), historyScenario.delay))
+          : Promise.resolve(response);
+      }
       if (url.includes('/api/v1/agents/w1%3Ap7/history')) {
         agentHistoryRequests += 1;
         if (simulateHistoryRace) {
@@ -93,10 +118,12 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
             ? new Promise(resolve => setTimeout(() => resolve(new Response(payload, { status: 200, headers: { 'Content-Type': 'application/json' } })), 400))
             : Promise.resolve(new Response(payload, { status: 200, headers: { 'Content-Type': 'application/json' } }));
         }
-        const messages = agentHistoryRequests < 3 ? [] : [
-          { role: 'user', kind: 'conversation', text: 'Please check the deployment.' },
-          { role: 'assistant', kind: 'tool', text: 'Ran 3 commands' },
-          { role: 'assistant', kind: 'conversation', text: 'The deployment is healthy.' },
+        const baseline = { id: 'fleet-baseline', role: 'assistant', kind: 'conversation', text: 'Existing baseline.' };
+        const messages = agentHistoryRequests === 1 ? [baseline] : [
+          baseline,
+          { id: 'fleet-user-live', role: 'user', kind: 'conversation', text: 'Please check the deployment.' },
+          { id: 'fleet-tool-live', role: 'assistant', kind: 'tool', text: 'Ran 3 commands' },
+          { id: 'fleet-agent-live', role: 'assistant', kind: 'conversation', text: 'The deployment is healthy.' },
         ];
         return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
@@ -113,7 +140,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, emptyInventory, promptResponseText, historyRace, !preserveStorage, seedMessages, liveUpdates);
+  }, emptyInventory, promptResponseText, historyRace, !preserveStorage, seedMessages, liveUpdates, chatHistoryScenario);
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: colorScheme }]);
   await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
@@ -156,6 +183,12 @@ test('chat starts at the measured latest content and preserves older-message rea
   }));
   const page = await openChat({ width: 900, height: 700 }, false, 'Reply', URL, 0, false, false, 'light', seedMessages);
   await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-seed-"]').length === 6);
+  const fixedControls = () => page.evaluate(() => {
+    const logo = document.querySelector('[data-testid="brand-drawer-toggle"]').getBoundingClientRect();
+    const composer = document.querySelector('[data-testid="captain-prompt"]').closest('[class]')?.getBoundingClientRect();
+    return { logo: { x: logo.x, y: logo.y }, composer: composer ? { x: composer.x, y: composer.y } : null };
+  });
+  const fixedBefore = await fixedControls();
 
   const metrics = () => page.$eval('[data-testid="chat-history"]', element => ({
     scrollTop: element.scrollTop,
@@ -179,6 +212,11 @@ test('chat starts at the measured latest content and preserves older-message rea
   await page.waitForSelector('[data-testid="jump-to-latest"]');
   position = await metrics();
   assert.ok(position.scrollTop + position.clientHeight < position.scrollHeight - 2, 'user scroll should leave the viewport above the end');
+  assert.deepEqual(await fixedControls(), fixedBefore, 'logo and composer must remain detached from history scrolling');
+  assert.equal((await page.$eval('[data-testid="jump-to-latest"]', element => element.innerText)).trim(), '↓');
+  const jumpStyle = await page.$eval('[data-testid="jump-to-latest"]', element => ({ background: getComputedStyle(element).backgroundColor, width: getComputedStyle(element).width }));
+  assert.match(jumpStyle.background, /rgba\(17, 23, 34, 0\.62\)/);
+  assert.equal(jumpStyle.width, '38px');
 
   await submit(page, 'while reading older messages');
   await page.waitForSelector('[data-testid="jump-to-latest"]');
@@ -407,8 +445,10 @@ test('right swipe on the chat screen opens the mobile drawer', async () => {
   await page.close();
 });
 
-test('right swipe starting in the composer does not open the drawer', async () => {
+test('right swipe from the focused composer opens the drawer without losing input state', async () => {
   const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
+  await page.focus('[data-testid="captain-prompt"]');
+  await page.keyboard.type('preserve focused draft');
   const composer = await page.$eval('[data-testid="captain-prompt"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, height: rect.height }; });
   const client = await page.createCDPSession();
   const start = { x: composer.left + 20, y: composer.top + composer.height / 2 };
@@ -417,7 +457,9 @@ test('right swipe starting in the composer does not open the drawer', async () =
     await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x + step * 28, y: start.y }] });
   }
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  assert.ok(Number(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity)) < 0.05);
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'preserve focused draft');
+  assert.equal(await page.evaluate(() => location.pathname), '/chat', 'swipe must not trigger browser back navigation');
   await page.close();
 });
 
@@ -540,6 +582,9 @@ test('fleet agent opens its conversation, hides tools by default, and settings c
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   await page.evaluate(() => document.querySelector('[data-testid="drawer-section-fleet"]').click());
   await page.waitForSelector('[data-testid="fleet-agent-w1:p7"]');
+  const fleetName = await page.$eval('[data-testid="fleet-agent-w1:p7"]', element => element.innerText);
+  assert.match(fleetName, /Deploy agent/);
+  assert.doesNotMatch(fleetName, /w1:p7/, 'Fleet Summary should present the assigned name rather than raw pane diagnostics');
   await page.evaluate(() => document.querySelector('[data-testid="fleet-agent-w1:p7"]').click());
   await page.waitForFunction(() => new URL(location.href).searchParams.get('agentId') === 'w1:p7');
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The deployment is healthy.'));
@@ -583,7 +628,7 @@ test('two-second hold exposes edit, copy, and selection for plain messages', asy
   await submit(page, 'editable message');
   const selector = '[data-testid^="user-message-u-"]';
   await page.waitForSelector(selector);
-  assert.equal(await page.$eval(selector, element => element.innerText), 'editable message');
+  assert.equal(await page.$eval(`${selector} [data-testid^="user-message-text-"]`, element => element.innerText), 'editable message');
   const rect = await page.$eval(selector, element => { const box = element.getBoundingClientRect(); return { x: box.x + box.width / 2, y: box.y + box.height / 2 }; });
   await page.mouse.move(rect.x, rect.y); await page.mouse.down(); await new Promise(resolve => setTimeout(resolve, 2100)); await page.mouse.up();
   await page.waitForSelector('[data-testid="message-actions"]');
@@ -757,17 +802,67 @@ test('user bubbles are opaque and repeated legitimate messages remain distinct',
   await page.close();
 });
 
-test('a sent user message remains plain and stable across the live-refresh poll', async () => {
+test('WebSocket and poll fallback render each safe turn once, retain queue timestamps, and bound tools', async () => {
+  const messages = [
+    { id: 'server-user-1', role: 'user', kind: 'conversation', text: 'live source question' },
+    { id: 'server-tool-1', role: 'assistant', kind: 'tool', text: 'Running npm test --token hidden-secret' },
+    { id: 'server-calm-1', role: 'assistant', kind: 'conversation', text: '/calm animation status' },
+    { id: 'server-envelope-1', role: 'assistant', kind: 'conversation', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
+    { id: 'server-agent-1', role: 'assistant', kind: 'conversation', text: 'Actual response only.' },
+  ];
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { messages, delay: 500 });
+  await submit(page, 'live source question');
+  await page.focus('[data-testid="captain-prompt"]');
+  await page.keyboard.type('queued second question');
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-u-"]').length === 2);
+  const queuedTimestamp = await page.$eval('[data-testid^="user-message-u-"]:last-of-type [data-testid^="message-timestamp-"]', element => element.innerText).catch(() => null);
+  assert.ok(queuedTimestamp && /\d/.test(queuedTimestamp), 'queued message should receive its timestamp when the user sends it');
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('Actual response only.'), { timeout: 10_000 });
+  await page.waitForFunction(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length === 2, { timeout: 10_000 });
+  await new Promise(resolve => setTimeout(resolve, 3400));
+  assert.equal((await page.$$('[data-testid^="user-message-u-"]')).length, 2);
+  assert.equal((await page.$$('[data-testid="agent-message"]')).length, 1);
+  let historyText = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.doesNotMatch(historyText, /calm|jsonrpc|hidden-secret|Running npm test/);
+
+  await page.evaluate(() => document.querySelector('[data-testid="brand-drawer-toggle"]').click());
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.evaluate(() => document.querySelector('[data-testid="settings-open"]').click());
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
+  await page.evaluate(() => document.querySelector('[data-testid="settings-theme"]').click());
+  await page.waitForSelector('[data-testid="settings-appearance-window"]');
+  await page.focus('[data-testid="settings-tool-calls-toggle"] input');
+  await page.keyboard.press('Space');
+  await page.waitForFunction(() => localStorage.getItem('magistrate.chat.show-tool-calls') === 'true');
+  await page.waitForSelector('[data-testid="tool-history-message"]');
+  historyText = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(historyText, /Running…/);
+  assert.doesNotMatch(historyText, /hidden-secret|npm test/);
+  assert.equal((await page.$$('[data-testid="tool-history-message"]')).length, 1);
+  await page.close();
+});
+
+test('a sent user timestamp remains exact across optimistic state, polling, persistence, and reload', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await submit(page, 'timestamp check');
   const selector = '[data-testid^="user-message-u-"]';
   await page.waitForSelector(selector);
-  const before = await page.$eval(selector, element => element.innerText);
-  assert.equal(before, 'timestamp check');
+  assert.equal(await page.$eval(`${selector} [data-testid^="user-message-text-"]`, element => element.innerText), 'timestamp check');
+  const before = await page.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText);
+  assert.match(before, /\d/);
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain'))[0]);
+  assert.equal(typeof persisted.sentAt, 'number');
   // The background auto-refresh poll runs every 3s (see ChatCanvas's syncFromHistory).
   await new Promise(resolve => setTimeout(resolve, 3400));
-  const after = await page.$eval(selector, element => element.innerText);
-  assert.equal(after, before);
+  assert.equal(await page.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText), before);
   assert.equal((await page.$$(selector)).length, 1);
   await page.close();
+
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
+  await reloaded.waitForSelector(selector);
+  assert.equal(await reloaded.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText), before);
+  const afterReload = await reloaded.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain'))[0].sentAt);
+  assert.equal(afterReload, persisted.sentAt);
+  await reloaded.close();
 });

@@ -12,7 +12,7 @@ import { EnvironmentBackground } from '../../src/components/EnvironmentBackgroun
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
-import { filterAgentHistory, toolCallPreview } from '../../src/services/ChatHistory';
+import { filterAgentHistory, isHarnessArtifact, sanitizeAgentHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, prependConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
@@ -24,7 +24,7 @@ const markInk = require('../../assets/images/magistrate-mark-ink-256.png');
 const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B', mutedDark: '#8E99AA', mutedLight: '#667180', cyan: '#24D8FF', violet: '#8B6CFF', success: '#43D17A', attention: '#FFB347', critical: '#FF625F' };
 
 type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file'; status?: 'ready' | 'uploading' | 'uploaded' | 'failed'; uploaded?: ChatUpload };
-type QueuedPrompt = { id: string; text: string; attachments: ComposerAttachment[]; editId: string | null };
+type QueuedPrompt = { id: string; messageId: string; text: string; attachments: ComposerAttachment[]; editId: string | null };
 type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | null;
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
@@ -156,12 +156,20 @@ function ModelMenu({ dark, profiles, loading, error, open, selection, onToggle, 
   </View>;
 }
 
+export function formatConversationTimestamp(sentAt?: number): string | null {
+  if (typeof sentAt !== 'number' || !Number.isFinite(sentAt) || sentAt < 0) return null;
+  const date = new Date(sentAt);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
 function UserMessage({ message, textColor, selectable, onLongPress, onRetry }: { message: ConversationMessage; textColor: string; selectable: boolean; onLongPress: () => void; onRetry?: () => void }) {
   // Keep transport metadata out of the transcript, but retain a compact
   // filename/type/size summary so a reload remains useful to the captain.
-  return <TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="button" accessibilityLabel="Your message. Press and hold for actions." delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={styles.userMessage}>
+  const timestamp = formatConversationTimestamp(message.sentAt);
+  return <TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="button" accessibilityLabel={`Your message${timestamp ? `, sent ${timestamp}` : ''}. Press and hold for actions.`} delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={styles.userMessage}>
     <Text testID={`user-message-text-${message.id}`} selectable={selectable} style={[styles.messageText, { color: textColor }]}>{message.text}</Text>
     {message.attachments?.map(attachment => <Text key={`${message.id}-${attachment.name}`} testID={`message-attachment-${message.id}`} style={[styles.messageAttachment, { color: textColor }]} numberOfLines={1}>↳ {attachment.name} · {attachment.mediaType}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}</Text>)}
+    {timestamp ? <Text testID={`message-timestamp-${message.id}`} style={[styles.messageTimestamp, { color: textColor }]}>{timestamp}</Text> : null}
     {message.delivery === 'sending' ? <Text testID={`message-sending-${message.id}`} style={styles.messageDelivery}>Sending…</Text> : null}
     {message.delivery === 'failed' ? <View style={styles.messageFailure}><Text testID={`message-failed-${message.id}`} style={styles.messageFailed}>Not sent. Check the attachment and retry.</Text>{onRetry ? <TouchableOpacity testID={`retry-message-${message.id}`} accessibilityRole="button" onPress={onRetry}><Text style={styles.retryText}>Retry</Text></TouchableOpacity> : null}</View> : null}
   </TouchableOpacity>;
@@ -189,11 +197,11 @@ function conversationalPromptResponse(response: unknown): string | null {
     if ('jsonrpc' in envelope && !('result' in envelope)) return null;
     for (const key of ['response', 'text']) {
       const value = source[key];
-      if (typeof value === 'string' && value.trim()) return value.trim();
+      if (typeof value === 'string' && value.trim() && !isHarnessArtifact(value)) return value.trim();
     }
     return null;
   } catch { /* A plain string is a legacy synchronous conversational response. */ }
-  return response.trim();
+  return isHarnessArtifact(response) ? null : response.trim();
 }
 
 export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawerToggle = () => {}, drawerOpen = false, profiles = [], capabilityLoading = false, capabilityError = null, selectedProfileId = null, routingReady = true, onProfileChange = () => {}, voiceInputMode = 'automatic', voiceCapabilities, autoStartRecording = false }: { target?: string; showToolCalls?: boolean; onDrawerToggle?: () => void; drawerOpen?: boolean; profiles?: ExecutionProfile[]; capabilityLoading?: boolean; capabilityError?: string | null; selectedProfileId?: string | null; routingReady?: boolean; onProfileChange?: (profileId: string | null) => void; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; autoStartRecording?: boolean }) {
@@ -516,7 +524,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // The same deduplication path is used by WebSocket delivery and polling.
   const appendHistoryMessages = (incoming: Array<{ id?: string; role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }>): boolean => {
     let appendedReply = false;
-    incoming.forEach(message => {
+    sanitizeAgentHistory(incoming).forEach(message => {
       const key = historyKey(message);
       const identity = message.id ? `id:${message.id}` : key;
       // Do not compare text alone: two legitimate turns can say the same
@@ -545,13 +553,19 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // acceleration path only. HTTP polling below remains the recovery path when
   // the socket is unavailable or a snapshot is transiently empty.
   useEffect(() => {
+    let active = true;
     const realtime = new RealtimeClient(target);
     const unsubscribe = realtime.subscribe(event => {
       if (event?.type !== 'agent_history' || !Array.isArray(event.messages)) return;
-      if (appendHistoryMessages(event.messages)) setIsThinking(false);
+      // In development React may mount, clean up, and mount effects again. Do
+      // not let an early socket replay server history before the authoritative
+      // initial seed has established identities for this mounted canvas.
+      void historyReadyRef.current.then(() => {
+        if (active && appendHistoryMessages(event.messages)) setIsThinking(false);
+      });
     });
-    realtime.connect();
-    return () => { unsubscribe(); realtime.disconnect(); };
+    void realtime.connect();
+    return () => { active = false; unsubscribe(); realtime.disconnect(); };
   }, [target]);
   // Live auto-refresh: whichever agent is behind `target` may produce new
   // terminal output without this device having sent the prompt (Herdr has no
@@ -560,19 +574,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      try { if (await syncFromHistory() && !cancelled) setIsThinking(false); }
-      catch { /* Transient network/Herdr hiccup: retry on the next tick. */ }
+      try {
+        await historyReadyRef.current;
+        if (!cancelled && await syncFromHistory()) setIsThinking(false);
+      } catch { /* Transient network/Herdr hiccup: retry on the next tick. */ }
     };
     const interval = setInterval(() => void poll(), 3000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [target]);
-  const submitPrompt = async (trimmed: string, editId: string | null = null, pendingAttachments: ComposerAttachment[] = []) => {
-    const now = new Date();
-    const messageId = editId || `u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const submitPrompt = async (trimmed: string, editId: string | null = null, pendingAttachments: ComposerAttachment[] = [], queuedMessageId?: string) => {
+    const messageId = editId || queuedMessageId || `u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const attachmentSummaries: ConversationAttachment[] = pendingAttachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size }));
     pendingAttachmentsByMessageRef.current.set(messageId, pendingAttachments);
-    if (editId) { updateConversationMessageState(target, editId, { text: trimmed, sentAt: now.getTime(), attachments: attachmentSummaries, delivery: 'sending' }); setEditingMessageId(null); }
-    else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: now.getTime(), source: 'text', attachments: attachmentSummaries, delivery: 'sending' });
+    if (editId || queuedMessageId) {
+      // Editing, retrying, and queue release are delivery transitions, not new
+      // sends. Preserve the timestamp captured when the user acted.
+      updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, delivery: 'sending' });
+      if (editId) setEditingMessageId(null);
+    } else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: Date.now(), source: 'text', attachments: attachmentSummaries, delivery: 'sending' });
     setPromptText(''); setSendError(null); setIsThinking(true);
     try {
       // Do not let the initial history seed race this submission (see
@@ -617,7 +636,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (isThinking || queuedPrompts.length === 0) return;
     const next = queuedPrompts[0];
     setQueuedPrompts(queue => queue.slice(1));
-    void submitPrompt(next.text, next.editId, next.attachments);
+    void submitPrompt(next.text, next.editId, next.attachments, next.messageId);
   }, [isThinking, queuedPrompts]); // eslint-disable-line react-hooks/exhaustive-deps
   const handleSend = async () => {
     const trimmed = promptText.trim();
@@ -627,8 +646,13 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!routingReady && modelSelection) { setSendError('Execution settings are still unavailable; your message was not sent.'); return; }
     if (!trimmed) { if (!isThinking) router.push('/voice' as any); return; }
     if (isThinking) {
-      setQueuedPrompts(queue => [...queue, { id: `q-${Date.now()}`, text: trimmed, attachments: [...attachments], editId: editingMessageId }]);
-      setAttachments([]); setPromptText(''); setSendError(null); return;
+      const sentAt = Date.now();
+      const messageId = editingMessageId || `u-${sentAt}-${Math.random().toString(36).slice(2, 10)}`;
+      const attachmentSummaries: ConversationAttachment[] = attachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size }));
+      if (editingMessageId) updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, delivery: 'sending' });
+      else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt, source: 'text', attachments: attachmentSummaries, delivery: 'sending' });
+      setQueuedPrompts(queue => [...queue, { id: `q-${sentAt}`, messageId, text: trimmed, attachments: [...attachments], editId: editingMessageId }]);
+      setEditingMessageId(null); setAttachments([]); setPromptText(''); setSendError(null); return;
     }
     await submitPrompt(trimmed, editingMessageId, attachments);
   };
@@ -651,9 +675,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity>
     </View>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
-      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text></View>)}
+      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text></View>)}
     </ScrollView>
-    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { setHasNewMessages(false); setIsScrolledUp(false); requestLatestScroll(true); }}><Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text></TouchableOpacity> : null}
+    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { setHasNewMessages(false); setIsScrolledUp(false); requestLatestScroll(true); }}><Text style={styles.jumpText}>↓</Text></TouchableOpacity> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
       <TouchableOpacity accessibilityRole="button" onPress={editMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Edit</Text></TouchableOpacity>
       <TouchableOpacity accessibilityRole="button" onPress={() => void copyMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Copy</Text></TouchableOpacity>
@@ -863,7 +887,7 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, exec
 export default function ChatScreen() {
   const { agentId, record } = useLocalSearchParams<{ agentId?: string | string[]; record?: string | string[] }>(); const target = Array.isArray(agentId) ? agentId[0] : agentId; const autoStartRecording = (Array.isArray(record) ? record[0] : record) === 'true';
   const router = useRouter();
-  const dark = isDarkTheme(useChatColorScheme()); const { width, height } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
+  const dark = isDarkTheme(useChatColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
   const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES); const [preferencesReady, setPreferencesReady] = useState(false);
   const [executionProfiles, setExecutionProfiles] = useState<ExecutionProfile[]>([]);
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
@@ -929,12 +953,13 @@ export default function ChatScreen() {
     onMoveShouldSetPanResponder: (_, g) => isNarrow && drawerOpen && g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy),
     onPanResponderRelease: (_, g) => { if (g.dx < -55 || g.vx < -0.35) setDrawerOpen(false); },
   }), [drawerOpen, isNarrow]);
-  // Keep a generous bottom exclusion band so this cannot hijack text-selection
-  // or horizontal scrolling gestures that begin in the composer.
+  // Open from a deliberate horizontal swipe anywhere in the chat, including
+  // the detached composer. Vertical movement remains with text selection and
+  // input scrolling; app/_layout.tsx disables browser back-navigation hijack.
   const swipeToOpen = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_, g) => isNarrow && !drawerOpen && g.y0 < height - 220 && g.dx > 8 && Math.abs(g.dx) > Math.abs(g.dy),
+    onMoveShouldSetPanResponder: (_, g) => isNarrow && !drawerOpen && g.dx > 8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
     onPanResponderRelease: (_, g) => { if (g.dx > 55 || g.vx > 0.35) setDrawerOpen(true); },
-  }), [drawerOpen, isNarrow, height]);
+  }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page} {...(isNarrow ? swipeToOpen.panHandlers : {})}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
       <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
@@ -946,11 +971,11 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
-  shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: brand.cyan, borderWidth: 1, borderColor: brand.cyan }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 }, messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageDelivery: { fontSize: 10, marginTop: 6, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
-  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, zIndex: 5 }, jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
+  shellHeader: { height: 48, flexShrink: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 12, elevation: 12 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
+  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: brand.cyan, borderWidth: 1, borderColor: brand.cyan }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 }, messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.72, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
+  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, width: 38, height: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(17,23,34,0.62)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 999, zIndex: 15, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 8 }, jumpText: { color: brand.paper, fontSize: 20, lineHeight: 22, fontWeight: '700' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
-  composer: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 10 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, thinkingButton: { backgroundColor: brand.cyan }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
+  composer: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 20, elevation: 12 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, thinkingButton: { backgroundColor: brand.cyan }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
   attachmentControl: { width: 36, zIndex: 20 }, attachmentMenu: { position: 'absolute', left: -2, bottom: 46, width: 238, borderRadius: 20, padding: 11, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 14 }, attachmentOption: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 8, paddingVertical: 7, borderRadius: 13 }, attachmentOptionTitle: { fontSize: 14, fontWeight: '700' }, attachmentOptionMeta: { fontSize: 11, marginTop: 2 },
   attachmentPreview: { flexGrow: 0, marginHorizontal: 8, marginBottom: 7, maxHeight: 60 }, attachmentPreviewContent: { gap: 8, paddingHorizontal: 3 }, attachmentChip: { width: 220, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, padding: 5, paddingRight: 7, borderRadius: 15 }, attachmentThumbnail: { width: 46, height: 46, borderRadius: 11 }, attachmentFileIcon: { width: 46, height: 46, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, attachmentCopy: { flex: 1, minWidth: 0 }, attachmentName: { fontSize: 12, fontWeight: '700' }, attachmentMeta: { fontSize: 10, marginTop: 3 }, attachmentRemove: { width: 28, height: 38, alignItems: 'center', justifyContent: 'center' }, attachmentRemoveText: { fontSize: 21, lineHeight: 23 },
   liveWaveform: { position: 'absolute', left: 8, right: 8, bottom: 72, height: 52, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', paddingHorizontal: 14, zIndex: 9 }, liveWaveformBar: { width: 3, borderRadius: 2 },

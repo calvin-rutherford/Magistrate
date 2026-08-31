@@ -10,6 +10,33 @@ def make_snapshot(tasks, records=None):
     }
 
 
+def test_firstmate_agent_names_prefer_matched_task_title_and_keep_unmatched_herdr_fallback():
+    agents = [
+        {'id': 'w1D:p2', 'pane_id': 'w1D:p2', 'name': 'raw-pane'},
+        {'id': 'w2:p3', 'pane_id': 'w2:p3', 'name': 'Herdr worker'},
+    ]
+    snapshot = {'tasks': [{
+        'id': 'chat-fix-c9',
+        'endpoint': {'target': 'default:w1D:p2'},
+        'backlog': {'title': 'Fix chat presentation'},
+    }]}
+
+    mapped = FirstmateClient.apply_agent_display_names(agents, snapshot)
+
+    assert mapped[0]['name'] == 'Fix chat presentation'
+    assert mapped[0]['display_name_source'] == 'firstmate'
+    assert mapped[1]['name'] == 'Herdr worker'
+    assert mapped[1]['display_name_source'] == 'herdr'
+
+
+def test_firstmate_agent_name_mapping_never_fabricates_missing_identity():
+    agents = [{'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'w1:p1'}]
+    snapshot = {'tasks': [{'endpoint': {'target': 'default:w1:p1'}, 'backlog': {}}]}
+    assert FirstmateClient.apply_agent_display_names(agents, snapshot) == [
+        {'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'w1:p1', 'display_name_source': 'herdr'}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_needs_decision_task_surfaces_as_attention_item(monkeypatch):
     client = FirstmateClient()

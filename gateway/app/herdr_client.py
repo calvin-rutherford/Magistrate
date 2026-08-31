@@ -32,11 +32,20 @@ _MARKERLESS_TOOL = re.compile(
     re.IGNORECASE,
 )
 _LINE_BREAK = re.compile(r'^(?:[-*•‣]|\d+[.)]\s|#)')
+_ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))')
+_ANSI_BACKGROUND = re.compile(r'\x1b\[48;5;(\d+)m')
+_ANSI_ITALIC = re.compile(r'\x1b\[(?:[^m;]*;)*3(?:;[^m]*)?m')
 # Footer/status overlays herdr captures mid-frame; they can land on an indented
 # row directly under a message, so they are dropped wherever they appear.
 _TERMINAL_CHROME = re.compile(
-    r'\(ctrl\+(?:End|Home)\)|Jump to bottom|Update installed · Restart|⏵⏵|⏸\s|auto mode on ·|esc to interrupt|ctrl\+\w+ to '
+    r'\(ctrl\+(?:End|Home)\)|Jump to bottom|Update installed · Restart|⏵⏵|⏸\s|auto mode on ·|esc to interrupt|ctrl\+\w+ to ',
+    re.IGNORECASE,
 )
+_HARNESS_ARTIFACT = re.compile(
+    r'^(?:FIRSTMATE_OP\b|WAKE_(?:ACK|DRAIN|REQUIRED)\b|Planning\b|Clarifying\b|Initiating\b|Inspecting\b|Identifying\b|Verifying\b|Queuing\b|Error:\s|Took \d|Command exited with code\b|\(no output\)|\.\.\. \(\d+ earlier lines|help\[\d+\]:|/calm\b|calm(?:ing)?(?: animation| status)?\b|edit\s*$|(?:pane|tab|workspace)(?:_id)?\s*[:=]|window=\S+|worktree=/|~/\S+ \([^)]*\)\s*$|[↑↓]\S.*\bCH\d|─{3,})',
+    re.IGNORECASE,
+)
+_SYSTEM_NOTICE = re.compile(r'^(?:⛵\s+[^:]+:|Run bin/fm-wake-drain\.sh\b|Watcher continuity is extension-owned\b)', re.IGNORECASE)
 
 
 def unwrap_terminal_text(text: str) -> str:
@@ -54,15 +63,80 @@ def unwrap_terminal_text(text: str) -> str:
     return re.sub(r'\n{2,}', '\n\n', '\n'.join(blocks)).strip()
 
 
-def parse_agent_history(output: str) -> List[Dict[str, str]]:
-    """Turn Herdr's plain terminal transcript into displayable chat entries.
+def _is_harness_artifact(text: str) -> bool:
+    value = _ANSI.sub('', text).strip()
+    if not value or _TERMINAL_CHROME.search(value) or _TRANSIENT_SUMMARY.match(value) or _HARNESS_ARTIFACT.match(value) or _SYSTEM_NOTICE.match(value) or _ROUTING_PREFIX.match(value):
+        return True
+    try:
+        envelope = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(envelope, dict) and any(key in envelope for key in ('jsonrpc', 'result', 'status', 'target', 'event', 'pane_id', 'tab_id', 'workspace_id'))
 
-    Herdr intentionally exposes terminal snapshots rather than a harness-specific
-    conversation API. Codex and Claude both render stable prompt/response markers;
-    everything else (chrome, spinners, separators, and the live composer) is
-    ignored. Conversational prose is unwrapped from the terminal's hard wrapping,
-    and tool summaries remain typed separately so clients can hide them.
+
+def _parse_pi_ansi_history(output: str) -> List[Dict[str, str]]:
+    """Use Pi's ANSI background boxes as the role boundary stripped by text mode."""
+    messages: List[Dict[str, str]] = []
+    lines = output.replace('\r', '').split('\n')
+    assistant_lines: List[str] = []
+
+    def finish_assistant() -> None:
+        nonlocal assistant_lines
+        text = unwrap_terminal_text('\n'.join(assistant_lines))
+        if text and not _is_harness_artifact(text):
+            messages.append({'role': 'assistant', 'kind': 'conversation', 'text': text})
+        assistant_lines = []
+
+    index = 0
+    while index < len(lines):
+        backgrounds = _ANSI_BACKGROUND.findall(lines[index])
+        if backgrounds:
+            finish_assistant()
+            background = backgrounds[-1]
+            run: List[str] = []
+            while index < len(lines):
+                matches = _ANSI_BACKGROUND.findall(lines[index])
+                if not matches or matches[-1] != background:
+                    break
+                run.append(_ANSI.sub('', lines[index]).rstrip())
+                index += 1
+            text = unwrap_terminal_text('\n'.join(run))
+            if not text or _is_harness_artifact(text):
+                continue
+            if _MARKERLESS_TOOL.match(text) or re.match(r'^(?:(?:edit|read|write|bash|grep|find|ls)\s*\n|[+\- ]\s*\d+\s|@@\s)', text, re.IGNORECASE):
+                messages.append({'role': 'assistant', 'kind': 'tool', 'text': text})
+            else:
+                messages.append({'role': 'user', 'kind': 'conversation', 'text': _ROUTING_PREFIX.sub('', text).strip()})
+            continue
+        raw_line = lines[index]
+        index += 1
+        text = _ANSI.sub('', raw_line).rstrip()
+        if _ANSI_ITALIC.search(raw_line):
+            finish_assistant()
+            continue
+        if not text.strip():
+            if assistant_lines and assistant_lines[-1] != '':
+                assistant_lines.append('')
+            continue
+        if _is_harness_artifact(text):
+            finish_assistant()
+            continue
+        assistant_lines.append(text)
+    finish_assistant()
+    return messages
+
+
+def parse_agent_history(output: str) -> List[Dict[str, str]]:
+    """Turn a Herdr terminal snapshot into typed conversation entries.
+
+    Codex and Claude expose stable text markers. Pi exposes role boundaries only
+    through ANSI background boxes, so markerless plain text deliberately fails
+    closed instead of leaking tools, reasoning, and terminal chrome as prose.
     """
+    plain_output = _ANSI.sub('', output)
+    if not any(_HISTORY_MARKER.match(line) for line in plain_output.splitlines()):
+        return _parse_pi_ansi_history(output) if '\x1b[' in output else []
+    output = plain_output
     messages: List[Dict[str, str]] = []
     current: Optional[Dict[str, str]] = None
 
@@ -71,7 +145,7 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         if not current:
             return
         text = unwrap_terminal_text(current['text']) if current['kind'] == 'conversation' else current['text'].strip()
-        if text and text not in _TRANSIENT_USER_TEXT:
+        if text and text not in _TRANSIENT_USER_TEXT and not _is_harness_artifact(text):
             messages.append({**current, 'text': text})
         current = None
 
@@ -133,26 +207,6 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         else:
             finish()
     finish()
-    # Pi's terminal renderer intentionally emits plain transcript rows rather
-    # than the marker glyphs used by Codex/Claude. Herdr exposes snapshots, not
-    # a conversation API, so retain those rows as assistant prose instead of
-    # returning an empty history. Drop recognizable command output and terminal
-    # chrome; callers deduplicate locally-authored prompts by text.
-    if not messages:
-        blocks = re.split(r'\n\s*\n', output.replace('\r', '').strip())
-        for block in blocks:
-            lines = []
-            for line in block.splitlines():
-                stripped = line.strip()
-                if (not stripped or _TERMINAL_CHROME.search(stripped)
-                        or _TRANSIENT_SUMMARY.match(stripped)
-                        or stripped.startswith('───')
-                        or _MARKERLESS_TOOL.match(stripped)):
-                    continue
-                lines.append(stripped)
-            text = _ROUTING_PREFIX.sub('', unwrap_terminal_text('\n'.join(lines))).strip()
-            if text and text not in _TRANSIENT_USER_TEXT:
-                messages.append({'role': 'assistant', 'kind': 'conversation', 'text': text})
     return messages
 
 
@@ -344,7 +398,7 @@ class HerdrClient:
                 'routing': {'selection_supported': True, 'migration_supported': False, 'mode': 'prompt-context'},
             }
 
-    async def read_agent_output(self, target: str, lines: int = HERDR_MAX_READ_LINES, source: str = 'recent-unwrapped') -> str:
+    async def read_agent_output(self, target: str, lines: int = HERDR_MAX_READ_LINES, source: str = 'recent-unwrapped', output_format: str = 'text') -> str:
         resolved_target = await self.resolve_target(target)
         # Herdr's API models lines as an unsigned 32-bit value. Asking for its
         # maximum returns every row still retained by the configured byte-sized
@@ -352,14 +406,14 @@ class HerdrClient:
         lines = min(max(lines, 0), HERDR_MAX_READ_LINES)
         cmd = [
             'herdr', 'agent', 'read', resolved_target,
-            '--source', source, '--lines', str(lines), '--format', 'text'
+            '--source', source, '--lines', str(lines), '--format', output_format
         ]
         stdout, _, returncode = await _run_cli(*cmd)
         if returncode != 0 and source != 'visible':
             # Active alternate-screen agents cannot expose scrollback while
             # working. Their visible viewport still contains the latest live
             # conversation, so return that instead of an empty history.
-            return await self.read_agent_output(resolved_target, lines=lines, source='visible')
+            return await self.read_agent_output(resolved_target, lines=lines, source='visible', output_format=output_format)
         return stdout.decode('utf-8', errors='replace') if stdout else ''
 
     async def get_agent_history(
@@ -367,7 +421,7 @@ class HerdrClient:
         before: Optional[str] = None, after: Optional[str] = None,
     ) -> Dict[str, Any]:
         resolved_target = await self.resolve_target(target)
-        output = await self.read_agent_output(resolved_target, lines=lines)
+        output = await self.read_agent_output(resolved_target, lines=lines, output_format='ansi')
         messages = parse_agent_history(output)
         # Herdr exposes terminal text rather than durable message IDs. Hashing
         # normalized content gives clients stable cursors within retained

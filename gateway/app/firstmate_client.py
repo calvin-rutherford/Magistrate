@@ -49,6 +49,39 @@ class FirstmateClient:
                 'error': str(e)
             }
 
+    @staticmethod
+    def apply_agent_display_names(herdr_agents: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Prefer Firstmate's task identity while preserving Herdr as fallback.
+
+        Fleet task endpoints use a qualified target such as ``default:w1D:p2``;
+        Herdr exposes the pane as ``w1D:p2``. Only a real endpoint match may
+        rename an agent, and no synthetic/demo identity is introduced.
+        """
+        names_by_target: Dict[str, str] = {}
+        for task in snapshot.get('tasks', []):
+            if not isinstance(task, dict):
+                continue
+            endpoint = task.get('endpoint') if isinstance(task.get('endpoint'), dict) else {}
+            target = endpoint.get('target') or task.get('agent_id') or task.get('pane_id')
+            if not isinstance(target, str) or not target:
+                continue
+            if target.startswith('default:'):
+                target = target[len('default:'):]
+            backlog = task.get('backlog') if isinstance(task.get('backlog'), dict) else {}
+            name = task.get('worker_label') or task.get('label') or backlog.get('title') or task.get('id')
+            if isinstance(name, str) and name.strip():
+                names_by_target[target] = name.strip()
+
+        result = []
+        for agent in herdr_agents:
+            target = str(agent.get('pane_id') or agent.get('id') or '')
+            assigned_name = names_by_target.get(target)
+            result.append({
+                **agent,
+                **({'name': assigned_name, 'display_name_source': 'firstmate'} if assigned_name else {'display_name_source': 'herdr'}),
+            })
+        return result
+
     async def get_attention_items(self, herdr_agents: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         snapshot = await self.get_snapshot()
         attention_items = []

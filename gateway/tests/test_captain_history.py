@@ -31,23 +31,45 @@ def test_history_parser_unwraps_hard_wrapped_prose_but_keeps_lists():
     }]
 
 
-def test_history_parser_keeps_pi_markerless_transcript_rows_without_tool_traces():
+def test_history_parser_fails_closed_for_ambiguous_pi_plain_text():
     output = """User question from Pi
 
-Assistant response from Pi with
-  a wrapped line.
-
-[Magistrate execution: harness=pi; model=gpt-5.6-luna; provider=openai-codex; variant=default; profile=pi:default]
-User question from routing
+Planning next step
 
 $ npm run test
 Ran 3 commands
 """
+    assert parse_agent_history(output) == []
 
+
+def test_history_parser_uses_pi_ansi_boxes_and_drops_harness_artifacts():
+    reset = '\x1b[0m'
+    user_bg = '\x1b[48;5;59m'
+    tool_bg = '\x1b[48;5;22m'
+    output = '\r\n'.join([
+        f'{reset}{user_bg}                                                           {reset}',
+        f'{reset}{user_bg} User question from Pi                                  {reset}',
+        f'{reset}{user_bg}                                                           {reset}',
+        '',
+        f' {reset}\x1b[1m\x1b[3m\x1b[38;5;244mPlanning private work{reset}',
+        '',
+        f'{reset}{tool_bg} $ npm run test                                            {reset}',
+        f'{reset}{tool_bg} Took 0.4s                                                 {reset}',
+        '',
+        ' Agent response from Pi with',
+        '   a wrapped line.',
+        '',
+        ' /calm animation status',
+        '',
+        ' {"jsonrpc":"2.0","result":{"ok":true}}',
+        '',
+        '───────────────────────────────────────────────────────────',
+        '~/firstmate (main)',
+    ])
     assert parse_agent_history(output) == [
-        {'role': 'assistant', 'kind': 'conversation', 'text': 'User question from Pi'},
-        {'role': 'assistant', 'kind': 'conversation', 'text': 'Assistant response from Pi with a wrapped line.'},
-        {'role': 'assistant', 'kind': 'conversation', 'text': 'User question from routing'},
+        {'role': 'user', 'kind': 'conversation', 'text': 'User question from Pi'},
+        {'role': 'assistant', 'kind': 'tool', 'text': '$ npm run test Took 0.4s'},
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'Agent response from Pi with a wrapped line.'},
     ]
 
 

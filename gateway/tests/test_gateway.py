@@ -82,7 +82,10 @@ def test_events_requires_first_frame_authentication():
 
 def test_events_stream_normalized_history(monkeypatch):
     async def fake_history(target, lines):
-        return {'target': target, 'messages': [{'role': 'assistant', 'kind': 'conversation', 'text': 'ready'}]}
+        return {'target': target, 'messages': [
+            {'id': 'turn-1', 'role': 'assistant', 'kind': 'conversation', 'text': 'ready'},
+            {'id': 'turn-2', 'role': 'assistant', 'kind': 'conversation', 'text': 'ready'},
+        ]}
 
     monkeypatch.setattr('app.main.herdr_client.get_agent_history', fake_history)
     with client.websocket_connect('/api/v1/events') as websocket:
@@ -92,7 +95,8 @@ def test_events_stream_normalized_history(monkeypatch):
         assert websocket.receive_json() == {'type': 'subscribed', 'target': 'agent-1'}
         event = websocket.receive_json()
         assert event['type'] == 'agent_history'
-        assert event['messages'][0]['text'] == 'ready'
+        assert [message['id'] for message in event['messages']] == ['turn-1', 'turn-2']
+        assert [message['text'] for message in event['messages']] == ['ready', 'ready']
 
 
 def test_agent_interrupt_requires_authentication():
