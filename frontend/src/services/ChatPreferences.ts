@@ -8,6 +8,10 @@ export const TOOL_CALL_VISIBILITY_KEY = 'magistrate.chat.show-tool-calls';
 export const CHAT_THEME_MODE_KEY = 'magistrate.chat.theme-mode';
 export const CHAT_BACKGROUND_KEY = 'magistrate.chat.background';
 export const CHAT_CUSTOM_BACKGROUND_KEY = 'magistrate.chat.custom-background';
+export const VOICE_CAPTURE_BEHAVIOR_KEY = 'magistrate.voice.capture-behavior';
+export const VOICE_TRANSCRIPT_BEHAVIOR_KEY = 'magistrate.voice.transcript-behavior';
+export type VoiceCaptureBehavior = 'tap-to-toggle' | 'hold-to-talk';
+export type VoiceTranscriptBehavior = 'insert' | 'auto-send';
 
 export type ChatThemeMode = 'system' | 'dark' | 'light';
 
@@ -17,6 +21,8 @@ export type ChatPreferences = {
   background: WeatherSceneKey;
   customBackgroundUri?: string;
   voiceInputMode: VoiceInputMode;
+  voiceCaptureBehavior: VoiceCaptureBehavior;
+  voiceTranscriptBehavior: VoiceTranscriptBehavior;
 };
 
 export const DEFAULT_CHAT_PREFERENCES: ChatPreferences = {
@@ -25,21 +31,22 @@ export const DEFAULT_CHAT_PREFERENCES: ChatPreferences = {
   background: 'auto',
   customBackgroundUri: undefined,
   voiceInputMode: DEFAULT_VOICE_INPUT_MODE,
+  voiceCaptureBehavior: 'tap-to-toggle',
+  voiceTranscriptBehavior: 'insert',
 };
 
 const validThemeModes = new Set<ChatThemeMode>(['system', 'dark', 'light']);
 const validVoiceInputModes = new Set<VoiceInputMode>(['automatic', 'browser', 'native', 'openai']);
+const validVoiceCaptureBehaviors = new Set<VoiceCaptureBehavior>(['tap-to-toggle', 'hold-to-talk']);
+const validVoiceTranscriptBehaviors = new Set<VoiceTranscriptBehavior>(['insert', 'auto-send']);
 const validBackgrounds = new Set<WeatherSceneKey>([
   'auto', 'dusk-mountain', 'clear-day', 'clear-night', 'clouds', 'rain', 'storm', 'sunset', 'minimal-dark', 'custom',
 ]);
 
 export async function loadChatPreferences(): Promise<ChatPreferences> {
-  const [toolCalls, themeMode, background, customBackground, voiceInputMode] = await AsyncStorage.multiGet([
-    TOOL_CALL_VISIBILITY_KEY,
-    CHAT_THEME_MODE_KEY,
-    CHAT_BACKGROUND_KEY,
-    CHAT_CUSTOM_BACKGROUND_KEY,
-    VOICE_INPUT_MODE_KEY,
+  const [toolCalls, themeMode, background, customBackground, voiceInputMode, captureBehavior, transcriptBehavior] = await AsyncStorage.multiGet([
+    TOOL_CALL_VISIBILITY_KEY, CHAT_THEME_MODE_KEY, CHAT_BACKGROUND_KEY, CHAT_CUSTOM_BACKGROUND_KEY,
+    VOICE_INPUT_MODE_KEY, VOICE_CAPTURE_BEHAVIOR_KEY, VOICE_TRANSCRIPT_BEHAVIOR_KEY,
   ]);
   const storedBackground = validBackgrounds.has(background[1] as WeatherSceneKey)
     ? background[1] as WeatherSceneKey
@@ -53,9 +60,9 @@ export async function loadChatPreferences(): Promise<ChatPreferences> {
     themeMode: validThemeModes.has(themeMode[1] as ChatThemeMode) ? themeMode[1] as ChatThemeMode : DEFAULT_CHAT_PREFERENCES.themeMode,
     background: hasCustomBackground ? 'custom' : storedBackground === 'custom' ? DEFAULT_CHAT_PREFERENCES.background : storedBackground,
     customBackgroundUri: hasCustomBackground ? customBackground[1] || undefined : undefined,
-    voiceInputMode: validVoiceInputModes.has(voiceInputMode[1] as VoiceInputMode)
-      ? voiceInputMode[1] as VoiceInputMode
-      : DEFAULT_CHAT_PREFERENCES.voiceInputMode,
+    voiceInputMode: validVoiceInputModes.has(voiceInputMode[1] as VoiceInputMode) ? voiceInputMode[1] as VoiceInputMode : DEFAULT_CHAT_PREFERENCES.voiceInputMode,
+    voiceCaptureBehavior: validVoiceCaptureBehaviors.has(captureBehavior[1] as VoiceCaptureBehavior) ? captureBehavior[1] as VoiceCaptureBehavior : DEFAULT_CHAT_PREFERENCES.voiceCaptureBehavior,
+    voiceTranscriptBehavior: validVoiceTranscriptBehaviors.has(transcriptBehavior[1] as VoiceTranscriptBehavior) ? transcriptBehavior[1] as VoiceTranscriptBehavior : DEFAULT_CHAT_PREFERENCES.voiceTranscriptBehavior,
   };
   applyChatAppearance(preferences);
   return preferences;
@@ -94,6 +101,16 @@ export async function saveToolCallVisibility(showToolCalls: boolean): Promise<vo
 export async function saveVoiceInputMode(mode: VoiceInputMode): Promise<void> {
   if (!validVoiceInputModes.has(mode)) throw new Error('Unsupported voice input mode.');
   await AsyncStorage.setItem(VOICE_INPUT_MODE_KEY, mode);
+}
+
+export async function saveVoiceCaptureBehavior(value: VoiceCaptureBehavior): Promise<void> {
+  if (!validVoiceCaptureBehaviors.has(value)) throw new Error('Unsupported voice capture behavior.');
+  await AsyncStorage.setItem(VOICE_CAPTURE_BEHAVIOR_KEY, value);
+}
+
+export async function saveVoiceTranscriptBehavior(value: VoiceTranscriptBehavior): Promise<void> {
+  if (!validVoiceTranscriptBehaviors.has(value)) throw new Error('Unsupported voice transcript behavior.');
+  await AsyncStorage.setItem(VOICE_TRANSCRIPT_BEHAVIOR_KEY, value);
 }
 
 export async function saveThemeMode(themeMode: ChatThemeMode): Promise<void> {
