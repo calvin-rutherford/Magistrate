@@ -4,7 +4,6 @@ import * as Linking from 'expo-linking';
 import React, { useEffect, useState } from 'react';
 import { Platform, Text, TextInput, TouchableOpacity, View, StyleSheet } from 'react-native';
 import { notificationManager } from '../src/services/NotificationManager';
-import { InAppNotificationStack } from '../src/components/InAppNotificationStack';
 import { NotificationPermissionPrompt } from '../src/components/NotificationPermissionPrompt';
 import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import {
@@ -46,7 +45,13 @@ export default function RootLayout() {
   useEffect(() => {
     if (session.status !== 'authenticated' || !pendingIntent) return;
     const intent = consumePendingIntent();
-    if (intent) router.push(pendingIntentPath(intent) as never);
+    if (!intent) return;
+    // A cold push can arrive before authentication, so the initial
+    // acknowledgement attempt may have failed. Retry it at the authenticated
+    // routing boundary, immediately before opening the detailed destination.
+    if (intent.targetType === 'attention') void notificationManager.markViewed(intent.params.item);
+    if (intent.targetType === 'pull-request') void notificationManager.markViewed(`github-pr-${intent.params.number}`);
+    router.push(pendingIntentPath(intent) as never);
   }, [pendingIntent, router, session.status]);
 
   useEffect(() => {
@@ -152,7 +157,6 @@ export default function RootLayout() {
         <Stack screenOptions={{ headerShown: false }}>
           <Stack.Screen name="(tabs)" />
         </Stack>
-        <InAppNotificationStack />
         <NotificationPermissionPrompt />
         </ErrorBoundary>
       </View>

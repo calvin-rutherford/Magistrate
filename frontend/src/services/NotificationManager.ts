@@ -6,6 +6,7 @@ import { enqueuePendingIntent, PendingIntentPayload } from './PendingIntentRoute
 import {
   acknowledgeNotificationEvents,
   fetchNotificationEvents,
+  markNotificationEventsDelivered,
   NotificationEvent,
   registerNativePushToken as registerTokenWithGateway,
   revokeNativePushToken,
@@ -26,7 +27,7 @@ if (Platform.OS !== 'web') {
 export type NativePushStatus = 'not-started' | 'registering' | 'registered' | 'permission-required' | 'permission-denied' | 'unavailable' | 'offline' | 'error';
 
 function copyFor(events: NotificationEvent[]) {
-  if (events.length > 1) return { title: `${events.length} items need your attention`, body: 'Questions or captain decisions are waiting.', url: '/attention' };
+  if (events.length > 1) return { title: `${events.length} items need your attention`, body: 'Questions or captain decisions are waiting.', url: events[0]?.deep_link || events[0]?.url || '/attention' };
   const event = events[0];
   return event.notification_kind === 'pr_ready'
     ? { title: 'A pull request is ready', body: event.subtitle, url: event.deep_link || event.url }
@@ -37,7 +38,11 @@ function openNotificationData(value: unknown): void {
   // RootLayout owns navigation. Queueing here preserves a cold/terminated
   // notification tap through authentication and validates the route centrally.
   if (typeof value === 'string') enqueuePendingIntent(value);
-  else if (value && typeof value === 'object') enqueuePendingIntent(value as PendingIntentPayload);
+  else if (value && typeof value === 'object') {
+    const payload = value as PendingIntentPayload;
+    if (typeof payload.item_id === 'string') void notificationManager.markViewed(payload.item_id);
+    enqueuePendingIntent(payload);
+  }
 }
 
 class NotificationManagerService {
@@ -49,6 +54,10 @@ class NotificationManagerService {
   private registering = false;
   private fallbackEvents: NotificationEvent[] = [];
   private fallbackListeners = new Set<(events: NotificationEvent[]) => void>();
+  private unreadEvents: NotificationEvent[] = [];
+  private unreadListeners = new Set<(events: NotificationEvent[]) => void>();
+  private viewedInFlight = new Set<string>();
+  private browserDelivered = new Set<string>();
   private status: NativePushStatus = 'not-started';
   private statusListeners = new Set<(status: NativePushStatus) => void>();
 
@@ -56,6 +65,41 @@ class NotificationManagerService {
     this.fallbackListeners.add(listener);
     listener(this.fallbackEvents);
     return () => { this.fallbackListeners.delete(listener); };
+  }
+
+  subscribeUnread(listener: (events: NotificationEvent[]) => void) {
+    this.unreadListeners.add(listener);
+    listener(this.unreadEvents);
+    return () => { this.unreadListeners.delete(listener); };
+  }
+
+  getUnreadEvents(): NotificationEvent[] { return this.unreadEvents; }
+
+  private setUnread(events: NotificationEvent[]) {
+    const seen = new Set<string>();
+    this.unreadEvents = events.filter(event => {
+      if (seen.has(event.id)) return false;
+      seen.add(event.id);
+      return event.requires_action !== false;
+    });
+    this.unreadListeners.forEach(listener => listener(this.unreadEvents));
+  }
+
+  async markViewed(itemId: string): Promise<void> {
+    if (!itemId || this.viewedInFlight.has(itemId)) return;
+    this.viewedInFlight.add(itemId);
+    try {
+      await acknowledgeNotificationEvents([itemId]);
+      this.setUnread(this.unreadEvents.filter(event => event.id !== itemId));
+      this.fallbackEvents = this.fallbackEvents.filter(event => event.id !== itemId);
+      this.fallbackListeners.forEach(listener => listener(this.fallbackEvents));
+    } catch (error) {
+      // Keep the dot when acknowledgement cannot reach the gateway. A retry
+      // on the next view/poll is preferable to claiming the item was read.
+      console.error('Notification acknowledgement error:', error);
+    } finally {
+      this.viewedInFlight.delete(itemId);
+    }
   }
 
   subscribePushStatus(listener: (status: NativePushStatus) => void) {
@@ -166,21 +210,32 @@ class NotificationManagerService {
     try {
       // The gateway performs native delivery and acknowledges only successful
       // remote sends. Web receives this feed for its open-tab fallback.
-      const { events } = await fetchNotificationEvents(false);
+      const result = await fetchNotificationEvents(false);
+      // The gateway keeps delivery and viewing separate. This is the source
+      // for the restrained chat-logo indicator, including pushes accepted while
+      // the app was backgrounded or terminated.
+      const events = Array.isArray(result?.events) ? result.events : [];
+      const unread = Array.isArray(result?.unread) ? result.unread : events;
+      this.setUnread(unread);
       if (!events.length) {
         if (Platform.OS !== 'web' && (this.status === 'offline' || this.status === 'error')) void this.registerNativePushToken(false);
         return;
       }
-      let delivered = false;
-      if (Platform.OS === 'web') delivered = await this.deliverBrowser(events);
-      else {
+      if (Platform.OS === 'web') {
+        const freshEvents = events.filter(event => !this.browserDelivered.has(`${event.id}:${event.revision || ''}`));
+        if (!freshEvents.length) return;
+        const delivered = await this.deliverBrowser(freshEvents);
+        if (delivered) {
+          freshEvents.forEach(event => this.browserDelivered.add(`${event.id}:${event.revision || ''}`));
+          await markNotificationEventsDelivered(freshEvents.map(event => event.id));
+        }
+      } else {
         // A failed/absent remote channel is honest in-app fallback, not a
         // background-push claim. The gateway's bounded retries already ran.
+        // There is intentionally no in-app popup; the unread dot and drawer
+        // remain the fallback until the captain opens the item.
         this.showFallback(events);
-        delivered = true;
       }
-      if (!delivered) this.showFallback(events);
-      if (delivered) await acknowledgeNotificationEvents(events.map(event => event.id));
     } catch (error) {
       if (Platform.OS !== 'web') this.setStatus('offline');
       console.error('Notification monitoring error:', error);
@@ -195,10 +250,14 @@ class NotificationManagerService {
     if (BrowserNotification.permission !== 'granted') return false;
     const copy = copyFor(events);
     try {
-      const notification = new BrowserNotification(copy.title, { body: copy.body, data: { url: copy.url } });
+      const notification = new BrowserNotification(copy.title, {
+        body: copy.body,
+        data: { intent_version: 1, target_type: 'attention', target_id: events[0]?.id, item_id: events[0]?.id, route: copy.url },
+      });
       notification.onclick = () => {
         if (typeof window !== 'undefined') window.focus();
-        openNotificationData(copy.url);
+        events.forEach(event => { void this.markViewed(event.id); });
+        openNotificationData({ intent_version: 1, target_type: 'attention', target_id: events[0]?.id, item_id: events[0]?.id, route: copy.url });
         notification.close?.();
       };
       return true;

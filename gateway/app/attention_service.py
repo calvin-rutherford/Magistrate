@@ -30,6 +30,7 @@ class AttentionService:
                     'url': att.get('url', '/attention'),
                     'deep_link': att.get('deep_link'),
                     'target_id': att.get('target_id'),
+                    'context': att.get('context'),
                     'requires_action': True,
                     'notification_kind': att.get('type'),
                     'consequential': att.get('consequential') is True,
@@ -54,6 +55,7 @@ class AttentionService:
                         'url': f'/pr-detail?number={pr.get("number")}',
                         'requires_action': True,
                         'external_url': pr.get('url'),
+                        'context': {'repository': pr.get('repository'), 'author': pr.get('author'), 'branch': pr.get('branch'), 'review_status': pr.get('review_status'), 'checks': (pr.get('checks') or {}).get('summary')},
                         'notification_kind': 'pr_ready',
                         'consequential': pr.get('merge_decision_required') is True,
                         'revision': pr.get('head_sha') or pr.get('updated_at'),
@@ -76,6 +78,7 @@ class AttentionService:
                         'status': issue.get('status', 'IN PROGRESS'),
                         'url': f'/attention?item=jira-{issue.get("key")}',
                         'external_url': issue.get('url'),
+                        'context': {'issue_key': issue.get('key'), 'project': issue.get('project')},
                         'requires_action': True,
                         'notification_kind': 'blocker',
                         'revision': issue.get('updated_at') or issue.get('status')
@@ -97,6 +100,7 @@ class AttentionService:
                         'status': 'unread_mention',
                         'url': f'/attention?item={m.get("id", "teams-msg")}',
                         'external_url': m.get('url'),
+                        'context': {'sender': m.get('sender'), 'message_id': m.get('id')},
                         'requires_action': True,
                         'notification_kind': 'captain_question',
                         'revision': m.get('updated_at') or m.get('id')

@@ -30,7 +30,7 @@ from app.attention_service import attention_service
 from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
                                list_registered_push_users, registered_local_hour,
                                reconcile_notification_events, dispatch_notification_events,
-                               acknowledge_notification_events, get_notification_preferences,
+                               mark_notification_events_delivered, acknowledge_notification_events, get_notification_preferences,
                                update_notification_preferences)
 from app.providers.github import GitHubProviderAdapter
 from app.providers.twitter import TwitterProviderAdapter
@@ -514,6 +514,11 @@ async def get_notification_events(
     del foreground
     items = await attention_service.get_unified_attention_items()
     return await dispatch_notification_events(principal.user_id, items, local_hour=local_hour)
+
+@app.post('/api/v1/notifications/events/delivered')
+async def delivered_notification_events(contract: NotificationAckContract, principal: Principal = Depends(require_scope('notifications'))):
+    mark_notification_events_delivered(principal.user_id, contract.item_ids)
+    return {'status': 'delivered', 'item_ids': contract.item_ids}
 
 @app.post('/api/v1/notifications/events/ack')
 async def ack_notification_events(contract: NotificationAckContract, principal: Principal = Depends(require_scope('notifications'))):

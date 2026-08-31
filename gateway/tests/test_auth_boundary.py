@@ -122,6 +122,8 @@ def test_missing_or_query_only_credentials_are_rejected():
     ('GET', '/api/v1/fleet', None),
     ('GET', '/api/v1/attention', None),
     ('GET', '/api/v1/notifications/events', None),
+    ('POST', '/api/v1/notifications/events/delivered', {'item_ids': []}),
+    ('POST', '/api/v1/notifications/events/ack', {'item_ids': []}),
     ('GET', '/api/v1/voice/capabilities', None),
     ('POST', '/api/v1/voice/transcribe', None),
     ('POST', '/api/v1/voice/moves', {'utterance': 'status', 'idempotency_key': 'auth-test-1234'}),
