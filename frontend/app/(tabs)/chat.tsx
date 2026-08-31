@@ -219,6 +219,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const atBottomRef = useRef(true);
+  const initialHistoryLoadedRef = useRef(false);
+  const initialScrollCancelledRef = useRef(false);
+  const historyViewportMeasuredRef = useRef(false);
+  const historyContentMeasuredRef = useRef(false);
+  const pendingLatestScrollRef = useRef(false);
+  const latestScrollFrameRef = useRef<number | null>(null);
   const historyRequestRef = useRef(0);
   // A prompt must not race the initial scrollback seed. If the seed resolves
   // after a new reply is already present, it would mark that reply as known
@@ -230,6 +236,30 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const knownKeysRef = useRef<Set<string>>(new Set());
   const targetLabel = target === 'captain' ? 'Magistrate' : target;
   const capture = useVoiceInputAdapter(undefined, voiceInputMode);
+
+  // ScrollView's native content dimensions are only trustworthy after both the
+  // viewport and its rendered content have measured. Keep the request pending
+  // until those callbacks fire rather than guessing a height or using a timer.
+  const requestLatestScroll = (force = false) => {
+    if (force) {
+      atBottomRef.current = true;
+      initialScrollCancelledRef.current = false;
+    } else if (!initialHistoryLoadedRef.current) {
+      if (atBottomRef.current && !initialScrollCancelledRef.current) pendingLatestScrollRef.current = true;
+      return;
+    } else if (!atBottomRef.current && !pendingLatestScrollRef.current) return;
+    pendingLatestScrollRef.current = true;
+    if (latestScrollFrameRef.current !== null) return;
+    latestScrollFrameRef.current = requestAnimationFrame(() => {
+      latestScrollFrameRef.current = null;
+      if (!pendingLatestScrollRef.current || !historyViewportMeasuredRef.current || !historyContentMeasuredRef.current) return;
+      // Content growth can make the previous offset look temporarily above
+      // the end before onContentSizeChange runs. The pending request records
+      // that the captain was at the end when the message arrived.
+      pendingLatestScrollRef.current = false;
+      scrollRef.current?.scrollToEnd({ animated: false });
+    });
+  };
   useEffect(() => {
     const profile = profiles.find(item => item.id === selectedProfileId);
     setModelSelection(profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null);
@@ -237,38 +267,60 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
 
   useEffect(() => {
     const request = ++historyRequestRef.current;
+    initialHistoryLoadedRef.current = false;
+    initialScrollCancelledRef.current = false;
+    historyViewportMeasuredRef.current = false;
+    historyContentMeasuredRef.current = false;
+    pendingLatestScrollRef.current = true;
     let resolveHistoryReady!: () => void;
     let historyReady = false;
-    const markHistoryReady = () => { if (!historyReady) { historyReady = true; resolveHistoryReady(); } };
+    const markHistoryReady = (scrollToLatest = true) => {
+      if (historyReady) return;
+      historyReady = true;
+      initialHistoryLoadedRef.current = true;
+      resolveHistoryReady();
+      if (scrollToLatest) requestLatestScroll();
+    };
     historyReadyRef.current = new Promise<void>(resolve => { resolveHistoryReady = resolve; });
     setSendError(null); setIsThinking(false);
     // The captain thread is shared with Voice Mode (see ConversationSession),
     // so switching back to it keeps whatever it already holds in memory for
     // this session; other targets start each visit with a clean thread.
     knownKeysRef.current = new Set(getConversationMessages(target).map(historyKey));
-    void hydrateConversationMessages(target).then(hydrated => hydrated.forEach(message => knownKeysRef.current.add(historyKey(message))));
+    const hydration = hydrateConversationMessages(target).then(hydrated => hydrated.forEach(message => knownKeysRef.current.add(historyKey(message))));
     // Seed known-message keys from recent Herdr scrollback so the live poll
     // below doesn't treat pre-existing history as new and replay it into the
     // thread - chat only ever shows what happens while it's open.
-    const loadHistory = (attempt: number) => {
-      fetchAgentHistory(target).then(result => {
+    const loadHistory = async (attempt: number): Promise<void> => {
+      try {
+        const result = await fetchAgentHistory(target);
         if (request !== historyRequestRef.current) return;
         // A working agent can briefly leave an empty terminal snapshot (redraw
         // or alternate screen); retry a few times before accepting it as empty.
-        if (result.messages.length === 0 && attempt < 5) { setTimeout(() => loadHistory(attempt + 1), 2000); return; }
+        if (result.messages.length === 0 && attempt < 5) {
+          await new Promise<void>(resolve => setTimeout(resolve, 2000));
+          return loadHistory(attempt + 1);
+        }
         result.messages.forEach(message => knownKeysRef.current.add(historyKey(message)));
         setHistoryBefore(result.next_before || null);
-        markHistoryReady();
-      }).catch(error => {
+      } catch (error) {
         if (request !== historyRequestRef.current) return;
         setSendError(errorText(error, 'Agent history could not be loaded.'));
         // A history outage must not permanently prevent sending. The active
         // poll remains the recovery path and will discover the eventual reply.
-        markHistoryReady();
-      });
+      }
     };
-    loadHistory(0);
-    return () => { historyRequestRef.current += 1; markHistoryReady(); };
+    void Promise.allSettled([hydration, loadHistory(0)]).then(() => {
+      if (request === historyRequestRef.current) markHistoryReady();
+    });
+    return () => {
+      historyRequestRef.current += 1;
+      if (latestScrollFrameRef.current !== null) {
+        cancelAnimationFrame(latestScrollFrameRef.current);
+        latestScrollFrameRef.current = null;
+      }
+      markHistoryReady(false);
+    };
   }, [target]);
 
   // Mobile web keyboards resize the visual viewport, not the layout viewport.
@@ -359,6 +411,20 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     atBottomRef.current = atBottom; setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
     if (contentOffset.y < 36) void loadOlderHistory();
   };
+  const handleHistoryLayout = () => {
+    historyViewportMeasuredRef.current = true;
+    requestLatestScroll();
+  };
+  const handleHistoryContentSizeChange = () => {
+    historyContentMeasuredRef.current = true;
+    requestLatestScroll();
+  };
+  const handleHistoryScrollBeginDrag = () => {
+    // A captain who starts reading older content has expressed an intentional
+    // position; do not override it when an asynchronous render catches up.
+    pendingLatestScrollRef.current = false;
+    if (!initialHistoryLoadedRef.current) initialScrollCancelledRef.current = true;
+  };
   const addAttachments = (selected: ComposerAttachment[]) => {
     setAttachments(current => [...current, ...selected]);
     setSendError(null);
@@ -392,10 +458,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     } catch (error) { setSendError(errorText(error, 'The file picker could not be opened.')); }
   };
   const appendMessage = (message: ConversationMessage) => {
+    const wasAtBottom = atBottomRef.current;
     knownKeysRef.current.add(historyKey(message));
     appendConversationMessage(target, message);
-    if (!atBottomRef.current) setHasNewMessages(true);
-    requestAnimationFrame?.(() => { if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: true }); });
+    if (!wasAtBottom) setHasNewMessages(true);
+    if (wasAtBottom) requestLatestScroll();
   };
   // Merges normalized Herdr events and HTTP history into the visible thread.
   // The same deduplication path is used by WebSocket delivery and polling.
@@ -503,10 +570,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     <View style={styles.shellHeader}>
       <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity>
     </View>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onScroll={handleScroll} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
       {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text></View>)}
     </ScrollView>
-    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { atBottomRef.current = true; setHasNewMessages(false); setIsScrolledUp(false); scrollRef.current?.scrollToEnd({ animated: true }); }}><Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text></TouchableOpacity> : null}
+    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { setHasNewMessages(false); setIsScrolledUp(false); requestLatestScroll(true); }}><Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text></TouchableOpacity> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
       <TouchableOpacity accessibilityRole="button" onPress={editMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Edit</Text></TouchableOpacity>
       <TouchableOpacity accessibilityRole="button" onPress={() => void copyMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Copy</Text></TouchableOpacity>
@@ -788,7 +855,7 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
   shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 22, paddingHorizontal: 22, paddingBottom: 20, gap: 14 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 11, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 16, lineHeight: 23 },
+  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 },
   jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, zIndex: 5 }, jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
   composer: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 10 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, thinkingButton: { backgroundColor: brand.cyan }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
