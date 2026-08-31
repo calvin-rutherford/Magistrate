@@ -1,6 +1,27 @@
 # Magistrate Architecture
 
-Magistrate is not a chatbot or a generic agent framework. It is an **AI-native engineering government**. 
+Magistrate is not a chatbot or a generic agent framework. It is an **AI-native engineering government**.
+
+## Deskless Operator Alpha boundary
+
+The product names are intentionally separate:
+
+- **Magi** is the human interface: the Expo/React Native iPhone and web
+  surfaces for chat, foreground voice, Attention, and PR targets.
+- **Magistrate** is the governed execution substrate: the FastAPI Gateway,
+  auth/scopes, policy, private Herdr connection, Firstmate, and harnesses.
+- **Owner alpha** is a single trusted operator deployment. Its command and
+  voice scopes are for the owner only; its app bundle contains no runner,
+  provider, bootstrap, or harness credentials.
+- **Friend/multi-user product** is future work requiring accounts/invites,
+  tenant authorization, isolated execution, and device/session management.
+  Friend preview sessions must be restricted to observation/notifications and
+  never expose execution credentials.
+
+The native path is `physical iPhone -> HTTPS/WSS Gateway -> private Herdr ->
+Firstmate/harnesses`. See [`deskless-operator-alpha.md`](./deskless-operator-alpha.md)
+and [`DEAT-001.md`](./DEAT-001.md) for the current slice and its unexecuted
+physical acceptance gate.
 
 ## The Metaphor
 

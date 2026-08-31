@@ -1,5 +1,6 @@
-import { Stack, usePathname } from 'expo-router';
+import { Stack, usePathname, useRouter } from 'expo-router';
 import Head from 'expo-router/head';
+import * as Linking from 'expo-linking';
 import React, { useEffect, useState } from 'react';
 import { Platform, Text, TextInput, TouchableOpacity, View, StyleSheet } from 'react-native';
 import { notificationManager } from '../src/services/NotificationManager';
@@ -13,17 +14,40 @@ import {
   useGatewaySession,
   validateGatewaySession,
 } from '../src/api/client';
+import {
+  consumePendingIntent,
+  enqueuePendingIntent,
+  pendingIntentPath,
+  usePendingIntent,
+} from '../src/services/PendingIntentRouter';
 
 export default function RootLayout() {
   const pathname = usePathname();
+  const router = useRouter();
   const session = useGatewaySession();
+  const pendingIntent = usePendingIntent();
   const [bootstrapSecret, setBootstrapSecret] = useState('');
   const [sessionError, setSessionError] = useState('');
   const [sessionSubmitting, setSessionSubmitting] = useState(false);
 
   useEffect(() => {
+    notificationManager.installNotificationRouting();
     void restoreGatewaySession();
   }, []);
+
+  useEffect(() => {
+    // Capture URL launches before auth validation. This covers terminated and
+    // unauthenticated launches without mounting a protected destination early.
+    void Linking.getInitialURL().then(url => enqueuePendingIntent(url)).catch(() => undefined);
+    const subscription = Linking.addEventListener('url', event => enqueuePendingIntent(event.url));
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (session.status !== 'authenticated' || !pendingIntent) return;
+    const intent = consumePendingIntent();
+    if (intent) router.push(pendingIntentPath(intent) as never);
+  }, [pendingIntent, router, session.status]);
 
   useEffect(() => {
     if (session.status === 'authenticated' && Platform.OS === 'web') {

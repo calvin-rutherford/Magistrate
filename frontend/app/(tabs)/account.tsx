@@ -270,8 +270,9 @@ export default function AccountScreen() {
             })}
           </View>
           <Text testID="account-native-push-status" style={styles.pushStatusText}>
-            {nativePushStatus === 'registered' ? 'Native push: registered with Gateway.' : nativePushStatus === 'permission-denied' ? 'Native push permission denied. In-app attention remains available.' : nativePushStatus === 'unavailable' ? 'Native push unavailable here (use a physical device/release build with EAS push credentials).' : nativePushStatus === 'offline' ? 'Gateway or push service offline. Retrying while connected.' : 'Native push status: ' + nativePushStatus + '.'}
+            {nativePushStatus === 'registered' ? 'Native push: registered with Gateway.' : nativePushStatus === 'permission-required' ? 'Native push permission has not been requested.' : nativePushStatus === 'permission-denied' ? 'Native push permission denied. In-app attention remains available.' : nativePushStatus === 'unavailable' ? 'Native push unavailable here (use a physical device/release build with EAS push credentials).' : nativePushStatus === 'offline' ? 'Gateway or push service offline. Retrying while connected.' : 'Native push status: ' + nativePushStatus + '.'}
           </Text>
+          {nativePushStatus !== 'registered' && <TouchableOpacity testID="account-enable-native-push" onPress={() => void notificationManager.registerNativePushToken(true)} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>ENABLE NATIVE PUSH</Text></TouchableOpacity>}
           <Text style={styles.settingHint}>Web notifications require an open, eligible browser tab; native push is the beta background channel.</Text>
         </GlassSurface>
 
@@ -432,6 +433,7 @@ const styles = StyleSheet.create({
   permissionModeTitle: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255,255,255,0.75)' },
   permissionModeTitleActive: { color: '#FFFFFF' },
   pushStatusText: { marginTop: 12, fontSize: 10, lineHeight: 15, color: 'rgba(255,255,255,0.72)' },
+  enablePushButton: { alignSelf: 'flex-start', marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderWidth: 1, borderColor: '#24D8FF', borderRadius: 999 },
   voiceModeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
   voiceModePill: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   voiceModePillActive: { backgroundColor: 'rgba(36, 216, 255, 0.28)', borderColor: '#24D8FF' },

@@ -1,5 +1,3 @@
-import * as Linking from 'expo-linking';
-
 export interface SiriIntentTrigger {
   id: string;
   phrase: string;
@@ -11,20 +9,20 @@ export const SIRI_INTENT_REGISTRY: SiriIntentTrigger[] = [
   {
     id: 'siri_use_mic',
     phrase: 'Use Magistrate mic',
-    targetPath: '/chat',
-    params: { record: 'true' }
+    targetPath: '/voice',
+    params: { autostart: 'true' }
   },
   {
     id: 'siri_talk_firstmate',
     phrase: 'Talk to Magistrate',
-    targetPath: '/chat',
-    params: { record: 'true' }
+    targetPath: '/voice',
+    params: { autostart: 'true' }
   },
   {
     id: 'siri_command_firstmate',
     phrase: 'Command Magistrate',
-    targetPath: '/chat',
-    params: { record: 'true' }
+    targetPath: '/voice',
+    params: { autostart: 'true' }
   },
   {
     id: 'siri_what_running',
@@ -45,10 +43,10 @@ export class SiriShortcutAdapter {
       const query = found.params ? '?' + new URLSearchParams(found.params).toString() : '';
       return 'magistrate:/' + found.targetPath + query;
     }
-    return 'magistrate://chat?record=true';
+    return 'magistrate:/voice?autostart=true';
   }
 
   static getActionButtonShortcutUrl(): string {
-    return 'magistrate://chat?record=true';
+    return 'magistrate:/voice?autostart=true';
   }
 }

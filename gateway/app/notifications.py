@@ -14,6 +14,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -295,6 +296,27 @@ def reconcile_notification_events(
     }
 
 
+def _push_intent_data(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a versioned, app-owned target alongside the legacy URL field."""
+    route = str(event.get("deep_link") or event.get("url") or "/attention")
+    parsed = urlparse(route)
+    query = parse_qs(parsed.query)
+    target_type = "attention"
+    target_id = str(event.get("id") or "")
+    if parsed.path == "/chat" and query.get("agentId"):
+        target_type, target_id = "agent", query["agentId"][0]
+    elif parsed.path == "/pr-detail" and query.get("number"):
+        target_type, target_id = "pull-request", query["number"][0]
+    elif parsed.path == "/attention" and query.get("item"):
+        target_id = query["item"][0]
+    return {
+        "intent_version": 1,
+        "target_type": target_type,
+        "target_id": target_id,
+        "route": route,
+    }
+
+
 async def dispatch_notification_events(
     user_id: str,
     attention_items: List[Dict[str, Any]],
@@ -315,7 +337,7 @@ async def dispatch_notification_events(
             user_id,
             title,
             event.get("subtitle") or "An item needs your attention.",
-            {"url": event.get("deep_link") or event.get("url", "/attention"), "item_id": event.get("id"), "notification_kind": kind},
+            {**_push_intent_data(event), "url": event.get("deep_link") or event.get("url", "/attention"), "item_id": event.get("id"), "notification_kind": kind},
         )
         if outcome.get("status") == "sent":
             delivered.append(str(event["id"]))

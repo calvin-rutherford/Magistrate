@@ -9,10 +9,13 @@ quiet window. A successful remote send is the only native delivery that marks
 the transition delivered.
 
 Native beta builds obtain a real `ExponentPushToken[...]` from
-`expo-notifications`, register it over the authenticated Gateway session, and
-receive push data containing an app-owned deep link (`/attention`, `/chat`, or
-`/pr-detail`). A device permission denial, missing EAS project/credentials,
-simulator, offline Gateway, or provider failure is shown as unavailable and
+`expo-notifications` after an explicit owner action in Account, register it over
+the authenticated Gateway session, and receive push data containing an
+app-owned deep link (`/attention`, `/chat`, or `/pr-detail`). The payload also
+carries `intent_version: 1`, `target_type`, `target_id`, and `route`; RootLayout passes that route through the shared
+pending-intent parser. A device permission denial, missing EAS
+project/credentials, simulator, offline Gateway, or provider failure is shown
+as unavailable and
 keeps the item in the in-app Attention fallback. The app never schedules a
 local notification from a foreground poll and never claims that this is
 background push.
