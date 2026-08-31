@@ -14,6 +14,13 @@ import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, Voi
 import { loadOperatingPermissionMode, saveOperatingPermissionMode, OPERATING_PERMISSION_MODE_OPTIONS, OperatingPermissionMode } from '../../src/services/OperatingPermissionModes';
 import { notificationManager, NativePushStatus } from '../../src/services/NotificationManager';
 
+type AccountSectionKey = 'notifications' | 'voice' | 'connections' | 'appearance';
+function AccountSectionHeader({ id, title, expanded, onPress }: { id: AccountSectionKey; title: string; expanded: boolean; onPress: () => void }) {
+  return <TouchableOpacity testID={`account-section-${id}`} accessibilityRole="button" accessibilityLabel={`${title} settings`} accessibilityState={{ expanded }} {...({ 'aria-expanded': expanded } as any)} onPress={onPress} style={styles.sectionHeader} activeOpacity={0.75}>
+    <Text style={styles.sectionTitle}>{title}</Text><Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.sectionChevron}>{expanded ? '⌄' : '›'}</Text>
+  </TouchableOpacity>;
+}
+
 export default function AccountScreen() {
   const router = useRouter();
 
@@ -33,6 +40,8 @@ export default function AccountScreen() {
   const [quietHours, setQuietHours] = useState<boolean>(true);
   const [operatingPermissionMode, setOperatingPermissionMode] = useState<OperatingPermissionMode>('moderate');
   const [nativePushStatus, setNativePushStatus] = useState<NativePushStatus>(() => notificationManager.getPushStatus());
+  const [expandedSection, setExpandedSection] = useState<AccountSectionKey | null>(null);
+  const toggleSection = (section: AccountSectionKey) => setExpandedSection(current => current === section ? null : section);
 
   const loadAccountData = async () => {
     try {
@@ -230,11 +239,9 @@ export default function AccountScreen() {
           </View>
         </GlassSurface>
 
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>CAPTAIN ATTENTION NOTIFICATIONS</Text>
-        </View>
+        <AccountSectionHeader id="notifications" title="CAPTAIN ATTENTION NOTIFICATIONS" expanded={expandedSection === 'notifications'} onPress={() => toggleSection('notifications')} />
 
-        <GlassSurface variant="card" style={styles.settingsCard}>
+        {expandedSection === 'notifications' ? <GlassSurface variant="card" style={styles.settingsCard}>
           <View style={styles.settingToggleRow}>
             <View style={styles.settingCopy}>
               <Text style={styles.settingToggleLabel}>CAPTAIN ATTENTION</Text>
@@ -274,14 +281,12 @@ export default function AccountScreen() {
           </Text>
           {nativePushStatus !== 'registered' && <TouchableOpacity testID="account-enable-native-push" onPress={() => void notificationManager.registerNativePushToken(true)} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>ENABLE NATIVE PUSH</Text></TouchableOpacity>}
           <Text style={styles.settingHint}>Web notifications require an open, eligible browser tab; native push is the beta background channel.</Text>
-        </GlassSurface>
+        </GlassSurface> : null}
 
         {/* VOICE & AUDIO SETTINGS */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>VOICE & SPEECH SYNTHESIS</Text>
-        </View>
+        <AccountSectionHeader id="voice" title="VOICE & SPEECH SYNTHESIS" expanded={expandedSection === 'voice'} onPress={() => toggleSection('voice')} />
 
-        <GlassSurface variant="card" style={styles.settingsCard}>
+        {expandedSection === 'voice' ? <GlassSurface variant="card" style={styles.settingsCard}>
           <View style={styles.settingToggleRow}>
             <Text style={styles.settingToggleLabel}>VOICE OUTPUT</Text>
             <TouchableOpacity
@@ -314,14 +319,12 @@ export default function AccountScreen() {
           <Text testID="account-voice-input-label" style={styles.settingLabel}>VOICE INPUT MODE</Text>
           <Text style={styles.settingHint}>Speech is placed in the chat composer for review. OpenAI credentials never leave the gateway.</Text>
           <View testID="account-voice-input-options" style={styles.voiceModeRow}>{VOICE_INPUT_MODE_OPTIONS.map(option => { const capability = capabilityFor(voiceCapabilities, option.id); const selected = voiceInputMode === option.id; const disabled = capability.available === 'unavailable'; return <TouchableOpacity key={option.id} testID={`account-voice-mode-${option.id}`} accessibilityRole="button" accessibilityLabel={`${option.label}: ${capability.reason || option.description}`} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={() => { setVoiceInputMode(option.id); void saveVoiceInputMode(option.id); }} style={[styles.voiceModePill, selected ? styles.voiceModePillActive : undefined, disabled ? styles.voiceModePillDisabled : undefined]}><Text style={[styles.voiceModeText, selected ? styles.voiceModeTextActive : undefined]}>{option.label}</Text></TouchableOpacity>; })}</View>
-        </GlassSurface>
+        </GlassSurface> : null}
 
         {/* CONNECTED OAUTH PROVIDERS */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>CONNECTED OAUTH PROVIDERS</Text>
-        </View>
+        <AccountSectionHeader id="connections" title="CONNECTED OAUTH PROVIDERS" expanded={expandedSection === 'connections'} onPress={() => toggleSection('connections')} />
 
-        <GlassSurface variant="card" style={styles.socialCard}>
+        {expandedSection === 'connections' ? <GlassSurface variant="card" style={styles.socialCard}>
           {providers.length === 0 ? (
           <Text style={{ fontFamily: 'monospace', color: 'rgba(255,255,255,0.5)', fontSize: 11, textAlign: 'center', marginVertical: 10 }}>No integrations connected.</Text>
         ) : providers.map(s => (
@@ -343,14 +346,12 @@ export default function AccountScreen() {
               </TouchableOpacity>
             </View>
           ))}
-        </GlassSurface>
+        </GlassSurface> : null}
 
         {/* BACKGROUNDS & APPEARANCE */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>BACKGROUNDS & APPEARANCE</Text>
-        </View>
+        <AccountSectionHeader id="appearance" title="BACKGROUNDS & APPEARANCE" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} />
 
-        <GlassSurface variant="card" style={styles.settingsCard}>
+        {expandedSection === 'appearance' ? <GlassSurface variant="card" style={styles.settingsCard}>
           <Text style={styles.settingLabel}>SELECTABLE BACKGROUND THEME</Text>
           <View style={styles.themeRow}>
             {[
@@ -376,7 +377,7 @@ export default function AccountScreen() {
             <Text style={styles.customBgBtnText}>{customBackgroundUri ? 'REPLACE CUSTOM PHOTO 📷' : 'UPLOAD CUSTOM PHOTO 📷'}</Text>
           </TouchableOpacity>
           {customBackgroundUri ? <TouchableOpacity testID="account-custom-background-remove" style={styles.customBgRemoveBtn} onPress={async () => { setCustomBackgroundUri(undefined); setActiveThemeKey('auto'); await removeCustomBackground(); }}><Text style={styles.customBgBtnText}>REMOVE CUSTOM PHOTO</Text></TouchableOpacity> : null}
-        </GlassSurface>
+        </GlassSurface> : null}
       </ScrollView>
     </EnvironmentBackground>
   );
@@ -407,8 +408,9 @@ const styles = StyleSheet.create({
   profileEmail: { fontSize: 12, color: 'rgba(255, 255, 255, 0.65)', marginTop: 2 },
   uploadBtn: { marginTop: 6 },
   uploadBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 0.8 },
-  sectionHeader: { marginTop: 14, marginBottom: 6 },
-  sectionTitle: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', letterSpacing: 1.4 },
+  sectionHeader: { marginTop: 14, marginBottom: 6, minHeight: 44, paddingVertical: 8, paddingHorizontal: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  sectionTitle: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', letterSpacing: 1.4, flex: 1 },
+  sectionChevron: { color: '#FFFFFF', fontSize: 22, lineHeight: 24, width: 30, textAlign: 'center' },
   socialCard: { padding: 16, borderRadius: 18, gap: 12 },
   socialRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
   providerLeft: { flex: 1, paddingRight: 10 },

@@ -200,6 +200,7 @@ test('logout revokes the session locally and returns to the authentication gate'
   await connect(page);
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.click('[data-testid="settings-open"]');
+  await page.click('[data-testid="settings-section-account"]');
   await page.waitForSelector('[data-testid="settings-logout"]');
   await page.click('[data-testid="settings-logout"]');
   await page.waitForSelector('[data-testid="bootstrap-secret"]');

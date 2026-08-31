@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AgentInfo } from '../src/api/client';
-import { mapAgentStatus, summarizeAgents } from '../src/services/AgentStatus';
+import { AGENT_NAME_UNAVAILABLE, agentDisplayName, mapAgentStatus, summarizeAgents } from '../src/services/AgentStatus';
 
 const agent = (id: string, status?: string, name?: string): AgentInfo => ({ id, name: name || id, status });
+
+test('uses Herdr names and fails closed for generic or missing labels', () => {
+  assert.equal(agentDisplayName({ id: 'w1:p7', name: 'Review worker', pane_id: 'w1:p7' }), 'Review worker');
+  assert.equal(agentDisplayName({ id: 'w1:p8', name: 'firstmate', pane_id: 'w1:p8' }), AGENT_NAME_UNAVAILABLE);
+  assert.equal(agentDisplayName({ id: 'w1:p9', name: 'w1:p9', pane_id: 'w1:p9', tab_id: 'w1:t9' }), AGENT_NAME_UNAVAILABLE);
+  assert.equal(agentDisplayName({ id: 'w1:p10', name: 'pane_id=w1:p10', pane_id: 'w1:p10' }), AGENT_NAME_UNAVAILABLE);
+  assert.equal(agentDisplayName({ id: 'w1:p11', name: null }), AGENT_NAME_UNAVAILABLE);
+});
 
 test('maps only known live states and never guesses unknown values', () => {
   assert.equal(mapAgentStatus(agent('a', 'working')), 'active');

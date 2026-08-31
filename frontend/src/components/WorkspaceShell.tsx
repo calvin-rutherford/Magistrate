@@ -18,7 +18,7 @@ import {
   sendAgentKey,
   UnifiedAttentionRecord
 } from '../api/client';
-import { summarizeAgents, displayAgentStatus } from '../services/AgentStatus';
+import { agentDisplayName, summarizeAgents, displayAgentStatus } from '../services/AgentStatus';
 import { openExternalUrl } from '../utils/externalLinks';
 
 // Sidebar refreshes must not replace the Chat DOM: terminal scroll position,
@@ -331,14 +331,14 @@ function AgentPreview({ agent, status, selected, onOpen }: { agent: AgentInfo; s
     finally { setBusy(null); setPending(null); }
   };
   return <GlassSurface variant="card" style={[styles.panelCard, selected ? styles.selectedCard : undefined]}>
-    <TouchableOpacity testID={`agent-card-${agent.id}`} accessibilityRole="button" accessibilityLabel={`Chat with ${agent.name || agent.id}`} onPress={() => onOpen(agent.id)} activeOpacity={0.85}>
-      <View style={styles.agentHeader}><Text style={styles.agentName}>{agent.name || agent.id}</Text><Text style={styles.agentStatus}>{displayAgentStatus(status as any)}</Text></View>
+    <TouchableOpacity testID={`agent-card-${agent.id}`} accessibilityRole="button" accessibilityLabel={`Chat with ${agentDisplayName(agent)}`} onPress={() => onOpen(agent.id)} activeOpacity={0.85}>
+      <View style={styles.agentHeader}><Text style={styles.agentName}>{agentDisplayName(agent)}</Text><Text style={styles.agentStatus}>{displayAgentStatus(status as any)}</Text></View>
       {agent.harness ? <Text style={styles.muted}>Harness: {agent.harness}</Text> : null}
       <Text style={styles.agentTargetHint}>OPEN CHAT TARGET →</Text>
     </TouchableOpacity>
     <Text style={styles.controlsLabel}>AGENT CONTROLS</Text>
     <View style={styles.controlsRow}>
-      {(['interrupt', 'Enter', 'Escape'] as const).map(action => <TouchableOpacity key={action} testID={`agent-${agent.id}-${action.toLowerCase()}-control`} accessibilityRole="button" accessibilityLabel={`${action} ${agent.name || agent.id}`} disabled={busy !== null || pending !== null} onPress={() => action === 'Escape' ? void run(action) : setPending(action)} style={[styles.controlButton, action === 'interrupt' ? styles.interruptButton : undefined]}><Text style={styles.controlText}>{busy === action ? '…' : action.toUpperCase()}</Text></TouchableOpacity>)}
+      {(['interrupt', 'Enter', 'Escape'] as const).map(action => <TouchableOpacity key={action} testID={`agent-${agent.id}-${action.toLowerCase()}-control`} accessibilityRole="button" accessibilityLabel={`${action} ${agentDisplayName(agent)}`} disabled={busy !== null || pending !== null} onPress={() => action === 'Escape' ? void run(action) : setPending(action)} style={[styles.controlButton, action === 'interrupt' ? styles.interruptButton : undefined]}><Text style={styles.controlText}>{busy === action ? '…' : action.toUpperCase()}</Text></TouchableOpacity>)}
     </View>
     {pending ? <View style={styles.confirmRow}><Text style={styles.confirmText}>Confirm {pending}?</Text><TouchableOpacity testID="agent-control-cancel" onPress={() => setPending(null)}><Text style={styles.cancelText}>CANCEL</Text></TouchableOpacity><TouchableOpacity testID="agent-control-confirm" onPress={() => void run(pending)}><Text style={styles.confirmText}>CONFIRM</Text></TouchableOpacity></View> : null}
     {message ? <Text style={styles.muted}>{message}</Text> : null}

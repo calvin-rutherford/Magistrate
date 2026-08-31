@@ -287,7 +287,7 @@ export async function authorizedFetch(input: RequestInfo | URL, init: RequestIni
 
 export interface AgentInfo {
   id: string;
-  name: string;
+  name: string | null;
   harness?: string | null;
   status?: 'idle' | 'working' | 'blocked' | 'done' | 'unknown' | string | null;
   pane_id?: string;

@@ -520,9 +520,39 @@ test('usage lives in Settings and reports quota evidence without inventing amoun
   assert.equal(await page.$('[data-testid="drawer-section-usage"]'), null);
   await page.click('[data-testid="settings-open"]');
   await page.waitForSelector('[data-testid="settings-usage-section"]');
+  assert.equal(await page.$('[data-testid="settings-usage-content"]'), null);
+  await page.click('[data-testid="settings-section-usage"]');
+  await page.waitForSelector('[data-testid="settings-usage-content"]');
   const usage = await page.$eval('[data-testid="settings-usage-section"]', element => element.innerText);
   assert.match(usage, /codex.*plus/i);
   assert.match(usage, /20% left/i);
+  await page.close();
+});
+
+test('Settings sections are collapsed, keyboard accessible, and retain persisted controls', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.click('[data-testid="settings-open"]');
+  await page.waitForSelector('[data-testid="settings-sheet"]');
+  const sheetRatio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
+  assert.ok(sheetRatio >= 0.86 && sheetRatio <= 0.92, `settings panel should be about 15% larger: ${sheetRatio}`);
+  assert.equal(await page.$('[data-testid="settings-execution-content"]'), null);
+  assert.equal(await page.$('[data-testid="settings-voice-mode-options"]'), null);
+  const execution = '[data-testid="settings-section-execution"]';
+  assert.equal(await page.$eval(execution, element => element.getAttribute('aria-expanded')), 'false');
+  await page.focus(execution);
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('[data-testid="settings-execution-content"]');
+  assert.equal(await page.$eval(execution, element => element.getAttribute('aria-expanded')), 'true');
+  assert.ok(await page.$('[data-testid="switching-option-migrate"]'));
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('[data-testid="settings-execution-content"]') === null);
+  assert.equal(await page.$('[data-testid="switching-option-migrate"]'), null);
+
+  await page.click('[data-testid="settings-theme"]');
+  await page.waitForSelector('[data-testid="settings-tool-calls-toggle"]');
+  await page.click('[data-testid="settings-tool-calls-toggle"]');
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.chat.show-tool-calls')), 'true');
   await page.close();
 });
 
@@ -565,7 +595,7 @@ test('account gear opens the lower settings drawer with live network status', as
   await page.click('[data-testid="settings-appearance-close"]');
   assert.equal(await page.$eval('[data-testid="settings-network-status"]', element => element.textContent), 'Connected');
   const ratio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
-  assert.ok(ratio >= 0.74 && ratio <= 0.82);
+  assert.ok(ratio >= 0.86 && ratio <= 0.92);
   await page.$eval('[data-testid="settings-close"]', element => element.click());
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) < 0.05);
   await page.close();
@@ -675,6 +705,7 @@ test('voice input mode selection is explicit and persists without sending a prom
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false);
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.click('[data-testid="settings-open"]');
+  await page.click('[data-testid="settings-section-voice-input"]');
   await page.waitForSelector('[data-testid="settings-voice-mode-options"]');
   await page.click('[data-testid="voice-mode-option-openai"]');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.input-mode')), 'openai');
@@ -683,6 +714,7 @@ test('voice input mode selection is explicit and persists without sending a prom
   const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
   await refreshed.click('[data-testid="brand-drawer-toggle"]');
   await refreshed.click('[data-testid="settings-open"]');
+  await refreshed.click('[data-testid="settings-section-voice-input"]');
   await refreshed.waitForSelector('[data-testid="voice-mode-option-openai"]');
   assert.equal(await refreshed.evaluate(() => localStorage.getItem('magistrate.voice.input-mode')), 'openai');
   assert.match(await refreshed.$eval('[data-testid="settings-voice-input-section"]', element => element.innerText), /Gateway OpenAI/);

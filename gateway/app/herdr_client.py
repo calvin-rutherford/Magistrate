@@ -26,6 +26,20 @@ _TRANSIENT_SUMMARY = re.compile(
     re.IGNORECASE,
 )
 _TRANSIENT_USER_TEXT = {'Ask Codex to do anything', 'Ask Claude anything', 'Skipping dev server'}
+_GENERIC_AGENT_NAMES = {'magistrate', 'firstmate', 'π - magistrate', 'π - firstmate'}
+
+
+def _human_agent_name(value: Any, identifiers: set[str]) -> Optional[str]:
+    """Keep only a real Herdr pane name; IDs and harness titles are not names."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    normalized = candidate.lower()
+    if not candidate or normalized in _GENERIC_AGENT_NAMES or normalized in identifiers:
+        return None
+    if re.match(r'^(?:pane|tab|workspace)(?:[_ -]?id)?\s*[:=]', candidate, re.IGNORECASE):
+        return None
+    return candidate
 _ROUTING_PREFIX = re.compile(r'^\[Magistrate execution:[^\]]+\]\s*', re.IGNORECASE)
 _MARKERLESS_TOOL = re.compile(
     r'^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
@@ -318,12 +332,15 @@ class HerdrClient:
             agent_id = ag.get('pane_id') or ag.get('id') or ag.get('name')
             if not agent_id:
                 continue
-            display_name = ag.get('terminal_title_stripped') or ag.get('name') or ag.get('label') or agent_id
-            # Herdr may expose the generic harness title as the pane name. In
-            # that case the stable pane identity is more truthful than
-            # displaying "Magistrate" or "Firstmate" for every worker.
-            if str(display_name).strip().lower() in {'magistrate', 'firstmate', 'π - magistrate', 'π - firstmate'}:
-                display_name = ag.get('pane_id') or agent_id
+            identifiers = {str(value).strip().lower() for value in (agent_id, ag.get('pane_id'), ag.get('tab_id'), ag.get('workspace_id')) if value}
+            # Herdr can expose both the configured pane name and a terminal
+            # title. Prefer the configured name, then other human-readable
+            # labels. Never turn an ID or generic harness title into identity.
+            display_name = None
+            for candidate in (ag.get('name'), ag.get('label'), ag.get('terminal_title_stripped'), ag.get('terminal_title')):
+                display_name = _human_agent_name(candidate, identifiers)
+                if display_name:
+                    break
             formatted_agents.append({
                 'id': agent_id,
                 'name': display_name,

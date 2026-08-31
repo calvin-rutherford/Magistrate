@@ -87,7 +87,7 @@ export default function AttentionScreen() {
   };
 
   return (
-    <EnvironmentBackground>
+    <EnvironmentBackground hideBottomControls>
       <View style={styles.headerRow}>
         <TouchableOpacity onPress={() => router.back()}>
           <GlassSurface variant="control" style={styles.headerCircleBtn}>

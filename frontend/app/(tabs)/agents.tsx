@@ -5,7 +5,7 @@ import { EnvironmentBackground } from '../../src/components/EnvironmentBackgroun
 import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { AgentInfo, fetchAgents, fetchGitHubPRs, fetchUnifiedAttention, interruptAgent, sendAgentKey } from '../../src/api/client';
-import { summarizeAgents } from '../../src/services/AgentStatus';
+import { agentDisplayName, summarizeAgents } from '../../src/services/AgentStatus';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Agent data could not be loaded.';
 type AgentAction = 'interrupt' | 'Enter' | 'Escape';
@@ -58,7 +58,7 @@ export default function AgentsScreen() {
       if (result.status === 'error' || result.error) {
         throw new Error(result.error || `The ${actionLabel(action).toLowerCase()} action was not accepted.`);
       }
-      setControlMessage({ agentId: agent.id, message: `${actionLabel(action)} sent to ${agent.name || agent.id}.` });
+      setControlMessage({ agentId: agent.id, message: `${actionLabel(action)} sent to ${agentDisplayName(agent)}.` });
       if (action === 'interrupt') {
         await loadAgents();
       }
@@ -113,16 +113,14 @@ export default function AgentsScreen() {
           return (
             <GlassSurface key={agent.id} variant="card" style={[styles.card, selected ? styles.selectedCard : undefined]}>
               <View style={styles.cardHeader}>
-                <Text style={styles.agentName}>{agent.name || agent.id}</Text>
+                <Text style={styles.agentName}>{agentDisplayName(agent)}</Text>
                 <Text style={styles.statusText}>{agent.status ? agent.status.toUpperCase() : 'STATUS UNAVAILABLE'}</Text>
               </View>
               {agent.harness ? <Text style={styles.detailText}>Harness: {agent.harness}</Text> : null}
-              <Text style={styles.detailText}>Pane: {agent.pane_id || agent.id}</Text>
-              {agent.tab_id ? <Text style={styles.detailText}>Tab: {agent.tab_id}</Text> : null}
               <TouchableOpacity
                 testID={`agent-${agent.id}-chat-link`}
                 accessibilityRole="button"
-                accessibilityLabel={`Open chat with ${agent.name || agent.id}`}
+                accessibilityLabel={`Open chat with ${agentDisplayName(agent)}`}
                 onPress={() => router.push({ pathname: '/chat', params: { agentId: agent.id } } as any)}
                 style={styles.chatLink}
               >
@@ -141,7 +139,7 @@ export default function AgentsScreen() {
                       key={action}
                       testID={`agent-${agent.id}-${action.toLowerCase()}-control`}
                       accessibilityRole="button"
-                      accessibilityLabel={`${actionLabel(action)} ${agent.name || agent.id}`}
+                      accessibilityLabel={`${actionLabel(action)} ${agentDisplayName(agent)}`}
                       accessibilityState={{ disabled: busyAction !== null || pendingAction !== null, busy }}
                       disabled={busyAction !== null || pendingAction !== null}
                       onPress={() => requestAgentAction(agent, action)}
@@ -165,8 +163,8 @@ export default function AgentsScreen() {
           <Text style={styles.confirmationTitle}>CONFIRM {actionLabel(pendingAction.action)}</Text>
           <Text style={styles.confirmationText}>
             {pendingAction.action === 'interrupt'
-              ? `Send Ctrl-C to ${pendingAction.agent.name || pendingAction.agent.id}? This may stop its current work.`
-              : `Send Enter to ${pendingAction.agent.name || pendingAction.agent.id}? This may approve or execute a pending terminal action.`}
+              ? `Send Ctrl-C to ${agentDisplayName(pendingAction.agent)}? This may stop its current work.`
+              : `Send Enter to ${agentDisplayName(pendingAction.agent)}? This may approve or execute a pending terminal action.`}
           </Text>
           <View style={styles.confirmationActions}>
             <TouchableOpacity testID="agent-control-cancel" accessibilityRole="button" onPress={() => setPendingAction(null)} style={styles.secondaryButton}>
