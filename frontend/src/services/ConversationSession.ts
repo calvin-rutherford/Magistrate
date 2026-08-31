@@ -5,7 +5,17 @@ export interface ConversationAttachment {
   name: string;
   mediaType: string;
   size?: number;
+  /**
+   * Real processing state, never optimistic. 'uploading' until the gateway
+   * confirms storage, 'stored' once it has, 'attached' once the prompt carrying
+   * it was accepted, and 'failed' when the upload was rejected.
+   */
+  status?: 'uploading' | 'stored' | 'attached' | 'failed';
+  /** Server-issued upload id; absent while the upload is still local. */
+  uploadId?: string;
 }
+
+const ATTACHMENT_STATES = new Set(['uploading', 'stored', 'attached', 'failed']);
 
 /** Provenance supplied by the gateway/provider; never inferred from prose. */
 export interface ConversationSource {
@@ -80,7 +90,11 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
           && (candidate.size === undefined || (typeof candidate.size === 'number' && Number.isSafeInteger(candidate.size) && candidate.size >= 0 && candidate.size <= 25 * 1024 * 1024));
       }).map(attachment => {
         const candidate = attachment as Record<string, unknown>;
-        return { name: candidate.name as string, mediaType: candidate.mediaType as string, size: candidate.size as number | undefined };
+        // A restored attachment whose state we cannot verify is not claimed as
+        // processed; the unknown state renders without a success label.
+        const status = ATTACHMENT_STATES.has(String(candidate.status)) ? candidate.status as ConversationAttachment['status'] : undefined;
+        const uploadId = typeof candidate.uploadId === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(candidate.uploadId) ? candidate.uploadId : undefined;
+        return { name: candidate.name as string, mediaType: candidate.mediaType as string, size: candidate.size as number | undefined, status, uploadId };
       }) : undefined;
       const sentAt = typeof value.sentAt === 'number' && Number.isFinite(value.sentAt) && value.sentAt >= 0 ? value.sentAt : undefined;
       const toolResults = Array.isArray(value.toolResults)

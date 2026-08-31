@@ -82,7 +82,12 @@ def test_unconfigured_providers_are_honest(monkeypatch):
     issued = client.post('/api/v1/auth/session', json={'bootstrap_secret': 'provider-secret'}).json()
     response = client.get('/api/v1/auth/providers', headers=headers(issued['session_token']))
     assert response.status_code == 200
-    assert all(item['status'] == 'disconnected' and item['username'] == '' and item['auth_url'] is None for item in response.json())
+    # An unconfigured provider is now reported with the specific 'unavailable'
+    # state rather than the ambiguous 'disconnected', and never with an identity.
+    payload = response.json()
+    assert all(item['status'] == 'unavailable' and item['username'] == '' and item['auth_url'] is None for item in payload)
+    assert all(item['available'] is False and item['configuration'] == 'unavailable' for item in payload)
+    assert all(item['unavailable_reason'] for item in payload)
     assert client.get('/api/v1/auth/github/connect', headers=headers(issued['session_token'])).status_code == 503
 
 

@@ -361,10 +361,13 @@ export interface UsageSummary {
 }
 
 export interface HealthInfo {
-  status: string;
+  status: 'healthy' | 'degraded' | string;
   service: string;
   herdr_socket_connected: boolean;
-  herdr_version?: string;
+  /** Null whenever the gateway did not observe a live Herdr snapshot. */
+  herdr_version?: string | null;
+  degraded_sources?: string[];
+  firstmate_available?: boolean;
   firstmate_tasks_count?: number;
 }
 
@@ -515,14 +518,56 @@ export interface UserProfile {
   active_theme?: string;
 }
 
+export type AuthProviderStatus = 'connected' | 'disconnected' | 'expired' | 'unavailable';
+
 export interface AuthProviderInfo {
   provider: string;
-  status: 'connected' | 'disconnected' | 'expired';
+  status: AuthProviderStatus;
   username: string;
   capabilities: string[];
   auth_url: string | null;
-  available?: boolean;
-  configuration?: 'available' | 'unavailable' | string;
+  available: boolean;
+  /** Intentionally out of scope for this release; can never be connected. */
+  deferred: boolean;
+  /** Safe, server-authored explanation for any non-connected state. */
+  unavailable_reason: string | null;
+  configuration: 'available' | 'unavailable';
+}
+
+/**
+ * Decode one provider row so the UI cannot render an unbacked connection.
+ *
+ * 'connected' survives only when the gateway says the provider is available and
+ * reports that exact status. Anything else - an unknown status string, a
+ * connected status on an unavailable provider, a deferred provider - fails
+ * closed to the honest state. The gateway already enforces this; repeating it
+ * here means a stale or spoofed payload still cannot produce a fake connection.
+ */
+export function normalizeAuthProvider(raw: unknown): AuthProviderInfo | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.provider !== 'string' || !value.provider.trim()) return null;
+  const deferred = value.deferred === true;
+  const available = value.available === true && !deferred;
+  const reported = value.status;
+  const status: AuthProviderStatus = !available
+    ? 'unavailable'
+    : reported === 'connected' || reported === 'expired' ? reported : 'disconnected';
+  const reason = typeof value.unavailable_reason === 'string' && value.unavailable_reason.trim()
+    ? value.unavailable_reason.trim().slice(0, 300)
+    : status === 'unavailable' ? 'This provider is unavailable on the connected gateway.' : null;
+  return {
+    provider: value.provider.trim().slice(0, 64),
+    status,
+    // An identity is only meaningful next to a live grant.
+    username: status === 'connected' || status === 'expired' ? String(value.username || '').slice(0, 160) : '',
+    capabilities: Array.isArray(value.capabilities) ? value.capabilities.filter((item): item is string => typeof item === 'string').slice(0, 20) : [],
+    auth_url: typeof value.auth_url === 'string' ? value.auth_url : null,
+    available,
+    deferred,
+    unavailable_reason: reason,
+    configuration: available ? 'available' : 'unavailable',
+  };
 }
 
 export interface GitHubPR {
@@ -665,6 +710,27 @@ export interface ChatUpload {
   filename: string;
   media_type: string;
   size: number;
+  /** Server-issued processing state. Only 'stored' means the bytes landed. */
+  status: 'stored';
+  /** Whether the gateway associated this upload with a chat message. */
+  attached: boolean;
+}
+
+/** Strip an upload record down to the fields the prompt contract accepts. */
+export function attachmentManifest(uploads: ChatUpload[]): Array<Pick<ChatUpload, 'upload_id' | 'filename' | 'media_type' | 'size'>> {
+  return uploads.map(({ upload_id, filename, media_type, size }) => ({ upload_id, filename, media_type, size }));
+}
+
+function normalizeChatUpload(raw: unknown): ChatUpload {
+  const value = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  // A 200 is not evidence the file was processed. Require the server-issued
+  // state before the composer is allowed to show anything but a failure.
+  if (value.status !== 'stored') throw new Error('The gateway did not confirm the upload was stored.');
+  if (typeof value.upload_id !== 'string' || !value.upload_id) throw new Error('Gateway returned no upload record.');
+  if (typeof value.filename !== 'string' || typeof value.media_type !== 'string' || typeof value.size !== 'number' || !Number.isSafeInteger(value.size) || value.size < 0) {
+    throw new Error('Gateway returned an invalid upload record.');
+  }
+  return { upload_id: value.upload_id, filename: value.filename, media_type: value.media_type, size: value.size, status: 'stored', attached: value.attached === true };
 }
 
 export function validateChatAttachment(filename: string, mimeType: string | undefined, size: number | undefined): string | null {
@@ -693,9 +759,9 @@ export async function uploadChatFile(uri: string, filename: string, mimeType?: s
   }
   if (messageId) formData.append('message_id', messageId);
   const res = await authorizedFetch(GATEWAY_URL + '/uploads', { method: 'POST', body: formData });
-  const data = await checkedJson<{ uploads?: ChatUpload[] }>(res);
+  const data = await checkedJson<{ uploads?: unknown[] }>(res);
   if (!data.uploads?.length) throw new Error('Gateway returned no upload record.');
-  return data.uploads[0];
+  return normalizeChatUpload(data.uploads[0]);
 }
 
 export async function uploadUserAvatar(imageUri: string, mimeType: string = 'image/jpeg'): Promise<any> {
@@ -724,7 +790,9 @@ export async function uploadUserAvatar(imageUri: string, mimeType: string = 'ima
 export async function fetchAuthProviders(): Promise<AuthProviderInfo[]> {
   const res = await authorizedFetch(GATEWAY_URL + '/auth/providers', {
   });
-  return checkedJson<AuthProviderInfo[]>(res);
+  const data = await checkedJson<unknown>(res);
+  if (!Array.isArray(data)) throw new Error('Gateway returned invalid provider data.');
+  return data.map(normalizeAuthProvider).filter((item): item is AuthProviderInfo => item !== null);
 }
 
 export async function fetchUsage(): Promise<UsageSummary> {
@@ -883,6 +951,8 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
 }
 
 export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[], messageId?: string, signal?: AbortSignal) {
+  // Only server-confirmed, stored uploads may be referenced in a prompt.
+  if (attachments?.some(item => item.status !== 'stored')) throw new Error('An attachment was not confirmed as stored by the gateway.');
   const res = await authorizedFetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
     signal,
@@ -896,7 +966,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       text,
       target,
       ...(profileId !== undefined ? { profile_id: profileId, ...(harness && model ? { harness, model } : {}) } : harness && model ? { harness, model } : {}),
-      ...(attachments?.length ? { attachments } : {}),
+      ...(attachments?.length ? { attachments: attachmentManifest(attachments) } : {}),
       ...(messageId ? { message_id: messageId } : {})
     })
   });

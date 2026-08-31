@@ -13,7 +13,12 @@ HEADERS = TEST_HEADERS
 def test_health():
     res = client.get('/api/v1/health', headers=HEADERS)
     assert res.status_code == 200
-    assert res.json()['status'] == 'healthy'
+    payload = res.json()
+    # Health is honest about live sources: 'healthy' only with every source
+    # observed, and the Herdr version is never a placeholder we did not read.
+    assert payload['status'] in ('healthy', 'degraded')
+    assert (payload['status'] == 'healthy') == (not payload['degraded_sources'])
+    assert payload['herdr_socket_connected'] == (payload['herdr_version'] is not None)
 
 def test_account_profile_crud():
     # Get profile

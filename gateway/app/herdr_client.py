@@ -319,7 +319,11 @@ class HerdrClient:
                     return data['result']['snapshot']
             except json.JSONDecodeError:
                 pass
-        return {'agents': [], 'workspaces': [], 'tabs': [], 'panes': [], 'version': '0.8.2'}
+        # Neither the socket nor the CLI answered. Returning a placeholder version
+        # here made every downstream consumer read the socket as connected and
+        # report a Herdr build nobody observed, so the empty snapshot carries no
+        # version at all and callers see the real disconnected state.
+        return {'agents': [], 'workspaces': [], 'tabs': [], 'panes': []}
 
     async def list_agents(self) -> List[Dict[str, Any]]:
         snapshot = await self.get_snapshot()
