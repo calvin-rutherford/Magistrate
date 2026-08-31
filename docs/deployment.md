@@ -93,11 +93,26 @@ selected backup back to `MAGISTRATE_DB_PATH`, restore ownership/mode, start the
 unit, and rerun the smoke. Never replace the path with a checkout-local file or
 delete it as part of a frontend deploy.
 
-## Automatic demo redeploy
+## Automatic demo redeploy (disabled)
 
-`.github/workflows/deploy-demo.yml` runs on every push to `main` (the signal
-GitHub emits after a pull request is merged). Configure these repository Actions
-secrets before enabling it:
+Automatic GitHub demo redeployment is intentionally disabled under the captain's
+standing instruction. `.github/workflows/deploy-demo.yml` has no `push` trigger,
+so merges and other changes to `main` cannot start an SSH deployment. It remains
+an explicitly manual-only workflow: an operator must dispatch it deliberately
+and check its confirmation input. Keep this posture until automatic deployment
+is separately authorized and the repository deployment secrets are deliberately
+configured; this change does not configure or change that secret contract.
+
+Git history explains the audit finding: before PR #44, these deployment docs
+explicitly said that no unattended timer was installed because a pull could
+leave the service and assets out of sync. PR #44 then introduced the workflow
+with a `push`-to-`main` trigger, and PR #50 improved its readiness polling
+without removing that trigger. No subsequent repository change represented the
+later disable instruction, so the active trigger remained in the shipped
+workflow.
+
+A deliberate manual GitHub dispatch still uses the existing guarded SSH path and
+requires the existing repository Actions secret contract:
 
 - `MAGISTRATE_DEPLOY_HOST` — the demo host name or Tailscale address
 - `MAGISTRATE_DEPLOY_USER` — the unprivileged service account
@@ -105,14 +120,13 @@ secrets before enabling it:
   the deployment account
 - `MAGISTRATE_DEPLOY_KNOWN_HOSTS` — the pinned `known_hosts` entry
 
-The workflow uses only those repository-provided host credentials and invokes
-the guarded script on the persistent checkout. Missing secrets, unavailable host
-access, a dirty checkout, or a non-fast-forward/divergent checkout fail closed;
-no reset or force push is attempted. The workflow's concurrency group prevents
-overlapping updates.
+Missing secrets, unavailable host access, a dirty checkout, or a
+non-fast-forward/divergent checkout fail closed; no reset or force push is
+attempted. The workflow's concurrency group prevents overlapping updates.
 
-If automatic deployment is unavailable, log into the demo host through the
-approved SSH path and run:
+The approved private Tailscale deployment process remains the preferred manual
+recovery path. Log into the demo host through the approved Tailscale SSH path and
+run:
 
 ```sh
 cd /home/spectre/firstmate/projects/Magistrate-deploy
@@ -122,8 +136,6 @@ git status --short
 
 Resolve any reported dirty/divergent state by preserving and reviewing its
 unique work, then retry. Do not use `git reset --hard`, `git stash`, or a force
-push. If host credentials are unavailable, the remaining manual step is to have
-the deployment owner configure the four repository secrets (or run the command
-from a trusted host) and then verify the configured HTTPS gateway health URL
-with an issued Bearer session. Do not put the deployment host, runner address,
-or bootstrap secret in Git.
+push. Verify the configured HTTPS gateway health URL with an issued Bearer
+session. Do not put the deployment host, runner address, or bootstrap secret in
+Git.

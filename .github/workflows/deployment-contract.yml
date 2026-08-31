@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/deploy_magistrate.sh'
       - 'scripts/test_deploy_magistrate.sh'
+      - 'scripts/test_deployment_workflow.sh'
       - 'scripts/smoke_magistrate.sh'
       - '.github/workflows/deploy-demo.yml'
       - '.github/workflows/deployment-contract.yml'
@@ -13,6 +14,7 @@ on:
     paths:
       - 'scripts/deploy_magistrate.sh'
       - 'scripts/test_deploy_magistrate.sh'
+      - 'scripts/test_deployment_workflow.sh'
       - 'scripts/smoke_magistrate.sh'
       - '.github/workflows/deploy-demo.yml'
       - '.github/workflows/deployment-contract.yml'
@@ -25,5 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify demo workflow is manual-only
+        run: bash scripts/test_deployment_workflow.sh
       - name: Exercise clean fast-forward and refusal safeguards
         run: bash scripts/test_deploy_magistrate.sh

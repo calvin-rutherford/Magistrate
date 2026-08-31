@@ -1,11 +1,17 @@
 name: Deploy demo
 
 on:
-  # A merge to main produces a push event. Deploy from the merge result so the
-  # persistent checkout and the built frontend always share one revision.
-  push:
-    branches: [main]
+  # Automatic demo redeployment is intentionally disabled. In particular, a
+  # merge or any other push to main must never start an SSH deployment.
+  # Deploy only after a deliberate manual dispatch with the confirmation gate
+  # below, while the repository deployment secret contract remains unchanged.
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Confirm this deliberate demo deployment'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,6 +26,7 @@ env:
 
 jobs:
   deploy:
+    if: ${{ inputs.confirm == true }}
     name: Update demo host
     runs-on: ubuntu-latest
     timeout-minutes: 20
