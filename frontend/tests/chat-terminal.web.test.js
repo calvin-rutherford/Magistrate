@@ -799,14 +799,45 @@ test('voice input mode selection is explicit and persists without sending a prom
   await refreshed.close();
 });
 
-test('mic button records real audio, shows a live waveform, and fills the composer with the transcript', async () => {
+test('mic button records real audio, shows the active mark, and fills the composer for review', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await page.click('[data-testid="inline-mic-button"]');
   await page.waitForFunction(() => document.querySelector('[data-testid="inline-mic-button"]').getAttribute('aria-label') === 'Stop microphone');
+  assert.ok(await page.$('[data-testid="active-voice-surface"]'));
+  assert.match(await page.$eval('[data-testid="mic-status"]', element => element.innerText), /Listening/);
   await new Promise(resolve => setTimeout(resolve, 500));
   await page.click('[data-testid="inline-mic-button"]');
   await page.waitForFunction(() => document.querySelector('[data-testid="captain-prompt"]').value.includes('test transcript from mic'));
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'test transcript from mic');
+  assert.match(await page.$eval('[data-testid="mic-status"]', element => element.innerText), /review/i);
+  await page.close();
+});
+
+test('voice settings expose and persist capture and transcript behavior', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="brand-drawer-toggle"]'); await page.click('[data-testid="settings-open"]');
+  await page.click('[data-testid="settings-section-voice-input"]');
+  await page.click('[data-testid="voice-capture-option-hold-to-talk"]');
+  await page.click('[data-testid="voice-transcript-option-auto-send"]');
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.capture-behavior')), 'hold-to-talk');
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.transcript-behavior')), 'auto-send');
+  await page.close();
+  const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
+  await refreshed.click('[data-testid="brand-drawer-toggle"]'); await refreshed.click('[data-testid="settings-open"]'); await refreshed.click('[data-testid="settings-section-voice-input"]');
+  assert.ok(await refreshed.$('[data-testid="voice-capture-option-hold-to-talk"]'));
+  assert.ok(await refreshed.$('[data-testid="voice-transcript-option-auto-send"]'));
+  assert.equal(await refreshed.evaluate(() => localStorage.getItem('magistrate.voice.capture-behavior')), 'hold-to-talk');
+  assert.equal(await refreshed.evaluate(() => localStorage.getItem('magistrate.voice.transcript-behavior')), 'auto-send');
+  await refreshed.close();
+});
+
+test('auto-send and insert choices are visible and persisted as explicit behavior', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  await page.click('[data-testid="brand-drawer-toggle"]'); await page.click('[data-testid="settings-open"]'); await page.click('[data-testid="settings-section-voice-input"]');
+  assert.ok(await page.$('[data-testid="voice-transcript-option-insert"]'));
+  assert.ok(await page.$('[data-testid="voice-transcript-option-auto-send"]'));
+  await page.click('[data-testid="voice-transcript-option-auto-send"]');
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.transcript-behavior')), 'auto-send');
   await page.close();
 });
 
