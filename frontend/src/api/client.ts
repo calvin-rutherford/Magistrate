@@ -624,6 +624,12 @@ export async function updateUserProfile(profile: Partial<UserProfile>): Promise<
   return checkedJson<UserProfile>(res);
 }
 
+export const CHAT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const CHAT_MAX_UPLOAD_COUNT = 10;
+export const CHAT_MAX_UPLOAD_TOTAL_BYTES = 50 * 1024 * 1024;
+const CHAT_ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'application/pdf', 'application/json', 'application/zip', 'application/gzip', 'text/csv', 'text/plain', 'text/markdown']);
+const CHAT_ALLOWED_OCTET_SUFFIXES = new Set(['.txt', '.md', '.json', '.csv', '.pdf', '.zip', '.gz', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']);
+
 export interface ChatUpload {
   upload_id: string;
   filename: string;
@@ -631,14 +637,31 @@ export interface ChatUpload {
   size: number;
 }
 
-export async function uploadChatFile(uri: string, filename: string, mimeType: string = 'application/octet-stream'): Promise<ChatUpload> {
+export function validateChatAttachment(filename: string, mimeType: string | undefined, size: number | undefined): string | null {
+  if (size !== undefined && (!Number.isSafeInteger(size) || size < 0 || size > CHAT_MAX_UPLOAD_BYTES)) return 'Files must be smaller than 25 MB.';
+  const normalized = (mimeType || 'application/octet-stream').split(';', 1)[0].trim().toLowerCase();
+  const suffix = `.${filename.split('.').pop()?.toLowerCase() || ''}`;
+  if (!CHAT_ALLOWED_TYPES.has(normalized) && !(normalized === 'application/octet-stream' && CHAT_ALLOWED_OCTET_SUFFIXES.has(suffix))) return 'This file type is not supported.';
+  return null;
+}
+
+export async function uploadChatFile(uri: string, filename: string, mimeType?: string, messageId?: string): Promise<ChatUpload> {
   const formData = new FormData();
   if (typeof window !== 'undefined') {
     const response = await rawFetch(uri);
-    formData.append('files', await response.blob(), filename);
+    if (!response.ok) throw new Error('The selected file could not be read.');
+    const blob = await response.blob();
+    const declaredType = mimeType || blob.type || 'application/octet-stream';
+    const validationError = validateChatAttachment(filename, declaredType, blob.size);
+    if (validationError) throw new Error(validationError);
+    formData.append('files', blob, filename);
   } else {
-    formData.append('files', { uri, name: filename, type: mimeType } as any);
+    const declaredType = mimeType || 'application/octet-stream';
+    const validationError = validateChatAttachment(filename, declaredType, undefined);
+    if (validationError) throw new Error(validationError);
+    formData.append('files', { uri, name: filename, type: declaredType } as any);
   }
+  if (messageId) formData.append('message_id', messageId);
   const res = await authorizedFetch(GATEWAY_URL + '/uploads', { method: 'POST', body: formData });
   const data = await checkedJson<{ uploads?: ChatUpload[] }>(res);
   if (!data.uploads?.length) throw new Error('Gateway returned no upload record.');
@@ -829,7 +852,7 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
   return data;
 }
 
-export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[]) {
+export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[], messageId?: string) {
   const res = await authorizedFetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
     headers: {
@@ -842,7 +865,8 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       text,
       target,
       ...(profileId !== undefined ? { profile_id: profileId, ...(harness && model ? { harness, model } : {}) } : harness && model ? { harness, model } : {}),
-      ...(attachments?.length ? { attachments } : {})
+      ...(attachments?.length ? { attachments } : {}),
+      ...(messageId ? { message_id: messageId } : {})
     })
   });
   return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);

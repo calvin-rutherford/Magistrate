@@ -28,7 +28,7 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = []) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = [], liveUpdates = false) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   if (visualViewportShortfall) {
@@ -39,14 +39,17 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       Object.defineProperty(window.visualViewport, 'height', { get: () => window.innerHeight - shortfall });
     }, visualViewportShortfall);
   }
-  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages) => {
+  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages, simulateLiveUpdates) => {
     if (clearStorage) { localStorage.clear(); sessionStorage.clear(); }
     if (initialMessages.length) localStorage.setItem('magistrate.chat.messages.captain', JSON.stringify(initialMessages));
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
+    let uploadCount = 0;
     let historyRequests = 0;
     let agentHistoryRequests = 0;
+    let attentionRequests = 0;
     window.__magistrateApiCalls = [];
+    window.__attentionRequests = () => attentionRequests;
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/auth/session')) {
@@ -54,6 +57,11 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
           ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' }
           : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (url.includes('/api/v1/uploads')) {
+        uploadCount += 1;
+        window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
+        return Promise.resolve(new Response(JSON.stringify({ uploads: [{ upload_id: `upload-${String(uploadCount).padStart(16, '0')}`, filename: 'package.json', media_type: 'application/json', size: 123 }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/captain/prompt')) {
         promptSent = true;
@@ -93,7 +101,11 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([{ id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-      if (url.includes('/api/v1/attention/unified')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/attention/unified')) {
+        attentionRequests += 1;
+        const items = simulateLiveUpdates && attentionRequests > 1 ? [{ id: 'attention-live', provider: 'firstmate', title: 'New decision', subtitle: 'Choose next step', status: 'blocked', url: '', requires_action: true }] : [];
+        return Promise.resolve(new Response(JSON.stringify(items), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/auth/providers')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/voice/capabilities')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'voice-capabilities.v1', provider: 'openai', configured: true, modes: [{ id: 'openai', label: 'Gateway OpenAI', available: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -101,7 +113,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, emptyInventory, promptResponseText, historyRace, !preserveStorage, seedMessages);
+  }, emptyInventory, promptResponseText, historyRace, !preserveStorage, seedMessages, liveUpdates);
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: colorScheme }]);
   await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
@@ -207,6 +219,42 @@ test('attachment menu picks a file, previews it, and requires a descriptive mess
 
   await page.click('[data-testid^="remove-file-"]');
   await page.waitForFunction(() => !document.querySelector('[data-testid="attachment-preview"]'));
+  await page.close();
+});
+
+test('attachment upload is associated with the message and survives the visible history', async () => {
+  const page = await openChat({ width: 1100, height: 760 }, false, 'Attachment received.', URL, 0, false, true);
+  const chooserPromise = page.waitForFileChooser();
+  await page.click('[data-testid="attachment-menu-button"]');
+  await page.click('[data-testid="attachment-option-files"]');
+  const chooser = await chooserPromise;
+  await chooser.accept([path.join(process.cwd(), 'package.json')]);
+  await page.waitForFunction(() => document.querySelector('[data-testid="attachment-preview"]')?.innerText.includes('package.json'));
+  await page.focus('[data-testid="captain-prompt"]');
+  await page.keyboard.type('Review the attached manifest');
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForFunction(() => window.__magistrateApiCalls.some(call => call.url.includes('/captain/prompt')));
+  const promptBody = JSON.parse(await page.evaluate(() => window.__magistrateApiCalls.find(call => call.url.includes('/captain/prompt')).body));
+  assert.equal(promptBody.text, 'Review the attached manifest');
+  assert.equal(promptBody.attachments.length, 1);
+  assert.equal(promptBody.attachments[0].filename, 'package.json');
+  assert.match(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /package\.json.*application\/json/);
+  assert.equal(await page.$('[data-testid^="message-sending-"]'), null);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="branded-chat-shell"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]')?.innerText.includes('package.json'));
+  await page.close();
+});
+
+test('open chat refreshes a newly arriving attention item without a page reload', async () => {
+  const page = await openChat({ width: 1100, height: 760 }, false, '', URL, 0, false, false, 'light', [], true);
+  await new Promise(resolve => setTimeout(resolve, 16000));
+  assert.ok(await page.evaluate(() => window.__attentionRequests() > 1), 'the live refresh should poll attention while chat is open');
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.$eval('[data-testid="drawer-section-attention"]', element => element.click());
+  await page.waitForFunction(() => document.querySelector('[data-testid="magistrate-drawer"]')?.innerText.includes('New decision'));
+  assert.match(await page.$eval('[data-testid="drawer-section-attention"]', element => element.innerText), /1/);
   await page.close();
 });
 
@@ -696,6 +744,19 @@ test('chat does not replay existing backlog on open and requests a bounded histo
 
 // Plain chat intentionally omits transport metadata; a live-refresh poll must
 // not duplicate or rewrite the visible user message.
+test('user bubbles are opaque and repeated legitimate messages remain distinct', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, 'Reply');
+  await submit(page, 'same wording');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="send-captain-prompt"]').getAttribute('aria-label').startsWith('Queue'));
+  await submit(page, 'same wording');
+  assert.equal((await page.$$('[data-testid^="user-message-u-"]')).length, 2);
+  const bubble = await page.$eval('[data-testid^="user-message-u-"]', element => getComputedStyle(element).backgroundColor);
+  assert.match(bubble, /rgb\(36, 216, 255\)/);
+  assert.doesNotMatch(bubble, /rgba/);
+  assert.doesNotMatch(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /\/calm/);
+  await page.close();
+});
+
 test('a sent user message remains plain and stable across the live-refresh poll', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await submit(page, 'timestamp check');
