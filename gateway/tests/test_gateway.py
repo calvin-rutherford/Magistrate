@@ -15,8 +15,46 @@ def test_health_authorized():
     resp = client.get("/api/v1/health", headers=TEST_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["status"] == "healthy"
+    # 'healthy' is now a claim about observed sources, so it depends on whether
+    # Herdr/Firstmate are reachable where the suite runs. Assert the invariant
+    # that holds either way and pin both verdicts in the tests below, rather
+    # than an environment-dependent literal.
+    assert data["status"] in ("healthy", "degraded")
+    assert (data["status"] == "healthy") == (not data["degraded_sources"])
     assert data["service"] == "magistrate-gateway"
+
+
+def test_health_reports_healthy_only_when_every_source_is_observed(monkeypatch):
+    import app.main as gateway
+
+    async def live_herdr():
+        return {"version": "9.9.9", "agents": []}
+
+    async def live_firstmate():
+        return {"fm_home": "/tmp/fm", "tasks": []}
+
+    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", live_herdr)
+    monkeypatch.setattr(gateway.fm_client, "get_snapshot", live_firstmate)
+    data = client.get("/api/v1/health", headers=TEST_HEADERS).json()
+    assert data["status"] == "healthy"
+    assert data["degraded_sources"] == []
+    assert data["herdr_version"] == "9.9.9"
+    assert data["herdr_socket_connected"] is True
+    assert data["firstmate_available"] is True
+
+
+def test_health_names_each_unobserved_source(monkeypatch):
+    import app.main as gateway
+
+    async def empty():
+        return {}
+
+    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", empty)
+    monkeypatch.setattr(gateway.fm_client, "get_snapshot", empty)
+    data = client.get("/api/v1/health", headers=TEST_HEADERS).json()
+    assert data["status"] == "degraded"
+    assert sorted(data["degraded_sources"]) == ["firstmate", "herdr"]
+    assert data["herdr_version"] is None
 
 
 def test_runtime():
