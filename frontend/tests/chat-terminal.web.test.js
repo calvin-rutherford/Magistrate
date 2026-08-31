@@ -28,7 +28,7 @@ test.before(async () => {
 
 test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light') {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = []) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   if (visualViewportShortfall) {
@@ -39,8 +39,9 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       Object.defineProperty(window.visualViewport, 'height', { get: () => window.innerHeight - shortfall });
     }, visualViewportShortfall);
   }
-  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage) => {
+  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages) => {
     if (clearStorage) { localStorage.clear(); sessionStorage.clear(); }
+    if (initialMessages.length) localStorage.setItem('magistrate.chat.messages.captain', JSON.stringify(initialMessages));
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let historyRequests = 0;
@@ -100,7 +101,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, emptyInventory, promptResponseText, historyRace, !preserveStorage);
+  }, emptyInventory, promptResponseText, historyRace, !preserveStorage, seedMessages);
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: colorScheme }]);
   await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
@@ -112,10 +113,11 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
 }
 
 async function submit(page, text) {
+  const expected = (await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length)) + 1;
   await page.focus('[data-testid="captain-prompt"]');
   await page.keyboard.type(text);
   await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForFunction(expected => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length >= expected, {}, (await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length)) || 1);
+  await page.waitForFunction(expectedCount => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length >= expectedCount, {}, expected);
 }
 
 test('chat starts genuinely empty with one branded logo and a minimal composer', async () => {
@@ -130,6 +132,59 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
   await new Promise(resolve => setTimeout(resolve, 3200));
   assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length), 0);
   assert.equal((await page.$$('[data-testid="model-menu-button"]')).length, 1);
+  await page.close();
+});
+
+test('chat starts at the measured latest content and preserves older-message reading position', async () => {
+  const seedMessages = Array.from({ length: 12 }, (_, index) => ({
+    id: `seed-${index}`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: `turn ${index}`,
+    source: 'text',
+  }));
+  const page = await openChat({ width: 900, height: 700 }, false, 'Reply', URL, 0, false, false, 'light', seedMessages);
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-seed-"]').length === 6);
+
+  const metrics = () => page.$eval('[data-testid="chat-history"]', element => ({
+    scrollTop: element.scrollTop,
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+  let position = await metrics();
+  assert.ok(position.scrollTop + position.clientHeight >= position.scrollHeight - 2, 'initial messages should end at the latest content');
+  const typography = await page.$eval('[data-testid^="user-message-seed-"]', element => {
+    const text = element.querySelector('[data-testid^="user-message-text-"]');
+    return text ? { fontSize: getComputedStyle(text).fontSize, lineHeight: getComputedStyle(text).lineHeight } : null;
+  });
+  assert.ok(typography && Number.parseFloat(typography.fontSize) >= 17);
+  assert.ok(typography && Number.parseFloat(typography.lineHeight) >= 26);
+
+  await page.evaluate(() => {
+    const element = document.querySelector('[data-testid="chat-history"]');
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+  position = await metrics();
+  assert.ok(position.scrollTop + position.clientHeight < position.scrollHeight - 2, 'user scroll should leave the viewport above the end');
+
+  await submit(page, 'while reading older messages');
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+  position = await metrics();
+  assert.ok(position.scrollTop + position.clientHeight < position.scrollHeight - 2, 'new content must not steal an older-message reading position');
+
+  await page.click('[data-testid="jump-to-latest"]');
+  await page.waitForFunction(() => {
+    const element = document.querySelector('[data-testid="chat-history"]');
+    return element.scrollTop + element.clientHeight >= element.scrollHeight - 2;
+  });
+  await submit(page, 'at the latest');
+  await page.waitForFunction(() => {
+    const element = document.querySelector('[data-testid="chat-history"]');
+    return element.scrollTop + element.clientHeight >= element.scrollHeight - 2;
+  });
+  position = await metrics();
+  assert.ok(position.scrollTop + position.clientHeight >= position.scrollHeight - 2, 'new content at the end should stay at the end');
   await page.close();
 });
 
