@@ -1,0 +1,11 @@
+{
+  "command": "HerdrClient.read_agent_output",
+  "target": "w1W:p2",
+  "source": "recent-unwrapped (visible fallback allowed)",
+  "raw_bytes": 21896,
+  "parsed_rows": 4,
+  "conversation_rows": 1,
+  "tool_rows": 3,
+  "harness_or_terminal_rows_visible": 0,
+  "result": "PASS"
+}

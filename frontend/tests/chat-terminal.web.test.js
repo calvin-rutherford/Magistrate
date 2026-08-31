@@ -22,7 +22,7 @@ test.after(async () => {
   await server?.stop();
 });
 
-async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = [], liveUpdates = false, chatHistoryScenario = null) {
+async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = [], liveUpdates = false, chatHistoryScenario = null, promptFailure = false) {
   const page = await browser.newPage();
   await page.setViewport(viewport);
   if (visualViewportShortfall) {
@@ -33,7 +33,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       Object.defineProperty(window.visualViewport, 'height', { get: () => window.innerHeight - shortfall });
     }, visualViewportShortfall);
   }
-  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages, simulateLiveUpdates, historyScenario) => {
+  await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages, simulateLiveUpdates, historyScenario, promptFailure) => {
     if (clearStorage) { localStorage.clear(); sessionStorage.clear(); }
     if (initialMessages.length) localStorage.setItem('magistrate.chat.messages.captain', JSON.stringify(initialMessages));
     const nativeFetch = window.fetch.bind(window);
@@ -86,6 +86,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/captain/prompt')) {
         promptSent = true;
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
+        if (promptFailure) return Promise.resolve(new Response(JSON.stringify({ detail: 'Gateway lost the active run.' }), { status: 502, headers: { 'Content-Type': 'application/json' } }));
         const response = new Response(JSON.stringify({ status: 'submitted', target: 'captain', response: responseText }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         return historyScenario?.promptDelay ? new Promise(resolve => setTimeout(() => resolve(response), historyScenario.promptDelay)) : Promise.resolve(response);
       }
@@ -157,7 +158,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
-  }, emptyInventory, promptResponseText, historyRace, !preserveStorage, seedMessages, liveUpdates, chatHistoryScenario);
+  }, emptyInventory, promptResponseText, historyRace, !preserveStorage, seedMessages, liveUpdates, chatHistoryScenario, promptFailure);
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: colorScheme }]);
   await page.goto(route, { waitUntil: 'networkidle0' });
   // Expo's development-only #error-toast has a zero-sized box but can still
@@ -1131,5 +1132,39 @@ test('a worker thread excludes firstmate prompts and worker metadata and never d
   assert.equal(rows.agent.length, 1, `expected one agent row, got ${JSON.stringify(rows.agent)}`);
   assert.match(rows.agent[0], /reported no errors\./);
   assert.doesNotMatch(rows.text, FORBIDDEN);
+  await page.close();
+});
+
+test('streaming, gateway error, and cancellation fixtures render truthful states', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [
+    { id: 'fixture-stream', role: 'assistant', kind: 'conversation', text: 'Partial answer', audience: 'primary', source: 'text', progress: 'streaming' },
+    { id: 'fixture-error', role: 'assistant', kind: 'conversation', text: 'Partial gateway answer', audience: 'primary', source: 'text', progress: 'failed' },
+    { id: 'fixture-cancel', role: 'assistant', kind: 'conversation', text: 'Stopped answer', audience: 'primary', source: 'text', progress: 'cancelled' },
+  ], false, { manual: true, initialMessages: [] });
+  await page.waitForSelector('[data-testid="assistant-streaming-fixture-stream"]');
+  assert.equal(await page.$eval('[data-testid="assistant-streaming-fixture-stream"]', element => element.innerText), 'Updating response…');
+  assert.match(await page.$eval('[data-testid="assistant-failed-fixture-error"]', element => element.innerText), /Response stopped before completion/);
+  assert.equal(await page.$eval('[data-testid="assistant-cancelled-fixture-cancel"]', element => element.innerText), 'Response stopped');
+  await page.close();
+
+  const failed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, initialMessages: [] }, true);
+  await submit(failed, 'gateway interruption fixture');
+  await failed.waitForSelector('[data-testid^="message-failed-"]');
+  assert.match(await failed.$eval('[data-testid^="message-failed-"]', element => element.innerText), /Not sent/);
+  await failed.close();
+});
+
+test('chat surface exposes accessible roles and labels for the composer and drawer', async () => {
+  const page = await openChat({ width: 900, height: 700 });
+  const accessibility = await page.evaluate(() => ({
+    composer: document.querySelector('[data-testid="captain-prompt"]')?.getAttribute('aria-label'),
+    sendRole: document.querySelector('[data-testid="send-captain-prompt"]')?.getAttribute('aria-label'),
+    drawerRole: document.querySelector('[data-testid="brand-drawer-toggle"]')?.getAttribute('aria-label'),
+    roleCount: document.querySelectorAll('[role="button"]').length,
+  }));
+  assert.equal(accessibility.composer, 'Message Magistrate');
+  assert.match(accessibility.sendRole || '', /Send|Queue|voice mode/);
+  assert.match(accessibility.drawerRole || '', /drawer/i);
+  assert.ok(accessibility.roleCount >= 3);
   await page.close();
 });
