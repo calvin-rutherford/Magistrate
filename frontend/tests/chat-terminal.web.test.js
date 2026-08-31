@@ -265,6 +265,72 @@ test('chat starts at the measured latest content and preserves older-message rea
   await page.close();
 });
 
+test('floating chat controls stay pressable and leave the final message clear', async () => {
+  const seedMessages = Array.from({ length: 20 }, (_, index) => ({
+    id: `floating-${index}`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: `floating turn ${index}`,
+    source: 'text',
+    audience: index % 2 ? 'primary' : 'captain',
+  }));
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', seedMessages);
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-floating-"]').length === 10);
+  await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+
+  await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  const controls = await page.evaluate(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    const logo = document.querySelector('[data-testid="brand-drawer-toggle"]');
+    const composer = document.querySelector('[data-testid="captain-prompt"]');
+    const last = document.querySelector('[data-testid="user-message-floating-18"]');
+    const composerRect = composer.getBoundingClientRect();
+    const lastRect = last.getBoundingClientRect();
+    return {
+      logoVisible: (() => { const rect = logo.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= innerHeight; })(),
+      composerVisible: composerRect.top >= 0 && composerRect.bottom <= innerHeight,
+      lastClear: lastRect.bottom <= composerRect.top,
+      bottomInset: history.scrollHeight - history.clientHeight,
+    };
+  });
+  assert.equal(controls.logoVisible, true);
+  assert.equal(controls.composerVisible, true);
+  assert.equal(controls.lastClear, true, 'the final message must scroll clear of the floating composer');
+  assert.ok(controls.bottomInset > 0, 'history needs an inset for the detached composer');
+
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForSelector('[data-testid="magistrate-drawer"]');
+  await page.focus('[data-testid="captain-prompt"]');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'captain-prompt');
+  await page.close();
+});
+
+test('drawer Settings and Account remain pinned above a long scrolling list', async () => {
+  const page = await openChat({ width: 390, height: 700 });
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForSelector('[data-testid="magistrate-drawer"]');
+  await page.$eval('[data-testid="drawer-scroll"]', element => {
+    const content = element.firstElementChild || element;
+    for (let index = 0; index < 30; index += 1) {
+      const row = document.createElement('div'); row.textContent = `long drawer item ${index}`; row.style.height = '42px'; row.style.padding = '10px 4px'; content.appendChild(row);
+    }
+  });
+  const before = await page.evaluate(() => ['drawer-settings-control', 'settings-open'].map(id => {
+    const rect = document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect();
+    return { id, top: rect.top, bottom: rect.bottom, height: rect.height };
+  }));
+  await page.$eval('[data-testid="drawer-scroll"]', element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  const after = await page.evaluate(() => ['drawer-settings-control', 'settings-open'].map(id => {
+    const rect = document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect();
+    return { id, top: rect.top, bottom: rect.bottom, height: rect.height, visible: rect.top >= 0 && rect.bottom <= innerHeight };
+  }));
+  assert.deepEqual(after.map(item => ({ id: item.id, height: item.height })), before.map(item => ({ id: item.id, height: item.height })));
+  assert.ok(after.every(item => item.visible), 'drawer footer controls must remain visible');
+  await page.click('[data-testid="drawer-settings-control"]');
+  await page.waitForSelector('[data-testid="settings-sheet"]');
+  await page.close();
+});
+
 test('attachment menu picks a file, previews it, and requires a descriptive message', async () => {
   const page = await openChat({ width: 1100, height: 760 });
   await page.click('[data-testid="attachment-menu-button"]');
