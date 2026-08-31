@@ -45,6 +45,10 @@ terminal parsing is demoted to an ingestion adapter.
 - Every message is typed: `conversation` (visible), `tool` (bounded label,
   revealed only by the explicit "show tool calls" option), `internal` and
   `status` (never delivered to a chat client at all).
+- The `captain` alias resolves only to an agent in Herdr's explicitly labelled
+  `firstmate`/`captain` workspace (or an explicitly named legacy pane). A known
+  harness is not a routing role: if that workspace is absent, routing fails
+  closed instead of injecting the captain's prompt into an arbitrary worker.
 
 ### Schema
 
@@ -62,6 +66,12 @@ Gateway authors them; the composer's `Date.now()` is only an optimistic
 placeholder until the canonical user row arrives. This avoids reconciliation
 between client-millisecond and server-second values and makes reloads reproduce
 the exact canonical time.
+
+Cancellation is durable turn state, not a synthetic chat message. Every
+delivered message carries `turn_status`; after a stop, the canonical user row
+therefore returns with `turn_status: "cancelled"` on every reload and the client
+renders `Response stopped` from that field. No separate `type: "status"` row is
+delivered, because status rows are intentionally outside the chat payload.
 
 Two constraints carry the whole guarantee:
 

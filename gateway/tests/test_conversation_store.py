@@ -168,6 +168,34 @@ def test_tool_events_are_hidden_bounded_labels_and_never_prose():
     ]
 
 
+def test_deployed_tool_only_poll_later_upserts_assistant_prose_exactly_once():
+    """The deployed failure shape: tools were visible before any primary reply."""
+    turn = store.record_prompt(USER, TARGET, 'u-deployed', 'reply exactly READY')
+    tool_only = rows(
+        ('user', 'conversation', 'reply exactly READY'),
+        ('assistant', 'tool', 'Read gateway/app/herdr_client.py'),
+        ('assistant', 'tool', 'Bash(git status --short)'),
+    )
+    store.ingest_terminal_rows(USER, TARGET, tool_only)
+    assert not [
+        item for item in store.list_messages(USER, TARGET)['messages']
+        if item['role'] == 'assistant' and item['type'] == 'conversation'
+    ]
+
+    completed = tool_only + rows(
+        ('assistant', 'conversation', 'READY'),
+    )
+    store.ingest_terminal_rows(USER, TARGET, completed)
+    store.ingest_terminal_rows(USER, TARGET, completed)
+
+    messages = store.list_messages(USER, TARGET)['messages']
+    replies = [item for item in messages if item['role'] == 'assistant' and item['type'] == 'conversation']
+    assert [(item['turn_id'], item['text'], item['revision']) for item in replies] == [
+        (turn['turn_id'], 'READY', 1),
+    ]
+    assert [item['text'] for item in messages if item['type'] == 'tool'] == ['Read', 'Bash']
+
+
 def test_harness_metadata_and_worker_audiences_never_enter_visible_chat():
     """The leak classes reported on the deployed demo, at their real source."""
     store.record_prompt(USER, TARGET, 'u-6', 'summarize the deploy')
@@ -387,7 +415,11 @@ def test_a_cancelled_turn_never_gains_a_later_reply():
 
     assert changed == []
     assert visible() == [('user', 'conversation', 'stop this one')]
-    assert {item['turn_status'] for item in store.list_messages(USER, TARGET)['messages']} == {'cancelled'}
+    first_reload = store.list_messages(USER, TARGET)['messages']
+    second_reload = store.list_messages(USER, TARGET)['messages']
+    assert {item['turn_status'] for item in first_reload} == {'cancelled'}
+    assert second_reload == first_reload
+    assert not [item for item in first_reload if item['type'] == 'status']
 
 
 def test_events_stream_delivers_canonical_messages_once_per_revision(monkeypatch):
