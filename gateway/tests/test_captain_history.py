@@ -242,3 +242,122 @@ def test_history_parser_drops_mid_frame_chrome_and_retypes_tool_detail_rows():
         ('conversation', 'Hardening that, then verifying the real pattern:'),
         ('tool', 'Running cd "/workspace" && npx tsc --noEmit…'),
     ]
+
+
+# Regression for the deployed-demo report after #61/#63. These fixtures mirror
+# the frontend cases in frontend/tests/chat-history.test.ts; the two parsers must
+# stay in sync (see AGENTS.md).
+def test_pi_tool_envelope_in_a_user_box_is_tool_activity_not_a_user_turn():
+    reset = '\x1b[0m'
+    box = '\x1b[48;5;59m'
+    output = '\r\n'.join([
+        f'{reset}{box} edit gateway/app/notifications.py                          {reset}',
+        f'{reset}{box}                                                           {reset}',
+        f'{reset}{box} ... 340     elif parsed.path == "/pr-detail":              {reset}',
+        f'{reset}{box} 341         target_type = "pull-request"                   {reset}',
+        '',
+        f'{reset}{box} read frontend/src/api/client.ts:425-539                    {reset}',
+        '',
+        ' The deploy is healthy.',
+    ])
+    parsed = parse_agent_history(output)
+    assert [(m['role'], m['kind']) for m in parsed] == [
+        ('assistant', 'tool'), ('assistant', 'tool'), ('assistant', 'conversation'),
+    ]
+    assert not [m for m in parsed if m['role'] == 'user']
+
+
+def test_a_captain_turn_that_merely_names_a_file_stays_a_captain_turn():
+    reset = '\x1b[0m'
+    box = '\x1b[48;5;59m'
+    output = '\r\n'.join([
+        f'{reset}{box} edit src/main.py                                          {reset}',
+        '',
+        f'{reset}{box} check gateway/app/db.py and tell me what it does          {reset}',
+        '',
+        ' Here is what it does.',
+    ])
+    assert parse_agent_history(output) == [
+        {'role': 'user', 'kind': 'conversation', 'text': 'edit src/main.py'},
+        {'role': 'user', 'kind': 'conversation', 'text': 'check gateway/app/db.py and tell me what it does'},
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'Here is what it does.'},
+    ]
+
+
+def test_spinner_metadata_and_truncated_cwd_rows_are_not_prose():
+    reset = '\x1b[0m'
+    output = '\r\n'.join([
+        ' ⠦ Working...',
+        '',
+        ' model: claude-opus-5',
+        '',
+        ' session_id: 5f2c',
+        '',
+        ' ~/.treehouse/Magistrate-7ab3fc/1/Magistrate (fm/magistra...',
+        '',
+        f'{reset}\x1b[48;5;59m A real captain question                                {reset}',
+        '',
+        ' A real agent answer.',
+    ])
+    assert parse_agent_history(output) == [
+        {'role': 'user', 'kind': 'conversation', 'text': 'A real captain question'},
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'A real agent answer.'},
+    ]
+
+
+def test_firstmate_to_worker_prompt_on_a_marked_row_is_excluded():
+    output = '\n'.join([
+        '› FIRSTMATE_OP: v1 launch-brief: you are a crewmate',
+        '',
+        '⏺ Worker acknowledgement for Firstmate.',
+    ])
+    assert parse_agent_history(output) == [
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'Worker acknowledgement for Firstmate.'},
+    ]
+
+
+def test_a_harness_usage_overlay_is_not_conversation():
+    """The captain pane can be showing Claude's /usage panel when a snapshot is
+    read. Its tab bar, block meters, and gauge rows are boxed exactly like a
+    user turn and were rendered as highlighted captain messages."""
+    reset = '\x1b[0m'
+    box = '\x1b[48;5;59m'
+    output = '\r\n'.join([
+        f'{reset}{box} Settings  Status   Config   Usage   Stats                 {reset}',
+        '',
+        ' your usage, not a breakdown                            ↑',
+        '',
+        ' 74% of your usage was at >150k context',
+        '',
+        f'{reset}{box} ███████████████████████████▌                              {reset}',
+        '',
+        ' 47% used ↓',
+        '',
+        f'{reset}{box} redeploy the demo once the chat fix lands                 {reset}',
+        '',
+        ' Aye captain, queued behind the chat fix.',
+    ])
+    assert parse_agent_history(output) == [
+        {'role': 'user', 'kind': 'conversation', 'text': 'redeploy the demo once the chat fix lands'},
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'Aye captain, queued behind the chat fix.'},
+    ]
+
+
+def test_the_framed_composer_row_is_unsubmitted_input_not_a_captain_turn():
+    """Claude frames its composer with '───' rules, and a Herdr snapshot catches
+    that box mid-keystroke: every keystroke otherwise minted a new user row."""
+    output = '\n'.join([
+        '\u203a an actually submitted captain turn',
+        '',
+        '\u23fa The agent reply.',
+        '',
+        '───────────────────────────────────────────',
+        "\u276f  let's start using the pi harness and gpt 5.6 luna and",
+        '  sol depending on the job. only use opus 5 for the',
+        '───────────────────────────────────────────',
+        '  \u23f5\u23f5 auto mode on (shift+tab to cycle)',
+    ])
+    assert parse_agent_history(output) == [
+        {'role': 'user', 'kind': 'conversation', 'text': 'an actually submitted captain turn'},
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'The agent reply.'},
+    ]

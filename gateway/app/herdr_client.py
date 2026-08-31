@@ -52,14 +52,39 @@ _ANSI_ITALIC = re.compile(r'\x1b\[(?:[^m;]*;)*3(?:;[^m]*)?m')
 # Footer/status overlays herdr captures mid-frame; they can land on an indented
 # row directly under a message, so they are dropped wherever they appear.
 _TERMINAL_CHROME = re.compile(
-    r'\(ctrl\+(?:End|Home)\)|Jump to bottom|Update installed · Restart|⏵⏵|⏸\s|auto mode on ·|esc to interrupt|ctrl\+\w+ to ',
+    r'\(ctrl\+(?:End|Home)\)|Jump to bottom|Update installed · Restart|⏵⏵|⏸\s|auto mode on ·|esc to interrupt|ctrl\+\w+ to |of your (?:usage|limit)\b',
     re.IGNORECASE,
 )
 _HARNESS_ARTIFACT = re.compile(
-    r'^(?:FIRSTMATE_OP\b|WAKE_(?:ACK|DRAIN|REQUIRED)\b|Planning\b|Clarifying\b|Initiating\b|Inspecting\b|Identifying\b|Verifying\b|Queuing\b|Error:\s|Took \d|Command exited with code\b|\(no output\)|\.\.\. \(\d+ earlier lines|help\[\d+\]:|/calm\b|calm(?:ing)?(?: animation| status)?\b|edit\s*$|(?:pane|tab|workspace)(?:_id)?\s*[:=]|window=\S+|worktree=/|~/\S+ \([^)]*\)\s*$|[↑↓]\S.*\bCH\d|─{3,})',
+    r'^(?:FIRSTMATE_OP\b|WAKE_(?:ACK|DRAIN|REQUIRED)\b|Planning\b|Clarifying\b|Initiating\b|Inspecting\b|Identifying\b|Verifying\b|Queuing\b|Error:\s|Took \d|Command exited with code\b|\(no output\)|\.\.\. \(\d+ earlier lines|help\[\d+\]:|/calm\b|calm(?:ing)?(?: animation| status)?\b|edit\s*$'
+    r'|(?:pane|tab|workspace)(?:_id)?\s*[:=]|(?:(?:model|provider|harness)|(?:thread|session|trace|run|request|conversation|message)[ _-]?id)\s*[:=]|your usage\b'
+    r'|window=\S+|worktree=/|~/\S+ \(|[⠀-⣿]|[↑↓]\S.*\bCH\d|─{3,})',
     re.IGNORECASE,
 )
-_SYSTEM_NOTICE = re.compile(r'^(?:⛵\s+[^:]+:|Run bin/fm-wake-drain\.sh\b|Watcher continuity is extension-owned\b)', re.IGNORECASE)
+# Firstmate drives worker panes by typing control plumbing into them: wake
+# notices, launch briefs, inbox instructions, status-file directions. Those are
+# lifecycle records, not the conversational prompt a worker thread shows.
+# A harness overlay - settings, usage, permissions - takes over the screen and
+# renders its panel chrome inside the same background boxes Pi uses for user
+# turns: tab bars, block-drawing meters, and gauge rows. None is conversation.
+_PANEL_CHROME = re.compile(r'^(?:[\u2500-\u259F\u2588\s]{3,}|(?:[A-Z][A-Za-z]{1,14}[ \t]{2,}){2,}[A-Z][A-Za-z]{1,14}|\d{1,3}%[ \t](?:used|remaining|left)\b.*)$')
+_SYSTEM_NOTICE = re.compile(
+    r'^(?:⛵\s+[^:]+:|Run bin/fm-wake-drain\.sh\b|Watcher continuity is extension-owned\b'
+    r'|Firstmate (?:instruction|steers|inbox|launch)\b|FIRSTMATE_(?:OP|WAKE)\b|Report status by appending\b|v\d+ launch-brief:)',
+    re.IGNORECASE,
+)
+# A Pi/Codex tool envelope is a header naming a real path plus the numbered
+# excerpt or diff it produced. Both halves are required: a captain may
+# legitimately write "read the release notes" or even "read src/main.py", and
+# those must stay captain turns. Mirrors isToolEnvelope in
+# frontend/src/services/ChatHistory.ts.
+_TOOL_ENVELOPE_HEADER = re.compile(
+    r'^(?:edit|read|write|create|delete|remove|move|copy|rename|apply[_ ]?patch|patch|cat|head|tail|sed|awk|grep|rg|find|ls|glob|open|view|diff|touch|mkdir)'
+    r'\b[ \t]+(?:[\w.@~-]*/[\w.@/-]*|[\w.@-]+\.[A-Za-z0-9]{1,8})(:\d+(?:[-:]\d+)?)?[ \t]*$',
+    re.IGNORECASE,
+)
+_NUMBERED_EXCERPT = re.compile(r'(?:^|\n)[ \t]*(?:\.{3}[ \t]*)?[+\-]?[ \t]*\d{1,6}[ \t]{1,12}\S')
+_DIFF_EXCERPT = re.compile(r'(?:^|\n)[ \t]*(?:@@[ \t]|[+\-]{3}[ \t]|[+\-][ \t]*\d+[ \t])')
 _RAW_TERMINAL = re.compile(r'^(?:\$\s|⎿\s|(?:bash|read|edit|write|glob|grep|task|websearch|webfetch)\s*\(|[^\s@]+@[^\s:]+:[^\n]*[$#]\s)', re.IGNORECASE)
 
 
@@ -80,13 +105,23 @@ def unwrap_terminal_text(text: str) -> str:
 
 def _is_harness_artifact(text: str) -> bool:
     value = _ANSI.sub('', text).strip()
-    if not value or _TERMINAL_CHROME.search(value) or _TRANSIENT_SUMMARY.match(value) or _HARNESS_ARTIFACT.match(value) or _SYSTEM_NOTICE.match(value) or _ROUTING_PREFIX.match(value):
+    if not value or _TERMINAL_CHROME.search(value) or _TRANSIENT_SUMMARY.match(value) or _HARNESS_ARTIFACT.match(value) or _SYSTEM_NOTICE.match(value) or _PANEL_CHROME.match(value) or _ROUTING_PREFIX.match(value):
         return True
     try:
         envelope = json.loads(value)
     except json.JSONDecodeError:
         return False
     return isinstance(envelope, dict) and any(key in envelope for key in ('jsonrpc', 'result', 'status', 'target', 'event', 'pane_id', 'tab_id', 'workspace_id'))
+
+
+def _is_tool_envelope(text: str) -> bool:
+    """A harness tool envelope, which Pi boxes exactly like a user turn."""
+    value = _ANSI.sub('', text).lstrip()
+    header, _, body = value.partition('\n')
+    match = _TOOL_ENVELOPE_HEADER.match(header.strip())
+    if not match:
+        return False
+    return bool(match.group(1)) or bool(_NUMBERED_EXCERPT.search(body)) or bool(_DIFF_EXCERPT.search(body))
 
 
 def _parse_pi_ansi_history(output: str) -> List[Dict[str, str]]:
@@ -118,9 +153,13 @@ def _parse_pi_ansi_history(output: str) -> List[Dict[str, str]]:
             text = unwrap_terminal_text('\n'.join(run))
             if not text or _is_harness_artifact(text):
                 continue
-            if _MARKERLESS_TOOL.match(text) or re.match(r'^(?:(?:edit|read|write|bash|grep|find|ls)\s*\n|[+\- ]\s*\d+\s|@@\s)', text, re.IGNORECASE):
+            if _MARKERLESS_TOOL.match(text) or _is_tool_envelope(text) or re.match(r'^(?:(?:edit|read|write|bash|grep|find|ls)\s*\n|[+\- ]\s*\d+\s|@@\s)', text, re.IGNORECASE):
                 messages.append({'role': 'assistant', 'kind': 'tool', 'text': text})
-            else:
+            # A background box is the only role signal Pi gives, and it wraps
+            # tool envelopes and harness chrome as well as user turns. An
+            # unrecognised box fails closed rather than being promoted to a
+            # user message just because it lacks a recognised agent role.
+            elif not _RAW_TERMINAL.match(text):
                 messages.append({'role': 'user', 'kind': 'conversation', 'text': _ROUTING_PREFIX.sub('', text).strip()})
             continue
         raw_line = lines[index]
@@ -160,16 +199,31 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
         if not current:
             return
         text = unwrap_terminal_text(current['text']) if current['kind'] == 'conversation' else current['text'].strip()
-        if text and text not in _TRANSIENT_USER_TEXT and not _is_harness_artifact(text) and (current['kind'] == 'tool' or not _RAW_TERMINAL.match(text)):
+        if not text or text in _TRANSIENT_USER_TEXT or _is_harness_artifact(text):
+            current = None
+            return
+        # Firstmate injects worker prompts through the same '\u203a' marker the
+        # captain uses, and a harness tool envelope can occupy a marked row.
+        if current['kind'] == 'conversation' and _is_tool_envelope(text):
+            messages.append({'role': 'assistant', 'kind': 'tool', 'text': text})
+        elif current['kind'] == 'tool' or not _RAW_TERMINAL.match(text):
             messages.append({**current, 'text': text})
         current = None
 
     previous_blank = True
+    # Whether the last non-blank row was a '───' rule. Claude frames its composer
+    # with those rules, so a marked row right after one is unsubmitted input, not
+    # a turn - and a snapshot catches it mid-keystroke, which would otherwise mint
+    # a fresh 'user message' for every character typed.
+    previous_rule = False
     # Offset in current['text'] where the last blank-line-separated unmarked row
     # begins: a later '⎿' detail row proves that row was tool activity, not prose.
     split_at: Optional[int] = None
     for raw_line in output.replace('\r', '').splitlines():
         was_blank, previous_blank = previous_blank, not raw_line.strip()
+        after_rule = previous_rule
+        if raw_line.strip():
+            previous_rule = bool(re.match(r'^─{3,}', raw_line.strip()))
         marker = _HISTORY_MARKER.match(raw_line)
         if marker:
             finish()
@@ -177,7 +231,7 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
             glyph, text = marker.groups()
             text = _ROUTING_PREFIX.sub('', text).strip()
             if glyph in ('›', '❯'):
-                current = {'role': 'user', 'kind': 'conversation', 'text': text}
+                current = None if after_rule else {'role': 'user', 'kind': 'conversation', 'text': text}
             else:
                 if _TRANSIENT_SUMMARY.match(text.strip()) or _TERMINAL_CHROME.search(text):
                     current = None

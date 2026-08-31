@@ -45,6 +45,11 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let postPromptHistoryRequests = 0;
+    // `phases` supplies successive post-prompt history reads (the last repeats),
+    // reproducing a Herdr snapshot whose reply text grows while it renders.
+    const phaseMessages = () => historyScenario.phases
+      ? historyScenario.phases[Math.min(postPromptHistoryRequests, historyScenario.phases.length - 1)]
+      : historyScenario.messages;
     if (historyScenario) {
       class FakeWebSocket {
         static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -53,8 +58,11 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
           if (historyScenario.manual) return;
           const emit = () => {
             if (!promptSent || this.readyState !== FakeWebSocket.OPEN) { setTimeout(emit, 20); return; }
-            const payload = JSON.stringify({ type: 'agent_history', target: 'captain', messages: historyScenario.messages });
+            // The same event is delivered twice by the socket and again by the
+            // poll: identity must converge on one row.
+            const payload = JSON.stringify({ type: 'agent_history', target: 'captain', messages: phaseMessages() });
             setTimeout(() => { this.onmessage?.({ data: payload }); this.onmessage?.({ data: payload }); }, historyScenario.delay || 0);
+            if (historyScenario.phases) setTimeout(emit, 700);
           };
           emit();
         }
@@ -111,11 +119,17 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
           const initialMessages = Array.isArray(historyScenario.initialMessages) ? historyScenario.initialMessages : [];
           return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: initialMessages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
         }
+        const response = new Response(JSON.stringify({ target: 'captain', messages: phaseMessages() }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         postPromptHistoryRequests += 1;
-        const response = new Response(JSON.stringify({ target: 'captain', messages: historyScenario.messages }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         return postPromptHistoryRequests === 1 && historyScenario.delay
           ? new Promise(resolve => setTimeout(() => resolve(response), historyScenario.delay))
           : Promise.resolve(response);
+      }
+      if (historyScenario?.workerPhases && url.includes('/api/v1/agents/w1%3Ap7/history')) {
+        const phases = historyScenario.workerPhases;
+        const messages = phases[Math.min(agentHistoryRequests, phases.length - 1)];
+        agentHistoryRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/agents/w1%3Ap7/history')) {
         agentHistoryRequests += 1;
@@ -988,4 +1002,140 @@ test('a sent user timestamp remains exact across optimistic state, polling, pers
   const afterReload = await reloaded.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain'))[0].sentAt);
   assert.equal(afterReload, persisted.sentAt);
   await reloaded.close();
+});
+
+// Regression for the deployed-demo report after PRs #61/#63: agent/internal
+// metadata rendered as highlighted user messages, and one captain turn plus one
+// primary reply rendered twice. The fixtures below carry the exact leaked
+// classes and the exact duplicate sequences.
+const LEAKED_METADATA = [
+  // Pi boxes a tool envelope exactly like a user turn.
+  { id: 'leak-envelope', role: 'user', kind: 'conversation', text: 'edit gateway/app/notifications.py\n\n... 340     elif parsed.path == "/pr-detail":\n341         target_type = "pull-request"' },
+  { id: 'leak-firstmate', role: 'user', kind: 'conversation', text: 'FIRSTMATE_OP: v1 launch-brief: you are a crewmate' },
+  { id: 'leak-worker-reply', role: 'assistant', kind: 'conversation', text: 'Scout report for Firstmate only.' },
+  { id: 'leak-spinner', role: 'assistant', kind: 'conversation', text: '⠦ Working...' },
+  { id: 'leak-cwd', role: 'assistant', kind: 'conversation', text: '~/.treehouse/Magistrate-7ab3fc/1/Magistrate (fm/magistra...' },
+  { id: 'leak-provider', role: 'assistant', kind: 'conversation', text: 'model: claude-opus-5' },
+  { id: 'leak-trace', role: 'assistant', kind: 'conversation', text: 'session_id: 5f2c-trace' },
+  { id: 'leak-pane', role: 'assistant', kind: 'conversation', text: 'pane_id=w1:p9 tab_id=secret' },
+  { id: 'leak-rpc', role: 'assistant', kind: 'conversation', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
+  { id: 'leak-terminal', role: 'assistant', kind: 'conversation', text: '$ cat /tmp/raw-pane-output' },
+];
+const FORBIDDEN = /notifications\.py|pr-detail|pull-request|FIRSTMATE_OP|crewmate|Scout report|Working\.\.\.|treehouse|claude-opus-5|session_id|pane_id|tab_id|jsonrpc|raw-pane/;
+
+const conversationRows = page => page.evaluate(() => ({
+  user: [...document.querySelectorAll('[data-testid^="user-message-"]')]
+    .filter(element => !element.getAttribute('data-testid').startsWith('user-message-text-'))
+    .map(element => ({ id: element.getAttribute('data-testid'), background: getComputedStyle(element).backgroundColor, text: element.innerText })),
+  agent: [...document.querySelectorAll('[data-testid="agent-message"]')].map(element => element.innerText),
+  tool: [...document.querySelectorAll('[data-testid="tool-history-message"]')].length,
+  text: document.querySelector('[data-testid="chat-history"]').innerText,
+}));
+
+test('one captain turn with leaked metadata renders exactly one captain row and one primary row', async () => {
+  const messages = [
+    { id: 'captain-prompt', role: 'user', kind: 'conversation', text: 'summarize the deploy' },
+    { id: 'captain-tool', role: 'assistant', kind: 'tool', text: 'Running npm test --token hidden-secret' },
+    { id: 'captain-reply', role: 'assistant', kind: 'conversation', text: 'The deploy is healthy and finished at 09:12.' },
+    ...LEAKED_METADATA,
+  ];
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { messages, delay: 300 });
+  await submit(page, 'summarize the deploy');
+  await pageWaitForText(page, 'The deploy is healthy and finished at 09:12.');
+  // Let the socket replay and several polls redeliver the identical event.
+  await new Promise(resolve => setTimeout(resolve, 6800));
+  const rows = await conversationRows(page);
+  assert.equal(rows.user.length, 1, `expected one captain row, got ${JSON.stringify(rows.user)}`);
+  assert.equal(rows.agent.length, 1, `expected one primary row, got ${JSON.stringify(rows.agent)}`);
+  assert.match(rows.user[0].id, /^user-message-u-/, 'the only user-styled row must be the locally submitted captain message');
+  assert.match(rows.user[0].background, /rgb\(36, 216, 255\)/, 'captain rows keep the opaque captain bubble');
+  assert.match(rows.agent[0], /The deploy is healthy and finished at 09:12\./);
+  assert.doesNotMatch(rows.text, FORBIDDEN);
+  assert.doesNotMatch(rows.text, /hidden-secret/);
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain')));
+  assert.deepEqual(persisted.map(message => [message.role, message.audience]), [['user', 'captain'], ['assistant', 'primary']]);
+  await page.close();
+
+  // Reload must reconcile, not replay: still exactly two rows.
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [], false, { initialMessages: messages, messages, manual: true });
+  await pageWaitForText(reloaded, 'The deploy is healthy and finished at 09:12.');
+  await new Promise(resolve => setTimeout(resolve, 3600));
+  const afterReload = await conversationRows(reloaded);
+  assert.equal(afterReload.user.length, 1);
+  assert.equal(afterReload.agent.length, 1);
+  assert.doesNotMatch(afterReload.text, FORBIDDEN);
+  await reloaded.close();
+});
+
+test('a reply whose snapshot text keeps growing stays one primary row and settles on the final text', async () => {
+  const prompt = { id: 'grow-prompt', role: 'user', kind: 'conversation', text: 'run the tests' };
+  // Herdr has no durable ids, so the gateway hashes content: each read of a
+  // still-rendering reply arrives with a different id.
+  const reply = text => ({ id: `grow-${text.length}`, role: 'assistant', kind: 'conversation', text });
+  const partial = 'The tests are running';
+  const middle = 'The tests are running and 30 of them have';
+  const settled = 'The tests are running and all 42 of them pass.';
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
+    phases: [[prompt, reply(partial)], [prompt, reply(middle)], [prompt, reply(settled)]],
+  });
+  await submit(page, 'run the tests');
+  await pageWaitForText(page, settled);
+  await new Promise(resolve => setTimeout(resolve, 3600));
+  let rows = await conversationRows(page);
+  assert.equal(rows.user.length, 1);
+  assert.equal(rows.agent.length, 1, `expected one primary row, got ${JSON.stringify(rows.agent)}`);
+  assert.match(rows.agent[0], /The tests are running and all 42 of them pass\./);
+  await page.close();
+
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [], false, {
+    initialMessages: [prompt, reply(settled)], messages: [prompt, reply(settled)], manual: true,
+  });
+  await pageWaitForText(reloaded, settled);
+  await new Promise(resolve => setTimeout(resolve, 3600));
+  rows = await conversationRows(reloaded);
+  assert.equal(rows.user.length, 1);
+  assert.equal(rows.agent.length, 1);
+  await reloaded.close();
+});
+
+test('two legitimate identical captain messages keep one row and one reply each', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, 'First reply arrived.');
+  await submit(page, 'same wording');
+  await pageWaitForText(page, 'First reply arrived.');
+  await page.close();
+
+  const second = await openChat({ width: 900, height: 700 }, false, 'Second reply arrived.', URL, 0, false, true);
+  await pageWaitForText(second, 'First reply arrived.');
+  await submit(second, 'same wording');
+  await pageWaitForText(second, 'Second reply arrived.');
+  await new Promise(resolve => setTimeout(resolve, 3600));
+  const rows = await conversationRows(second);
+  assert.equal(rows.user.length, 2, `repeated text sent at different times stays two rows: ${JSON.stringify(rows.user)}`);
+  assert.equal(rows.agent.length, 2);
+  assert.ok(rows.text.indexOf('First reply arrived.') < rows.text.indexOf('Second reply arrived.'));
+  await second.close();
+});
+
+test('a worker thread excludes firstmate prompts and worker metadata and never duplicates a growing reply', async () => {
+  const leak = [
+    { id: 'w-envelope', role: 'user', kind: 'conversation', text: 'edit gateway/app/notifications.py\n\n... 340     elif parsed.path == "/pr-detail":' },
+    { id: 'w-firstmate', role: 'user', kind: 'conversation', text: 'FIRSTMATE_OP: v1 launch-brief: you are a crewmate' },
+  ];
+  const reply = text => ({ id: `w-reply-${text.length}`, role: 'assistant', kind: 'conversation', text });
+  const settled = 'The worker finished the migration and reported no errors.';
+  const page = await openChat({ width: 900, height: 700 }, false, '', `${URL}?agentId=w1%3Ap7`, 0, false, false, 'light', [], false, {
+    workerPhases: [
+      [{ id: 'w-baseline', role: 'assistant', kind: 'conversation', text: 'Baseline row.' }],
+      [...leak, reply('The worker finished the migration')],
+      [...leak, reply(settled)],
+    ],
+  });
+  await pageWaitForText(page, settled);
+  await new Promise(resolve => setTimeout(resolve, 3600));
+  const rows = await conversationRows(page);
+  assert.equal(rows.user.length, 0, `no worker-thread row may be styled as a captain message: ${JSON.stringify(rows.user)}`);
+  assert.equal(rows.agent.length, 1, `expected one agent row, got ${JSON.stringify(rows.agent)}`);
+  assert.match(rows.agent[0], /reported no errors\./);
+  assert.doesNotMatch(rows.text, FORBIDDEN);
+  await page.close();
 });
