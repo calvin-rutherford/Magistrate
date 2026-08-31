@@ -5,28 +5,29 @@ reconciles an item fingerprint (`kind`, revision, copy, status, and deep link)
 and sends at most one Expo push for each active fingerprint. Provider errors
 retry with bounded backoff; invalid device tokens are revoked. Quiet hours
 defer a transition rather than acknowledging it, so it is eligible after the
-quiet window. A successful remote send is the only native delivery that marks
-the transition delivered.
+quiet window. A successful remote send marks delivery, but not viewing: the
+app keeps the item unread until its detailed Attention/PR view is opened and
+acknowledged.
 
 Native beta builds obtain a real `ExponentPushToken[...]` from
 `expo-notifications` after an explicit owner action in Account, register it over
 the authenticated Gateway session, and receive push data containing an
 app-owned deep link (`/attention`, `/chat`, or `/pr-detail`). The payload also
-carries `intent_version: 1`, `target_type`, `target_id`, and `route`; RootLayout passes that route through the shared
-pending-intent parser. A device permission denial, missing EAS
-project/credentials, simulator, offline Gateway, or provider failure is shown
-as unavailable and
-keeps the item in the in-app Attention fallback. The app never schedules a
-local notification from a foreground poll and never claims that this is
-background push.
+carries `intent_version: 1`, `target_type`, `target_id`, and `route`; RootLayout
+passes that route through the shared pending-intent parser. A device
+permission denial, missing EAS project/credentials, simulator, offline
+Gateway, or provider failure is shown as unavailable and keeps the item
+available through the Attention drawer and its unread indicator. There is no
+in-app notification popup. The app never schedules a local notification from
+a foreground poll and never claims that this is background push.
 
 Web retains its fallback behavior: with browser permission granted, the open
-page uses the browser Notification API; denied or unsupported browsers get the
-in-app stack. Web notifications require an open and eligible browser tab (they
-are not a service-worker push subscription). Native remote push is the beta
-background channel and still depends on a physical-device/release build with
-valid Apple/FCM/EAS credentials; Expo Go and simulators cannot validate
-production delivery.
+page uses the browser Notification API; denied or unsupported browsers keep the
+item in the Attention drawer with the unread indicator. Web notifications
+require an open and eligible browser tab (they are not a service-worker push
+subscription). Native remote push is the beta background channel and still
+depends on a physical-device/release build with valid Apple/FCM/EAS
+credentials; Expo Go and simulators cannot validate production delivery.
 
 ## Operating-permission modes
 

@@ -117,7 +117,9 @@ class FirstmateClient:
                         'project': project,
                         'revision': hints.get('last_event_text') or target_id,
                         'url': f'/attention?item=captain-question-{target_id}',
-                        'deep_link': agent_link
+                        'deep_link': f'/attention?item=captain-question-{target_id}',
+                        'agent_link': agent_link,
+                        'context': {'task_id': task_id, 'agent_target': agent_target, 'decision_key': target_id, 'project': project}
                     })
 
             if hints.get('blocked_event'):
@@ -133,7 +135,9 @@ class FirstmateClient:
                         'project': project,
                         'revision': hints.get('last_event_text') or target_id,
                         'url': f'/attention?item=captain-question-{target_id}',
-                        'deep_link': agent_link
+                        'deep_link': f'/attention?item=captain-question-{target_id}',
+                        'agent_link': agent_link,
+                        'context': {'task_id': task_id, 'agent_target': agent_target, 'decision_key': target_id, 'project': project}
                     })
 
             # A pull request only needs the captain's merge decision once Firstmate
@@ -152,7 +156,10 @@ class FirstmateClient:
                     'project': project,
                     'revision': pr_url,
                     'url': f'/attention?item=pr-ready-{task_id}',
-                    'deep_link': agent_link or (f'/pr-detail?number={match.group(1)}' if (match := re.search(r'/pull/(\d+)', pr_url)) else None)
+                    'deep_link': (f'/pr-detail?number={match.group(1)}' if (match := re.search(r'/pull/(\d+)', pr_url)) else f'/attention?item=pr-ready-{task_id}'),
+                    'agent_link': agent_link,
+                    'external_url': pr_url,
+                    'context': {'task_id': task_id, 'agent_target': agent_target, 'project': project, 'pull_request_url': pr_url}
                 })
 
         return attention_items

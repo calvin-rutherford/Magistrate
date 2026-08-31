@@ -34,7 +34,7 @@ Voice input mode selection is persisted as `magistrate.voice.input-mode` by `Cha
 
 ## Web push notifications
 
-`src/services/NotificationManager.ts` polls `/api/v1/notifications/events` and delivers via the real `Notification` Web API on `Platform.OS === 'web'`; web only works in an open/eligible browser tab. Native obtains a real Expo token with `expo-notifications`, registers it through the authenticated Gateway, and relies on Gateway remote delivery (never a local notification fabricated from a foreground poll). Permission denial, missing EAS credentials, offline state, or provider failure uses `InAppNotificationStack`. The browser prompt is explicit and gated by `NotificationPermissionPreferences.ts`; verify with `npm run test:notifications` (not wired into CI — see the puppeteer web suites excluded from `.github/workflows/frontend.yml`).`
+`src/services/NotificationManager.ts` polls `/api/v1/notifications/events` and delivers via the real `Notification` Web API on `Platform.OS === 'web'`; web only works in an open/eligible browser tab. Native obtains a real Expo token with `expo-notifications`, registers it through the authenticated Gateway, and relies on Gateway remote delivery (never a local notification fabricated from a foreground poll). Permission denial, missing EAS credentials, offline state, or provider failure keeps the item in the Attention drawer and its unread logo indicator; no in-app notification popup is used. The browser prompt is explicit and gated by `NotificationPermissionPreferences.ts`; verify with `npm run test:notifications` (not wired into CI — see the puppeteer web suites excluded from `.github/workflows/frontend.yml`).`
 
 ## Local dev environment
 

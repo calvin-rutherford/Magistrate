@@ -33,6 +33,21 @@ def test_transition_dedupe_material_update_and_resolution(monkeypatch, tmp_path)
     assert [event['id'] for event in notifications.reconcile_notification_events('captain', [item(revision='2')])['events']] == ['question-1']
 
 
+def test_remote_delivery_does_not_clear_unread_until_viewed(monkeypatch, tmp_path):
+    setup_db(monkeypatch, tmp_path)
+    notifications.register_push_token('captain', 'ExponentPushToken[real-device]', 'ios')
+
+    async def fake_send(*args, **kwargs):
+        return {'status': 'sent'}
+
+    monkeypatch.setattr(notifications, 'send_push_notification', fake_send)
+    result = __import__('asyncio').run(notifications.dispatch_notification_events('captain', [item()]))
+    assert [event['id'] for event in result['unread']] == ['question-1']
+    notifications.acknowledge_notification_events('captain', ['question-1'])
+    result = __import__('asyncio').run(notifications.dispatch_notification_events('captain', [item()]))
+    assert result['unread'] == []
+
+
 def test_batches_actionable_items_and_ignores_infrastructure_block(monkeypatch, tmp_path):
     setup_db(monkeypatch, tmp_path)
     infrastructure = item('infra')

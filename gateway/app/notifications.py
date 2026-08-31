@@ -61,10 +61,14 @@ def init_notification_db() -> None:
             fingerprint TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
             delivered INTEGER NOT NULL DEFAULT 0,
+            viewed INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY (user_id, item_id)
         )
         """)
+        columns = {row[1] for row in cursor.execute("PRAGMA table_info(notification_state)")}
+        if "viewed" not in columns:
+            cursor.execute("ALTER TABLE notification_state ADD COLUMN viewed INTEGER NOT NULL DEFAULT 0")
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS notification_preferences (
             user_id TEXT PRIMARY KEY,
@@ -266,7 +270,7 @@ def reconcile_notification_events(
         existing = {row["item_id"]: row for row in conn.execute("SELECT * FROM notification_state WHERE user_id=?", (user_id,)).fetchall()}
         for item_id, row in existing.items():
             if item_id not in actionable and row["active"]:
-                conn.execute("UPDATE notification_state SET active=0, delivered=1, updated_at=? WHERE user_id=? AND item_id=?", (now, user_id, item_id))
+                conn.execute("UPDATE notification_state SET active=0, delivered=1, viewed=1, updated_at=? WHERE user_id=? AND item_id=?", (now, user_id, item_id))
         pending: List[Dict[str, Any]] = []
         for item_id, item in actionable.items():
             fingerprint = _fingerprint(item)
@@ -274,10 +278,10 @@ def reconcile_notification_events(
             changed = row is None or row["fingerprint"] != fingerprint or not row["active"]
             if changed:
                 conn.execute("""
-                    INSERT INTO notification_state(user_id,item_id,fingerprint,active,delivered,updated_at)
-                    VALUES(?,?,?,?,0,?)
+                    INSERT INTO notification_state(user_id,item_id,fingerprint,active,delivered,viewed,updated_at)
+                    VALUES(?,?,?,?,0,0,?)
                     ON CONFLICT(user_id,item_id) DO UPDATE SET
-                      fingerprint=excluded.fingerprint, active=1, delivered=0, updated_at=excluded.updated_at
+                      fingerprint=excluded.fingerprint, active=1, delivered=0, viewed=0, updated_at=excluded.updated_at
                 """, (user_id, item_id, fingerprint, 1, now))
             delivered = False if changed else bool(row["delivered"])
             if not delivered:
@@ -294,6 +298,34 @@ def reconcile_notification_events(
         "quiet": quiet,
         "suppressed_foreground": foreground,
     }
+
+
+def _unread_events(user_id: str, attention_items: List[Dict[str, Any]], preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return active, captain-relevant items not yet viewed by the captain.
+
+    Delivery and viewing are intentionally separate: a remote push can be
+    accepted while the item remains visible as unread in the app.
+    """
+    if not preferences["enabled"]:
+        return []
+    items_by_id = {str(item["id"]): item for item in attention_items}
+    init_notification_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT item_id FROM notification_state WHERE user_id=? AND active=1 AND viewed=0",
+            (user_id,),
+        ).fetchall()
+    return [items_by_id[row[0]] for row in rows if row[0] in items_by_id]
+
+
+def mark_notification_events_delivered(user_id: str, item_ids: List[str]) -> None:
+    """Record provider/browser delivery without clearing the unread indicator."""
+    init_notification_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executemany(
+            "UPDATE notification_state SET delivered=1 WHERE user_id=? AND item_id=? AND active=1",
+            [(user_id, item_id) for item_id in item_ids],
+        )
 
 
 def _push_intent_data(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -326,8 +358,9 @@ async def dispatch_notification_events(
     result = reconcile_notification_events(user_id, attention_items, foreground=False, local_hour=local_hour)
     events = list(result["events"])
     registered = get_registered_push_token(user_id)
+    unread = _unread_events(user_id, attention_items, get_notification_preferences(user_id))
     if not registered or not events:
-        return {**result, "delivery": "web-or-in-app" if events else "none"}
+        return {**result, "unread": unread, "delivery": "web-or-in-app" if events else "none"}
     delivered: List[str] = []
     failures: List[Dict[str, Any]] = []
     for event in events:
@@ -343,18 +376,20 @@ async def dispatch_notification_events(
             delivered.append(str(event["id"]))
         else:
             failures.append({"id": event.get("id"), "status": outcome.get("status"), "detail": outcome.get("detail")})
-    acknowledge_notification_events(user_id, delivered)
+    mark_notification_events_delivered(user_id, delivered)
     # Native clients must not manufacture a local notification from this feed.
-    # Failed sends remain in the in-app fallback and are retried on the next
-    # reconciliation; successful sends are already remote pushes.
+    # Failed sends remain pending and are retried on the next reconciliation;
+    # successful sends are remote pushes but remain unread until viewed.
     remaining = [event for event in events if str(event["id"]) not in delivered]
-    return {**result, "events": remaining, "delivery": "sent" if not failures else "partial", "failures": failures}
+    unread = _unread_events(user_id, attention_items, get_notification_preferences(user_id))
+    return {**result, "events": remaining, "unread": unread, "delivery": "sent" if not failures else "partial", "failures": failures}
 
 
 def acknowledge_notification_events(user_id: str, item_ids: List[str]) -> None:
+    """Acknowledge items as viewed; this is the unread-dot clear operation."""
     init_notification_db()
     with sqlite3.connect(DB_PATH) as conn:
-        conn.executemany("UPDATE notification_state SET delivered=1 WHERE user_id=? AND item_id=? AND active=1", [(user_id, item_id) for item_id in item_ids])
+        conn.executemany("UPDATE notification_state SET delivered=1, viewed=1 WHERE user_id=? AND item_id=? AND active=1", [(user_id, item_id) for item_id in item_ids])
 
 
 def update_notification_preferences(

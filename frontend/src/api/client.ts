@@ -420,9 +420,10 @@ export interface AttentionItem {
   title: string;
   subtitle: string;
   type: string;
-  status: 'blocked' | 'ready';
+  status?: string;
   target_id?: string;
   project: string;
+  requires_action?: boolean;
 }
 
 export interface NotificationEvent extends AttentionItem {
@@ -430,6 +431,7 @@ export interface NotificationEvent extends AttentionItem {
   url: string;
   deep_link?: string | null;
   revision?: string;
+  context?: Record<string, string | number | boolean | null>;
 }
 
 export interface NotificationPreferences {
@@ -439,11 +441,19 @@ export interface NotificationPreferences {
   mode: OperatingPermissionMode;
 }
 
-export async function fetchNotificationEvents(foreground: boolean): Promise<{ events: NotificationEvent[]; delivery?: string }> {
+export async function fetchNotificationEvents(foreground: boolean): Promise<{ events: NotificationEvent[]; unread?: NotificationEvent[]; delivery?: string }> {
   const hour = new Date().getHours();
   const res = await authorizedFetch(`${GATEWAY_URL}/notifications/events?foreground=${foreground}&local_hour=${hour}`, {
   });
-  return checkedJson<{ events: NotificationEvent[] }>(res);
+  return checkedJson<{ events: NotificationEvent[]; unread?: NotificationEvent[]; delivery?: string }>(res);
+}
+
+export async function markNotificationEventsDelivered(itemIds: string[]): Promise<void> {
+  const res = await authorizedFetch(GATEWAY_URL + '/notifications/events/delivered', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ item_ids: itemIds })
+  });
+  await checkedJson(res);
 }
 
 export async function acknowledgeNotificationEvents(itemIds: string[]): Promise<void> {
@@ -589,6 +599,11 @@ export interface UnifiedAttentionRecord {
   target_id?: string;
   requires_action?: boolean;
   external_url?: string;
+  project?: string;
+  notification_kind?: NotificationEvent['notification_kind'];
+  consequential?: boolean;
+  revision?: string;
+  context?: Record<string, string | number | boolean | null>;
 }
 
 export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]> {

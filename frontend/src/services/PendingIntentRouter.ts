@@ -11,6 +11,7 @@ export interface PendingIntentPayload {
   intent_version: number;
   target_type?: string;
   target_id?: string;
+  item_id?: string;
   route: string;
 }
 

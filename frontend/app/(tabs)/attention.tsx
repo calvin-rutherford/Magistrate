@@ -6,10 +6,33 @@ import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { openExternalUrl } from '../../src/utils/externalLinks';
 import { fetchAgents, fetchGitHubPRs, fetchUnifiedAttention, UnifiedAttentionRecord } from '../../src/api/client';
+import { notificationManager } from '../../src/services/NotificationManager';
+
+function AttentionDetail({ item }: { item: UnifiedAttentionRecord }) {
+  const openExternal = async () => {
+    if (!item.external_url) return;
+    const result = await openExternalUrl(item.external_url);
+    if (!result.ok) Alert.alert('Unable to open attention item', result.message);
+  };
+  const context = Object.entries(item.context || {}).filter(([, value]) => value !== null && value !== undefined && value !== '');
+  return <View testID={`attention-detail-${item.id}`}><GlassSurface variant="card" style={styles.detailCard}>
+    <Text style={styles.detailEyebrow}>ATTENTION DETAIL · {item.provider.toUpperCase()}</Text>
+    <Text style={styles.detailTitle}>{item.title}</Text>
+    <Text style={styles.detailSubtitle}>{item.subtitle}</Text>
+    <View style={styles.detailDivider} />
+    <Text style={styles.detailLabel}>STATUS</Text>
+    <Text style={styles.detailValue}>{item.status || 'ACTION REQUIRED'}{item.priority ? ` · ${item.priority}` : ''}</Text>
+    {item.project ? <><Text style={styles.detailLabel}>PROJECT</Text><Text style={styles.detailValue}>{item.project}</Text></> : null}
+    {item.target_id ? <><Text style={styles.detailLabel}>TARGET</Text><Text selectable style={styles.detailValue}>{item.target_id}</Text></> : null}
+    {context.map(([key, value]) => <View key={key}><Text style={styles.detailLabel}>{key.replaceAll('_', ' ').toUpperCase()}</Text><Text style={styles.detailValue}>{String(value)}</Text></View>)}
+    {item.external_url ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open source attention item" onPress={() => void openExternal()} style={styles.detailLink}><Text style={styles.actionPrompt}>OPEN SOURCE ↗</Text></TouchableOpacity> : null}
+  </GlassSurface></View>;
+}
 
 export default function AttentionScreen() {
   const router = useRouter();
-  const { item: focusedItem } = useLocalSearchParams<{ item?: string }>();
+  const { item: focusedItemParam } = useLocalSearchParams<{ item?: string }>();
+  const focusedItem = Array.isArray(focusedItemParam) ? focusedItemParam[0] : focusedItemParam;
   const [items, setItems] = useState<UnifiedAttentionRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -35,10 +58,19 @@ export default function AttentionScreen() {
     loadAttention();
   }, []);
 
+  useEffect(() => {
+    if (!focusedItem || !items.some(item => item.id === focusedItem)) return;
+    // A focused route is the detailed acknowledgement boundary, not the
+    // delivery/poll boundary. Keep the indicator until this view is loaded.
+    void notificationManager.markViewed(focusedItem);
+  }, [focusedItem, items]);
+
   const openItem = async (item: UnifiedAttentionRecord) => {
     if (item.url.startsWith('/')) {
+      void notificationManager.markViewed(item.id);
       router.push(item.url as any);
     } else {
+      void notificationManager.markViewed(item.id);
       const result = await openExternalUrl(item.external_url || item.url);
       if (!result.ok) Alert.alert('Unable to open link', result.message);
     }
@@ -81,13 +113,15 @@ export default function AttentionScreen() {
           <Text style={styles.sectionTitle}>UNIFIED ATTENTION QUEUE ({items.length})</Text>
         </View>
 
+        {focusedItem && items.find(item => item.id === focusedItem) ? <AttentionDetail item={items.find(item => item.id === focusedItem)!} /> : null}
+
         {loading && <GlassSurface variant="card" style={styles.card}><Text style={styles.itemSubtitle}>Loading live attention data…</Text></GlassSurface>}
         {error && <GlassSurface variant="card" style={styles.card}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadAttention}><Text style={styles.actionPrompt}>TRY AGAIN</Text></TouchableOpacity></GlassSurface>}
         {!loading && !error && items.length === 0 && <GlassSurface variant="card" style={styles.card}><Text style={styles.itemSubtitle}>Nothing requires your attention.</Text></GlassSurface>}
         {[...items].filter(item => item.requires_action !== false).sort((a, b) => Number(b.id === focusedItem) - Number(a.id === focusedItem)).map(item => {
           const badgeColor = getProviderColor(item.provider);
           return (
-            <TouchableOpacity key={item.id} onPress={() => openItem(item)} activeOpacity={0.85}>
+            <TouchableOpacity key={item.id} testID={`attention-item-${item.id}`} accessibilityRole="button" accessibilityLabel={`Open attention detail for ${item.title}`} onPress={() => openItem(item)} activeOpacity={0.85}>
               <GlassSurface variant="card" style={[styles.card, item.id === focusedItem ? styles.focusedCard : undefined]}>
                 <View style={styles.cardHeader}>
                   <View style={styles.providerBadgeGroup}>
@@ -150,5 +184,13 @@ const styles = StyleSheet.create({
   itemSubtitle: { fontSize: 12, color: 'rgba(255, 255, 255, 0.65)', lineHeight: 16, marginBottom: 12 },
   cardFooter: { borderTopWidth: 1, borderTopColor: 'rgba(255, 255, 255, 0.08)', paddingTop: 8, alignItems: 'flex-end' },
   actionPrompt: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#72F5B1' },
-  errorText: { color: '#FCA5A5', fontSize: 12, marginBottom: 8 }
+  errorText: { color: '#FCA5A5', fontSize: 12, marginBottom: 8 },
+  detailCard: { padding: 18, marginVertical: 6, borderRadius: 18, borderColor: '#72F5B1', borderWidth: 1 },
+  detailEyebrow: { color: '#72F5B1', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', letterSpacing: 1.2 },
+  detailTitle: { color: '#FFFFFF', fontSize: 20, fontWeight: 'bold', lineHeight: 26, marginTop: 10 },
+  detailSubtitle: { color: 'rgba(255,255,255,0.78)', fontSize: 14, lineHeight: 21, marginTop: 6 },
+  detailDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.12)', marginVertical: 16 },
+  detailLabel: { color: 'rgba(255,255,255,0.5)', fontFamily: 'monospace', fontSize: 9, letterSpacing: 1.2, marginTop: 10 },
+  detailValue: { color: 'rgba(255,255,255,0.88)', fontSize: 13, lineHeight: 19, marginTop: 3 },
+  detailLink: { alignSelf: 'flex-start', marginTop: 16, paddingVertical: 8 }
 });

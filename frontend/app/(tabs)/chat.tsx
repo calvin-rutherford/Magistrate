@@ -18,6 +18,7 @@ import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPrefe
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl } from '../../src/utils/externalLinks';
 import { RealtimeClient } from '../../src/realtime/socket';
+import { notificationManager } from '../../src/services/NotificationManager';
 
 const markPaper = require('../../assets/images/magistrate-mark-paper-256.png');
 const markInk = require('../../assets/images/magistrate-mark-ink-256.png');
@@ -220,6 +221,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [sendError, setSendError] = useState<string | null>(null);
   const [isScrolledUp, setIsScrolledUp] = useState(false);
   const [hasNewMessages, setHasNewMessages] = useState(false);
+  const [unreadAttentionCount, setUnreadAttentionCount] = useState(() => notificationManager.getUnreadEvents().length);
   const [historyBefore, setHistoryBefore] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -280,6 +282,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       scrollRef.current?.scrollToEnd({ animated: false });
     });
   };
+  useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
+
   useEffect(() => {
     const profile = profiles.find(item => item.id === selectedProfileId);
     setModelSelection(profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null);
@@ -672,7 +676,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
 
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.784)' : 'rgba(255,255,255,0.8)' }, webViewportHeight ? { height: webViewportHeight } : null]}>
     <View style={styles.shellHeader}>
-      <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity>
+      <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread captain attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityHint="Opens navigation and attention details" accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}>
+        <View style={styles.logoWithUnread}><BrandMark dark={dark} />{unreadAttentionCount > 0 ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</View>
+      </TouchableOpacity>
     </View>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
       {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text></View>)}
@@ -971,7 +977,7 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
-  shellHeader: { height: 48, flexShrink: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 12, elevation: 12 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
+  shellHeader: { height: 48, flexShrink: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 12, elevation: 12 }, logoButton: { width: 52, height: 44, alignItems: 'center', justifyContent: 'center' }, logoWithUnread: { position: 'relative', width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, unreadAttentionDot: { position: 'absolute', top: 1, right: 0, width: 8, height: 8, borderRadius: 4, backgroundColor: '#F5C542', borderWidth: 1, borderColor: '#111722' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
   chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: brand.cyan, borderWidth: 1, borderColor: brand.cyan }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 }, messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.72, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
   jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, width: 38, height: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(17,23,34,0.62)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 999, zIndex: 15, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 8 }, jumpText: { color: brand.paper, fontSize: 20, lineHeight: 22, fontWeight: '700' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },

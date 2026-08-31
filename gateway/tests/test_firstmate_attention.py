@@ -61,6 +61,8 @@ async def test_needs_decision_task_surfaces_as_attention_item(monkeypatch):
     assert items[0]['subtitle'] == 'Pick a rollout strategy.'
     assert items[0]['status'] == 'needs-decision'
     assert items[0]['project'] == 'Magistrate'
+    assert items[0]['deep_link'] == '/attention?item=captain-question-demo-task-1'
+    assert items[0]['context']['decision_key'] == 'demo-task-1'
 
 
 @pytest.mark.asyncio
