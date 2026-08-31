@@ -157,7 +157,7 @@ export default function AccountScreen() {
     try {
       await saveChatBackground(key);
       await updateUserProfile({ active_theme: key });
-    } catch (e) {
+    } catch {
       console.error('Failed to save background theme');
     }
   };

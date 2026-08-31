@@ -1,30 +1,23 @@
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
 const test = require('node:test');
-const puppeteer = require('puppeteer-core');
+const { launchBrowser, startWebServer } = require('./helpers/web-server');
 
-const PORT = Number(process.env.MAGISTRATE_WEB_TEST_PORT) || 8096;
-const BASE = `http://127.0.0.1:${PORT}`;
 let server;
 let browser;
-
-async function waitForServer() {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    try { if ((await fetch(BASE)).ok) return; } catch {}
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-  throw new Error('Expo web server did not become ready');
-}
+// Assigned once the dev server has picked a port; the suites read it at call
+// time, never at module load.
+let BASE;
 
 test.before(async () => {
-  server = spawn(path.join(process.cwd(), 'node_modules', '.bin', 'expo'), ['start', '--web', '--port', String(PORT)], { cwd: process.cwd(), env: { ...process.env, CI: '1' }, stdio: 'ignore' });
-  await waitForServer();
-  browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+  server = await startWebServer({ readyPath: '/' });
+  BASE = server.base;
+  browser = await launchBrowser();
 });
 
-test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
+test.after(async () => {
+  await browser?.close();
+  await server?.stop();
+});
 
 async function open(url) {
   const page = await browser.newPage();

@@ -13,7 +13,9 @@ export function EnvironmentBackground({ children, hideBottomControls = false, vo
   const [clock, setClock] = React.useState(() => new Date());
   const [reducedMotion, setReducedMotion] = React.useState(false);
   const [highContrast, setHighContrast] = React.useState(false);
-  const fade = React.useRef(new Animated.Value(1)).current;
+  // Held in state rather than a ref so the value is created exactly once and is
+  // never read from a ref during render (react-hooks/refs).
+  const [fade] = React.useState(() => new Animated.Value(1));
   // Keep the environment on the same palette as the chat surfaces. In
   // particular, system mode must react to an OS scheme change instead of
   // retaining the palette from the previous render.
@@ -33,10 +35,12 @@ export function EnvironmentBackground({ children, hideBottomControls = false, vo
     if (reducedMotion) { fade.setValue(1); return; }
     fade.setValue(0.72); Animated.timing(fade, { toValue: 1, duration: 4000, useNativeDriver: true }).start();
   }, [theme.timePeriod, theme.weather, dark, reducedMotion, fade]);
-  const panResponder = React.useRef(PanResponder.create({
+  // Created once on mount, as before, so the back-swipe keeps the same responder
+  // identity for the lifetime of the screen.
+  const [panResponder] = React.useState(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_, gesture) => pathname !== '/chat' && gesture.dx > 50 && Math.abs(gesture.dy) < 40,
     onPanResponderRelease: (_, gesture) => { if (gesture.dx > 60) router.back(); },
-  })).current;
+  }));
   return <View style={styles.container} {...panResponder.panHandlers}>
     <Animated.View style={[styles.container, { opacity: fade }]}>
       <ImageBackground source={theme.sceneImage} style={styles.bgImage} resizeMode="cover">
