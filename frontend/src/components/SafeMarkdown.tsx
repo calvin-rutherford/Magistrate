@@ -57,7 +57,7 @@ const styles = StyleSheet.create({
   codeLanguage: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8 },
   copyButton: { minWidth: 52, minHeight: 30, justifyContent: 'center', alignItems: 'flex-end' },
   copyText: { fontSize: 11, fontWeight: '800' },
-  codeScroller: { touchAction: 'pan-x' as any },
+  codeScroller: { touchAction: 'pan-x' } as any,
   codeScroll: { padding: 12, minWidth: '100%' },
   codeText: { fontFamily: 'monospace', fontSize: 13, lineHeight: 20 },
 });
