@@ -5,6 +5,7 @@ from app.herdr_client import HerdrClient
 from app.github_service import github_service
 from app.providers.jira import JiraProviderAdapter
 from app.providers.teams import TeamsProviderAdapter
+from app.attention_actions import action_for_item
 
 fm_client = FirstmateClient()
 herdr_client = HerdrClient()
@@ -20,7 +21,7 @@ class AttentionService:
             agents = await herdr_client.list_agents()
             fm_att = await fm_client.get_attention_items(herdr_agents=agents)
             for att in fm_att:
-                items.append({
+                item = {
                     'id': att.get('id', 'fm-item'),
                     'provider': 'firstmate',
                     'title': att.get('title', 'Firstmate Action Required'),
@@ -35,7 +36,11 @@ class AttentionService:
                     'notification_kind': att.get('type'),
                     'consequential': att.get('consequential') is True,
                     'revision': att.get('revision')
-                })
+                }
+                action = action_for_item(item)
+                if action:
+                    item['action'] = action
+                items.append(item)
         except Exception as e:
             print('Error fetching Firstmate attention:', e)
 

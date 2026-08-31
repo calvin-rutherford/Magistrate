@@ -39,3 +39,25 @@ action, completions, and consequential decisions. These modes do **not** grant
 merge, destructive, irreversible, security-sensitive, or external-public
 authority. Existing Firstmate policy, command scopes, and Captain confirmation
 rules remain the authority for every operation.
+
+## Keyed Attention decisions (MVP boundary)
+
+A concrete Firstmate `needs-decision` item may include an
+`attention-action.v1` contract. Its server-issued `action_key` is bound to the
+exact Firstmate `task_id`, `decision_key`, and live source revision. The only
+supported actions are `approve` and `reject` for that captain-hold record.
+
+The app first requests a confirmation token, then shows the action, exact
+Firstmate target, consequence, and reversibility before the owner can confirm.
+Opening a detail, reading it, acknowledging a notification, dismissing it, or
+clearing the unread dot never authorizes an action. The Gateway checks the
+owner session, action key, target, live revision, risk boundary, confirmation,
+and replay/idempotency state before calling Firstmate's keyed captain-hold
+intake. Outcomes are durable and bounded (`pending`, `succeeded`, `failed`, or
+rejected/stale) with actor session, timestamp, selected action, target, source
+revision, and safe operation evidence only.
+
+This is **not** general approval authority: GitHub merges/reviews, deploys,
+external communications, credential/security changes, destructive operations,
+and irreversible requests are not supported and are rejected. Notification
+acknowledgement remains a separate viewed/unread operation.

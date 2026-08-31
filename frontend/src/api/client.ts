@@ -439,6 +439,7 @@ export interface AttentionItem {
   target_id?: string;
   project: string;
   requires_action?: boolean;
+  action?: AttentionAction;
 }
 
 export interface NotificationEvent extends AttentionItem {
@@ -602,6 +603,47 @@ export async function fetchAttention(): Promise<AttentionItem[]> {
   return checkedJson<AttentionItem[]>(res);
 }
 
+export interface AttentionAction {
+  schema_version: 'attention-action.v1';
+  action_key: string;
+  decision_key: string;
+  source_revision: string;
+  target: { provider: 'firstmate'; task_id: string; decision_key: string };
+  allowed_actions: Array<'approve' | 'reject'>;
+  confirmation_required: true;
+  consequence: string;
+  reversible: boolean;
+  status: 'available' | 'unsupported' | 'pending' | 'succeeded' | 'failed' | 'stale' | string;
+  reason?: string | null;
+}
+
+export interface AttentionActionConfirmation {
+  schema_version: 'attention-action.v1';
+  status: 'confirmation_required';
+  action_key: string;
+  action: 'approve' | 'reject';
+  decision_key: string;
+  source_revision: string;
+  target: AttentionAction['target'];
+  consequence: string;
+  reversible: boolean;
+  confirmation_token: string;
+  expires_at: number;
+}
+
+export interface AttentionActionOutcome {
+  schema_version: 'attention-action.v1';
+  item_id?: string | null;
+  action_key: string;
+  decision_key: string;
+  action: 'approve' | 'reject';
+  target: AttentionAction['target'];
+  status: 'pending' | 'succeeded' | 'failed' | 'rejected' | 'stale' | string;
+  evidence: Record<string, string | boolean | number | null>;
+  timestamp: number;
+  idempotent?: boolean;
+}
+
 export interface UnifiedAttentionRecord {
   id: string;
   provider: string;
@@ -619,6 +661,7 @@ export interface UnifiedAttentionRecord {
   consequential?: boolean;
   revision?: string;
   context?: Record<string, string | number | boolean | null>;
+  action?: AttentionAction;
 }
 
 export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]> {
@@ -627,6 +670,32 @@ export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]>
   const data = await checkedJson<unknown>(res);
   if (!Array.isArray(data)) throw new Error('Gateway returned invalid attention data.');
   return data as UnifiedAttentionRecord[];
+}
+
+export async function prepareAttentionAction(actionKey: string, action: 'approve' | 'reject', targetId: string): Promise<AttentionActionConfirmation> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}/prepare`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action_key: actionKey, action, target_id: targetId }),
+  });
+  return checkedJson<AttentionActionConfirmation>(res);
+}
+
+export async function executeAttentionAction(actionKey: string, action: 'approve' | 'reject', targetId: string, confirmationToken: string): Promise<AttentionActionOutcome> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}/execute`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action_key: actionKey, action, target_id: targetId, confirmation_token: confirmationToken }),
+  });
+  return checkedJson<AttentionActionOutcome>(res);
+}
+
+export async function fetchAttentionAction(actionKey: string): Promise<AttentionAction | AttentionActionOutcome> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}`);
+  return checkedJson<AttentionAction | AttentionActionOutcome>(res);
+}
+
+export async function fetchAttentionActionForItem(itemId: string): Promise<AttentionAction | AttentionActionOutcome> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/by-item/${encodeURIComponent(itemId)}`);
+  return checkedJson<AttentionAction | AttentionActionOutcome>(res);
 }
 
 export async function fetchRecentActivity(limit = 20): Promise<RecentActivityFeed> {

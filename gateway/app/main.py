@@ -17,7 +17,8 @@ from app.herdr_client import DEFAULT_HISTORY_LINES, HERDR_MAX_READ_LINES, HerdrC
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
 from app.contracts import (UniversalInputContract, ExecutionSettingsContract, ExecutionCredentialContract, GestureInputContract,
-                           NotificationAckContract, NotificationPreferencesContract,
+                           NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
+                           AttentionActionExecuteContract,
                            RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
@@ -27,6 +28,8 @@ from app.db import (init_db, get_profile, update_profile, get_connected_accounts
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
 from app.attention_service import attention_service
+from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
+                                   prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
 from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
                                list_registered_push_users, registered_local_hour,
                                reconcile_notification_events, dispatch_notification_events,
@@ -457,6 +460,77 @@ async def get_teams_mentions(principal: Principal = Depends(require_scope('provi
 @app.get('/api/v1/attention/unified')
 async def get_unified_attention(principal: Principal = Depends(require_scope('read'))):
     return await attention_service.get_unified_attention_items()
+
+
+def _require_owner(principal: Principal) -> None:
+    # Command-capable sessions are still checked against the configured owner;
+    # a future observer/read-only session must never gain action authority by
+    # merely receiving an action-shaped payload.
+    owner_id = os.getenv('MAGISTRATE_BOOTSTRAP_USER_ID', 'default_user').strip()
+    if principal.user_id != owner_id:
+        raise HTTPException(status_code=403, detail='Only the authenticated owner may execute Attention actions.')
+
+
+def _action_error(exc: AttentionActionError) -> HTTPException:
+    status = exc.code if exc.code in {'stale', 'rejected', 'pending'} else ('rejected' if exc.code in {'unsupported', 'unsupported_risk', 'confirmation_invalid', 'replay_mismatch'} else 'failed')
+    return HTTPException(status_code=exc.status_code, detail={'code': exc.code, 'status': status, 'message': exc.detail})
+
+
+@app.post('/api/v1/attention/actions/{action_key}/prepare')
+async def prepare_attention_action(action_key: str, contract: AttentionActionContract, principal: Principal = Depends(require_scope('command'))):
+    _require_owner(principal)
+    if contract.action_key != action_key:
+        raise HTTPException(status_code=409, detail={'code': 'mismatch', 'message': 'The action key in the request does not match the route.'})
+    try:
+        items = await attention_service.get_unified_attention_items()
+        return prepare_confirmation(items, action_key, contract.action, contract.target_id, principal.user_id, principal.session_id)
+    except AttentionActionError as exc:
+        raise _action_error(exc) from exc
+
+
+@app.post('/api/v1/attention/actions/{action_key}/execute')
+async def execute_attention_action(action_key: str, contract: AttentionActionExecuteContract, principal: Principal = Depends(require_scope('command'))):
+    _require_owner(principal)
+    if contract.action_key != action_key:
+        raise HTTPException(status_code=409, detail={'code': 'mismatch', 'message': 'The action key in the request does not match the route.'})
+    try:
+        items = await attention_service.get_unified_attention_items()
+        return await execute_confirmation(
+            items, action_key, contract.action, contract.target_id, contract.confirmation_token,
+            principal.user_id, principal.session_id, fm_client.fm_home,
+        )
+    except AttentionActionError as exc:
+        raise _action_error(exc) from exc
+
+
+@app.get('/api/v1/attention/actions/by-item/{item_id}')
+async def get_attention_action_for_item(item_id: str, principal: Principal = Depends(require_scope('read'))):
+    """Reload-safe lookup for a detail route whose source item has resolved."""
+    existing = outcome_for_item(item_id, principal.user_id)
+    if existing:
+        return _public_outcome(existing)
+    items = await attention_service.get_unified_attention_items()
+    for item in items:
+        if item.get('id') == item_id:
+            action = action_for_item(item)
+            if action:
+                return action
+            break
+    raise HTTPException(status_code=404, detail={'code': 'stale', 'message': 'Attention action is no longer available.'})
+
+
+@app.get('/api/v1/attention/actions/{action_key}')
+async def get_attention_action(action_key: str, principal: Principal = Depends(require_scope('read'))):
+    """Reload-safe action/outcome state without exposing execution internals."""
+    existing = _outcome_row(action_key, principal.user_id)
+    if existing:
+        return _public_outcome(existing)
+    items = await attention_service.get_unified_attention_items()
+    for item in items:
+        action = action_for_item(item)
+        if action and action['action_key'] == action_key:
+            return action
+    raise HTTPException(status_code=404, detail={'code': 'stale', 'message': 'Attention action is no longer available.'})
 
 @app.get('/api/v1/usage')
 async def get_usage_summary(provider: Optional[str] = None, principal: Principal = Depends(require_scope('read'))):

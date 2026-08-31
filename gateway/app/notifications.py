@@ -341,12 +341,18 @@ def _push_intent_data(event: Dict[str, Any]) -> Dict[str, Any]:
         target_type, target_id = "pull-request", query["number"][0]
     elif parsed.path == "/attention" and query.get("item"):
         target_id = query["item"][0]
-    return {
+    payload = {
         "intent_version": 1,
         "target_type": target_type,
         "target_id": target_id,
         "route": route,
     }
+    action = event.get("action") if isinstance(event.get("action"), dict) else None
+    if action and isinstance(action.get("action_key"), str):
+        # The key is an opaque server-issued handle, not authority by itself;
+        # the Gateway still revalidates the live item and owner confirmation.
+        payload["action_key"] = action["action_key"]
+    return payload
 
 
 async def dispatch_notification_events(
