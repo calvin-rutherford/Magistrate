@@ -303,11 +303,26 @@ export interface AgentControlResult {
   error?: string | null;
 }
 
+export interface AgentHistorySource {
+  id: string;
+  title: string;
+  url: string;
+  publisher?: string;
+  retrievedAt?: string;
+  quote?: string;
+  page?: string | number;
+}
+
 export interface AgentHistoryMessage {
   id?: string;
   role: 'user' | 'assistant';
   kind: 'conversation' | 'tool';
   text: string;
+  sources?: AgentHistorySource[];
+  thinkingSummary?: { provider: string; text: string };
+  runId?: string;
+  regenerateSafe?: boolean;
+  progress?: 'queued' | 'working' | 'streaming' | 'complete' | 'failed' | 'cancelled';
 }
 
 export interface AgentHistoryResult {
@@ -885,7 +900,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       ...(messageId ? { message_id: messageId } : {})
     })
   });
-  return checkedJson<{ status: string; target?: string; response?: string; error?: string }>(res);
+  return checkedJson<{ status: string; target?: string; response?: string; error?: string; sources?: AgentHistorySource[]; thinkingSummary?: { provider: string; text: string }; runId?: string; regenerateSafe?: boolean; progress?: AgentHistoryMessage['progress'] }>(res);
 }
 
 export async function interruptAgent(agentId: string): Promise<AgentControlResult> {
