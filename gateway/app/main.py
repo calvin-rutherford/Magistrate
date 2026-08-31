@@ -190,7 +190,9 @@ async def agent_events(websocket: WebSocket):
             history = await herdr_client.get_agent_history(target, lines=DEFAULT_HISTORY_LINES)
             fresh = []
             for item in history.get('messages', []):
-                key = f"{item.get('role')}|{item.get('kind')}|{item.get('text')}"
+                # Stable history ids keep two legitimate identical turns
+                # distinct while repeated snapshots remain idempotent.
+                key = f"id:{item.get('id')}" if item.get('id') else f"{item.get('role')}|{item.get('kind')}|{item.get('text')}"
                 if key in seen:
                     continue
                 seen.add(key)
@@ -676,7 +678,8 @@ async def remove_execution_credential(credential_key: str, principal: Principal 
 
 @app.get('/api/v1/agents')
 async def list_agents(principal: Principal = Depends(require_scope('read'))):
-    return await herdr_client.list_agents()
+    agents, fleet = await asyncio.gather(herdr_client.list_agents(), fm_client.get_snapshot())
+    return fm_client.apply_agent_display_names(agents, fleet)
 
 @app.get('/api/v1/fleet')
 async def get_fleet(principal: Principal = Depends(require_scope('read'))):

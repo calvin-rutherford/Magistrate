@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AgentHistoryMessage, filterAgentHistory, isRenderableToolCall, parseAgentHistory, toolCallPreview } from '../src/services/ChatHistory';
+import { AgentHistoryMessage, filterAgentHistory, isHarnessArtifact, isRenderableToolCall, parseAgentHistory, sanitizeAgentHistory, toolCallPreview } from '../src/services/ChatHistory';
 
 const history: AgentHistoryMessage[] = [
   { role: 'user', kind: 'conversation', text: 'Please inspect the fleet.' },
@@ -8,23 +8,39 @@ const history: AgentHistoryMessage[] = [
   { role: 'assistant', kind: 'conversation', text: 'The fleet is healthy.' },
 ];
 
-test('Pi markerless transcript rows remain available without exposing command output', () => {
+test('Pi markerless plain text fails closed instead of exposing ambiguous harness rows', () => {
+  const output = ['User question from Pi', '', 'Planning next step', '', '$ npm run test', 'Ran 3 commands'].join('\n');
+  assert.deepEqual(parseAgentHistory(output), []);
+});
+
+test('Pi ANSI boxes preserve user/agent roles while suppressing reasoning, calm, transport, and chrome', () => {
+  const reset = '\x1b[0m';
+  const userBg = '\x1b[48;5;59m';
+  const toolBg = '\x1b[48;5;22m';
   const output = [
-    'User question from Pi',
+    `${reset}${userBg}                                                           ${reset}`,
+    `${reset}${userBg} User question from Pi                                  ${reset}`,
+    `${reset}${userBg}                                                           ${reset}`,
     '',
-    'Assistant response from Pi with',
-    '  a wrapped line.',
+    ` ${reset}\x1b[1m\x1b[3m\x1b[38;5;244mPlanning private work${reset}`,
     '',
-    '[Magistrate execution: harness=pi; model=gpt-5.6-luna; provider=openai-codex; variant=default; profile=pi:default]',
-    'User question from routing',
+    `${reset}${toolBg} $ npm run test                                            ${reset}`,
+    `${reset}${toolBg} Took 0.4s                                                 ${reset}`,
     '',
-    '$ npm run test',
-    'Ran 3 commands',
-  ].join('\n');
+    ' Agent response from Pi with',
+    '   a wrapped line.',
+    '',
+    ' /calm animation status',
+    '',
+    ' {"jsonrpc":"2.0","result":{"ok":true}}',
+    '',
+    '───────────────────────────────────────────────────────────',
+    '~/firstmate (main)',
+  ].join('\r\n');
   assert.deepEqual(parseAgentHistory(output), [
-    { role: 'assistant', kind: 'conversation', text: 'User question from Pi' },
-    { role: 'assistant', kind: 'conversation', text: 'Assistant response from Pi with a wrapped line.' },
-    { role: 'assistant', kind: 'conversation', text: 'User question from routing' },
+    { role: 'user', kind: 'conversation', text: 'User question from Pi' },
+    { role: 'assistant', kind: 'tool', text: '$ npm run test Took 0.4s' },
+    { role: 'assistant', kind: 'conversation', text: 'Agent response from Pi with a wrapped line.' },
   ]);
 });
 
@@ -37,6 +53,20 @@ test('agent history hides tool calls by default', () => {
 
 test('agent history includes tool calls only when enabled', () => {
   assert.deepEqual(filterAgentHistory(history, true), history);
+});
+
+test('normalized history rejects harness metadata even when transport mislabeled it as conversation', () => {
+  const incoming: AgentHistoryMessage[] = [
+    { role: 'user', kind: 'conversation', text: 'Keep this real question.' },
+    { role: 'user', kind: 'conversation', text: 'Can you explain /calm and jsonrpc?' },
+    { role: 'assistant', kind: 'conversation', text: 'Actual agent answer.' },
+    { role: 'assistant', kind: 'conversation', text: 'FIRSTMATE_OP: v1 watcher wake' },
+    { role: 'assistant', kind: 'conversation', text: '/calm animation status' },
+    { role: 'assistant', kind: 'conversation', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
+    { role: 'assistant', kind: 'tool', text: 'raw pane_id=w1:p2 runtime metadata' },
+  ];
+  assert.equal(isHarnessArtifact(incoming[3].text), true);
+  assert.deepEqual(sanitizeAgentHistory(incoming).map(message => message.text), ['Keep this real question.', 'Can you explain /calm and jsonrpc?', 'Actual agent answer.']);
 });
 
 // Mirrors gateway/tests/test_captain_history.py — the two parsers must agree.

@@ -11,8 +11,9 @@ export interface ConversationMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  // Agent history replayed from Herdr terminal snapshots has no reliable
-  // wall-clock time, so timestamps stay optional for those messages.
+  // Locally submitted messages keep the wall-clock time captured at the send
+  // action. Herdr snapshots have no reliable time, so discovered messages may
+  // omit it; callers must never manufacture one during hydration or refresh.
   sentAt?: number;
   source: 'text' | 'voice';
   kind?: 'conversation' | 'tool';
@@ -49,13 +50,25 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
         const candidate = attachment as Record<string, unknown>;
         return { name: candidate.name as string, mediaType: candidate.mediaType as string, size: candidate.size as number | undefined };
       }) : undefined;
-      return { ...value, source: value.source === 'voice' ? 'voice' : 'text', attachments, delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : undefined } as ConversationMessage;
+      const sentAt = typeof value.sentAt === 'number' && Number.isFinite(value.sentAt) && value.sentAt >= 0 ? value.sentAt : undefined;
+      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', attachments, delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : undefined } as ConversationMessage;
     });
     const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
-    const existing = new Set(normalized.map(message => message.id));
-    messagesByTarget.set(target, [...normalized, ...current.filter(message => !existing.has(message.id))]);
+    const currentById = new Map(current.map(message => [message.id, message]));
+    const hydrated = normalized.map(stored => {
+      const live = currentById.get(stored.id);
+      if (!live) return stored;
+      currentById.delete(stored.id);
+      // An optimistic message can change while AsyncStorage is loading. The
+      // in-memory copy is newer, but a timestamp missing from either side must
+      // not erase the real timestamp from the other.
+      return { ...stored, ...live, sentAt: live.sentAt ?? stored.sentAt };
+    });
+    const merged = [...hydrated, ...current.filter(message => currentById.has(message.id))];
+    messagesByTarget.set(target, merged);
+    persist(target, merged);
     emit(target);
-    return normalized;
+    return merged;
   } catch { return getConversationMessages(target); }
 }
 
