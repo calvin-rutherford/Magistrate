@@ -13,7 +13,8 @@ import { SafeMarkdown } from '../../src/components/SafeMarkdown';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
-import { filterAgentHistory, isHarnessArtifact, sanitizeAgentHistory, toolCallPreview } from '../../src/services/ChatHistory';
+import { filterAgentHistory, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
+import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, insertConversationMessageAfter, prependConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
@@ -197,14 +198,10 @@ function AssistantMessage({ message, dark, text, muted, showToolCalls, onActions
   return <View testID="agent-message" style={styles.assistantMessage}><View style={styles.assistantBody}><SafeMarkdown markdown={message.text} color={text} mutedColor={muted} dark={dark} testID={`assistant-markdown-${message.id}`} />{showToolCalls && message.toolResults?.map((result, index) => <View key={`${message.id}-tool-${index}`} testID="tool-history-message" style={styles.attachedToolResult}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{result}</Text></View>)}{summary ? <View testID="safe-thinking-summary" style={styles.thinkingSummary}><Text style={[styles.thinkingSummaryLabel, { color: muted }]}>{summary.provider} summary</Text><Text style={[styles.thinkingSummaryText, { color: muted }]}>{summary.text}</Text></View> : null}<SourceList sources={message.sources || []} dark={dark} text={text} muted={muted} />{message.progress === 'failed' ? <Text testID={`assistant-failed-${message.id}`} accessibilityRole="alert" style={styles.assistantStateFailed}>Response stopped before completion. Retry is available only when this run is safe to repeat.</Text> : message.progress === 'cancelled' ? <Text testID={`assistant-cancelled-${message.id}`} style={[styles.assistantState, { color: muted }]}>Response stopped</Text> : message.progress === 'streaming' ? <Text testID={`assistant-streaming-${message.id}`} style={[styles.assistantState, { color: muted }]}>Updating response…</Text> : message.progress === 'working' || message.progress === 'queued' ? <Text testID={`assistant-working-${message.id}`} style={[styles.assistantState, { color: muted }]}>Working…</Text> : null}</View><TouchableOpacity testID={`message-actions-${message.id}`} accessibilityRole="button" accessibilityLabel="Assistant message actions" onPress={onActions} style={styles.inlineMessageAction}><Text style={styles.inlineMessageActionText}>•••</Text></TouchableOpacity></View>;
 }
 
-const historyKey = (message: { role: string; kind?: string; text: string }) => `${message.role}|${message.kind || 'conversation'}|${message.text}`;
-const stableHistoryId = (message: { role: string; kind?: string; text: string }) => {
-  // Herdr history ids are preferred. This bounded fallback keeps the WebSocket
-  // and polling paths convergent when an older gateway omits ids.
-  let hash = 2166136261;
-  for (const character of historyKey(message)) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
-  return `history-${(hash >>> 0).toString(36)}`;
-};
+// Identity and reconciliation live in one place for every delivery path; see
+// src/services/ChatIdentity.ts.
+const historyKey = messageContentKey;
+const stableHistoryId = fallbackMessageId;
 function conversationalPromptResponse(response: unknown): string | null {
   if (typeof response !== 'string' || !response.trim()) return null;
   try {
@@ -387,6 +384,13 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           await new Promise<void>(resolve => setTimeout(resolve, 2000));
           return loadHistory(attempt + 1);
         }
+        // A reply stored before a reload can have grown or reflowed in the
+        // snapshot since. Revise that row rather than letting the seed record
+        // the new content hash as a row this canvas has already shown.
+        if (target !== 'captain') {
+          const seedRevisable = terminalRevisionCandidate(sanitizeTerminalHistory(result.messages));
+          if (seedRevisable) reviseRenderedReply(seedRevisable);
+        }
         result.messages.forEach(message => {
           // While a captain request is active, do not consume assistant/tool
           // identities from the seed before the prompt boundary is observed.
@@ -396,7 +400,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           const key = historyKey(message);
           const optimisticCount = optimisticCountsRef.current.get(key) || 0;
           if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
-          knownKeysRef.current.add(message.id ? `id:${message.id}` : key);
+          knownKeysRef.current.add(messageIdentity(message));
         });
         // Captain history is the normalized local conversation store. Raw
         // terminal scrollback is identity-only and is never pageable prose.
@@ -501,15 +505,22 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     setHistoryLoading(true);
     try {
       const result = await fetchAgentHistory(target, CHAT_HISTORY_LINES, { before: historyBefore });
-      // Server-known history rows must keep the gateway's stable id. Minting a
-      // local id here would break cursor/dedup identity and present a row we
-      // cannot re-address, so a row without one is dropped instead.
-      prependConversationMessages(target, result.messages.filter(message => typeof message.id === 'string' && message.id.length > 0).map(message => ({ id: message.id as string, role: message.role, kind: message.kind, text: message.text, source: 'text' as const, sources: message.sources, thinkingSummary: message.thinkingSummary, runId: message.runId, regenerateSafe: message.regenerateSafe, progress: message.progress || (message.role === 'assistant' ? 'complete' : undefined) })));
+      // An older page is terminal-derived like every other read, so it goes
+      // through the same exclusion: internally addressed records are never
+      // restored as messages of either role. Server-known rows must also keep
+      // the gateway's stable id - minting a local one would break cursor/dedup
+      // identity and present a row we cannot re-address, so a row without one
+      // is dropped instead.
+      prependConversationMessages(target, sanitizeTerminalHistory(result.messages).reduce<ConversationMessage[]>((rows, message) => {
+        if (message.kind === 'control' || typeof message.id !== 'string' || !message.id) return rows;
+        rows.push({ id: message.id, role: message.role, kind: message.kind, text: message.text, source: 'text', sources: message.sources, thinkingSummary: message.thinkingSummary, runId: message.runId, regenerateSafe: message.regenerateSafe, progress: message.progress || (message.role === 'assistant' ? 'complete' : undefined) });
+        return rows;
+      }, []));
       result.messages.forEach(message => {
         const key = historyKey(message);
         const optimisticCount = optimisticCountsRef.current.get(key) || 0;
         if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
-        knownKeysRef.current.add(message.id ? `id:${message.id}` : key);
+        knownKeysRef.current.add(messageIdentity(message));
       });
       setHistoryBefore(result.next_before || null);
     } catch (error) { setSendError(errorText(error, 'Older chat history could not be loaded.')); }
@@ -581,7 +592,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       knownKeysRef.current.add(key);
       optimisticCountsRef.current.set(key, (optimisticCountsRef.current.get(key) || 0) + 1);
     } else {
-      knownKeysRef.current.add(message.id ? `id:${message.id}` : key);
+      knownKeysRef.current.add(messageIdentity(message));
     }
     appendConversationMessage(target, message);
     if (!wasAtBottom) setHasNewMessages(true);
@@ -600,24 +611,32 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // replaying the old terminal backlog.
   function reconcileCaptainHistory(incoming: AgentHistoryMessage[]) {
     if (target !== 'captain') return;
-    const history = sanitizeAgentHistory(incoming);
+    const history = sanitizeTerminalHistory(incoming);
     const local = getConversationMessages(target);
-    const unresolved = local.reduce((result, message, index) => {
+    // Every captain turn, with the primary reply already rendered for it (if
+    // any). An answered turn is still listed: a reply that grew or reflowed in
+    // the snapshot since it was stored must revise that row, never add a second.
+    const turns = local.reduce((result, message, index) => {
       if (message.role !== 'user' || message.audience !== 'captain' || message.delivery === 'failed' || message.delivery === 'cancelled') return result;
       const nextUser = local.slice(index + 1).findIndex(item => item.role === 'user');
       const end = nextUser < 0 ? local.length : index + 1 + nextUser;
-      const hasReply = local.slice(index + 1, end).some(item => item.role === 'assistant' && item.kind !== 'tool');
-      if (!hasReply) result.push({ message, index });
+      const reply = local.slice(index + 1, end).find(item => item.role === 'assistant' && item.kind !== 'tool') || null;
+      result.push({ message, index, reply });
       return result;
-    }, [] as { message: ConversationMessage; index: number }[]);
-    if (!unresolved.length) return;
+    }, [] as { message: ConversationMessage; index: number; reply: ConversationMessage | null }[]);
+    if (!turns.length) return;
 
     type CaptainHistoryEntry = AgentHistoryMessage;
     type CaptainHistorySegment = { prompt: CaptainHistoryEntry; reply: CaptainHistoryEntry | null; toolResults: string[] };
     const segments: CaptainHistorySegment[] = [];
     let segment: CaptainHistorySegment | null = null;
     history.forEach(message => {
-      if (message.role === 'user') {
+      if (message.kind === 'control') {
+        // A user-role control record is an internal turn addressed to someone
+        // else, so it closes the captain's segment. Agent-side control rows are
+        // only harness noise interleaved with a reply and change no boundary.
+        if (message.role === 'user') segment = null;
+      } else if (message.role === 'user') {
         segment = { prompt: message, reply: null, toolResults: [] };
         segments.push(segment);
       } else if (segment && message.kind === 'tool') {
@@ -628,8 +647,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       }
     });
 
-    const matches: Array<{ local: { message: ConversationMessage; index: number }; segment: typeof segments[number] }> = [];
-    const available = [...unresolved];
+    const matches: Array<{ local: typeof turns[number]; segment: typeof segments[number] }> = [];
+    const available = [...turns];
     // Match from the latest occurrence so an old repeated phrase cannot steal
     // the response belonging to the current locally persisted turn.
     [...segments].reverse().forEach(candidate => {
@@ -643,6 +662,23 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       const reply = candidate.reply;
       if (!reply) return;
       const id = reply.id || stableHistoryId(reply);
+      knownKeysRef.current.add(messageIdentity(reply));
+      const rendered = localMessage.reply;
+      if (rendered) {
+        // The segment match is positional proof that this is the same turn's
+        // reply, re-read after the snapshot re-rendered it. That is stronger
+        // evidence than text similarity, so no containment check is needed
+        // here - only the live path, which has no segment, falls back to one.
+        if (rendered.text !== reply.text) {
+          updateConversationMessageState(target, rendered.id, {
+            text: reply.text,
+            ...(reply.sources ? { sources: reply.sources } : {}),
+            ...(reply.thinkingSummary ? { thinkingSummary: reply.thinkingSummary } : {}),
+            ...(reply.progress ? { progress: reply.progress } : {}),
+          });
+        }
+        return;
+      }
       insertConversationMessageAfter(target, localMessage.message.id, {
         id, role: 'assistant', kind: 'conversation', text: reply.text, sentAt: undefined, source: 'text', audience: 'primary', progress: reply.progress || 'complete', sources: reply.sources, thinkingSummary: reply.thinkingSummary, runId: reply.runId, regenerateSafe: reply.regenerateSafe,
         toolResults: candidate.toolResults.length ? candidate.toolResults : undefined,
@@ -653,12 +689,43 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       }
     });
   }
+  // Herdr ids hash terminal content (see gateway/app/herdr_client.py), and that
+  // content mutates while a reply renders, reflows, or scrolls its head out of
+  // the snapshot. Update the row it already produced instead of adding a second
+  // near-identical one; a genuinely new reply has no containment relation and
+  // still appends. Returns true when the incoming row was absorbed.
+  function reviseRenderedReply(message: AgentHistoryMessage): boolean {
+    if (message.kind !== 'conversation') return false;
+    const local = getConversationMessages(target);
+    const targetId = revisionTargetId(local, message);
+    if (!targetId) return false;
+    // Idempotent: an unchanged snapshot must not re-emit or re-persist a row.
+    if (local.find(item => item.id === targetId)?.text === message.text) return true;
+    updateConversationMessageState(target, targetId, {
+      text: message.text,
+      ...(message.sources ? { sources: message.sources } : {}),
+      ...(message.thinkingSummary ? { thinkingSummary: message.thinkingSummary } : {}),
+      ...(message.progress ? { progress: message.progress } : {}),
+    });
+    return true;
+  }
   const appendHistoryMessages = (incoming: AgentHistoryMessage[]): boolean => {
     let appendedReply = false;
-    sanitizeAgentHistory(incoming).forEach(message => {
+    const history = sanitizeTerminalHistory(incoming);
+    const revisable = terminalRevisionCandidate(history);
+    history.forEach(message => {
       const key = historyKey(message);
-      const identity = message.id ? `id:${message.id}` : key;
+      const identity = messageIdentity(message);
       const active = activePromptRef.current;
+
+      if (message.kind === 'control') {
+        // Never a message of either role. A user-role control record is an
+        // internal turn addressed to someone else, so it closes the response
+        // segment the captain's prompt opened; agent-side control rows are
+        // harness noise interleaved with the reply and close nothing.
+        if (active && message.role === 'user') active.observed = false;
+        return;
+      }
 
       if (target === 'captain') {
         if (message.role === 'user') {
@@ -673,13 +740,21 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           knownKeysRef.current.add(identity);
           return;
         }
+        // The revision must be tried before the identity short-circuit: a
+        // gateway that keeps one id for a row still rendering would otherwise
+        // pin the first partial read forever.
+        if (message === revisable && reviseRenderedReply(message)) {
+          knownKeysRef.current.add(identity);
+          return;
+        }
         if (knownKeysRef.current.has(identity)) return;
         // If a socket delivers a response before its prompt row, leave it
         // unconsumed so the authoritative full-history poll can retry safely.
-        if (!active || !active.observed) {
-          if (!active) knownKeysRef.current.add(identity);
+        if (!active) {
+          knownKeysRef.current.add(identity);
           return;
         }
+        if (!active.observed) return;
         knownKeysRef.current.add(identity);
         if (message.kind === 'tool') {
           const preview = toolCallPreview(message.text).slice(0, 48);
@@ -695,6 +770,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
 
       // Explicit worker conversations retain their existing navigation path,
       // while receiving the same typed artifact filtering and stable dedupe.
+      if (message === revisable && reviseRenderedReply(message)) {
+        knownKeysRef.current.add(identity);
+        return;
+      }
       if (knownKeysRef.current.has(identity)) return;
       const optimisticCount = optimisticCountsRef.current.get(key) || 0;
       if (message.id && optimisticCount > 0) {

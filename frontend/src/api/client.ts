@@ -316,7 +316,8 @@ export interface AgentHistorySource {
 export interface AgentHistoryMessage {
   id?: string;
   role: 'user' | 'assistant';
-  kind: 'conversation' | 'tool';
+  /** 'control' marks an internally addressed record; see ChatHistory.ts. */
+  kind: 'conversation' | 'tool' | 'control';
   text: string;
   sources?: AgentHistorySource[];
   thinkingSummary?: { provider: string; text: string };
