@@ -184,23 +184,34 @@ function WorkspaceDataChrome({ activeSection, isMobile, railCollapsed, mobileRai
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [dataReady, setDataReady] = useState(false);
   const [panelDataError, setPanelDataError] = useState<string | null>(null);
+  // A count is a claim about live data. When a source fails we must not reuse
+  // the previous or empty value as if it were current.
+  const [unavailableSources, setUnavailableSources] = useState<Record<WorkspaceSection, boolean>>({ situation: false, fleet: false, attention: false, 'pull-requests': false });
   const loadWorkspaceData = useCallback(async () => {
     const [agentResult, attentionResult, prResult, healthResult] = await Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchGitHubPRs(1, false), fetchHealth()]);
     const errors: string[] = [];
-    if (agentResult.status === 'fulfilled' && Array.isArray(agentResult.value)) setAgents(agentResult.value); else errors.push('agent fleet');
-    if (attentionResult.status === 'fulfilled' && Array.isArray(attentionResult.value)) setAttention(attentionResult.value); else errors.push('attention queue');
-    if (prResult.status === 'fulfilled' && Array.isArray(prResult.value.items)) setPrs(prResult.value.items.filter(pr => pr.requires_attention)); else errors.push('pull requests');
-    if (healthResult.status === 'fulfilled') setHealth(healthResult.value); else errors.push('telemetry');
+    const agentsOk = agentResult.status === 'fulfilled' && Array.isArray(agentResult.value);
+    const attentionOk = attentionResult.status === 'fulfilled' && Array.isArray(attentionResult.value);
+    const prsOk = prResult.status === 'fulfilled' && Array.isArray(prResult.value.items);
+    const healthOk = healthResult.status === 'fulfilled';
+    if (agentsOk) setAgents((agentResult as PromiseFulfilledResult<AgentInfo[]>).value); else errors.push('agent fleet');
+    if (attentionOk) setAttention((attentionResult as PromiseFulfilledResult<UnifiedAttentionRecord[]>).value); else errors.push('attention queue');
+    if (prsOk) setPrs((prResult as PromiseFulfilledResult<{ items: GitHubPR[] }>).value.items.filter(pr => pr.requires_attention)); else errors.push('pull requests');
+    if (healthOk) setHealth((healthResult as PromiseFulfilledResult<HealthInfo>).value); else errors.push('telemetry');
+    setUnavailableSources({ situation: !healthOk, fleet: !agentsOk, attention: !attentionOk, 'pull-requests': !prsOk });
     setPanelDataError(errors.length ? `Live ${errors.join(', ')} unavailable.` : null);
     setDataReady(true);
   }, []);
   useEffect(() => { loadWorkspaceData(); const timer = setInterval(loadWorkspaceData, 10000); return () => clearInterval(timer); }, [loadWorkspaceData]);
-  const counts = useMemo(() => ({
-    situation: !dataReady ? '…' : health?.herdr_socket_connected ? '1' : '0',
-    fleet: !dataReady ? '…' : String(agents.length),
-    attention: !dataReady ? '…' : String(attention.filter(item => item.requires_action !== false).length),
-    'pull-requests': !dataReady ? '…' : String(prs.length)
-  }), [agents.length, attention, dataReady, health, prs.length]);
+  const counts = useMemo(() => {
+    const value = (section: WorkspaceSection, compute: () => string) => !dataReady ? '…' : unavailableSources[section] ? '—' : compute();
+    return {
+      situation: value('situation', () => health?.herdr_socket_connected ? '1' : '0'),
+      fleet: value('fleet', () => String(agents.length)),
+      attention: value('attention', () => String(attention.filter(item => item.requires_action !== false).length)),
+      'pull-requests': value('pull-requests', () => String(prs.length))
+    };
+  }, [agents.length, attention, dataReady, health, prs.length, unavailableSources]);
   return <>
     {!isMobile ? <WorkspaceRail collapsed={railCollapsed} activeSection={activeSection} counts={counts} onOpen={onOpenSection} /> : null}
     {activeSection ? <WorkspacePanel section={activeSection} counts={counts} agents={agents} attention={attention} prs={prs} health={health} dataReady={dataReady} error={panelDataError} selectedAgentId={selectedAgentId} selectedAttentionId={selectedAttentionId} selectedPrNumber={selectedPrNumber} onClose={onClosePanel} onOpenAgent={onOpenAgent} onOpenAttention={onOpenAttention} onOpenPr={onOpenPr} /> : null}
@@ -262,13 +273,19 @@ function WorkspacePanel({ section, counts, agents, attention, prs, health, dataR
   onOpenPr: (number: number) => void;
 }) {
   const [selectedPr, setSelectedPr] = useState<GitHubPR | null>(null);
+  const [selectedPrError, setSelectedPrError] = useState<string | null>(null);
   const [prLoading, setPrLoading] = useState(false);
   useEffect(() => {
-    if (!selectedPrNumber) { setSelectedPr(null); return; }
+    if (!selectedPrNumber) { setSelectedPr(null); setSelectedPrError(null); return; }
     const known = prs.find(pr => pr.number === selectedPrNumber);
-    if (known) { setSelectedPr(known); return; }
-    setPrLoading(true);
-    fetchGitHubPR(selectedPrNumber).then(setSelectedPr).catch(() => setSelectedPr(null)).finally(() => setPrLoading(false));
+    if (known) { setSelectedPr(known); setSelectedPrError(null); return; }
+    setPrLoading(true); setSelectedPrError(null);
+    // The gateway's own message is shown: a swallowed failure is
+    // indistinguishable from a pull request that does not exist.
+    fetchGitHubPR(selectedPrNumber)
+      .then(pr => { setSelectedPr(pr); setSelectedPrError(null); })
+      .catch(error => { setSelectedPr(null); setSelectedPrError(error instanceof Error && error.message ? error.message : `Pull request #${selectedPrNumber} could not be loaded.`); })
+      .finally(() => setPrLoading(false));
   }, [prs, selectedPrNumber]);
 
   return (
@@ -289,21 +306,22 @@ function WorkspacePanel({ section, counts, agents, attention, prs, health, dataR
       {section === 'attention' ? <AttentionPanel items={attention} selectedId={selectedAttentionId} onOpen={onOpenAttention} /> : null}
       {section === 'pull-requests' ? <PullRequestPanel prs={prs} selectedPr={selectedPr} loading={prLoading} onOpen={onOpenPr} /> : null}
       {section === 'pull-requests' && selectedPr ? <PrDetail pr={selectedPr} /> : null}
-      {section === 'pull-requests' && selectedPrNumber && !selectedPr && !prLoading ? <Text style={styles.panelError}>Pull request #{selectedPrNumber} was not returned by the live gateway.</Text> : null}
+      {section === 'pull-requests' && selectedPrNumber && !selectedPr && !prLoading ? <Text testID="panel-pr-error" accessibilityRole="alert" style={styles.panelError}>{selectedPrError || `Pull request #${selectedPrNumber} was not returned by the live gateway.`}</Text> : null}
       <Text style={styles.panelHint}>Chat remains mounted underneath this window. Close with ×, Escape, or Back.</Text>
     </View>
   );
 }
 
 function SituationPanel({ health }: { health: HealthInfo | null }) {
-  const status = health?.status === 'healthy' ? (health.herdr_socket_connected ? 'OPERATIONAL' : 'DEGRADED') : health?.status?.toUpperCase() || 'UNAVAILABLE';
+  const status = !health ? 'UNAVAILABLE' : health.status === 'healthy' && health.herdr_socket_connected ? 'OPERATIONAL' : health.status === 'healthy' || health.status === 'degraded' ? 'DEGRADED' : health.status.toUpperCase();
   const color = status === 'OPERATIONAL' ? '#34D399' : status === 'DEGRADED' ? '#F59E0B' : '#FCA5A5';
   return <ScrollView contentContainerStyle={styles.panelScroll}>
     <StatusRing statusText={status} statusColor={color} subText={health?.herdr_socket_connected ? 'Gateway and Herdr connected' : 'Live telemetry is unavailable'} />
     <GlassSurface variant="card" style={styles.panelCard}>
       <Text style={styles.cardLabel}>LIVE TELEMETRY</Text>
       <Text style={styles.cardValue}>{health?.herdr_socket_connected ? 'Herdr socket connected' : 'Herdr socket unavailable'}</Text>
-      <Text style={styles.muted}>{health?.service || 'Gateway service'}{health?.herdr_version ? ` · Herdr ${health.herdr_version}` : ''}</Text>
+      <Text style={styles.muted}>{health?.service || 'Gateway service'}{health?.herdr_version ? ` · Herdr ${health.herdr_version}` : ' · Herdr version not reported'}</Text>
+      {health?.degraded_sources?.length ? <Text testID="situation-degraded" style={styles.muted}>Unavailable sources: {health.degraded_sources.join(', ')}</Text> : null}
     </GlassSurface>
   </ScrollView>;
 }

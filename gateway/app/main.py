@@ -9,7 +9,7 @@ import asyncio
 import time
 import re
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.auth import Principal, issue_session, revoke_session, require_scope, verify_token
@@ -262,11 +262,14 @@ oauth_transaction_store = OAuthTransactionStore()
 async def get_runtime(principal: Principal = Depends(require_scope('read'))):
     snapshot = await herdr_client.get_snapshot()
     fm_snapshot = await fm_client.get_snapshot()
+    # A missing snapshot means Herdr is unreachable. Reporting a placeholder
+    # version/protocol here would be an invented metric, so report null instead.
+    herdr_connected = bool(snapshot.get('version'))
     return {
         'herdr': {
-            'status': 'connected' if snapshot.get('version') else 'disconnected',
-            'version': snapshot.get('version', '0.8.2'),
-            'protocol': snapshot.get('protocol', 20),
+            'status': 'connected' if herdr_connected else 'disconnected',
+            'version': snapshot.get('version') if herdr_connected else None,
+            'protocol': snapshot.get('protocol') if herdr_connected else None,
             'agents_count': len(snapshot.get('agents', []))
         },
         'firstmate': {
@@ -280,13 +283,21 @@ async def get_runtime(principal: Principal = Depends(require_scope('read'))):
 async def get_health(principal: Principal = Depends(require_scope('read'))):
     snapshot = await herdr_client.get_snapshot()
     fm_snapshot = await fm_client.get_snapshot()
+    herdr_connected = bool(snapshot.get('version'))
+    firstmate_available = bool(fm_snapshot.get('fm_home'))
+    # The gateway process answering is not the same claim as the product being
+    # healthy. Degrade explicitly when a live source is missing, and never
+    # substitute a placeholder Herdr version for one we did not observe.
+    degraded = [name for name, ok in (('herdr', herdr_connected), ('firstmate', firstmate_available)) if not ok]
     return {
-        'status': 'healthy',
+        'status': 'degraded' if degraded else 'healthy',
+        'degraded_sources': degraded,
         'service': 'magistrate-gateway',
         'version': '1.0.0',
-        'herdr_version': snapshot.get('version', '0.8.2'),
-        'herdr_socket_connected': bool(snapshot.get('version')),
+        'herdr_version': snapshot.get('version') if herdr_connected else None,
+        'herdr_socket_connected': herdr_connected,
         'firstmate_home': fm_snapshot.get('fm_home'),
+        'firstmate_available': firstmate_available,
         'firstmate_tasks_count': len(fm_snapshot.get('tasks', []))
     }
 
@@ -322,24 +333,58 @@ async def upload_account_avatar(
     return {'status': 'success', 'avatar_url': public_url, 'profile': updated}
 
 # OAUTH & CONNECTED ACCOUNTS ENDPOINTS
+def _provider_connection_state(adapter, account: dict) -> Dict[str, Any]:
+    """Resolve a provider row that can never claim an unbacked connection.
+
+    'connected' requires all three of: operator OAuth configuration, a stored
+    credential, and an unexpired credential. Any missing piece downgrades to the
+    specific honest state, so a stale database row, a revoked deployment
+    credential, or a deferred provider can never render as connected.
+    """
+    available = bool(adapter.is_configured())
+    deferred = bool(adapter.is_deferred())
+    stored_status = account.get('status') or 'disconnected'
+    username = account.get('provider_username') or ''
+    expires_at = account.get('credential_expires_at')
+    expired = isinstance(expires_at, int) and expires_at <= int(time.time())
+
+    if not available:
+        reason = adapter.unavailable_reason()
+        # The identity is withheld too: showing a username beside an
+        # unavailable provider reads as a connection that does not exist.
+        return {'status': 'unavailable', 'username': '', 'available': False,
+                'deferred': deferred, 'unavailable_reason': reason}
+    if stored_status != 'connected':
+        return {'status': 'disconnected', 'username': '', 'available': True,
+                'deferred': deferred, 'unavailable_reason': None}
+    if not account.get('has_credential'):
+        return {'status': 'disconnected', 'username': '', 'available': True, 'deferred': deferred,
+                'unavailable_reason': 'The stored credential for this account is missing. Reconnect to restore access.'}
+    if expired:
+        return {'status': 'expired', 'username': username, 'available': True, 'deferred': deferred,
+                'unavailable_reason': 'The stored credential has expired. Reconnect to restore access.'}
+    return {'status': 'connected', 'username': username, 'available': True,
+            'deferred': deferred, 'unavailable_reason': None}
+
+
 @app.get('/api/v1/auth/providers')
 async def list_auth_providers(principal: Principal = Depends(require_scope('providers'))):
     db_accounts = {a['provider']: a for a in get_connected_accounts(principal.user_id)}
     result = []
     for p_name, adapter in providers.items():
-        acc = db_accounts.get(p_name, {})
-        # Listing integrations must not create a state-less OAuth URL. The
-        # authenticated connect route creates the real, one-time transaction.
-        auth_url = None
-        available = adapter.is_configured()
+        state = _provider_connection_state(adapter, db_accounts.get(p_name, {}))
         result.append({
             'provider': p_name,
-            'status': acc.get('status', 'disconnected'),
-            'username': acc.get('provider_username') or '',
+            'status': state['status'],
+            'username': state['username'],
             'capabilities': adapter.capabilities(),
-            'available': available,
-            'auth_url': auth_url,
-            'configuration': 'available' if available else 'unavailable'
+            'available': state['available'],
+            'deferred': state['deferred'],
+            'unavailable_reason': state['unavailable_reason'],
+            # Listing integrations must not create a state-less OAuth URL. The
+            # authenticated connect route creates the real, one-time transaction.
+            'auth_url': None,
+            'configuration': 'available' if state['available'] else 'unavailable'
         })
     return result
 
@@ -392,8 +437,12 @@ async def oauth_callback(provider: str, code: str = Query(None), state: str = Qu
 
         profile = await adapter.get_user_profile(access_token)
         username = profile.get('username') or profile.get('login') or profile.get('email')
-        provider_user_id = profile.get('id') or profile.get('account_id')
-        if not isinstance(username, str) or not username or not isinstance(provider_user_id, str) or not provider_user_id:
+        raw_identity = profile.get('id') or profile.get('account_id')
+        # GitHub and several other providers issue a numeric account id. Requiring
+        # a string here previously rejected every real GitHub identity, so the
+        # only truthful outcome was a failure; accept int and normalize instead.
+        provider_user_id = str(raw_identity) if isinstance(raw_identity, (str, int)) and not isinstance(raw_identity, bool) else ''
+        if not isinstance(username, str) or not username or not provider_user_id:
             raise ValueError('Provider profile did not return an authenticated identity.')
 
         upsert_connected_account(
@@ -662,7 +711,11 @@ async def upload_chat_files(
             associate_uploads(principal.user_id, message_id, [item['upload_id'] for item in uploaded])
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {'uploads': uploaded}
+    # The client must not infer processing success from a 200 alone. Report the
+    # state the server actually reached: bytes stored and validated, and whether
+    # the upload is already associated with a chat message.
+    attached = bool(message_id)
+    return {'uploads': [{**item, 'attached': attached} for item in uploaded]}
 
 
 @app.get('/api/v1/uploads/{upload_id}')

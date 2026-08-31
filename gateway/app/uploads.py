@@ -171,7 +171,11 @@ def save_upload(user_id: str, filename: str, media_type: Optional[str], content:
     except Exception:
         destination.unlink(missing_ok=True)
         raise
-    return {'upload_id': upload_id, 'filename': safe_name, 'media_type': kind, 'size': len(content)}
+    # 'stored' is the only processing state this module can honestly claim: the
+    # bytes are persisted and the declared type was validated against content.
+    # No transcoding, extraction, or provider ingestion has happened.
+    return {'upload_id': upload_id, 'filename': safe_name, 'media_type': kind,
+            'size': len(content), 'status': 'stored'}
 
 
 def associate_uploads(user_id: str, message_id: str, upload_ids: list[str]) -> None:

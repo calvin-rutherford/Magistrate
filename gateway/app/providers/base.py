@@ -19,6 +19,15 @@ class ProviderAdapter(ABC):
     def unavailable_reason(self) -> str:
         return 'OAuth is not configured for this provider.'
 
+    def is_deferred(self) -> bool:
+        """Whether this provider is intentionally out of scope for this release.
+
+        A deferred provider can never be connected: it has no credential path at
+        all, so the UI must show it as visibly unavailable rather than offering a
+        connect action that cannot succeed.
+        """
+        return False
+
     @abstractmethod
     def default_scopes(self) -> List[str]:
         pass

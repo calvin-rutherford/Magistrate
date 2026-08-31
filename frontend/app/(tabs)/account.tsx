@@ -14,6 +14,20 @@ import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, Voi
 import { loadOperatingPermissionMode, saveOperatingPermissionMode, OPERATING_PERMISSION_MODE_OPTIONS, OperatingPermissionMode } from '../../src/services/OperatingPermissionModes';
 import { notificationManager, NativePushStatus } from '../../src/services/NotificationManager';
 
+const errorText = (error: unknown, fallback: string) => error instanceof Error && error.message ? error.message : fallback;
+
+/**
+ * The button copy is derived only from the decoded provider state, so a
+ * CONNECTED label cannot appear without a gateway-confirmed live credential.
+ */
+function providerActionLabel(provider: AuthProviderInfo): string {
+  if (provider.status === 'connected') return 'CONNECTED ✓';
+  if (provider.status === 'expired') return 'RECONNECT';
+  if (provider.deferred) return 'DEFERRED';
+  if (!provider.available) return 'UNAVAILABLE';
+  return 'CONNECT +';
+}
+
 type AccountSectionKey = 'notifications' | 'voice' | 'connections' | 'appearance';
 function AccountSectionHeader({ id, title, expanded, onPress }: { id: AccountSectionKey; title: string; expanded: boolean; onPress: () => void }) {
   return <TouchableOpacity testID={`account-section-${id}`} accessibilityRole="button" accessibilityLabel={`${title} settings`} accessibilityState={{ expanded }} {...({ 'aria-expanded': expanded } as any)} onPress={onPress} style={styles.sectionHeader} activeOpacity={0.75}>
@@ -25,8 +39,12 @@ export default function AccountScreen() {
   const router = useRouter();
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
+  const [providersError, setProvidersError] = useState<string | null>(null);
+  const [providersLoaded, setProvidersLoaded] = useState<boolean>(false);
+  const [connectNotice, setConnectNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState<boolean>(false);
   const [activeThemeKey, setActiveThemeKey] = useState<WeatherSceneKey>('dusk-mountain');
   const [customBackgroundUri, setCustomBackgroundUri] = useState<string | undefined>();
@@ -44,26 +62,33 @@ export default function AccountScreen() {
   const toggleSection = (section: AccountSectionKey) => setExpandedSection(current => current === section ? null : section);
 
   const loadAccountData = async () => {
-    try {
-      const [prof, provs] = await Promise.all([
-        fetchUserProfile().catch(() => null),
-        fetchAuthProviders().catch(() => [])
-      ]);
-      if (prof) {
-        if (prof.avatar_url && prof.avatar_url.startsWith('/uploads')) {
-          prof.avatar_url = GATEWAY_URL.replace(/\/api\/v1$/, '') + prof.avatar_url;
-        }
-        // The locally persisted appearance is authoritative. The profile
-        // value is legacy metadata and must not overwrite an explicit device
-        // choice during hydration.
-        setProfile(prof);
+    // Each source is settled independently and its failure is shown, not
+    // swallowed: an unreachable provider list must read as unavailable rather
+    // than as an account with no integrations.
+    const [profileResult, providerResult] = await Promise.allSettled([fetchUserProfile(), fetchAuthProviders()]);
+    if (profileResult.status === 'fulfilled') {
+      const prof = profileResult.value;
+      if (prof.avatar_url && prof.avatar_url.startsWith('/uploads')) {
+        prof.avatar_url = GATEWAY_URL.replace(/\/api\/v1$/, '') + prof.avatar_url;
       }
-      if (provs && provs.length > 0) {
-        setProviders(provs);
-      }
-    } catch (e) {
-      console.error('Error loading account data:', e);
+      // The locally persisted appearance is authoritative. The profile
+      // value is legacy metadata and must not overwrite an explicit device
+      // choice during hydration.
+      setProfile(prof);
+      setProfileError(null);
+    } else {
+      setProfileError(errorText(profileResult.reason, 'Account profile could not be loaded.'));
     }
+    if (providerResult.status === 'fulfilled') {
+      setProviders(providerResult.value);
+      setProvidersError(null);
+    } else {
+      // Never keep showing a previous list beside a failed refresh: a stale
+      // CONNECTED row is exactly the fake state this screen must not render.
+      setProviders([]);
+      setProvidersError(errorText(providerResult.reason, 'Connected accounts could not be loaded.'));
+    }
+    setProvidersLoaded(true);
   };
 
   useEffect(() => {
@@ -118,8 +143,7 @@ export default function AccountScreen() {
           setProfile(prev => prev ? { ...prev, avatar_url: fullUrl } : prev);
         }
       } catch (e) {
-        console.error('Avatar upload error:', e);
-        Alert.alert('Upload Error', 'Failed to upload profile photo to server.');
+        Alert.alert('Upload Error', errorText(e, 'Failed to upload profile photo to server.'));
       } finally {
         setUploading(false);
       }
@@ -157,27 +181,37 @@ export default function AccountScreen() {
     try {
       await saveChatBackground(key);
       await updateUserProfile({ active_theme: key });
-    } catch {
-      console.error('Failed to save background theme');
+    } catch (e) {
+      Alert.alert('Appearance not saved', errorText(e, 'The background choice could not be saved to the gateway. It remains active on this device only.'));
     }
   };
 
   // REAL OAUTH BROWSER AUTHENTICATION FLOW WITH AUTO DISMISSAL
-  const handleRealOAuthConnect = async (providerInfo: any) => {
+  const handleRealOAuthConnect = async (providerInfo: AuthProviderInfo) => {
+    if (!providerInfo.available) {
+      setConnectNotice(providerInfo.unavailable_reason || `${providerInfo.provider.toUpperCase()} is unavailable on this gateway.`);
+      return;
+    }
     const returnUrl = Linking.createURL('/account');
+    setConnectNotice(null);
 
     try {
       const connect = await connectAuthProvider(providerInfo.provider, returnUrl);
       const result = await WebBrowser.openAuthSessionAsync(connect.auth_url, returnUrl);
-      // The browser automatically dismisses when the returnUrl is hit.
+      // The browser dismisses itself when the returnUrl is hit. The provider
+      // state is then re-read from the gateway: a completed browser round trip
+      // is not by itself evidence that a credential was stored.
       if (result.type === 'success') {
-        loadAccountData();
+        const callbackError = /[?&]error=([^&]+)/.exec(result.url || '')?.[1];
+        if (callbackError) setConnectNotice(`${providerInfo.provider.toUpperCase()} did not authorize this device (${decodeURIComponent(callbackError)}).`);
+        await loadAccountData();
       } else {
         WebBrowser.dismissBrowser();
+        setConnectNotice(`${providerInfo.provider.toUpperCase()} authorization was not completed.`);
       }
     } catch (e) {
-      console.error('OAuth browser error:', e);
       WebBrowser.dismissBrowser();
+      setConnectNotice(errorText(e, `${providerInfo.provider.toUpperCase()} could not be connected.`));
     }
   };
 
@@ -230,8 +264,8 @@ export default function AccountScreen() {
             </TouchableOpacity>
 
             <View style={styles.profileInfo}>
-              <Text style={styles.profileName}>{profile?.name || 'Account profile unavailable'}</Text>
-              <Text style={styles.profileEmail}>{profile?.email || 'Connect an account to see profile details.'}</Text>
+              <Text testID="account-profile-name" style={styles.profileName}>{profile?.name || (profileError ? 'Account profile unavailable' : 'No profile name set')}</Text>
+              <Text testID="account-profile-detail" style={styles.profileEmail}>{profileError || profile?.email || 'No profile email set.'}</Text>
               <TouchableOpacity onPress={handlePickAvatar} style={styles.uploadBtn}>
                 <Text style={styles.uploadBtnText}>CHANGE PHOTO ↗</Text>
               </TouchableOpacity>
@@ -325,24 +359,32 @@ export default function AccountScreen() {
         <AccountSectionHeader id="connections" title="CONNECTED OAUTH PROVIDERS" expanded={expandedSection === 'connections'} onPress={() => toggleSection('connections')} />
 
         {expandedSection === 'connections' ? <GlassSurface variant="card" style={styles.socialCard}>
-          {providers.length === 0 ? (
-          <Text style={{ fontFamily: 'monospace', color: 'rgba(255,255,255,0.5)', fontSize: 11, textAlign: 'center', marginVertical: 10 }}>No integrations connected.</Text>
+          {providersError ? <Text testID="account-providers-error" accessibilityRole="alert" style={styles.providerError}>{providersError}</Text> : null}
+          {connectNotice ? <Text testID="account-connect-notice" accessibilityRole="alert" style={styles.providerError}>{connectNotice}</Text> : null}
+          {!providersLoaded ? (
+            <Text testID="account-providers-loading" style={styles.providerPlaceholder}>Reading connected accounts…</Text>
+          ) : providersError ? null : providers.length === 0 ? (
+            <Text testID="account-providers-empty" style={styles.providerPlaceholder}>The gateway reported no integrations for this account.</Text>
         ) : providers.map(s => (
-            <View key={s.provider} style={styles.socialRow}>
+            <View key={s.provider} testID={`account-provider-${s.provider}`} style={styles.socialRow}>
               <View style={styles.providerLeft}>
                 <Text style={styles.socialName}>{s.provider.toUpperCase()}</Text>
                 <Text style={styles.socialHandle}>
-                  {s.username ? s.username : (s.capabilities ? s.capabilities.join(' • ') : 'No capabilities')}
+                  {s.status === 'connected' && s.username ? s.username : (s.capabilities.length ? s.capabilities.join(' • ') : 'No capabilities')}
                 </Text>
+                {/* The reason a provider is not connected is always stated. */}
+                {s.unavailable_reason ? <Text testID={`account-provider-reason-${s.provider}`} style={styles.providerReason}>{s.unavailable_reason}</Text> : null}
               </View>
               <TouchableOpacity
+                testID={`account-provider-action-${s.provider}`}
+                accessibilityRole="button"
+                accessibilityLabel={`${s.provider} ${providerActionLabel(s)}`}
+                accessibilityState={{ disabled: !s.available }}
                 disabled={!s.available}
                 style={[styles.socialToggleBtn, s.status === 'connected' ? styles.socialBtnConnected : undefined, !s.available ? { opacity: 0.55 } : undefined]}
-                onPress={() => handleRealOAuthConnect(s)}
+                onPress={() => void handleRealOAuthConnect(s)}
               >
-                <Text style={styles.socialBtnText}>
-                  {s.status === 'connected' ? 'CONNECTED ✓' : s.available ? 'CONNECT +' : 'UNAVAILABLE'}
-                </Text>
+                <Text style={styles.socialBtnText}>{providerActionLabel(s)}</Text>
               </TouchableOpacity>
             </View>
           ))}
@@ -416,6 +458,9 @@ const styles = StyleSheet.create({
   providerLeft: { flex: 1, paddingRight: 10 },
   socialName: { fontSize: 13.5, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 0.5 },
   socialHandle: { fontSize: 11, color: 'rgba(255, 255, 255, 0.5)', marginTop: 2 },
+  providerReason: { fontSize: 10, lineHeight: 14, color: 'rgba(255, 255, 255, 0.62)', marginTop: 4 },
+  providerError: { fontFamily: 'monospace', fontSize: 11, lineHeight: 16, color: '#FFB4B2', marginBottom: 8 },
+  providerPlaceholder: { fontFamily: 'monospace', color: 'rgba(255,255,255,0.5)', fontSize: 11, textAlign: 'center', marginVertical: 10 },
   socialToggleBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   socialBtnConnected: { backgroundColor: 'rgba(255, 255, 255, 0.15)', borderColor: '#FFFFFF' },
   socialBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
