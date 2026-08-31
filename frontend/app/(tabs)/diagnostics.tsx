@@ -5,7 +5,7 @@ import { GlassSurface } from '../../src/components/GlassSurface';
 import { StatusRing } from '../../src/components/StatusRing';
 import { acknowledgeNotificationEvents, fetchAgents, fetchGitHubPRs, fetchHealth, fetchUnifiedAttention, AgentInfo, GitHubPR, HealthInfo, UnifiedAttentionRecord } from '../../src/api/client';
 import { useRouter } from 'expo-router';
-import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
+import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { openExternalUrl } from '../../src/utils/externalLinks';
 
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
@@ -92,18 +92,20 @@ export default function HomeScreen() {
       key={agent.id}
       testID={`agent-card-${agent.id}`}
       accessibilityRole="button"
-      accessibilityLabel={`Open chat with ${agent.name || agent.id}`}
+      accessibilityLabel={`Open chat with ${agentDisplayName(agent)}`}
       onPress={() => router.push({ pathname: '/chat', params: { agentId: agent.id } } as any)}
       activeOpacity={0.85}
     >
       <GlassSurface variant="card" style={styles.card}>
         <View style={styles.cardHeader}>
-          <Text testID={`agent-name-${agent.id}`} style={styles.agentName}>{agent.name || agent.id}</Text>
+          <Text testID={`agent-name-${agent.id}`} style={styles.agentName}>{agentDisplayName(agent)}</Text>
           <View style={styles.statusBadge}>
           <Text style={styles.statusBadgeText}>{displayAgentStatus(displayStatus)}</Text>
           </View>
         </View>
         {agent.harness ? <Text style={styles.harnessText}>Harness: {agent.harness}</Text> : null}
+        {agent.pane_id ? <Text selectable style={styles.harnessText}>Pane ID: {agent.pane_id}</Text> : null}
+        {agent.tab_id ? <Text selectable style={styles.harnessText}>Tab ID: {agent.tab_id}</Text> : null}
         <Text style={styles.agentLinkText}>OPEN AGENT CHAT →</Text>
       </GlassSurface>
     </TouchableOpacity>

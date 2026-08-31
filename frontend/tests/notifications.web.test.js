@@ -126,6 +126,7 @@ test('selecting an Attention item opens its detailed view and acknowledges only 
   await page.click('[data-testid="attention-item-question-1"]');
   await page.waitForSelector('[data-testid="attention-detail-question-1"]');
   assert.match(await page.$eval('[data-testid="attention-detail-question-1"]', node => node.textContent), /Pick|Choose the rollout window|Deployment choice/);
+  assert.equal(await page.$('[data-testid="floating-bottom-controls"]'), null, 'detailed attention views must not have floating chat, voice, or gesture controls');
   await page.waitForFunction(() => window.__notificationCalls.some(call => call.url.includes('/events/ack')));
   await page.close();
 });

@@ -41,7 +41,7 @@ export default function PullRequestDetailScreen() {
   };
 
   return (
-    <EnvironmentBackground>
+    <EnvironmentBackground hideBottomControls>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}><Text style={styles.headerButton}>← BACK</Text></TouchableOpacity>
         <Text style={styles.headerTitle}>PULL REQUEST</Text>

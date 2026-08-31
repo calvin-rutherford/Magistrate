@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, StyleSheet } from 'react-native';
 import { fetchAgents, AgentInfo } from '../../src/api/client';
+import { agentDisplayName } from '../../src/services/AgentStatus';
 
 export default function FleetScreen() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -29,9 +30,8 @@ export default function FleetScreen() {
         ) : (
           agents.map((ag) => (
             <View key={ag.id} style={styles.card}>
-              <Text style={styles.cardTitle}>{ag.name}</Text>
+              <Text style={styles.cardTitle}>{agentDisplayName(ag)}</Text>
               <Text style={styles.cardDetail}>Harness: {ag.harness || 'Unavailable'} | Status: {String(ag.status || 'unknown').toUpperCase()}</Text>
-              <Text style={styles.cardDetail}>Pane ID: {ag.pane_id || ag.id}</Text>
             </View>
           ))
         )}

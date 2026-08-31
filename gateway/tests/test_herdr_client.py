@@ -61,7 +61,7 @@ async def test_list_agents_preserves_live_identity_without_demo_defaults():
         },
         {
             'id': 'w1:p8',
-            'name': 'w1:p8',
+            'name': None,
             'harness': None,
             'status': 'unknown',
             'pane_id': 'w1:p8',
@@ -69,6 +69,21 @@ async def test_list_agents_preserves_live_identity_without_demo_defaults():
             'workspace_id': None,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_agents_prefers_real_name_over_generic_harness_title_and_never_exposes_ids():
+    client = HerdrClient()
+    client.get_snapshot = AsyncMock(return_value={
+        'agents': [
+            {'pane_id': 'w1:p1', 'name': 'Build worker', 'terminal_title_stripped': 'Magistrate', 'tab_id': 'w1:t1'},
+            {'pane_id': 'w1:p2', 'name': 'firstmate', 'terminal_title_stripped': 'π - firstmate', 'tab_id': 'w1:t2'},
+        ]
+    })
+    agents = await client.list_agents()
+    assert agents[0]['name'] == 'Build worker'
+    assert agents[1]['name'] is None
+    assert agents[1]['name'] != agents[1]['pane_id']
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ export const BottomControls: React.FC = () => {
   const pathname = usePathname();
 
   return (
-    <View style={styles.fixedContainer} pointerEvents="box-none">
+    <View testID="floating-bottom-controls" style={styles.fixedContainer} pointerEvents="box-none">
       <GlassSurface variant="card" style={styles.barSurface}>
         <View style={styles.controlsRow}>
           {/* CHAT WIREFRAME BUTTON */}

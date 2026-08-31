@@ -6,6 +6,18 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 FIRSTMATE_HOME = os.getenv('FM_HOME', '/home/spectre/firstmate')
+_GENERIC_AGENT_NAMES = {'magistrate', 'firstmate', 'π - magistrate', 'π - firstmate'}
+
+
+def _task_display_name(value: Any, target: str) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or name.lower() in _GENERIC_AGENT_NAMES or name.lower() in {target.lower(), f'default:{target}'.lower()}:
+        return None
+    if re.match(r'^(?:pane|tab|workspace)(?:[_ -]?id)?\s*[:=]', name, re.IGNORECASE):
+        return None
+    return name
 
 class FirstmateClient:
     def __init__(self, fm_home: str = FIRSTMATE_HOME):
@@ -68,9 +80,13 @@ class FirstmateClient:
             if target.startswith('default:'):
                 target = target[len('default:'):]
             backlog = task.get('backlog') if isinstance(task.get('backlog'), dict) else {}
-            name = task.get('worker_label') or task.get('label') or backlog.get('title') or task.get('id')
-            if isinstance(name, str) and name.strip():
-                names_by_target[target] = name.strip()
+            name = None
+            for candidate in (task.get('worker_label'), task.get('label'), backlog.get('title')):
+                name = _task_display_name(candidate, target)
+                if name:
+                    break
+            if name:
+                names_by_target[target] = name
 
         result = []
         for agent in herdr_agents:

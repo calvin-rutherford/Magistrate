@@ -1,5 +1,16 @@
 import { AgentInfo } from '../api/client';
 
+export const AGENT_NAME_UNAVAILABLE = 'Agent name unavailable';
+const GENERIC_AGENT_NAMES = new Set(['magistrate', 'firstmate', 'π - magistrate', 'π - firstmate']);
+
+/** Return Herdr's real pane name without leaking transport identifiers. */
+export function agentDisplayName(agent: Pick<AgentInfo, 'id' | 'name' | 'pane_id' | 'tab_id' | 'workspace_id'>): string {
+  const candidate = typeof agent.name === 'string' ? agent.name.trim() : '';
+  const identifiers = new Set([agent.id, agent.pane_id, agent.tab_id, agent.workspace_id].filter(Boolean).map(value => String(value).trim().toLowerCase()));
+  if (!candidate || GENERIC_AGENT_NAMES.has(candidate.toLowerCase()) || identifiers.has(candidate.toLowerCase()) || /^(?:pane|tab|workspace)(?:[_ -]?id)?\s*[:=]/i.test(candidate)) return AGENT_NAME_UNAVAILABLE;
+  return candidate;
+}
+
 export type DisplayAgentStatus = 'active' | 'idle' | 'blocked' | 'unavailable';
 
 const ACTIVE_STATES = new Set(['active', 'busy', 'executing', 'processing', 'running', 'working']);
@@ -14,7 +25,7 @@ export function mapAgentStatus(agent: AgentInfo): DisplayAgentStatus {
 }
 
 function sortKey(agent: AgentInfo) {
-  return (agent.name || agent.id || '').trim().toLowerCase();
+  return agentDisplayName(agent).toLowerCase();
 }
 
 const STATUS_RANK: Record<DisplayAgentStatus, number> = { active: 0, idle: 1, blocked: 2, unavailable: 3 };
