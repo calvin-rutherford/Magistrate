@@ -48,8 +48,9 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     if (historyScenario) {
       class FakeWebSocket {
         static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
-        constructor() { this.readyState = FakeWebSocket.CONNECTING; setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }, 10); }
+        constructor() { this.readyState = FakeWebSocket.CONNECTING; window.__historySocket = this; setTimeout(() => { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }, 10); }
         send() {
+          if (historyScenario.manual) return;
           const emit = () => {
             if (!promptSent || this.readyState !== FakeWebSocket.OPEN) { setTimeout(emit, 20); return; }
             const payload = JSON.stringify({ type: 'agent_history', target: 'captain', messages: historyScenario.messages });
@@ -83,7 +84,12 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/captain/prompt')) {
         promptSent = true;
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
-        return Promise.resolve(new Response(JSON.stringify({ status: 'submitted', target: 'captain', response: responseText }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        const response = new Response(JSON.stringify({ status: 'submitted', target: 'captain', response: responseText }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        return historyScenario?.promptDelay ? new Promise(resolve => setTimeout(() => resolve(response), historyScenario.promptDelay)) : Promise.resolve(response);
+      }
+      if (url.includes('/interrupt')) {
+        window.__magistrateApiCalls.push({ url, method: options?.method });
+        return Promise.resolve(new Response(JSON.stringify({ status: 'interrupted', target: 'captain' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/execution/capabilities')) {
         return Promise.resolve(new Response(JSON.stringify({
@@ -101,7 +107,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/usage')) return Promise.resolve(new Response(JSON.stringify({ generated_at: '2026-08-29T18:00:00Z', schema_version: 5, source: 'quota-axi', providers: [{ provider: 'codex', plan: 'plus', status: 'fresh', stale: false, windows: [{ label: 'week', percentRemaining: 20 }] }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (historyScenario && url.includes('/api/v1/agents/captain/history')) {
-        if (!promptSent) return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        if (!promptSent || historyScenario.manual) return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
         postPromptHistoryRequests += 1;
         const response = new Response(JSON.stringify({ target: 'captain', messages: historyScenario.messages }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         return postPromptHistoryRequests === 1 && historyScenario.delay
@@ -180,6 +186,7 @@ test('chat starts at the measured latest content and preserves older-message rea
     role: index % 2 ? 'assistant' : 'user',
     text: `turn ${index}`,
     source: 'text',
+    audience: index % 2 ? 'primary' : 'captain',
   }));
   const page = await openChat({ width: 900, height: 700 }, false, 'Reply', URL, 0, false, false, 'light', seedMessages);
   await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-seed-"]').length === 6);
@@ -226,8 +233,16 @@ test('chat starts at the measured latest content and preserves older-message rea
   await page.click('[data-testid="jump-to-latest"]');
   await page.waitForFunction(() => {
     const element = document.querySelector('[data-testid="chat-history"]');
-    return element.scrollTop + element.clientHeight >= element.scrollHeight - 2;
+    return element.scrollTop + element.clientHeight >= element.scrollHeight - 2 && !document.querySelector('[data-testid="jump-to-latest"]');
   });
+  await page.evaluate(() => {
+    const element = document.querySelector('[data-testid="chat-history"]');
+    element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+  await page.focus('[data-testid="jump-to-latest"]');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="jump-to-latest"]'));
   await submit(page, 'at the latest');
   await page.waitForFunction(() => {
     const element = document.querySelector('[data-testid="chat-history"]');
@@ -511,15 +526,27 @@ test('usage lives in Settings and reports quota evidence without inventing amoun
   await page.close();
 });
 
-test('additional messages queue while the first response is pending', async () => {
-  const page = await openChat({ width: 900, height: 700 }, false, '');
+test('pending response moves thinking into history and Stop/Escape share interruption without late insertion', async () => {
+  const messages = [
+    { id: 'stop-user', role: 'user', kind: 'conversation', text: 'first request' },
+    { id: 'stop-agent', role: 'assistant', kind: 'conversation', text: 'late response must stay hidden' },
+  ];
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { messages, manual: true, promptDelay: 5000 });
   await submit(page, 'first request');
-  await page.focus('[data-testid="captain-prompt"]');
-  await page.keyboard.type('second request');
-  await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForSelector('[data-testid="queued-message-count"]');
-  assert.match(await page.$eval('[data-testid="queued-message-count"]', element => element.innerText), /1 queued/);
-  assert.ok(await page.$('[data-testid="thinking-dots"]'));
+  const pendingState = await page.evaluate(() => ({ history: document.querySelector('[data-testid="chat-history"]')?.innerText, stop: Boolean(document.querySelector('[data-testid="stop-captain-response"]')), thinking: Boolean(document.querySelector('[data-testid="agent-thinking-message"]')) }));
+  assert.equal(pendingState.stop, true, `expected pending control; state=${JSON.stringify(pendingState)}`);
+  assert.equal(pendingState.thinking, true, `expected in-conversation thinking; state=${JSON.stringify(pendingState)}`);
+  assert.equal(await page.$('[data-testid="composer-status"] [data-testid="thinking-dots"]'), null, 'thinking must not sit under the composer');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="agent-thinking-message"]'));
+  assert.ok(await page.$('[data-testid="send-captain-prompt"]'));
+  assert.ok(await page.$('[data-testid^="message-cancelled-"]'));
+  assert.equal((await page.$$('[data-testid^="user-message-u-"]')).length, 1, 'the captain message remains available');
+  await page.evaluate(payload => window.__historySocket?.onmessage?.({ data: JSON.stringify({ type: 'agent_history', target: 'captain', messages: payload }) }), messages);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.doesNotMatch(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /late response/);
+  assert.equal((await page.$$('[data-testid="agent-message"]')).length, 0);
+  assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/interrupt')).length), 1);
   await page.close();
 });
 
@@ -531,10 +558,15 @@ test('account gear opens the lower settings drawer with live network status', as
   assert.equal(target.visible, true);
   await page.mouse.click(target.x, target.y);
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) < 0.05);
+  await page.click('[data-testid="settings-theme"]');
+  await page.waitForSelector('[data-testid="settings-appearance-window"]');
+  assert.ok(await page.$('[data-testid="settings-tool-calls-toggle"]'));
+  await page.click('[data-testid="settings-appearance-close"]');
   assert.equal(await page.$eval('[data-testid="settings-network-status"]', element => element.textContent), 'Connected');
   const ratio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
   assert.ok(ratio >= 0.74 && ratio <= 0.82);
-  await page.click('[data-testid="settings-close"]');
+  await page.$eval('[data-testid="settings-close"]', element => element.click());
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) < 0.05);
   await page.close();
 });
@@ -802,45 +834,53 @@ test('user bubbles are opaque and repeated legitimate messages remain distinct',
   await page.close();
 });
 
-test('WebSocket and poll fallback render each safe turn once, retain queue timestamps, and bound tools', async () => {
+test('captain boundary dedupes WebSocket/poll, suppresses worker audiences, and persists only bounded attached tools', async () => {
   const messages = [
     { id: 'server-user-1', role: 'user', kind: 'conversation', text: 'live source question' },
     { id: 'server-tool-1', role: 'assistant', kind: 'tool', text: 'Running npm test --token hidden-secret' },
     { id: 'server-calm-1', role: 'assistant', kind: 'conversation', text: '/calm animation status' },
     { id: 'server-envelope-1', role: 'assistant', kind: 'conversation', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
+    { id: 'server-raw-terminal', role: 'assistant', kind: 'conversation', text: '$ cat /tmp/raw-terminal-output' },
     { id: 'server-agent-1', role: 'assistant', kind: 'conversation', text: 'Actual response only.' },
+    { id: 'worker-prompt', role: 'user', kind: 'conversation', text: 'FIRSTMATE_OP: inspect this for Firstmate' },
+    { id: 'worker-tool', role: 'assistant', kind: 'tool', text: '$ cat /tmp/raw-pane-output' },
+    { id: 'worker-reply', role: 'assistant', kind: 'conversation', text: 'Scout report for Firstmate only.' },
+    { id: 'metadata', role: 'assistant', kind: 'conversation', text: 'pane_id=w1:p9 tab_id=secret' },
   ];
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { messages, delay: 500 });
   await submit(page, 'live source question');
-  await page.focus('[data-testid="captain-prompt"]');
-  await page.keyboard.type('queued second question');
-  await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-u-"]').length === 2);
-  const queuedTimestamp = await page.$eval('[data-testid^="user-message-u-"]:last-of-type [data-testid^="message-timestamp-"]', element => element.innerText).catch(() => null);
-  assert.ok(queuedTimestamp && /\d/.test(queuedTimestamp), 'queued message should receive its timestamp when the user sends it');
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('Actual response only.'), { timeout: 10_000 });
-  await page.waitForFunction(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length === 2, { timeout: 10_000 });
   await new Promise(resolve => setTimeout(resolve, 3400));
-  assert.equal((await page.$$('[data-testid^="user-message-u-"]')).length, 2);
+  assert.equal((await page.$$('[data-testid^="user-message-u-"]')).length, 1);
   assert.equal((await page.$$('[data-testid="agent-message"]')).length, 1);
   let historyText = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
-  assert.doesNotMatch(historyText, /calm|jsonrpc|hidden-secret|Running npm test/);
+  assert.doesNotMatch(historyText, /calm|jsonrpc|hidden-secret|Running npm test|FIRSTMATE_OP|Scout report|pane_id|tab_id|raw-pane|raw-terminal/);
 
-  await page.evaluate(() => document.querySelector('[data-testid="brand-drawer-toggle"]').click());
+  await page.$eval('[data-testid="brand-drawer-toggle"]', element => element.click());
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.evaluate(() => document.querySelector('[data-testid="settings-open"]').click());
+  await page.$eval('[data-testid="settings-open"]', element => element.click());
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
-  await page.evaluate(() => document.querySelector('[data-testid="settings-theme"]').click());
-  await page.waitForSelector('[data-testid="settings-appearance-window"]');
+  await page.$eval('[data-testid="settings-theme"]', element => element.click());
   await page.focus('[data-testid="settings-tool-calls-toggle"] input');
   await page.keyboard.press('Space');
   await page.waitForFunction(() => localStorage.getItem('magistrate.chat.show-tool-calls') === 'true');
   await page.waitForSelector('[data-testid="tool-history-message"]');
   historyText = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.match(historyText, /Running…/);
-  assert.doesNotMatch(historyText, /hidden-secret|npm test/);
+  assert.doesNotMatch(historyText, /hidden-secret|npm test|cat|pane/);
   assert.equal((await page.$$('[data-testid="tool-history-message"]')).length, 1);
   await page.close();
+
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
+  await reloaded.waitForSelector('[data-testid="tool-history-message"]');
+  assert.equal((await reloaded.$$('[data-testid="agent-message"]')).length, 1);
+  assert.equal((await reloaded.$$('[data-testid="tool-history-message"]')).length, 1);
+  await reloaded.click('[data-testid="brand-drawer-toggle"]');
+  await reloaded.click('[data-testid="settings-open"]');
+  await reloaded.click('[data-testid="settings-theme"]');
+  await reloaded.click('[data-testid="settings-tool-calls-toggle"]');
+  await reloaded.waitForFunction(() => !document.querySelector('[data-testid="tool-history-message"]'));
+  await reloaded.close();
 });
 
 test('a sent user timestamp remains exact across optimistic state, polling, persistence, and reload', async () => {

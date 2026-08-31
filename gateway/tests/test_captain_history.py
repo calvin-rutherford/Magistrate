@@ -209,6 +209,16 @@ def test_history_parser_types_claude_unmarked_tool_rows_as_tool_activity():
     assert 'Stop hook feedback' not in ' '.join(m['text'] for m in messages)
 
 
+def test_history_parser_drops_raw_terminal_rows_mislabeled_as_conversation():
+    output = """● $ cat /tmp/raw-terminal-output
+
+● A real primary response.
+"""
+    assert parse_agent_history(output) == [
+        {'role': 'assistant', 'kind': 'conversation', 'text': 'A real primary response.'},
+    ]
+
+
 def test_history_parser_drops_mid_frame_chrome_and_retypes_tool_detail_rows():
     """Herdr snapshots catch status overlays mid-frame, sometimes over a message."""
     output = """● Five of six merged now — only chat cleanup (#29) remains.

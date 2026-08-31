@@ -26,6 +26,7 @@ const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: 
 
 type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file'; status?: 'ready' | 'uploading' | 'uploaded' | 'failed'; uploaded?: ChatUpload };
 type QueuedPrompt = { id: string; messageId: string; text: string; attachments: ComposerAttachment[]; editId: string | null };
+type ActivePrompt = { token: number; messageId: string; text: string; observed: boolean; toolResults: string[]; controller: AbortController };
 type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | null;
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
@@ -172,6 +173,7 @@ function UserMessage({ message, textColor, selectable, onLongPress, onRetry }: {
     {message.attachments?.map(attachment => <Text key={`${message.id}-${attachment.name}`} testID={`message-attachment-${message.id}`} style={[styles.messageAttachment, { color: textColor }]} numberOfLines={1}>↳ {attachment.name} · {attachment.mediaType}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}</Text>)}
     {timestamp ? <Text testID={`message-timestamp-${message.id}`} style={[styles.messageTimestamp, { color: textColor }]}>{timestamp}</Text> : null}
     {message.delivery === 'sending' ? <Text testID={`message-sending-${message.id}`} style={styles.messageDelivery}>Sending…</Text> : null}
+    {message.delivery === 'cancelled' ? <Text testID={`message-cancelled-${message.id}`} style={styles.messageDelivery}>Response stopped</Text> : null}
     {message.delivery === 'failed' ? <View style={styles.messageFailure}><Text testID={`message-failed-${message.id}`} style={styles.messageFailed}>Not sent. Check the attachment and retry.</Text>{onRetry ? <TouchableOpacity testID={`retry-message-${message.id}`} accessibilityRole="button" onPress={onRetry}><Text style={styles.retryText}>Retry</Text></TouchableOpacity> : null}</View> : null}
   </TouchableOpacity>;
 }
@@ -246,7 +248,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const historyContentMeasuredRef = useRef(false);
   const pendingLatestScrollRef = useRef(false);
   const latestScrollFrameRef = useRef<number | null>(null);
+  const finalScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const historyRequestRef = useRef(0);
+  const promptTokenRef = useRef(0);
+  const activePromptRef = useRef<ActivePrompt | null>(null);
+  const postPromptPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A prompt must not race the initial scrollback seed. If the seed resolves
   // after a new reply is already present, it would mark that reply as known
   // without rendering it and the live poll would skip it forever.
@@ -266,6 +272,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (force) {
       atBottomRef.current = true;
       initialScrollCancelledRef.current = false;
+      // A forced jump supersedes a stale frame queued by content growth; it
+      // must not clear the pill's request before the final row is measured.
+      if (latestScrollFrameRef.current !== null) cancelAnimationFrame(latestScrollFrameRef.current);
+      latestScrollFrameRef.current = null;
     } else if (!initialHistoryLoadedRef.current) {
       if (atBottomRef.current && !initialScrollCancelledRef.current) pendingLatestScrollRef.current = true;
       return;
@@ -280,7 +290,21 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       // that the captain was at the end when the message arrived.
       pendingLatestScrollRef.current = false;
       scrollRef.current?.scrollToEnd({ animated: false });
+      if (force) {
+        // React Native/Web can measure the final child one paint after the
+        // press. Repeat once against the settled content size.
+        if (finalScrollTimerRef.current) clearTimeout(finalScrollTimerRef.current);
+        finalScrollTimerRef.current = setTimeout(() => {
+          finalScrollTimerRef.current = null;
+          scrollRef.current?.scrollToEnd({ animated: false });
+        }, 50);
+      }
     });
+  };
+  const jumpToLatest = () => {
+    setHasNewMessages(false);
+    setIsScrolledUp(false);
+    requestLatestScroll(true);
   };
   useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
 
@@ -306,6 +330,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       if (scrollToLatest) requestLatestScroll();
     };
     historyReadyRef.current = new Promise<void>(resolve => { resolveHistoryReady = resolve; });
+    activePromptRef.current?.controller.abort();
+    activePromptRef.current = null;
+    if (postPromptPollTimerRef.current) clearTimeout(postPromptPollTimerRef.current);
+    postPromptPollTimerRef.current = null;
     setSendError(null); setIsThinking(false);
     // The captain thread is shared with Voice Mode (see ConversationSession),
     // so switching back to it keeps whatever it already holds in memory for
@@ -344,7 +372,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
           knownKeysRef.current.add(message.id ? `id:${message.id}` : key);
         });
-        setHistoryBefore(result.next_before || null);
+        // Captain history is the normalized local conversation store. Raw
+        // terminal scrollback is identity-only and is never pageable prose.
+        setHistoryBefore(target === 'captain' ? null : result.next_before || null);
       } catch (error) {
         if (request !== historyRequestRef.current) return;
         setSendError(errorText(error, 'Agent history could not be loaded.'));
@@ -361,6 +391,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         cancelAnimationFrame(latestScrollFrameRef.current);
         latestScrollFrameRef.current = null;
       }
+      if (finalScrollTimerRef.current) clearTimeout(finalScrollTimerRef.current);
+      if (postPromptPollTimerRef.current) clearTimeout(postPromptPollTimerRef.current);
+      activePromptRef.current?.controller.abort();
+      activePromptRef.current = null;
       markHistoryReady(false);
     };
   }, [target]);
@@ -437,7 +471,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   }, [autoStartRecording]);
 
   const loadOlderHistory = async () => {
-    if (!historyBefore || historyLoading) return;
+    if (target === 'captain' || !historyBefore || historyLoading) return;
     setHistoryLoading(true);
     try {
       const result = await fetchAgentHistory(target, CHAT_HISTORY_LINES, { before: historyBefore });
@@ -524,17 +558,52 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!wasAtBottom) setHasNewMessages(true);
     if (wasAtBottom) requestLatestScroll();
   };
-  // Merges normalized Herdr events and HTTP history into the visible thread.
-  // The same deduplication path is used by WebSocket delivery and polling.
+  // Terminal snapshots are discovery transport, never conversation content.
+  // For the captain thread, an exact locally-submitted prompt opens the only
+  // rendering boundary. Unknown user rows (worker prompts/replies), idle agent
+  // prose, and standalone tools are remembered for dedupe but never appended.
   const appendHistoryMessages = (incoming: Array<{ id?: string; role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }>): boolean => {
     let appendedReply = false;
     sanitizeAgentHistory(incoming).forEach(message => {
       const key = historyKey(message);
       const identity = message.id ? `id:${message.id}` : key;
-      // Do not compare text alone: two legitimate turns can say the same
-      // thing. Gateway history ids, or the stable legacy fallback, make the
-      // WebSocket and polling sources share one dedupe identity. Reconcile one
-      // optimistic local copy with its first server copy.
+      const active = activePromptRef.current;
+
+      if (target === 'captain') {
+        if (message.role === 'user') {
+          if (active && message.kind === 'conversation') {
+            // Only the exact captain prompt opens the response segment. Any
+            // subsequent user-role row is an internal worker/system audience
+            // boundary and fails closed until a new captain submission.
+            active.observed = message.text.trim() === active.text;
+          }
+          const optimisticCount = optimisticCountsRef.current.get(key) || 0;
+          if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
+          knownKeysRef.current.add(identity);
+          return;
+        }
+        if (knownKeysRef.current.has(identity)) return;
+        // If a socket delivers a response before its prompt row, leave it
+        // unconsumed so the authoritative full-history poll can retry safely.
+        if (!active || !active.observed) {
+          if (!active) knownKeysRef.current.add(identity);
+          return;
+        }
+        knownKeysRef.current.add(identity);
+        if (message.kind === 'tool') {
+          const preview = toolCallPreview(message.text).slice(0, 48);
+          if (!active.toolResults.includes(preview) && active.toolResults.length < 6) active.toolResults.push(preview);
+          return;
+        }
+        appendMessage({ id: message.id || stableHistoryId(message), role: 'assistant', kind: 'conversation', text: message.text, sentAt: undefined, source: 'text', audience: 'primary', toolResults: active.toolResults }, false);
+        activePromptRef.current = null;
+        setIsThinking(false);
+        appendedReply = true;
+        return;
+      }
+
+      // Explicit worker conversations retain their existing navigation path,
+      // while receiving the same typed artifact filtering and stable dedupe.
       if (knownKeysRef.current.has(identity)) return;
       const optimisticCount = optimisticCountsRef.current.get(key) || 0;
       if (message.id && optimisticCount > 0) {
@@ -588,54 +657,88 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   }, [target]);
   const submitPrompt = async (trimmed: string, editId: string | null = null, pendingAttachments: ComposerAttachment[] = [], queuedMessageId?: string) => {
     const messageId = editId || queuedMessageId || `u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const token = ++promptTokenRef.current;
+    const controller = new AbortController();
     const attachmentSummaries: ConversationAttachment[] = pendingAttachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size }));
     pendingAttachmentsByMessageRef.current.set(messageId, pendingAttachments);
     if (editId || queuedMessageId) {
-      // Editing, retrying, and queue release are delivery transitions, not new
-      // sends. Preserve the timestamp captured when the user acted.
-      updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, delivery: 'sending' });
+      updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, audience: 'captain', delivery: 'sending' });
       if (editId) setEditingMessageId(null);
-    } else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: Date.now(), source: 'text', attachments: attachmentSummaries, delivery: 'sending' });
+    } else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: Date.now(), source: 'text', attachments: attachmentSummaries, audience: 'captain', delivery: 'sending' });
+    activePromptRef.current = { token, messageId, text: trimmed, observed: false, toolResults: [], controller };
+    const isCurrent = () => activePromptRef.current?.token === token;
     setPromptText(''); setSendError(null); setIsThinking(true);
     try {
-      // Do not let the initial history seed race this submission (see
-      // historyReadyRef). This preserves the distinction between pre-existing
-      // scrollback and the reply generated by this prompt.
       await historyReadyRef.current;
+      if (!isCurrent()) return;
       if (modelSelection && !modelSelection.available) throw new Error(modelSelection.availabilityReason || 'The selected execution profile is unavailable.');
       const uploaded: ChatUpload[] = [];
       for (const attachment of pendingAttachments) {
+        if (!isCurrent()) return;
         setAttachments(current => current.map(item => item.id === attachment.id ? { ...item, status: 'uploading' } : item));
         const result = attachment.uploaded || await uploadChatFile(attachment.uri, attachment.name, attachment.mimeType, messageId);
+        if (!isCurrent()) return;
         uploaded.push(result);
         setAttachments(current => current.map(item => item.id === attachment.id ? { ...item, status: 'uploaded', uploaded: result } : item));
       }
-      const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded, messageId);
+      const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded, messageId, controller.signal);
+      if (!isCurrent()) return;
       if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The message was not accepted.');
-      updateConversationMessageState(target, messageId, {
-        delivery: 'sent',
-        attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size })),
-      });
+      updateConversationMessageState(target, messageId, { delivery: 'sent', attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size })) });
       const pendingIds = new Set(pendingAttachments.map(attachment => attachment.id));
       setAttachments(current => current.filter(item => !pendingIds.has(item.id)));
       const reply = conversationalPromptResponse(response?.response);
-      if (reply) { appendMessage({ id: `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text' }); setIsThinking(false); return; }
-      // Herdr acknowledges first and answers in its terminal. The WebSocket
-      // normally clears this wait; HTTP polling below is the recovery path.
-      const request = ++historyRequestRef.current;
+      if (reply) {
+        appendMessage({ id: `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text', audience: 'primary' });
+        activePromptRef.current = null; setIsThinking(false); return;
+      }
       const pollForReply = async () => {
-        if (request !== historyRequestRef.current) return;
-        try { if (await syncFromHistory()) { setIsThinking(false); return; } }
+        if (!isCurrent()) return;
+        try { if (await syncFromHistory()) return; }
         catch { /* Retry after transient gateway/snapshot failures. */ }
-        setTimeout(() => void pollForReply(), 1000);
+        if (isCurrent()) postPromptPollTimerRef.current = setTimeout(() => void pollForReply(), 1000);
       };
       void pollForReply();
     } catch (error) {
+      if (!isCurrent()) return;
+      activePromptRef.current = null;
       updateConversationMessageState(target, messageId, { delivery: 'failed' });
       setAttachments(current => current.map(item => pendingAttachments.some(pending => pending.id === item.id) ? { ...item, status: 'failed' } : item));
       setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); setIsThinking(false);
     }
   };
+  const stopPendingResponse = async () => {
+    const active = activePromptRef.current;
+    if (!active) return;
+    activePromptRef.current = null;
+    promptTokenRef.current += 1;
+    active.controller.abort();
+    if (postPromptPollTimerRef.current) clearTimeout(postPromptPollTimerRef.current);
+    postPromptPollTimerRef.current = null;
+    updateConversationMessageState(target, active.messageId, { delivery: 'cancelled' });
+    queuedPrompts.forEach(prompt => updateConversationMessageState(target, prompt.messageId, { delivery: 'cancelled' }));
+    setQueuedPrompts([]);
+    setIsThinking(false);
+    try {
+      const result = await interruptAgent(target);
+      if (result.status === 'error' || result.error) throw new Error(result.error || 'Interruption was not accepted.');
+      setSendError('Response stopped. Gateway interruption sent.');
+    } catch {
+      // The local request/subscription is definitely cancelled. Be explicit
+      // that backend work can continue if its interruption endpoint failed.
+      setSendError('Response stopped locally; underlying work may continue.');
+    }
+  };
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !isThinking || typeof window === 'undefined') return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      void stopPendingResponse();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isThinking, target]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (isThinking || queuedPrompts.length === 0) return;
     const next = queuedPrompts[0];
@@ -653,8 +756,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       const sentAt = Date.now();
       const messageId = editingMessageId || `u-${sentAt}-${Math.random().toString(36).slice(2, 10)}`;
       const attachmentSummaries: ConversationAttachment[] = attachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size }));
-      if (editingMessageId) updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, delivery: 'sending' });
-      else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt, source: 'text', attachments: attachmentSummaries, delivery: 'sending' });
+      if (editingMessageId) updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, audience: 'captain', delivery: 'sending' });
+      else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt, source: 'text', attachments: attachmentSummaries, audience: 'captain', delivery: 'sending' });
       setQueuedPrompts(queue => [...queue, { id: `q-${sentAt}`, messageId, text: trimmed, attachments: [...attachments], editId: editingMessageId }]);
       setEditingMessageId(null); setAttachments([]); setPromptText(''); setSendError(null); return;
     }
@@ -681,9 +784,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       </TouchableOpacity>
     </View>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
-      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text></View>)}
+      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text>{showToolCalls && message.kind !== 'tool' ? message.toolResults?.map((result, index) => <View key={`${message.id}-tool-${index}`} testID="tool-history-message" style={styles.attachedToolResult}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{result}</Text></View>) : null}</View>)}
+      {isThinking ? <View testID="agent-thinking-message" accessibilityRole="text" accessibilityLabel="Magistrate is thinking" style={styles.assistantMessage}><ThinkingIndicator dark={dark} /></View> : null}
     </ScrollView>
-    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { setHasNewMessages(false); setIsScrolledUp(false); requestLatestScroll(true); }}><Text style={styles.jumpText}>↓</Text></TouchableOpacity> : null}
+    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={jumpToLatest}><Text style={styles.jumpText}>↓</Text></TouchableOpacity> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
       <TouchableOpacity accessibilityRole="button" onPress={editMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Edit</Text></TouchableOpacity>
       <TouchableOpacity accessibilityRole="button" onPress={() => void copyMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Copy</Text></TouchableOpacity>
@@ -707,10 +811,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           <TouchableOpacity testID="attachment-option-files" accessibilityRole="button" accessibilityLabel="Choose files" onPress={() => void pickFiles()} style={styles.attachmentOption}><FileIcon color={dark ? brand.cyan : brand.violet} /><View><Text style={[styles.attachmentOptionTitle, { color: text }]}>Files</Text><Text style={[styles.attachmentOptionMeta, { color: muted }]}>Browse this device</Text></View></TouchableOpacity>
         </View> : null}
       </View>
-      <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable accessibilityLabel={`Message ${targetLabel}`} />
+      <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onKeyPress={event => { if (isThinking && event.nativeEvent.key === 'Escape') void stopPendingResponse(); }} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable accessibilityLabel={`Message ${targetLabel}`} />
       <ModelMenu dark={dark} profiles={profiles} loading={capabilityLoading} error={capabilityError} open={modelMenuOpen} selection={modelSelection} onToggle={() => setModelMenuOpen(value => !value)} onSelect={selection => { setModelSelection(selection); onProfileChange(selection?.profileId || null); setModelMenuOpen(false); setSendError(null); }} />
       <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : isTranscribing ? 'Transcribing microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing }} style={styles.composerIconButton} onPress={() => void handleMicPress()} disabled={isTranscribing}><MicIcon size={24} color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
-      <TouchableOpacity testID="send-captain-prompt" accessibilityRole="button" accessibilityLabel={promptText.trim() || attachments.length ? (isThinking ? `Queue message for ${targetLabel}` : `Send message to ${targetLabel}`) : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => void handleSend()} style={[styles.sendButton, isThinking ? styles.thinkingButton : undefined]}>{isThinking ? <ThinkingIndicator dark={dark} /> : promptText.trim() || attachments.length ? <Text style={styles.sendArrow}>↑</Text> : <SoundwaveIcon color={brand.obsidian} size={20} />}</TouchableOpacity>
+      <TouchableOpacity testID={isThinking ? 'stop-captain-response' : 'send-captain-prompt'} accessibilityRole="button" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : promptText.trim() || attachments.length ? `Send message to ${targetLabel}` : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => isThinking ? void stopPendingResponse() : void handleSend()} style={[styles.sendButton, isThinking ? styles.stopButton : undefined]}>{isThinking ? <Text style={styles.stopButtonText}>Stop</Text> : promptText.trim() || attachments.length ? <Text style={styles.sendArrow}>↑</Text> : <SoundwaveIcon color={brand.obsidian} size={20} />}</TouchableOpacity>
     </View>
     <View testID="composer-status" style={styles.composerStatus} accessibilityLiveRegion="polite">{editingMessageId ? <Text style={styles.editingLabel}>Editing message</Text> : !isThinking && (micStatus === 'listening' ? <Text testID="mic-status" style={styles.micListeningLabel}>Listening… tap mic to finish</Text> : micStatus === 'transcribing' ? <Text testID="mic-status" style={styles.micTranscribingLabel}>Transcribing…</Text> : micStatus === 'ready' ? <Text testID="mic-status" style={styles.micReadyLabel}>Transcript ready — review before sending</Text> : micStatus === 'error' ? <Text testID="mic-status" style={styles.micErrorLabel}>Microphone unavailable</Text> : null)}{queuedPrompts.length ? <Text testID="queued-message-count" style={styles.queuedLabel}>{queuedPrompts.length} queued · sends in order</Text> : null}{sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}</View>
   </KeyboardAvoidingView>;
@@ -968,7 +1072,7 @@ export default function ChatScreen() {
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page} {...(isNarrow ? swipeToOpen.panHandlers : {})}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
-      <DrawerPanel open={drawerOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => setSettingsOpen(true)} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
+      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
       <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} /></Animated.View>
       <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError} executionError={executionError} preferences={preferences} onPreferencesChange={setPreferences} executionProfiles={executionProfiles} voiceCapabilities={voiceCapabilities} executionSettings={executionSettings} onExecutionSettingsChange={update => { setExecutionSettings(current => ({ ...current, ...update })); void updateExecutionSettings(update).catch(error => setExecutionError(errorText(error, 'The execution setting could not be saved.'))); }} onSaveCredential={async (credentialKey, credential) => { try { await saveExecutionCredential(credentialKey, credential); setExecutionError(null); const capabilities = await fetchExecutionCapabilities(); setExecutionProfiles(profilesFromCapabilities(capabilities)); } catch (error) { setExecutionError(errorText(error, 'The credential could not be saved.')); } }} usage={usage} usageLoading={usageLoading} usageError={usageError} onClose={() => setSettingsOpen(false)} onLogout={() => { setSettingsOpen(false); void logoutGatewaySession(); }} />
     </>}
@@ -978,10 +1082,10 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
   shellHeader: { height: 48, flexShrink: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 12, elevation: 12 }, logoButton: { width: 52, height: 44, alignItems: 'center', justifyContent: 'center' }, logoWithUnread: { position: 'relative', width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, unreadAttentionDot: { position: 'absolute', top: 1, right: 0, width: 8, height: 8, borderRadius: 4, backgroundColor: '#F5C542', borderWidth: 1, borderColor: '#111722' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: brand.cyan, borderWidth: 1, borderColor: brand.cyan }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 }, messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.72, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
-  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, width: 38, height: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(17,23,34,0.62)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 999, zIndex: 15, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 8 }, jumpText: { color: brand.paper, fontSize: 20, lineHeight: 22, fontWeight: '700' },
+  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: brand.cyan, borderWidth: 1, borderColor: brand.cyan }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, attachedToolResult: { maxWidth: 260, marginTop: 7, paddingVertical: 5, paddingHorizontal: 9, borderRadius: 8, backgroundColor: 'rgba(142,153,170,0.10)', overflow: 'hidden' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 }, messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.72, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
+  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, width: 38, height: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(17,23,34,0.62)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 999, zIndex: 30, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 16 }, jumpText: { color: brand.paper, fontSize: 20, lineHeight: 22, fontWeight: '700' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
-  composer: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 20, elevation: 12 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, thinkingButton: { backgroundColor: brand.cyan }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
+  composer: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 20, elevation: 12 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, stopButton: { width: 58, borderRadius: 21, backgroundColor: brand.critical }, stopButtonText: { color: brand.paper, fontSize: 12, fontWeight: '800' }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
   attachmentControl: { width: 36, zIndex: 20 }, attachmentMenu: { position: 'absolute', left: -2, bottom: 46, width: 238, borderRadius: 20, padding: 11, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 14 }, attachmentOption: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 8, paddingVertical: 7, borderRadius: 13 }, attachmentOptionTitle: { fontSize: 14, fontWeight: '700' }, attachmentOptionMeta: { fontSize: 11, marginTop: 2 },
   attachmentPreview: { flexGrow: 0, marginHorizontal: 8, marginBottom: 7, maxHeight: 60 }, attachmentPreviewContent: { gap: 8, paddingHorizontal: 3 }, attachmentChip: { width: 220, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, padding: 5, paddingRight: 7, borderRadius: 15 }, attachmentThumbnail: { width: 46, height: 46, borderRadius: 11 }, attachmentFileIcon: { width: 46, height: 46, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, attachmentCopy: { flex: 1, minWidth: 0 }, attachmentName: { fontSize: 12, fontWeight: '700' }, attachmentMeta: { fontSize: 10, marginTop: 3 }, attachmentRemove: { width: 28, height: 38, alignItems: 'center', justifyContent: 'center' }, attachmentRemoveText: { fontSize: 21, lineHeight: 23 },
   liveWaveform: { position: 'absolute', left: 8, right: 8, bottom: 72, height: 52, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', paddingHorizontal: 14, zIndex: 9 }, liveWaveformBar: { width: 3, borderRadius: 2 },

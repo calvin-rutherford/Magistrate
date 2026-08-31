@@ -18,7 +18,11 @@ export interface ConversationMessage {
   source: 'text' | 'voice';
   kind?: 'conversation' | 'tool';
   attachments?: ConversationAttachment[];
-  delivery?: 'sending' | 'sent' | 'failed';
+  /** Safe, bounded labels for structured tool results attached to this reply. */
+  toolResults?: string[];
+  /** Explicit conversation boundary; terminal-derived rows without it are not restored. */
+  audience?: 'captain' | 'primary';
+  delivery?: 'sending' | 'sent' | 'failed' | 'cancelled';
 }
 
 // The active thread is kept in memory for reactive rendering and mirrored as
@@ -38,7 +42,14 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
     if (!raw) return getConversationMessages(target);
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return getConversationMessages(target);
-    const normalized = parsed.filter(item => item && typeof item.id === 'string' && (item.role === 'user' || item.role === 'assistant') && typeof item.text === 'string').map(item => {
+    const normalized = parsed.filter(item => {
+      if (!item || typeof item.id !== 'string' || (item.role !== 'user' && item.role !== 'assistant') || typeof item.text !== 'string') return false;
+      // PR #57 persisted every typed terminal-history row. Restore only rows
+      // known to have crossed the captain/primary boundary, while retaining
+      // locally-created messages from older app versions.
+      const trustedLegacyId = item.role === 'user' ? /^(?:u-|voice-u-)/.test(item.id) : /^(?:a-|voice-a-)/.test(item.id);
+      return item.kind !== 'tool' && (item.audience === (item.role === 'user' ? 'captain' : 'primary') || trustedLegacyId);
+    }).map(item => {
       const value = item as Record<string, unknown>;
       const attachments = Array.isArray(value.attachments) ? value.attachments.filter(attachment => {
         if (!attachment || typeof attachment !== 'object') return false;
@@ -51,7 +62,11 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
         return { name: candidate.name as string, mediaType: candidate.mediaType as string, size: candidate.size as number | undefined };
       }) : undefined;
       const sentAt = typeof value.sentAt === 'number' && Number.isFinite(value.sentAt) && value.sentAt >= 0 ? value.sentAt : undefined;
-      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', attachments, delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : undefined } as ConversationMessage;
+      const toolResults = Array.isArray(value.toolResults)
+        ? value.toolResults.filter(result => typeof result === 'string' && result.length > 0 && result.length <= 48).slice(0, 6) as string[]
+        : undefined;
+      const role = value.role as 'user' | 'assistant';
+      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: 'conversation', attachments, toolResults, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
     });
     const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
     const currentById = new Map(current.map(message => [message.id, message]));
@@ -102,7 +117,7 @@ export function updateConversationMessage(target: string, id: string, text: stri
   updateConversationMessageState(target, id, { text, sentAt });
 }
 
-export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments'>>) {
+export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'audience'>>) {
   const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
   const next = current.map(message => message.id === id ? { ...message, ...update } : message);
   messagesByTarget.set(target, next); persist(target, next); emit(target);
