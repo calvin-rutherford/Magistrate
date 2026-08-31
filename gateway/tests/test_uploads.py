@@ -52,6 +52,18 @@ def test_prompt_associates_owned_upload_and_forwards_only_safe_summary(monkeypat
     assert forwarded == 'Review this\n\nAttached files: notes.txt (text/plain, 5 bytes)'
     assert 'upload_id' not in forwarded
     assert 'message-123' not in forwarded
+    [attachment] = response.json()['conversation']['messages'][0]['attachments']
+    assert attachment == {
+        'id': upload['upload_id'],
+        'upload_id': upload['upload_id'],
+        'name': 'notes.txt',
+        'media_type': 'text/plain',
+        'size': 5,
+        'url': f"/api/v1/uploads/{upload['upload_id']}",
+    }
+    persisted = client.get('/api/v1/conversations/captain/messages', headers=TEST_HEADERS).json()
+    canonical_prompt = next(item for item in persisted['messages'] if item.get('client_message_id') == 'message-123')
+    assert canonical_prompt['attachments'] == [attachment]
 
 
 def test_prompt_rejects_client_attachment_metadata_tampering(monkeypatch, tmp_path):

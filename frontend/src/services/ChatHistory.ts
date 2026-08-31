@@ -258,3 +258,24 @@ export function sanitizeTerminalHistory<T extends AgentHistoryMessage>(messages:
 export function filterAgentHistory<T extends AgentHistoryMessage>(messages: T[], showToolCalls: boolean): T[] {
   return sanitizeAgentHistory(messages).filter(message => message.kind === 'conversation' || showToolCalls);
 }
+
+/**
+ * Render filter for canonical gateway messages.
+ *
+ * The gateway already classified these (see gateway/app/conversation_store.py),
+ * so this does not re-derive a row's type from its text: a canonical tool event
+ * is a bounded label, not a shell command to be re-recognised. What remains is
+ * the rendering rule plus one defence-in-depth check, so a stale cache or a
+ * mislabelled record still cannot present harness metadata as agent prose.
+ */
+export function filterCanonicalMessages<T extends { role: string; kind?: string; text: string }>(messages: T[], showToolCalls: boolean): T[] {
+  return messages.filter(message => {
+    const kind = message.kind || 'conversation';
+    if (kind === 'tool') return showToolCalls;
+    if (kind !== 'conversation') return false;
+    // Captain-authored text is never reclassified by content; a captain may
+    // legitimately discuss JSON-RPC, /calm, or a pane id.
+    if (message.role === 'user') return true;
+    return !isHarnessArtifact(message.text) && !isRawTerminalArtifact(message.text);
+  });
+}

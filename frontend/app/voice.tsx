@@ -7,7 +7,8 @@ import Svg, { G, Path, Polygon } from 'react-native-svg';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import { submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
-import { appendConversationMessage, useConversationMessages } from '../src/services/ConversationSession';
+import { reconcileCanonicalMessages } from '../src/services/CanonicalConversation';
+import { appendConversationMessage, getConversationMessages, resetConversationMessages, useConversationMessages } from '../src/services/ConversationSession';
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
 import { loadChatPreferences, useChatColorScheme } from '../src/services/ChatPreferences';
@@ -93,6 +94,9 @@ export default function VoiceScreen() {
   const listeningStartedAtRef = useRef(0);
   const lastSpeechAtRef = useRef(0);
   const sequenceRef = useRef(0);
+  // The submission id of the turn awaiting a decision, so a confirmed move is
+  // recorded under the same canonical turn the optimistic row already shows.
+  const clientMessageIdRef = useRef('');
   const sessionId = useId().replace(/[^A-Za-z0-9_-]/g, '');
   const [ripple] = useState(() => new Animated.Value(0));
   const [audioPeak] = useState(() => new Animated.Value(0));
@@ -175,9 +179,13 @@ export default function VoiceScreen() {
   const deliverResponse = useCallback((result: VoiceMoveResult) => {
     if (result.status !== 'completed') throw new Error(result.error || 'Firstmate did not complete the request.');
     const responseText = result.response?.trim() || `Request completed by ${result.target}.`;
-    // The move id is the gateway's stable identity for this completed turn; a
-    // local timestamp id would invent one for an entity the server already knows.
-    appendConversationMessage('captain', { id: result.move_id ? `move-${result.move_id}` : `voice-a-${Date.now()}`, role: 'assistant', text: responseText, sentAt: Date.now(), source: 'voice', audience: 'primary', runId: result.move_id });
+    // Voice Mode shares the captain thread, and the gateway records a completed
+    // voice turn canonically (see CHAT_ARCHITECTURE_FIX.md). Applying the
+    // returned turn is what keeps one record behind both surfaces instead of a
+    // locally minted voice row that chat would later have to reconcile.
+    const canonical = result.conversation?.messages || [];
+    if (canonical.length) resetConversationMessages('captain', reconcileCanonicalMessages(getConversationMessages('captain'), canonical));
+    else appendConversationMessage('captain', { id: result.move_id ? `move-${result.move_id}` : `voice-a-${Date.now()}`, role: 'assistant', text: responseText, sentAt: Date.now(), source: 'voice', audience: 'primary', runId: result.move_id });
     setVoiceState('SPEAKING');
     turnInFlightRef.current = false;
     ttsService.speakChunk(responseText, () => { if (!endingRef.current) void beginListening(); });
@@ -204,18 +212,22 @@ export default function VoiceScreen() {
         return;
       }
       setFinalTranscript(utterance); setIntermediate('');
-      appendConversationMessage('captain', { id: `voice-u-${Date.now()}`, role: 'user', text: utterance, sentAt: Date.now(), source: 'voice', audience: 'captain' });
+      // This id is the submission identity the gateway records the turn under,
+      // so the optimistic row and the canonical user message are one row.
+      const clientMessageId = `voice-u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      clientMessageIdRef.current = clientMessageId;
+      appendConversationMessage('captain', { id: clientMessageId, role: 'user', text: utterance, sentAt: Date.now(), source: 'voice', audience: 'captain', delivery: 'sending' });
       setVoiceState('THINKING');
       sequenceRef.current += 1;
       const key = `voice-${sessionId}-${sequenceRef.current}`;
-      const move = await submitVoiceMove(utterance, 'captain', key);
+      const move = await submitVoiceMove(utterance, 'captain', key, false, undefined, clientMessageId);
       if (move.status === 'prohibited' || move.status === 'error' || move.status === 'confirmation_expired') throw new Error(move.error || 'That request cannot be completed in Voice Mode.');
       if (move.status === 'confirmation_required') {
         setPendingMove(move); setPendingKey(key); setVoiceState('CONFIRMING'); turnInFlightRef.current = false;
         return;
       }
       if (move.status !== 'ready') throw new Error(move.error || 'The voice request could not be prepared.');
-      const result = await submitVoiceMove(utterance, 'captain', key, true);
+      const result = await submitVoiceMove(utterance, 'captain', key, true, undefined, clientMessageId);
       deliverResponse(result);
     } catch (cause) { fail(cause); }
   }, [beginListening, deliverResponse, fail, sessionId, voiceMode]);
@@ -253,7 +265,7 @@ export default function VoiceScreen() {
     if (!pendingMove || !pendingKey || turnInFlightRef.current) return;
     turnInFlightRef.current = true; setVoiceState('THINKING');
     try {
-      const result = await submitVoiceMove(finalTranscript, 'captain', pendingKey, true, pendingMove.confirmation_token);
+      const result = await submitVoiceMove(finalTranscript, 'captain', pendingKey, true, pendingMove.confirmation_token, clientMessageIdRef.current || undefined);
       setPendingMove(null); setPendingKey(''); deliverResponse(result);
     } catch (cause) { fail(cause); }
   };

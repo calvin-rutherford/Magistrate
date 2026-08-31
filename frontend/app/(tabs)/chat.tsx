@@ -7,15 +7,16 @@ import { AccessibilityInfo, Alert, Image, KeyboardAvoidingView, NativeScrollEven
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
-import { AgentHistoryMessage, AgentInfo, AuthProviderInfo, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
+import { AgentHistoryMessage, AgentInfo, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { SafeMarkdown } from '../../src/components/SafeMarkdown';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
-import { filterAgentHistory, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
+import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
+import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
-import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, insertConversationMessageAfter, prependConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, loadPendingConversationMessages, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, saveVoiceCaptureBehavior, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl, validatedWebUrl } from '../../src/utils/externalLinks';
@@ -30,7 +31,10 @@ const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: 
 
 type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file'; status?: 'ready' | 'uploading' | 'uploaded' | 'failed'; uploaded?: ChatUpload };
 type QueuedPrompt = { id: string; messageId: string; text: string; attachments: ComposerAttachment[]; editId: string | null };
-type ActivePrompt = { token: number; messageId: string; text: string; observed: boolean; toolResults: string[]; controller: AbortController };
+// The prompt this canvas is waiting on. `turnId` is the canonical turn the
+// gateway recorded for it; the transitional worker path does not consume that
+// canonical turn and leaves it unset.
+type ActivePrompt = { token: number; messageId: string; text: string; controller: AbortController; turnId?: string };
 type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | null;
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
@@ -231,6 +235,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const muted = dark ? brand.mutedDark : brand.mutedLight;
   const composerSurface = dark ? 'rgba(17,23,34,0.98)' : 'rgba(255,255,255,0.98)';
   const messages = useConversationMessages(target);
+  // The captain thread is the conversation the gateway records canonically.
+  // Worker panes are observation surfaces with no submitted turns, so they keep
+  // reading terminal history until they get a submission path of their own; see
+  // CHAT_ARCHITECTURE_FIX.md.
+  const canonicalTarget = target === 'captain';
   const [promptText, setPromptText] = useState('');
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [messageActionsId, setMessageActionsId] = useState<string | null>(null);
@@ -244,6 +253,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [unreadAttentionCount, setUnreadAttentionCount] = useState(() => notificationManager.getUnreadEvents().length);
   const [historyBefore, setHistoryBefore] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [hydratedHistoryTarget, setHydratedHistoryTarget] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [micStatus, setMicStatus] = useState<'idle' | 'requesting' | 'listening' | 'transcribing' | 'ready' | 'error'>('idle');
@@ -261,6 +271,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const inputRef = useRef<TextInput>(null);
   const holdActiveRef = useRef(false);
   const atBottomRef = useRef(true);
+  const lastHistoryOffsetRef = useRef(0);
   const initialHistoryLoadedRef = useRef(false);
   const initialScrollCancelledRef = useRef(false);
   const historyViewportMeasuredRef = useRef(false);
@@ -315,7 +326,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         if (finalScrollTimerRef.current) clearTimeout(finalScrollTimerRef.current);
         finalScrollTimerRef.current = setTimeout(() => {
           finalScrollTimerRef.current = null;
-          scrollRef.current?.scrollToEnd({ animated: false });
+          // A real upward scroll after the jump is newer intent than this
+          // one-paint measurement retry and must never be pulled back down.
+          if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: false });
         }, 50);
       }
     });
@@ -323,6 +336,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const jumpToLatest = () => {
     setHasNewMessages(false);
     setIsScrolledUp(false);
+    // Until the native scroll event reports its exact final offset, any
+    // non-bottom event must be treated as movement away from latest.
+    lastHistoryOffsetRef.current = Number.POSITIVE_INFINITY;
     requestLatestScroll(true);
   };
   useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
@@ -335,6 +351,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   useEffect(() => {
     const request = ++historyRequestRef.current;
     initialHistoryLoadedRef.current = false;
+    lastHistoryOffsetRef.current = 0;
     initialScrollCancelledRef.current = false;
     historyViewportMeasuredRef.current = false;
     historyContentMeasuredRef.current = false;
@@ -347,6 +364,13 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       initialHistoryLoadedRef.current = true;
       resolveHistoryReady();
       if (scrollToLatest) requestLatestScroll();
+      // Publish readiness only after React has had a frame to commit the
+      // canonical rows that were applied immediately before this call. Tests,
+      // assistive technology, and scroll anchoring can all observe aria-busy
+      // instead of racing a fetch or relying on an arbitrary sleep.
+      requestAnimationFrame(() => {
+        if (request === historyRequestRef.current) setHydratedHistoryTarget(target);
+      });
     };
     historyReadyRef.current = new Promise<void>(resolve => { resolveHistoryReady = resolve; });
     activePromptRef.current?.controller.abort();
@@ -366,9 +390,30 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     };
     const existingIds = new Set(getConversationMessages(target).map(message => message.id));
     getConversationMessages(target).forEach(rememberOptimistic);
-    const hydration = hydrateConversationMessages(target).then(hydrated => hydrated.forEach(message => {
-      if (!existingIds.has(message.id)) rememberOptimistic(message);
-    }));
+    const hydration = canonicalTarget
+      ? loadPendingConversationMessages(target)
+      : hydrateConversationMessages(target).then(hydrated => {
+        hydrated.forEach(message => { if (!existingIds.has(message.id)) rememberOptimistic(message); });
+        return hydrated;
+      });
+    // The canonical record is the transcript, so opening the captain thread is
+    // a plain read: no scrollback seeding, no identity bookkeeping, no replay
+    // suppression. Worker panes still seed from terminal scrollback below.
+    const loadCanonicalConversation = async (): Promise<void> => {
+      try {
+        // Fetch the authority before considering any local state. Only pending
+        // client_message_ids are then overlaid; cached canonical rows never
+        // participate in hydration or row-by-row reconciliation.
+        const result = await fetchCanonicalConversation(target);
+        const pending = await hydration;
+        if (request !== historyRequestRef.current) return;
+        applyCanonicalMessages(result.messages, { replace: true, pending });
+        setHistoryBefore(null);
+      } catch (error) {
+        if (request !== historyRequestRef.current) return;
+        setSendError(errorText(error, 'The conversation could not be loaded.'));
+      }
+    };
     // Seed known-message keys from recent Herdr scrollback so the live poll
     // below doesn't treat pre-existing history as new and replay it into the
     // thread - chat only ever shows what happens while it's open.
@@ -379,7 +424,6 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         await hydration;
         const result = await fetchAgentHistory(target);
         if (request !== historyRequestRef.current) return;
-        reconcileCaptainHistory(result.messages);
         // A working agent can briefly leave an empty terminal snapshot (redraw
         // or alternate screen); retry a few times before accepting it as empty.
         if (result.messages.length === 0 && attempt < 5) {
@@ -389,24 +433,15 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         // A reply stored before a reload can have grown or reflowed in the
         // snapshot since. Revise that row rather than letting the seed record
         // the new content hash as a row this canvas has already shown.
-        if (target !== 'captain') {
-          const seedRevisable = terminalRevisionCandidate(sanitizeTerminalHistory(result.messages));
-          if (seedRevisable) reviseRenderedReply(seedRevisable);
-        }
+        const seedRevisable = terminalRevisionCandidate(sanitizeTerminalHistory(result.messages));
+        if (seedRevisable) reviseRenderedReply(seedRevisable);
         result.messages.forEach(message => {
-          // While a captain request is active, do not consume assistant/tool
-          // identities from the seed before the prompt boundary is observed.
-          // A bounded snapshot can omit the prompt row; the normal sync path
-          // must get another chance to associate the eventual reply.
-          if (target === 'captain' && activePromptRef.current && message.role === 'assistant') return;
           const key = historyKey(message);
           const optimisticCount = optimisticCountsRef.current.get(key) || 0;
           if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
           knownKeysRef.current.add(messageIdentity(message));
         });
-        // Captain history is the normalized local conversation store. Raw
-        // terminal scrollback is identity-only and is never pageable prose.
-        setHistoryBefore(target === 'captain' ? null : result.next_before || null);
+        setHistoryBefore(result.next_before || null);
       } catch (error) {
         if (request !== historyRequestRef.current) return;
         setSendError(errorText(error, 'Agent history could not be loaded.'));
@@ -414,7 +449,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         // poll remains the recovery path and will discover the eventual reply.
       }
     };
-    void Promise.allSettled([hydration, loadHistory(0)]).then(() => {
+    void Promise.allSettled([hydration, canonicalTarget ? loadCanonicalConversation() : loadHistory(0)]).then(() => {
       if (request === historyRequestRef.current) markHistoryReady();
     });
     return () => {
@@ -510,8 +545,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStartRecording]);
 
+  // TRANSITIONAL: upward paging exists only for terminal-derived worker panes.
+  // The canonical record already returns a bounded recent window in order.
   const loadOlderHistory = async () => {
-    if (target === 'captain' || !historyBefore || historyLoading) return;
+    if (canonicalTarget || !historyBefore || historyLoading) return;
     setHistoryLoading(true);
     try {
       const result = await fetchAgentHistory(target, CHAT_HISTORY_LINES, { before: historyBefore });
@@ -539,7 +576,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
-    atBottomRef.current = atBottom; setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
+    const movedUp = contentOffset.y < lastHistoryOffsetRef.current - 1;
+    lastHistoryOffsetRef.current = contentOffset.y;
+    atBottomRef.current = atBottom;
+    // Upward movement is newer reader intent even when a browser does not emit
+    // onScrollBeginDrag (keyboard and wheel scrolling on web). Cancel every
+    // queued auto-position operation, not only the final measurement retry.
+    if (!atBottom && movedUp) {
+      pendingLatestScrollRef.current = false;
+      if (latestScrollFrameRef.current !== null) {
+        cancelAnimationFrame(latestScrollFrameRef.current);
+        latestScrollFrameRef.current = null;
+      }
+      if (finalScrollTimerRef.current) {
+        clearTimeout(finalScrollTimerRef.current);
+        finalScrollTimerRef.current = null;
+      }
+    }
+    setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
     if (contentOffset.y < 36) void loadOlderHistory();
   };
   const handleHistoryLayout = () => {
@@ -554,6 +608,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     // A captain who starts reading older content has expressed an intentional
     // position; do not override it when an asynchronous render catches up.
     pendingLatestScrollRef.current = false;
+    if (latestScrollFrameRef.current !== null) {
+      cancelAnimationFrame(latestScrollFrameRef.current);
+      latestScrollFrameRef.current = null;
+    }
+    if (finalScrollTimerRef.current) {
+      clearTimeout(finalScrollTimerRef.current);
+      finalScrollTimerRef.current = null;
+    }
     if (!initialHistoryLoadedRef.current) initialScrollCancelledRef.current = true;
   };
   const addAttachments = (selected: ComposerAttachment[]) => {
@@ -608,97 +670,40 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!wasAtBottom) setHasNewMessages(true);
     if (wasAtBottom) requestLatestScroll();
   };
-  // Terminal snapshots are discovery transport, never conversation content.
-  // For the captain thread, an exact locally-submitted prompt opens the only
-  // rendering boundary. Unknown user rows (worker prompts/replies), idle agent
-  // prose, and standalone tools are remembered for dedupe but never appended.
-  //
-  // A seed can finish after a prompt was submitted (or after a reload). If it
-  // sees the prompt and its reply together, blindly recording both identities
-  // as "known" drops the reply without ever rendering it. Recover only a
-  // response segment whose user row exactly matches an unresolved captain
-  // message already in the normalized store; this repairs that race without
-  // replaying the old terminal backlog.
-  function reconcileCaptainHistory(incoming: AgentHistoryMessage[]) {
-    if (target !== 'captain') return;
-    const history = sanitizeTerminalHistory(incoming);
-    const local = getConversationMessages(target);
-    // Every captain turn, with the primary reply already rendered for it (if
-    // any). An answered turn is still listed: a reply that grew or reflowed in
-    // the snapshot since it was stored must revise that row, never add a second.
-    const turns = local.reduce((result, message, index) => {
-      if (message.role !== 'user' || message.audience !== 'captain' || message.delivery === 'failed' || message.delivery === 'cancelled') return result;
-      const nextUser = local.slice(index + 1).findIndex(item => item.role === 'user');
-      const end = nextUser < 0 ? local.length : index + 1 + nextUser;
-      const reply = local.slice(index + 1, end).find(item => item.role === 'assistant' && item.kind !== 'tool') || null;
-      result.push({ message, index, reply });
-      return result;
-    }, [] as { message: ConversationMessage; index: number; reply: ConversationMessage | null }[]);
-    if (!turns.length) return;
-
-    type CaptainHistoryEntry = AgentHistoryMessage;
-    type CaptainHistorySegment = { prompt: CaptainHistoryEntry; reply: CaptainHistoryEntry | null; toolResults: string[] };
-    const segments: CaptainHistorySegment[] = [];
-    let segment: CaptainHistorySegment | null = null;
-    history.forEach(message => {
-      if (message.kind === 'control') {
-        // A user-role control record is an internal turn addressed to someone
-        // else, so it closes the captain's segment. Agent-side control rows are
-        // only harness noise interleaved with a reply and change no boundary.
-        if (message.role === 'user') segment = null;
-      } else if (message.role === 'user') {
-        segment = { prompt: message, reply: null, toolResults: [] };
-        segments.push(segment);
-      } else if (segment && message.kind === 'tool') {
-        const preview = toolCallPreview(message.text).slice(0, 48);
-        if (!segment.toolResults.includes(preview) && segment.toolResults.length < 6) segment.toolResults.push(preview);
-      } else if (segment && message.kind === 'conversation' && !segment.reply) {
-        segment.reply = message;
-      }
-    });
-
-    const matches: Array<{ local: typeof turns[number]; segment: typeof segments[number] }> = [];
-    const available = [...turns];
-    // Match from the latest occurrence so an old repeated phrase cannot steal
-    // the response belonging to the current locally persisted turn.
-    [...segments].reverse().forEach(candidate => {
-      if (!candidate.reply) return;
-      const matchAt = available.findLastIndex(item => item.message.text.trim() === candidate.prompt.text.trim());
-      if (matchAt < 0) return;
-      const [localMessage] = available.splice(matchAt, 1);
-      matches.push({ local: localMessage, segment: candidate });
-    });
-    matches.sort((left, right) => left.local.index - right.local.index).forEach(({ local: localMessage, segment: candidate }) => {
-      const reply = candidate.reply;
-      if (!reply) return;
-      const id = reply.id || stableHistoryId(reply);
-      knownKeysRef.current.add(messageIdentity(reply));
-      const rendered = localMessage.reply;
-      if (rendered) {
-        // The segment match is positional proof that this is the same turn's
-        // reply, re-read after the snapshot re-rendered it. That is stronger
-        // evidence than text similarity, so no containment check is needed
-        // here - only the live path, which has no segment, falls back to one.
-        if (rendered.text !== reply.text) {
-          updateConversationMessageState(target, rendered.id, {
-            text: reply.text,
-            ...(reply.sources ? { sources: reply.sources } : {}),
-            ...(reply.thinkingSummary ? { thinkingSummary: reply.thinkingSummary } : {}),
-            ...(reply.progress ? { progress: reply.progress } : {}),
-          });
-        }
-        return;
-      }
-      insertConversationMessageAfter(target, localMessage.message.id, {
-        id, role: 'assistant', kind: 'conversation', text: reply.text, sentAt: undefined, source: 'text', audience: 'primary', progress: reply.progress || 'complete', sources: reply.sources, thinkingSummary: reply.thinkingSummary, runId: reply.runId, regenerateSafe: reply.regenerateSafe,
-        toolResults: candidate.toolResults.length ? candidate.toolResults : undefined,
-      });
-      if (activePromptRef.current?.messageId === localMessage.message.id) {
-        activePromptRef.current = null;
-        setIsThinking(false);
-      }
-    });
-  }
+  /**
+   * Apply canonical gateway messages to the transcript.
+   *
+   * This is the whole of the captain delivery path: the gateway already decided
+   * what each record is, so there is nothing to dedupe by text, no optimistic
+   * count to reconcile, and no prompt boundary to infer. `replace` is for the
+   * authoritative full list an open/reload returns; a socket or poll delta
+   * merges into the rows already rendered. Returns true when the turn this
+   * canvas is waiting on has been answered.
+   */
+  const applyCanonicalMessages = (incoming: CanonicalMessage[], { replace = false, pending = [] }: { replace?: boolean; pending?: ConversationMessage[] } = {}): boolean => {
+    const current = getConversationMessages(target);
+    const currentIds = new Set(current.map(message => message.id));
+    const base = pending.length ? [...current, ...pending.filter(message => !currentIds.has(message.id))] : current;
+    const next = reconcileCanonicalMessages(base, incoming, { authoritative: replace });
+    if (!sameRenderedTranscript(current, next)) {
+      const wasAtBottom = atBottomRef.current;
+      resetConversationMessages(target, next);
+      if (wasAtBottom) requestLatestScroll(); else setHasNewMessages(true);
+    }
+    const active = activePromptRef.current;
+    if (!active) return false;
+    // The turn's own status is the completion signal: a user row still marked
+    // 'working' has no recorded reply yet. Nothing here inspects reply text.
+    const submitted = next.find(row => row.id === active.messageId);
+    if (!submitted || submitted.progress === 'working') return false;
+    activePromptRef.current = null;
+    setIsThinking(false);
+    return true;
+  };
+  const syncCanonicalConversation = async (): Promise<boolean> => {
+    const result = await fetchCanonicalConversation(target);
+    return applyCanonicalMessages(result.messages, { replace: true });
+  };
   // Herdr ids hash terminal content (see gateway/app/herdr_client.py), and that
   // content mutates while a reply renders, reflows, or scrolls its head out of
   // the snapshot. Update the row it already produced instead of adding a second
@@ -719,6 +724,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     });
     return true;
   }
+  // TRANSITIONAL: terminal-derived delivery, worker panes only.
+  // A worker pane has no submitted turn, so its transcript is still parsed out
+  // of a mutable snapshot and still needs content identity and revision
+  // matching. The captain thread no longer uses any of this.
   const appendHistoryMessages = (incoming: AgentHistoryMessage[]): boolean => {
     let appendedReply = false;
     const history = sanitizeTerminalHistory(incoming);
@@ -726,60 +735,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     history.forEach(message => {
       const key = historyKey(message);
       const identity = messageIdentity(message);
-      const active = activePromptRef.current;
 
-      if (message.kind === 'control') {
-        // Never a message of either role. A user-role control record is an
-        // internal turn addressed to someone else, so it closes the response
-        // segment the captain's prompt opened; agent-side control rows are
-        // harness noise interleaved with the reply and close nothing.
-        if (active && message.role === 'user') active.observed = false;
-        return;
-      }
+      // A control record is never a message of either role.
+      if (message.kind === 'control') return;
 
-      if (target === 'captain') {
-        if (message.role === 'user') {
-          if (active && message.kind === 'conversation') {
-            // Only the exact captain prompt opens the response segment. Any
-            // subsequent user-role row is an internal worker/system audience
-            // boundary and fails closed until a new captain submission.
-            active.observed = message.text.trim() === active.text;
-          }
-          const optimisticCount = optimisticCountsRef.current.get(key) || 0;
-          if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
-          knownKeysRef.current.add(identity);
-          return;
-        }
-        // The revision must be tried before the identity short-circuit: a
-        // gateway that keeps one id for a row still rendering would otherwise
-        // pin the first partial read forever.
-        if (message === revisable && reviseRenderedReply(message)) {
-          knownKeysRef.current.add(identity);
-          return;
-        }
-        if (knownKeysRef.current.has(identity)) return;
-        // If a socket delivers a response before its prompt row, leave it
-        // unconsumed so the authoritative full-history poll can retry safely.
-        if (!active) {
-          knownKeysRef.current.add(identity);
-          return;
-        }
-        if (!active.observed) return;
-        knownKeysRef.current.add(identity);
-        if (message.kind === 'tool') {
-          const preview = toolCallPreview(message.text).slice(0, 48);
-          if (!active.toolResults.includes(preview) && active.toolResults.length < 6) active.toolResults.push(preview);
-          return;
-        }
-        appendMessage({ id: message.id || stableHistoryId(message), role: 'assistant', kind: 'conversation', text: message.text, sentAt: undefined, source: 'text', audience: 'primary', progress: message.progress || 'complete', sources: message.sources, thinkingSummary: message.thinkingSummary, runId: message.runId, regenerateSafe: message.regenerateSafe, toolResults: active.toolResults }, false);
-        activePromptRef.current = null;
-        setIsThinking(false);
-        appendedReply = true;
-        return;
-      }
-
-      // Explicit worker conversations retain their existing navigation path,
-      // while receiving the same typed artifact filtering and stable dedupe.
       if (message === revisable && reviseRenderedReply(message)) {
         knownKeysRef.current.add(identity);
         return;
@@ -798,8 +757,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     return appendedReply;
   };
   const syncFromHistory = async (): Promise<boolean> => {
+    if (canonicalTarget) return syncCanonicalConversation();
     const result = await fetchAgentHistory(target);
-    reconcileCaptainHistory(result.messages);
     return appendHistoryMessages(result.messages);
   };
 
@@ -810,14 +769,17 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     let active = true;
     const realtime = new RealtimeClient(target);
     const unsubscribe = realtime.subscribe(event => {
-      if (event?.type !== 'agent_history' || !Array.isArray(event.messages)) return;
+      if (!Array.isArray(event?.messages)) return;
+      const canonical = event.type === 'conversation_messages';
+      if (canonical !== canonicalTarget) return;
       // In development React may mount, clean up, and mount effects again. Do
-      // not let an early socket replay server history before the authoritative
-      // initial seed has established identities for this mounted canvas.
+      // not let an early socket delivery race the authoritative initial read.
       void historyReadyRef.current.then(() => {
         if (!active) return;
-        reconcileCaptainHistory(event.messages);
-        if (appendHistoryMessages(event.messages)) setIsThinking(false);
+        // Canonical events are revision deltas keyed by message id, so they
+        // merge into the rows already rendered rather than replacing them.
+        if (canonical) applyCanonicalMessages(normalizeCanonicalMessages(event.messages));
+        else if (appendHistoryMessages(event.messages)) setIsThinking(false);
       });
     });
     void realtime.connect();
@@ -850,7 +812,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'working' });
       if (editId) setEditingMessageId(null);
     } else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: Date.now(), source: 'text', attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'working' });
-    activePromptRef.current = { token, messageId, text: trimmed, observed: false, toolResults: [], controller };
+    activePromptRef.current = { token, messageId, text: trimmed, controller };
     const isCurrent = () => activePromptRef.current?.token === token;
     setPromptText(''); setSendError(null); setIsThinking(true);
     try {
@@ -876,12 +838,21 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       updateConversationMessageState(target, messageId, { delivery: 'sent', progress: 'complete', attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size, status: 'attached' as const, uploadId: item.upload_id })) });
       const pendingIds = new Set(pendingAttachments.map(attachment => attachment.id));
       setAttachments(current => current.filter(item => !pendingIds.has(item.id)));
-      const reply = conversationalPromptResponse(response?.response);
-      if (reply) {
-        // A server-issued run id is the stable identity for a server-known
-        // response; the local fallback applies only when the gateway sends none.
-        appendMessage({ id: response.runId ? `run-${response.runId}` : `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text', audience: 'primary', progress: response.progress || 'complete', sources: response.sources, thinkingSummary: response.thinkingSummary, runId: response.runId, regenerateSafe: response.regenerateSafe });
-        activePromptRef.current = null; setIsThinking(false); return;
+      if (canonicalTarget) {
+        // The gateway answers with the canonical turn it recorded, including a
+        // reply the harness returned synchronously. Nothing is minted locally,
+        // so there is no local row for a later read to reconcile or duplicate.
+        const canonical = response?.conversation?.messages || [];
+        if (activePromptRef.current?.token === token) activePromptRef.current = { ...activePromptRef.current, turnId: response?.conversation?.turn_id };
+        if (canonical.length && applyCanonicalMessages(canonical)) return;
+      } else {
+        const reply = conversationalPromptResponse(response?.response);
+        if (reply) {
+          // A server-issued run id is the stable identity for a server-known
+          // response; the local fallback applies only when the gateway sends none.
+          appendMessage({ id: response.runId ? `run-${response.runId}` : `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text', audience: 'primary', progress: response.progress || 'complete', sources: response.sources, thinkingSummary: response.thinkingSummary, runId: response.runId, regenerateSafe: response.regenerateSafe });
+          activePromptRef.current = null; setIsThinking(false); return;
+        }
       }
       const pollForReply = async () => {
         if (!isCurrent()) return;
@@ -910,6 +881,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     queuedPrompts.forEach(prompt => updateConversationMessageState(target, prompt.messageId, { delivery: 'cancelled', progress: 'cancelled' }));
     setQueuedPrompts([]);
     setIsThinking(false);
+    if (canonicalTarget) {
+      // Cancel the canonical turn as well, so harness output produced after the
+      // captain stopped it is never recorded as that turn's reply.
+      const cancelled = [active.messageId, ...queuedPrompts.map(prompt => prompt.messageId)];
+      await Promise.allSettled(cancelled.map(messageId => cancelConversationTurn(target, messageId)));
+    }
     try {
       const result = await interruptAgent(target);
       if (result.status === 'error' || result.error) throw new Error(result.error || 'Interruption was not accepted.');
@@ -975,8 +952,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         <View style={styles.logoWithUnread}><BrandMark dark={dark} />{unreadAttentionCount > 0 ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</View>
       </TouchableOpacity>
     </View>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
-      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
+      {(canonicalTarget ? filterCanonicalMessages(messages, showToolCalls) : filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls)).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
       {isThinking ? <View testID="agent-thinking-message" accessibilityRole="text" accessibilityLabel="Magistrate is working" style={styles.assistantMessage}><Text style={[styles.progressLabel, { color: muted }]}>Working…</Text><ThinkingIndicator dark={dark} /></View> : null}
     </ScrollView>
     {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={jumpToLatest}><Text style={styles.jumpText}>↓</Text></TouchableOpacity> : null}

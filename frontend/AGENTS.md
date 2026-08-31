@@ -24,11 +24,13 @@ Sharp edges when driving the web build in headless Chrome:
 
 ## Chat history rendering
 
-`ChatCanvas` (`app/(tabs)/chat.tsx`) renders normalized messages persisted by `ConversationSession` separately from Herdr terminal scrollback. Initial history is bounded by `CHAT_HISTORY_LINES`; older pages use stable cursor IDs on upward scroll. New messages arrive through the gateway `/api/v1/events` stream and `syncFromHistory` polling remains the fallback. Working agents can expose transiently empty snapshots, so consumers must tolerate them. Messages discovered from Herdr leave `sentAt` unset (no reliable wall-clock time); locally sent messages retain their original timestamp.
+The captain thread renders the gateway's canonical conversation record: `fetchCanonicalConversation` plus `conversation_messages` events, merged by `src/services/CanonicalConversation.ts` (append by canonical id, update on revision, order by `sequence_index`). Read `../CHAT_ARCHITECTURE_FIX.md` before changing it, and do not reintroduce text matching, optimistic counting, or prompt-boundary inference there.
+
+Worker panes (`?agentId=`) are still terminal-derived: `fetchAgentHistory` bounded by `CHAT_HISTORY_LINES`, cursor paging on upward scroll, and `ChatIdentity` revision matching. Those branches are marked `TRANSITIONAL` in `app/(tabs)/chat.tsx`. Working agents can expose transiently empty snapshots, so consumers must tolerate them. Captain time is gateway-authored epoch milliseconds: local `Date.now()` exists only on an optimistic row and canonical `created_at` replaces it on acknowledgement. A terminal-derived worker message leaves `sentAt` unset unless its source carries a real timestamp.
 
 ## Backend model selection contract
 
-`POST /api/v1/captain/prompt` requires `harness` and `model` together or neither; omitting both keeps the backend's current session selection (see `gateway/app/main.py`). Offer variants from `GET /api/v1/execution/capabilities` only. Its response's `response` field is the agent's reply text and must be appended to the chat transcript by the caller — the gateway does not push it, so a caller that only checks for `status`/`error` will silently drop every reply.
+`POST /api/v1/captain/prompt` requires `harness` and `model` together or neither; omitting both keeps the backend's current session selection (see `gateway/app/main.py`). Offer variants from `GET /api/v1/execution/capabilities` only. It returns the canonical turn it recorded in `conversation.messages`, which is what the caller renders; the legacy `response` field is provider text the gateway has already recorded and the captain thread ignores it.
 
 ## Voice input
 

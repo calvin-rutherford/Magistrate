@@ -13,6 +13,8 @@ export interface ConversationAttachment {
   status?: 'uploading' | 'stored' | 'attached' | 'failed';
   /** Server-issued upload id; absent while the upload is still local. */
   uploadId?: string;
+  /** Authenticated gateway reference to the bounded upload store. */
+  url?: string;
 }
 
 const ATTACHMENT_STATES = new Set(['uploading', 'stored', 'attached', 'failed']);
@@ -34,9 +36,8 @@ export interface ConversationMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  // Locally submitted messages keep the wall-clock time captured at the send
-  // action. Herdr snapshots have no reliable time, so discovered messages may
-  // omit it; callers must never manufacture one during hydration or refresh.
+  // A local send starts with Date.now(); a canonical captain row replaces it
+  // with gateway epoch milliseconds. Terminal-derived worker rows may omit time.
   sentAt?: number;
   source: 'text' | 'voice';
   kind?: 'conversation' | 'tool';
@@ -54,6 +55,16 @@ export interface ConversationMessage {
   /** Explicit conversation boundary; terminal-derived rows without it are not restored. */
   audience?: 'captain' | 'primary';
   delivery?: 'sending' | 'sent' | 'failed' | 'cancelled';
+  /**
+   * Identity issued by the gateway's canonical conversation record (see
+   * CanonicalConversation.ts). Present on every captain row; absent on a row
+   * still in flight and on terminal-derived worker-pane rows.
+   */
+  canonicalId?: string;
+  /** Monotonic gateway revision used to reject out-of-order poll/socket delivery. */
+  canonicalRevision?: number;
+  turnId?: string;
+  sequenceIndex?: number;
 }
 
 // The active thread is kept in memory for reactive rendering and mirrored as
@@ -62,14 +73,76 @@ export interface ConversationMessage {
 const messagesByTarget = new Map<string, ConversationMessage[]>();
 const listenersByTarget = new Map<string, Set<() => void>>();
 const EMPTY_MESSAGES: ConversationMessage[] = [];
-const STORAGE_PREFIX = 'magistrate.chat.messages.';
+// Captain persistence is a cache, not a second transcript. Canonical rows are
+// keyed by gateway id and unacknowledged local submissions live in a separate
+// map keyed by client_message_id. Terminal-era v1/v2 captain arrays are deleted
+// rather than merged back into the gateway record. Worker panes remain on the
+// transitional v2 array until they receive durable upstream identity.
+const CAPTAIN_TARGET = 'captain';
+const WORKER_STORAGE_PREFIX = 'magistrate.chat.messages.v2.';
+const CANONICAL_CACHE_PREFIX = 'magistrate.chat.canonical.v1.';
+const PENDING_CACHE_PREFIX = 'magistrate.chat.pending.v1.';
+const LEGACY_STORAGE_PREFIXES = ['magistrate.chat.messages.', WORKER_STORAGE_PREFIX];
+const writesByTarget = new Map<string, Promise<void>>();
+const storageKey = (prefix: string, target: string) => prefix + encodeURIComponent(target);
+const isPendingLocalMessage = (message: ConversationMessage) =>
+  !message.canonicalId && message.role === 'user'
+  && (message.delivery === 'sending' || message.delivery === 'failed');
+const discardLegacyStorage = (target: string, includeV2 = false) => {
+  const prefixes = includeV2 ? LEGACY_STORAGE_PREFIXES : LEGACY_STORAGE_PREFIXES.slice(0, 1);
+  void Promise.all(prefixes.map(prefix => AsyncStorage.removeItem(storageKey(prefix, target)))).catch(() => {});
+};
 const persist = (target: string, messages: ConversationMessage[]) => {
-  void AsyncStorage.setItem(STORAGE_PREFIX + encodeURIComponent(target), JSON.stringify(messages)).catch(() => {});
+  const previous = writesByTarget.get(target) || Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    if (target !== CAPTAIN_TARGET) {
+      await AsyncStorage.setItem(storageKey(WORKER_STORAGE_PREFIX, target), JSON.stringify(messages));
+      return;
+    }
+    const canonical = Object.fromEntries(messages
+      .filter(message => typeof message.canonicalId === 'string' && message.canonicalId)
+      .map(message => [message.canonicalId as string, message]));
+    const pending = Object.fromEntries(messages
+      .filter(isPendingLocalMessage)
+      .map(message => [message.id, message]));
+    await Promise.all([
+      AsyncStorage.setItem(storageKey(CANONICAL_CACHE_PREFIX, target), JSON.stringify({ schema_version: 'conversation-cache.v1', messages: canonical })),
+      AsyncStorage.setItem(storageKey(PENDING_CACHE_PREFIX, target), JSON.stringify({ schema_version: 'conversation-pending.v1', messages: pending })),
+    ]);
+  });
+  writesByTarget.set(target, write);
+  void write.finally(() => { if (writesByTarget.get(target) === write) writesByTarget.delete(target); }).catch(() => {});
 };
 
-export async function hydrateConversationMessages(target: string): Promise<ConversationMessage[]> {
+/**
+ * Read only genuine unacknowledged submissions. The canonical cache is never
+ * hydrated into the live captain thread: Gateway is read first and replaces it.
+ */
+export async function loadPendingConversationMessages(target: string): Promise<ConversationMessage[]> {
+  if (target !== CAPTAIN_TARGET) return [];
   try {
-    const raw = await AsyncStorage.getItem(STORAGE_PREFIX + encodeURIComponent(target));
+    await writesByTarget.get(target)?.catch(() => {});
+    const raw = await AsyncStorage.getItem(storageKey(PENDING_CACHE_PREFIX, target));
+    discardLegacyStorage(target, true);
+    if (!raw) return [];
+    const payload = JSON.parse(raw) as unknown;
+    if (!payload || typeof payload !== 'object') return [];
+    const values = Object.values((payload as { messages?: unknown }).messages || {});
+    return values.filter((item): item is ConversationMessage => {
+      if (!item || typeof item !== 'object') return false;
+      const value = item as Partial<ConversationMessage>;
+      return typeof value.id === 'string' && /^(?:u-|voice-u-)[A-Za-z0-9_-]*$/.test(value.id)
+        && value.role === 'user' && typeof value.text === 'string'
+        && !value.canonicalId && (value.delivery === 'sending' || value.delivery === 'failed');
+    }).map(item => ({ ...item, source: item.source === 'voice' ? 'voice' : 'text', audience: 'captain' }));
+  } catch { return []; }
+}
+
+export async function hydrateConversationMessages(target: string): Promise<ConversationMessage[]> {
+  if (target === CAPTAIN_TARGET) return getConversationMessages(target);
+  try {
+    const raw = await AsyncStorage.getItem(storageKey(WORKER_STORAGE_PREFIX, target));
+    discardLegacyStorage(target);
     if (!raw) return getConversationMessages(target);
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return getConversationMessages(target);
@@ -79,7 +152,11 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       // known to have crossed the captain/primary boundary, while retaining
       // locally-created messages from older app versions.
       const trustedLegacyId = item.role === 'user' ? /^(?:u-|voice-u-)/.test(item.id) : /^(?:a-|voice-a-)/.test(item.id);
-      return item.kind !== 'tool' && (item.audience === (item.role === 'user' ? 'captain' : 'primary') || trustedLegacyId);
+      // A canonical row carries a server-issued id, so a tool event restored
+      // with one is a real recorded event rather than a parsed terminal row.
+      const canonical = typeof item.canonicalId === 'string' && item.canonicalId.length > 0;
+      if (item.kind === 'tool' && !canonical) return false;
+      return item.audience === (item.role === 'user' ? 'captain' : 'primary') || trustedLegacyId || canonical;
     }).map(item => {
       const value = item as Record<string, unknown>;
       const attachments = Array.isArray(value.attachments) ? value.attachments.filter(attachment => {
@@ -94,7 +171,8 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
         // processed; the unknown state renders without a success label.
         const status = ATTACHMENT_STATES.has(String(candidate.status)) ? candidate.status as ConversationAttachment['status'] : undefined;
         const uploadId = typeof candidate.uploadId === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(candidate.uploadId) ? candidate.uploadId : undefined;
-        return { name: candidate.name as string, mediaType: candidate.mediaType as string, size: candidate.size as number | undefined, status, uploadId };
+        const url = typeof candidate.url === 'string' && /^\/api\/v1\/uploads\/[A-Za-z0-9_-]{16,64}$/.test(candidate.url) ? candidate.url : undefined;
+        return { name: candidate.name as string, mediaType: candidate.mediaType as string, size: candidate.size as number | undefined, status, uploadId, url };
       }) : undefined;
       const sentAt = typeof value.sentAt === 'number' && Number.isFinite(value.sentAt) && value.sentAt >= 0 ? value.sentAt : undefined;
       const toolResults = Array.isArray(value.toolResults)
@@ -112,7 +190,7 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       const thinkingSummary = value.thinkingSummary && typeof value.thinkingSummary === 'object' ? (() => { const candidate = value.thinkingSummary as Record<string, unknown>; return typeof candidate.provider === 'string' && typeof candidate.text === 'string' ? { provider: candidate.provider.slice(0, 48), text: candidate.text.slice(0, 280) } : undefined; })() : undefined;
       const progress = ['queued', 'working', 'streaming', 'complete', 'failed', 'cancelled'].includes(String(value.progress)) ? value.progress as ConversationMessage['progress'] : undefined;
       const role = value.role as 'user' | 'assistant';
-      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
+      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: value.kind === 'tool' ? 'tool' : 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
     });
     const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
     const currentById = new Map(current.map(message => [message.id, message]));
@@ -120,9 +198,9 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       const live = currentById.get(stored.id);
       if (!live) return stored;
       currentById.delete(stored.id);
-      // An optimistic message can change while AsyncStorage is loading. The
-      // in-memory copy is newer, but a timestamp missing from either side must
-      // not erase the real timestamp from the other.
+      // An optimistic worker message can change while AsyncStorage is loading.
+      // Its in-memory fields are newer; retain a stored timestamp only when the
+      // live row does not carry one.
       return { ...stored, ...live, sentAt: live.sentAt ?? stored.sentAt };
     });
     const merged = [...hydrated, ...current.filter(message => currentById.has(message.id))];
@@ -155,15 +233,6 @@ export function prependConversationMessages(target: string, messages: Conversati
   messagesByTarget.set(target, next); persist(target, next); emit(target);
 }
 
-export function insertConversationMessageAfter(target: string, afterId: string, message: ConversationMessage) {
-  const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
-  if (current.some(existing => existing.id === message.id)) return;
-  const index = current.findIndex(existing => existing.id === afterId);
-  if (index < 0) return;
-  const next = [...current.slice(0, index + 1), message, ...current.slice(index + 1)];
-  messagesByTarget.set(target, next); persist(target, next); emit(target);
-}
-
 export function resetConversationMessages(target: string, messages: ConversationMessage[] = EMPTY_MESSAGES) {
   messagesByTarget.set(target, messages); persist(target, messages); emit(target);
 }
@@ -172,7 +241,7 @@ export function updateConversationMessage(target: string, id: string, text: stri
   updateConversationMessageState(target, id, { text, sentAt });
 }
 
-export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience'>>) {
+export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience' | 'canonicalId' | 'canonicalRevision' | 'turnId' | 'sequenceIndex'>>) {
   const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
   const next = current.map(message => message.id === id ? { ...message, ...update } : message);
   messagesByTarget.set(target, next); persist(target, next); emit(target);
