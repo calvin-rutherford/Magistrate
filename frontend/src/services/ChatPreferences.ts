@@ -40,7 +40,7 @@ const validVoiceInputModes = new Set<VoiceInputMode>(['automatic', 'browser', 'n
 const validVoiceCaptureBehaviors = new Set<VoiceCaptureBehavior>(['tap-to-toggle', 'hold-to-talk']);
 const validVoiceTranscriptBehaviors = new Set<VoiceTranscriptBehavior>(['insert', 'auto-send']);
 const validBackgrounds = new Set<WeatherSceneKey>([
-  'auto', 'dusk-mountain', 'clear-day', 'clear-night', 'clouds', 'rain', 'storm', 'sunset', 'minimal-dark', 'custom',
+  'auto', 'dusk-mountain', 'clear-day', 'clear-night', 'clouds', 'rain', 'storm', 'sunset', 'minimal-dark', 'minimal-light', 'custom',
 ]);
 
 export async function loadChatPreferences(): Promise<ChatPreferences> {

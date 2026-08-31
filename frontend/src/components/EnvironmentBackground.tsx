@@ -6,6 +6,17 @@ import { getWeather, WEATHER_REFRESH_MS } from '../services/weather';
 import { BottomControls } from './BottomControls';
 import { usePathname, useRouter } from 'expo-router';
 
+/**
+ * The two minimal environments are a deliberate flat canvas, not a dimmed
+ * scene, so their scrim colour is fixed by the choice rather than by the
+ * current theme - selecting Minimal Light must not stay black in dark mode.
+ */
+function minimalScrim(sceneKey: string): string | null {
+  if (sceneKey === 'minimal-dark') return '#05070A';
+  if (sceneKey === 'minimal-light') return '#F7F8FA';
+  return null;
+}
+
 export function EnvironmentBackground({ children, hideBottomControls = false, voiceMode = false }: { children: React.ReactNode; hideBottomControls?: boolean; voiceMode?: boolean }) {
   const router = useRouter(); const pathname = usePathname();
   const [, setBackgroundRevision] = React.useState(0);
@@ -45,7 +56,7 @@ export function EnvironmentBackground({ children, hideBottomControls = false, vo
     <Animated.View style={[styles.container, { opacity: fade }]}>
       <ImageBackground source={theme.sceneImage} style={styles.bgImage} resizeMode="cover">
         <WeatherOverlay kind={theme.weather} dark={dark} />
-        <View style={[styles.darkDimOverlay, { backgroundColor: dark ? '#07101D' : '#FFFFFF', opacity: voiceMode ? 0.58 : highContrast ? (dark ? 0.78 : 0.28) : dark ? theme.dimOpacity : Math.min(theme.dimOpacity, 0.16) }]} />
+        <View style={[styles.darkDimOverlay, { backgroundColor: minimalScrim(theme.sceneKey) || (dark ? '#07101D' : '#FFFFFF'), opacity: minimalScrim(theme.sceneKey) ? theme.dimOpacity : voiceMode ? 0.58 : highContrast ? (dark ? 0.78 : 0.28) : dark ? theme.dimOpacity : Math.min(theme.dimOpacity, 0.16) }]} />
         {voiceMode ? <View pointerEvents="none" style={styles.voiceModeTreatment} /> : null}
         <View style={styles.contentArea}>{children}</View>
         {!hideBottomControls && pathname !== '/chat' ? <BottomControls /> : null}

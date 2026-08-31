@@ -275,7 +275,15 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
   const page = await openChat({ width: 1100, height: 760 });
   assert.equal((await page.$$('[data-testid="chat-history"] img')).length, 0);
   assert.equal((await page.$eval('[data-testid="chat-history"]', element => element.innerText)).trim(), '');
-  assert.equal((await page.$$('[data-testid="brand-drawer-toggle"] img')).length, 1);
+  // The canonical mark is the resting Magi identity, above one greeting; the
+  // drawer control next to it is a plain menu glyph, not a second logo.
+  await page.waitForSelector('[data-testid="chat-empty-state"]');
+  assert.equal((await page.$$('[data-testid="chat-empty-state"] img')).length, 1);
+  assert.equal((await page.$$('[data-testid="brand-drawer-toggle"] img')).length, 0);
+  assert.equal((await page.$$('[data-testid="brand-drawer-toggle"] svg')).length, 1);
+  assert.match(await page.$eval('[data-testid="chat-greeting"]', element => element.innerText), /What can I help with/);
+  // Nothing else competes with it: no fleet counters, telemetry or suggestions.
+  assert.doesNotMatch(await page.$eval('[data-testid="chat-empty-state"]', element => element.innerText), /agent|fleet|harness|worktree/i);
   const body = await page.evaluate(() => document.body.innerText);
   assert.doesNotMatch(body, /Firstmate|melkezic/i);
   // Opening Chat and its recurring history refresh must never submit a prompt;
@@ -292,7 +300,14 @@ test('chat starts at the measured latest content and preserves older-message rea
     clientMessageId: `seed-${index}`, text: `turn ${index * 2}`, reply: `turn ${index * 2 + 1}`,
   }));
   const page = await openChat({ width: 900, height: 700 }, false, 'Reply', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-seed-"]').length === 6);
+  // Both halves of every recorded turn have to be on screen before the
+  // scroll position means anything: measuring while the replies are still
+  // arriving reads a transcript that does not overflow yet.
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-seed-"]').length === 6 && document.querySelectorAll('[data-testid="agent-message"]').length === 6);
+  await page.waitForFunction(() => {
+    const element = document.querySelector('[data-testid="chat-history"]');
+    return element.scrollHeight > element.clientHeight + 48;
+  });
   const fixedControls = () => page.evaluate(() => {
     const logo = document.querySelector('[data-testid="brand-drawer-toggle"]').getBoundingClientRect();
     const composer = document.querySelector('[data-testid="captain-prompt"]').closest('[class]')?.getBoundingClientRect();
@@ -314,19 +329,27 @@ test('chat starts at the measured latest content and preserves older-message rea
   assert.ok(typography && Number.parseFloat(typography.fontSize) >= 17);
   assert.ok(typography && Number.parseFloat(typography.lineHeight) >= 26);
 
-  await page.evaluate(() => {
+  // Opening the thread still has an auto-position to the end in flight, and it
+  // can land after a single synthetic scroll and snap the reader back down.
+  // Keep scrolling up until the reading position actually holds, the way a
+  // person would, instead of assuming one event wins the race.
+  await page.waitForFunction(() => {
     const element = document.querySelector('[data-testid="chat-history"]');
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll', { bubbles: true }));
-  });
-  await page.waitForSelector('[data-testid="jump-to-latest"]');
+    return Boolean(document.querySelector('[data-testid="jump-to-latest"]'));
+  }, { polling: 120 });
   position = await metrics();
   assert.ok(position.scrollTop + position.clientHeight < position.scrollHeight - 2, 'user scroll should leave the viewport above the end');
   assert.deepEqual(await fixedControls(), fixedBefore, 'logo and composer must remain detached from history scrolling');
   assert.equal((await page.$eval('[data-testid="jump-to-latest"]', element => element.innerText)).trim(), '↓');
+  // The floating controls now share one adaptive glass treatment so they stay
+  // legible over an arbitrary environment; what matters is that the control is
+  // still a filled, comfortably sized target rather than one pinned tone.
   const jumpStyle = await page.$eval('[data-testid="jump-to-latest"]', element => ({ background: getComputedStyle(element).backgroundColor, width: getComputedStyle(element).width }));
-  assert.match(jumpStyle.background, /rgba\(17, 23, 34, 0\.62\)/);
-  assert.equal(jumpStyle.width, '38px');
+  const jumpAlpha = Number((jumpStyle.background.match(/rgba?\([^)]*?([\d.]+)\)$/) || [])[1] ?? 1);
+  assert.ok(jumpAlpha >= 0.5, `the jump control needs an opaque-enough backing, got ${jumpStyle.background}`);
+  assert.equal(jumpStyle.width, '40px');
 
   await submit(page, 'while reading older messages');
   await page.waitForSelector('[data-testid="jump-to-latest"]');
@@ -495,22 +518,25 @@ test('drawer starts collapsed, expands downward, and preserves conversation hist
   await page.close();
 });
 
-test('drawer scales every icon by 20% without showing dropdown arrows or changing its controls', async () => {
+test('drawer navigation is one icon system at a comfortable hit target', async () => {
+  // The drawer used to mix text glyphs at hand-tuned point sizes. It is now a
+  // single line-icon set, so what has to hold is consistency - one optical
+  // size, one stroke - and a touch target large enough for a thumb.
   const page = await openChat({ width: 1100, height: 760 });
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  const sizes = await page.evaluate(() => ({
-    row: getComputedStyle(document.querySelector('[data-testid="drawer-section-attention-icon"]')).fontSize,
-    account: getComputedStyle(document.querySelector('[data-testid="drawer-account-icon"]')).fontSize,
-    gear: document.querySelector('[data-testid="settings-gear-icon"]').getBoundingClientRect().width,
-    rowHitTarget: document.querySelector('[data-testid="drawer-section-attention"]').getBoundingClientRect().height,
+  const icons = await page.evaluate(() => ['drawer-home-icon', 'drawer-section-fleet-icon', 'drawer-section-attention-icon', 'drawer-section-activity-icon', 'drawer-section-projects-icon', 'drawer-section-connections-icon', 'drawer-account-icon'].map(id => {
+    const svg = document.querySelector(`[data-testid="${id}"] svg`);
+    const rect = svg.getBoundingClientRect();
+    return { id, width: Math.round(rect.width), height: Math.round(rect.height), stroke: svg.getAttribute('stroke-width') };
   }));
-  assert.equal(sizes.row, '16.8px');
-  assert.equal(sizes.account, '22.8px');
-  assert.ok(Math.abs(sizes.gear - 21.6) < 0.02);
-  assert.equal(sizes.rowHitTarget, 42);
+  assert.equal(icons.length, 7);
+  assert.deepEqual(Array.from(new Set(icons.map(icon => `${icon.width}x${icon.height}`))), ['24x24'], JSON.stringify(icons));
+  assert.deepEqual(Array.from(new Set(icons.map(icon => icon.stroke))), ['1.6']);
+  assert.ok(Math.abs((await page.$eval('[data-testid="settings-gear-icon"]', element => element.getBoundingClientRect().width)) - 21.6) < 0.02);
+  const rows = await page.$$eval('[data-testid^="drawer-section-"]', elements => elements.filter(element => !element.getAttribute('data-testid').endsWith('-icon')).map(element => element.getBoundingClientRect().height));
+  assert.ok(rows.length >= 5 && rows.every(height => height >= 48), `drawer rows need a large hit target, got ${rows}`);
   assert.doesNotMatch(await page.$eval('[data-testid="magistrate-drawer"]', element => element.innerText), /⌃|⌄/);
-
   await page.close();
 });
 
@@ -688,6 +714,7 @@ test('usage lives in Settings and reports quota evidence without inventing amoun
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   assert.equal(await page.$('[data-testid="drawer-section-usage"]'), null);
   await page.click('[data-testid="settings-open"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
   await page.waitForSelector('[data-testid="settings-usage-section"]');
   assert.equal(await page.$('[data-testid="settings-usage-content"]'), null);
   await page.click('[data-testid="settings-section-usage"]');
@@ -700,9 +727,7 @@ test('usage lives in Settings and reports quota evidence without inventing amoun
 
 test('Settings sections are collapsed, keyboard accessible, and retain persisted controls', async () => {
   const page = await openChat({ width: 900, height: 700 });
-  await page.click('[data-testid="brand-drawer-toggle"]');
-  await page.click('[data-testid="settings-open"]');
-  await page.waitForSelector('[data-testid="settings-sheet"]');
+  await openSettingsSheet(page);
   const sheetRatio = await page.$eval('[data-testid="settings-sheet"]', element => element.getBoundingClientRect().height / window.innerHeight);
   assert.ok(sheetRatio >= 0.86 && sheetRatio <= 0.92, `settings panel should be about 15% larger: ${sheetRatio}`);
   assert.equal(await page.$('[data-testid="settings-execution-content"]'), null);
@@ -719,8 +744,7 @@ test('Settings sections are collapsed, keyboard accessible, and retain persisted
   assert.equal(await page.$('[data-testid="switching-option-migrate"]'), null);
 
   await page.click('[data-testid="settings-theme"]');
-  await page.waitForSelector('[data-testid="settings-tool-calls-toggle"]');
-  await page.click('[data-testid="settings-tool-calls-toggle"]');
+  await clickInSheet(page, '[data-testid="settings-tool-calls-toggle"]');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.chat.show-tool-calls')), 'true');
   await page.close();
 });
@@ -772,32 +796,33 @@ test('account gear opens the lower settings drawer with live network status', as
 
 test('settings default to system theme and automatic background, then persist explicit dark mode across refresh', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light');
-  await page.click('[data-testid="brand-drawer-toggle"]');
-  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="settings-open"]');
+  await openSettingsSheet(page);
   await page.waitForSelector('[data-testid="settings-usage-section"]');
   await page.click('[data-testid="settings-theme"]');
   assert.equal(await page.$eval('[data-testid="theme-option-system"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
-  assert.equal(await page.$eval('[data-testid="background-option-auto"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
+  // Environments are chosen from visual thumbnails now, so selection reads as a
+  // ring on the preview rather than a filled pill.
+  assert.equal(await page.$eval('[data-testid="background-option-auto"]', element => element.getAttribute('aria-selected')), 'true');
+  assert.equal(await page.$eval('[data-testid="background-option-auto"] > div', element => getComputedStyle(element).borderColor), 'rgb(36, 216, 255)');
+  assert.ok(await page.$('[data-testid="background-option-minimal-light"]'), 'Minimal Light is an offered environment');
+  assert.ok(await page.$('[data-testid="settings-custom-background-upload"]'), 'uploading a background is a first-class control');
   await page.click('[data-testid="theme-option-dark"]');
   await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('10, 14, 20'));
   await page.close();
 
   const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'dark');
-  await refreshed.click('[data-testid="brand-drawer-toggle"]');
-  await refreshed.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await refreshed.click('[data-testid="settings-open"]');
+  await openSettingsSheet(refreshed);
   await refreshed.click('[data-testid="settings-theme"]');
   assert.equal(await refreshed.$eval('[data-testid="theme-option-dark"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
-  assert.match(await refreshed.$eval('[data-testid="branded-chat-shell"]', element => getComputedStyle(element).backgroundColor), /rgba\(10, 14, 20, 0\.78\)/);
+  // The environment owns the canvas now, so the shell carries a light
+  // theme-reactive tint instead of an opaque panel.
+  assert.match(await refreshed.$eval('[data-testid="branded-chat-shell"]', element => getComputedStyle(element).backgroundColor), /rgba\(10, 14, 20, 0\.28\)/);
   await refreshed.close();
 });
 
 test('system theme follows the OS palette without retaining a stale light surface', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'dark');
-  await page.click('[data-testid="brand-drawer-toggle"]');
-  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.click('[data-testid="settings-open"]');
+  await openSettingsSheet(page);
   await page.click('[data-testid="settings-theme"]');
   await page.click('[data-testid="theme-option-system"]');
   await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('10, 14, 20'));
@@ -829,10 +854,9 @@ test('fleet agent opens its conversation, hides tools by default, and settings c
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   await page.click('[data-testid="settings-open"]');
-  await page.waitForSelector('[data-testid="settings-theme"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
   await page.click('[data-testid="settings-theme"]');
-  await page.waitForSelector('[data-testid="settings-tool-calls-toggle"]');
-  await page.click('[data-testid="settings-tool-calls-toggle"]');
+  await clickInSheet(page, '[data-testid="settings-tool-calls-toggle"]');
   await page.waitForSelector('[data-testid="tool-history-message"]');
   history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.match(history, /(?:^|\n)Ran(?:\n|$)/);
@@ -872,17 +896,15 @@ test('two-second hold exposes edit, copy, and selection for plain messages', asy
 
 test('voice input mode selection is explicit and persists without sending a prompt', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false);
-  await page.click('[data-testid="brand-drawer-toggle"]');
-  await page.click('[data-testid="settings-open"]');
+  await openSettingsSheet(page);
   await page.click('[data-testid="settings-section-voice-input"]');
   await page.waitForSelector('[data-testid="settings-voice-mode-options"]');
-  await page.click('[data-testid="voice-mode-option-openai"]');
+  await clickInSheet(page, '[data-testid="voice-mode-option-openai"]');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.input-mode')), 'openai');
   assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length), 0);
   await page.close();
   const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
-  await refreshed.click('[data-testid="brand-drawer-toggle"]');
-  await refreshed.click('[data-testid="settings-open"]');
+  await openSettingsSheet(refreshed);
   await refreshed.click('[data-testid="settings-section-voice-input"]');
   await refreshed.waitForSelector('[data-testid="voice-mode-option-openai"]');
   assert.equal(await refreshed.evaluate(() => localStorage.getItem('magistrate.voice.input-mode')), 'openai');
@@ -906,15 +928,15 @@ test('mic button records real audio, shows the active mark, and fills the compos
 
 test('voice settings expose and persist capture and transcript behavior', async () => {
   const page = await openChat({ width: 900, height: 700 });
-  await page.click('[data-testid="brand-drawer-toggle"]'); await page.click('[data-testid="settings-open"]');
+  await openSettingsSheet(page);
   await page.click('[data-testid="settings-section-voice-input"]');
-  await page.click('[data-testid="voice-capture-option-hold-to-talk"]');
-  await page.click('[data-testid="voice-transcript-option-auto-send"]');
+  await clickInSheet(page, '[data-testid="voice-capture-option-hold-to-talk"]');
+  await clickInSheet(page, '[data-testid="voice-transcript-option-auto-send"]');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.capture-behavior')), 'hold-to-talk');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.transcript-behavior')), 'auto-send');
   await page.close();
   const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
-  await refreshed.click('[data-testid="brand-drawer-toggle"]'); await refreshed.click('[data-testid="settings-open"]'); await refreshed.click('[data-testid="settings-section-voice-input"]');
+  await openSettingsSheet(refreshed); await refreshed.click('[data-testid="settings-section-voice-input"]');
   assert.ok(await refreshed.$('[data-testid="voice-capture-option-hold-to-talk"]'));
   assert.ok(await refreshed.$('[data-testid="voice-transcript-option-auto-send"]'));
   assert.equal(await refreshed.evaluate(() => localStorage.getItem('magistrate.voice.capture-behavior')), 'hold-to-talk');
@@ -924,25 +946,30 @@ test('voice settings expose and persist capture and transcript behavior', async 
 
 test('auto-send and insert choices are visible and persisted as explicit behavior', async () => {
   const page = await openChat({ width: 900, height: 700 });
-  await page.click('[data-testid="brand-drawer-toggle"]'); await page.click('[data-testid="settings-open"]'); await page.click('[data-testid="settings-section-voice-input"]');
+  await openSettingsSheet(page); await page.click('[data-testid="settings-section-voice-input"]');
   assert.ok(await page.$('[data-testid="voice-transcript-option-insert"]'));
   assert.ok(await page.$('[data-testid="voice-transcript-option-auto-send"]'));
-  await page.click('[data-testid="voice-transcript-option-auto-send"]');
+  await clickInSheet(page, '[data-testid="voice-transcript-option-auto-send"]');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.voice.transcript-behavior')), 'auto-send');
   await page.close();
 });
 
-test('the composer mic and wrench icons render at the same size as the voice-mode icon', async () => {
+test('the composer mic keeps its optical size and the execution selector reads as a name', async () => {
   // Pinned because a rebase that takes the composer wholesale silently reverts
-  // these to the 18px default, which reads visually smaller than the
-  // send-button's soundwave glyph.
+  // the mic to the 18px default, which reads visually smaller than the
+  // send-button glyph. The execution control is no longer a composer icon: it
+  // is the top-bar identity, which must state a human-readable selection and
+  // never expose provider/harness routing at rest.
   const page = await openChat({ width: 900, height: 700 });
   const box = async selector => page.$eval(selector, element => {
     const rect = element.querySelector('svg').getBoundingClientRect();
     return { width: Number(rect.width.toFixed(2)), height: Number(rect.height.toFixed(2)) };
   });
   assert.deepEqual(await box('[data-testid="inline-mic-button"]'), { width: 24, height: 24 });
-  assert.deepEqual(await box('[data-testid="model-menu-button"]'), { width: 24, height: 24 });
+  const identity = await page.$eval('[data-testid="model-menu-button"]', element => ({ text: element.innerText.replace(/\s+/g, ' ').trim(), label: element.getAttribute('aria-label') }));
+  assert.equal(identity.text, 'Magi Automatic');
+  assert.match(identity.label || '', /Execution identity/);
+  assert.doesNotMatch(await page.$eval('[data-testid="branded-chat-shell"]', element => element.innerText), /harness|provider=|variant/i);
   await page.close();
 });
 
@@ -981,6 +1008,25 @@ test('normalized chat messages persist across a page reload without replaying te
   assert.match(await reloaded.$eval('[data-testid="chat-history"]', element => element.innerText), /persist this normalized turn/);
   await reloaded.close();
 });
+
+// The settings sheet is a scroller, and its panels are longer now that
+// Appearance shows environment thumbnails. Bring a control into view the way a
+// person would before pressing it.
+// The drawer slides in and its footer is a pinned control, so a click issued
+// while it is still off-screen lands on nothing. Open Settings the way a person
+// can: once the drawer has actually arrived.
+async function openSettingsSheet(page) {
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="settings-open"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
+}
+
+async function clickInSheet(page, selector) {
+  await page.waitForSelector(selector);
+  await page.$eval(selector, element => element.scrollIntoView({ block: 'center' }));
+  await page.click(selector);
+}
 
 async function pageWaitForText(page, text) {
   await page.waitForFunction(expected => document.querySelector('[data-testid="chat-history"]')?.innerText.includes(expected), {}, text);
@@ -1125,9 +1171,12 @@ test('user bubbles are opaque and repeated legitimate messages remain distinct',
   await page.waitForFunction(() => !document.querySelector('[data-testid="send-captain-prompt"]').getAttribute('aria-label').startsWith('Queue'));
   await submit(page, 'same wording');
   assert.equal((await page.$$('[data-testid^="user-message-u-"]')).length, 2);
+  // Opaque so overlapping turns stay distinct over any environment, and neutral
+  // because spectral colour is reserved for active states.
   const bubble = await page.$eval('[data-testid^="user-message-u-"]', element => getComputedStyle(element).backgroundColor);
-  assert.match(bubble, /rgb\(36, 216, 255\)/);
+  assert.match(bubble, /^rgb\(/);
   assert.doesNotMatch(bubble, /rgba/);
+  assert.doesNotMatch(bubble, /rgb\(36, 216, 255\)/, 'the resting transcript must not be permanently spectral');
   assert.doesNotMatch(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /\/calm/);
   await page.close();
 });
@@ -1174,10 +1223,9 @@ test('repeated canonical delivery keeps one turn, and tool events stay bounded l
   await reloaded.waitForSelector('[data-testid="tool-history-message"]');
   assert.equal((await reloaded.$$('[data-testid="agent-message"]')).length, 1);
   assert.equal((await reloaded.$$('[data-testid="tool-history-message"]')).length, 1);
-  await reloaded.click('[data-testid="brand-drawer-toggle"]');
-  await reloaded.click('[data-testid="settings-open"]');
+  await openSettingsSheet(reloaded);
   await reloaded.click('[data-testid="settings-theme"]');
-  await reloaded.click('[data-testid="settings-tool-calls-toggle"]');
+  await clickInSheet(reloaded, '[data-testid="settings-tool-calls-toggle"]');
   await reloaded.waitForFunction(() => !document.querySelector('[data-testid="tool-history-message"]'));
   await reloaded.close();
 });
@@ -1254,7 +1302,7 @@ test('one captain turn with leaked metadata renders exactly one captain row and 
   assert.equal(rows.user.length, 1, `expected one captain row, got ${JSON.stringify(rows.user)}`);
   assert.equal(rows.agent.length, 1, `expected one primary row, got ${JSON.stringify(rows.agent)}`);
   assert.match(rows.user[0].id, /^user-message-u-/, 'the only user-styled row must be the locally submitted captain message');
-  assert.match(rows.user[0].background, /rgb\(36, 216, 255\)/, 'captain rows keep the opaque captain bubble');
+  assert.match(rows.user[0].background, /^rgb\(/, 'captain rows keep an opaque captain bubble');
   assert.match(rows.agent[0], /The deploy is healthy and finished at 09:12\./);
   assert.doesNotMatch(rows.text, FORBIDDEN);
   assert.doesNotMatch(rows.text, /hidden-secret/);

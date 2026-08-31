@@ -3,12 +3,15 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Image, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, Image, ImageSourcePropType, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
+import { LinearGradient } from 'expo-linear-gradient';
 import { AgentHistoryMessage, AgentInfo, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
+import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ComposeIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, InfoIcon, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
+import { loadMagiGreeting, magiGreeting } from '../../src/services/Greeting';
 import { SafeMarkdown } from '../../src/components/SafeMarkdown';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
@@ -18,7 +21,7 @@ import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitiz
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, loadPendingConversationMessages, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, saveVoiceCaptureBehavior, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
-import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
+import { setActiveBackground, TIME_IMAGES, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl, validatedWebUrl } from '../../src/utils/externalLinks';
 import { formatConversationTimestamp as formatChatTimestamp, formatAccessibleTimestamp, safeThinkingSummary } from '../../src/services/ChatFormatting';
 import { RealtimeClient } from '../../src/realtime/socket';
@@ -35,7 +38,7 @@ type QueuedPrompt = { id: string; messageId: string; text: string; attachments: 
 // gateway recorded for it; the transitional worker path does not consume that
 // canonical turn and leaves it unset.
 type ActivePrompt = { token: number; messageId: string; text: string; controller: AbortController; turnId?: string };
-type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | null;
+type DrawerSection = 'attention' | 'fleet' | 'activity' | 'projects' | 'connections' | null;
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 const isDarkTheme = (scheme: string | null | undefined) => scheme !== 'light';
@@ -60,14 +63,70 @@ function statusColor(status?: string | null) {
   return brand.mutedDark;
 }
 
-function BrandMark({ dark }: { dark: boolean }) {
-  return <Image source={dark ? markPaper : markInk} style={styles.mark} resizeMode="contain" accessibilityIgnoresInvertColors />;
+function BrandMark({ dark, style }: { dark: boolean; style?: object }) {
+  return <Image source={dark ? markPaper : markInk} style={[styles.mark, style]} resizeMode="contain" accessibilityIgnoresInvertColors />;
 }
 
-function WrenchIcon({ color, size = 18 }: { color: string; size?: number }) {
-  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <Path d="M20.1 8.5a4.6 4.6 0 0 1-5.94 5.94l-6.4 6.4a1.8 1.8 0 0 1-2.55-2.55l6.4-6.4A4.6 4.6 0 0 1 17.5 5.85l-2.83 2.83a1 1 0 0 0 0 1.41l1.24 1.24a1 1 0 0 0 1.41 0z" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
-  </Svg>;
+// The chrome floats over whatever the environment happens to be, so its
+// readability cannot depend on the background. Every floating control shares
+// one adaptive glass treatment: a tonal fill dark/light enough for the glyph,
+// a hairline edge, and a real blur where the platform supports it.
+const glassFill = (dark: boolean, strength: 'control' | 'surface' = 'control') =>
+  dark
+    ? strength === 'control' ? 'rgba(12,17,26,0.52)' : 'rgba(10,14,20,0.80)'
+    : strength === 'control' ? 'rgba(255,255,255,0.66)' : 'rgba(255,255,255,0.88)';
+const glassEdge = (dark: boolean) => dark ? 'rgba(255,255,255,0.10)' : 'rgba(17,21,27,0.08)';
+const blurStyle = (radius: number) => Platform.OS === 'web' ? { backdropFilter: `blur(${radius}px)`, WebkitBackdropFilter: `blur(${radius}px)` } as any : null;
+
+/** A circular floating control: the drawer button, the contextual action. */
+function GlassCircleButton({ dark, onPress, accessibilityLabel, accessibilityHint, accessibilityState, testID, children, badge }: {
+  dark: boolean; onPress: () => void; accessibilityLabel: string; accessibilityHint?: string;
+  accessibilityState?: object; testID?: string; children: React.ReactNode; badge?: boolean;
+}) {
+  return <TouchableOpacity testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} accessibilityState={accessibilityState} onPress={onPress} activeOpacity={0.7} style={[styles.glassCircle, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}>
+    {children}
+    {badge ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}
+  </TouchableOpacity>;
+}
+
+/**
+ * Readability treatment for the floating chrome. The environment keeps the
+ * canvas; only the two edges the chrome occupies get a tonal gradient, so a
+ * custom photograph is never covered by an opaque panel (prompt section 5).
+ */
+function EdgeScrims({ dark }: { dark: boolean }) {
+  const base = dark ? '5,7,10' : '247,248,250';
+  return <>
+    <LinearGradient pointerEvents="none" testID="chat-top-scrim" colors={[`rgba(${base},0.72)`, `rgba(${base},0.30)`, `rgba(${base},0)`]} style={styles.topScrim} />
+    <LinearGradient pointerEvents="none" testID="chat-bottom-scrim" colors={[`rgba(${base},0)`, `rgba(${base},0.52)`, `rgba(${base},0.88)`]} style={styles.bottomScrim} />
+  </>;
+}
+
+/**
+ * Resting Magi surface: the canonical mark above one greeting, and nothing
+ * else. It is a sibling of the transcript rather than its first row, so the
+ * transition into conversation is a cross-fade instead of a scroll jump, and
+ * an empty conversation stays genuinely empty.
+ */
+function EmptyStateMagi({ dark, visible, greeting, active }: { dark: boolean; visible: boolean; greeting: string; active: boolean }) {
+  const progress = useSharedValue(visible ? 1 : 0);
+  const breath = useSharedValue(0);
+  useEffect(() => { progress.value = withTiming(visible ? 1 : 0, { duration: 260, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [visible, progress]);
+  useEffect(() => {
+    if (!active) { breath.value = withTiming(0, { duration: 320 }); return; }
+    breath.value = withRepeat(withTiming(1, { duration: 2400, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }), -1, true);
+  }, [active, breath]);
+  const style = useAnimatedStyle(() => ({ opacity: progress.value, transform: [{ translateY: interpolate(progress.value, [0, 1], [10, 0]) }] }));
+  // Calm at rest, spectral when alive: the halo only exists while Magi does.
+  const haloStyle = useAnimatedStyle(() => ({ opacity: interpolate(breath.value, [0, 1], [0, 0.5]), transform: [{ scale: interpolate(breath.value, [0, 1], [0.94, 1.08]) }] }));
+  const markStyle = useAnimatedStyle(() => ({ transform: [{ scale: interpolate(breath.value, [0, 1], [1, 1.02]) }] }));
+  return <Animated.View testID="chat-empty-state" pointerEvents="none" accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'} style={[styles.emptyState, style]}>
+    <View style={styles.emptyStateMarkWrap}>
+      <Animated.View testID="empty-state-halo" style={[styles.emptyStateHalo, haloStyle]} />
+      <Animated.View style={markStyle}><BrandMark dark={dark} style={styles.emptyStateMark} /></Animated.View>
+    </View>
+    <Text testID="chat-greeting" accessibilityRole="header" style={[styles.greeting, { color: dark ? '#F4F5F7' : brand.ink }]}>{greeting}</Text>
+  </Animated.View>;
 }
 
 function MicIcon({ color, size = 18 }: { color: string; size?: number }) {
@@ -143,46 +202,105 @@ function ThinkingIndicator({ dark }: { dark: boolean }) {
   return <Animated.Text testID="thinking-dots" style={[styles.thinkingDots, { color: dark ? brand.cyan : brand.violet }, style]}>•••</Animated.Text>;
 }
 
-function ModelMenu({ dark, profiles, loading, error, open, selection, onToggle, onSelect }: {
-  dark: boolean; profiles: ExecutionProfile[]; loading: boolean; error: string | null; open: boolean;
-  selection: ModelSelection; onToggle: () => void; onSelect: (selection: ModelSelection) => void;
-}) {
+/**
+ * One live working state instead of a stream of intermediate events (prompt
+ * section 10). The operation count is a real count of the tool events the
+ * canonical record already carries for the turn in flight; it stays a compact
+ * line and the detail stays behind the existing tool-call preference.
+ */
+function WorkingState({ dark, muted, operations }: { dark: boolean; muted: string; operations: number }) {
+  return <View testID="agent-thinking-message" accessibilityRole="text" accessibilityLabel={`Magi is working${operations ? `, ${operations} operation${operations === 1 ? '' : 's'}` : ''}`} accessibilityLiveRegion="polite" style={styles.workingRow}>
+    <ThinkingIndicator dark={dark} />
+    <Text testID="working-state-label" style={[styles.workingLabel, { color: muted }]}>Magi is working{operations ? ` · ${operations} operation${operations === 1 ? '' : 's'}` : ''}…</Text>
+  </View>;
+}
+
+/**
+ * Top-bar execution identity. The resting shell states the human-readable
+ * selection only ("Magi · Automatic"); provider, harness and variant routing
+ * stay inside the sheet's Advanced disclosure (prompt sections 2 and 3).
+ */
+function IdentityControl({ dark, selection, open, onToggle }: { dark: boolean; selection: ModelSelection; open: boolean; onToggle: () => void }) {
   const text = dark ? '#F4F5F7' : brand.ink;
   const muted = dark ? brand.mutedDark : brand.mutedLight;
-  return <View style={styles.modelControl}>
-    <TouchableOpacity testID="model-menu-button" accessibilityRole="button" accessibilityLabel={`Model, ${selection?.label || 'current session'}`} accessibilityState={{ expanded: open }} onPress={onToggle} style={styles.modelButton}>
-      <WrenchIcon size={24} color={selection ? brand.cyan : muted} />
-    </TouchableOpacity>
-    {open ? <View testID="model-menu" accessibilityViewIsModal style={[styles.modelMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
-      <Text style={[styles.menuTitle, { color: text }]}>Agent and variant</Text>
-      <TouchableOpacity testID="model-option-current" accessibilityRole="button" accessibilityLabel="Use the running session model" accessibilityState={{ selected: selection === null }} onPress={() => onSelect(null)} style={styles.modelOption}>
-        <View style={[styles.selectionDot, { backgroundColor: selection === null ? brand.cyan : 'transparent' }]} />
-        <View style={styles.modelOptionCopy}><Text style={[styles.modelOptionTitle, { color: text }]}>Current session</Text><Text style={[styles.modelOptionMeta, { color: muted }]}>Uses the model already running on the backend</Text></View>
-      </TouchableOpacity>
-      <ScrollView style={styles.modelOptionsScroll} keyboardShouldPersistTaps="handled">
-        {profiles.map(profile => {
-          const selected = selection?.profileId === profile.id;
-          const disabled = !profile.available;
-          return <TouchableOpacity key={profile.id} disabled={disabled} testID={`model-option-${optionId(profile.harness.id, profile.model.id)}`} accessibilityRole="button" accessibilityLabel={`${profile.harness.label}, ${profile.provider.label}, ${profile.model.label}`} accessibilityState={{ selected, disabled }} onPress={() => onSelect({ profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason })} style={[styles.modelOption, disabled ? styles.modelOptionDisabled : undefined]}>
-            <View style={[styles.selectionDot, { backgroundColor: selected ? brand.cyan : 'transparent' }]} /><View style={styles.modelOptionCopy}><Text style={[styles.modelOptionTitle, { color: text }]}>{profile.label}</Text><Text style={[styles.modelOptionMeta, { color: muted }]}>{profile.harness.label} · {profile.provider.label} · {profile.model.label}{disabled ? ` · ${profile.availability_reason || 'Unavailable'}` : ''}</Text></View>
-          </TouchableOpacity>;
-        })}
-        {loading ? <Text style={[styles.modelNotice, { color: muted }]}>Loading available variants…</Text> : null}
-        {!loading && error ? <Text style={styles.modelError}>{error} Current session remains available.</Text> : null}
-        {!loading && !error && profiles.length === 0 ? <Text style={[styles.modelNotice, { color: muted }]}>No compatible variants are configured. Current session remains available.</Text> : null}
+  const variant = selection ? selection.label : 'Automatic';
+  return <TouchableOpacity testID="model-menu-button" accessibilityRole="button" accessibilityLabel={`Execution identity, Magi, ${variant}`} accessibilityHint="Opens the execution selector" accessibilityState={{ expanded: open }} onPress={onToggle} activeOpacity={0.7} style={styles.identityControl}>
+    <Text numberOfLines={1} style={[styles.identityName, { color: text }]}>Magi</Text>
+    <Text testID="identity-variant" numberOfLines={1} style={[styles.identityVariant, { color: muted }]}>{variant}</Text>
+    <View style={styles.identityChevron}><ChevronRightIcon size={16} color={muted} /></View>
+  </TouchableOpacity>;
+}
+
+/**
+ * Native-feeling execution sheet. Rows are intent-level; the routing detail a
+ * normal user never needs stays behind Advanced.
+ */
+function ExecutionSheet({ dark, profiles, loading, error, open, selection, onClose, onSelect }: {
+  dark: boolean; profiles: ExecutionProfile[]; loading: boolean; error: string | null; open: boolean;
+  selection: ModelSelection; onClose: () => void; onSelect: (selection: ModelSelection) => void;
+}) {
+  const [advanced, setAdvanced] = useState(false);
+  const text = dark ? '#F4F5F7' : brand.ink;
+  const muted = dark ? brand.mutedDark : brand.mutedLight;
+  useEffect(() => { if (!open) setAdvanced(false); }, [open]); // eslint-disable-line react-hooks/set-state-in-effect
+  if (!open) return null;
+  const groupSurface = dark ? 'rgba(30,37,48,0.96)' : 'rgba(238,241,244,0.98)';
+  return <View testID="model-sheet-layer" style={styles.sheetLayer}>
+    <TouchableOpacity testID="model-menu-scrim" accessibilityRole="button" accessibilityLabel="Close the execution selector" onPress={onClose} activeOpacity={1} style={styles.sheetScrim} />
+    <View testID="model-menu" accessibilityViewIsModal style={[styles.executionSheet, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
+      <View style={[styles.sheetGrabber, { backgroundColor: muted }]} />
+      <View style={styles.sheetHeader}>
+        <Text accessibilityRole="header" style={[styles.sheetTitle, { color: text }]}>Execution</Text>
+        <TouchableOpacity testID="model-menu-close" accessibilityRole="button" accessibilityLabel="Done" onPress={onClose} style={styles.sheetDone}><Text style={[styles.sheetDoneText, { color: dark ? brand.cyan : brand.violet }]}>Done</Text></TouchableOpacity>
+      </View>
+      <ScrollView style={styles.executionScroll} contentContainerStyle={styles.executionScrollContent} keyboardShouldPersistTaps="handled">
+        <Text style={[styles.groupLabel, { color: muted }]}>RECOMMENDED</Text>
+        <View style={[styles.group, { backgroundColor: groupSurface }]}>
+          <TouchableOpacity testID="model-option-current" accessibilityRole="button" accessibilityLabel="Magi, automatic routing. Uses the model already running on the backend." accessibilityState={{ selected: selection === null }} onPress={() => onSelect(null)} style={styles.groupRow}>
+            <View style={styles.groupRowCopy}><Text style={[styles.groupRowTitle, { color: text }]}>Magi · Automatic</Text><Text style={[styles.groupRowMeta, { color: muted }]}>Uses the model already running on the backend</Text></View>
+            {selection === null ? <Text testID="model-option-current-check" style={[styles.groupCheck, { color: dark ? brand.cyan : brand.violet }]}>✓</Text> : null}
+          </TouchableOpacity>
+        </View>
+        <Text style={[styles.groupLabel, { color: muted }]}>MODELS</Text>
+        <View style={[styles.group, { backgroundColor: groupSurface }]}>
+          {profiles.map((profile, index) => {
+            const selected = selection?.profileId === profile.id;
+            const disabled = !profile.available;
+            return <TouchableOpacity key={profile.id} disabled={disabled} testID={`model-option-${optionId(profile.harness.id, profile.model.id)}`} accessibilityRole="button" accessibilityLabel={`${profile.harness.label}, ${profile.provider.label}, ${profile.model.label}`} accessibilityState={{ selected, disabled }} onPress={() => onSelect({ profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason })} style={[styles.groupRow, index ? styles.groupRowDivided : undefined, disabled ? styles.modelOptionDisabled : undefined]}>
+              <View style={styles.groupRowCopy}>
+                <Text style={[styles.groupRowTitle, { color: text }]}>{profile.label}</Text>
+                {advanced || disabled ? <Text testID={`model-option-routing-${optionId(profile.harness.id, profile.model.id)}`} style={[styles.groupRowMeta, { color: disabled ? brand.attention : muted }]}>{advanced ? `${profile.harness.label} · ${profile.provider.label} · ${profile.model.label}` : ''}{disabled ? `${advanced ? ' · ' : ''}${profile.availability_reason || 'Unavailable'}` : ''}</Text> : null}
+              </View>
+              {selected ? <Text style={[styles.groupCheck, { color: dark ? brand.cyan : brand.violet }]}>✓</Text> : null}
+            </TouchableOpacity>;
+          })}
+          {loading ? <Text style={[styles.groupRowMeta, styles.groupNotice, { color: muted }]}>Loading available variants…</Text> : null}
+          {!loading && error ? <Text style={[styles.groupNotice, styles.modelError]}>{error} Current session remains available.</Text> : null}
+          {!loading && !error && profiles.length === 0 ? <Text style={[styles.groupRowMeta, styles.groupNotice, { color: muted }]}>No compatible variants are configured. Current session remains available.</Text> : null}
+        </View>
+        <Text style={[styles.groupLabel, { color: muted }]}>ADVANCED</Text>
+        <View style={[styles.group, { backgroundColor: groupSurface }]}>
+          <TouchableOpacity testID="model-advanced-toggle" accessibilityRole="button" accessibilityLabel="Execution routing detail" accessibilityState={{ expanded: advanced }} onPress={() => setAdvanced(value => !value)} style={styles.groupRow}>
+            <View style={styles.groupRowCopy}><Text style={[styles.groupRowTitle, { color: text }]}>Execution routing</Text><Text style={[styles.groupRowMeta, { color: muted }]}>{advanced ? 'Showing harness, provider and model for each option' : 'Show harness, provider and model for each option'}</Text></View>
+            <ChevronRightIcon size={18} color={muted} />
+          </TouchableOpacity>
+        </View>
       </ScrollView>
-    </View> : null}
+    </View>
   </View>;
 }
 
 export function formatConversationTimestamp(sentAt?: number): string | null { return formatChatTimestamp(sentAt); }
 
-function UserMessage({ message, textColor, selectable, onLongPress, onRetry, onActions }: { message: ConversationMessage; textColor: string; selectable: boolean; onLongPress: () => void; onRetry?: () => void; onActions: () => void }) {
+function UserMessage({ message, dark, textColor, selectable, onLongPress, onRetry, onActions }: { message: ConversationMessage; dark: boolean; textColor: string; selectable: boolean; onLongPress: () => void; onRetry?: () => void; onActions: () => void }) {
   // Keep transport metadata out of the transcript, but retain a compact
   // filename/type/size summary so a reload remains useful to the captain.
   const timestamp = formatConversationTimestamp(message.sentAt);
   const accessibleTimestamp = formatAccessibleTimestamp(message.sentAt);
-  return <View style={styles.userMessageWrap}><TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="text" accessibilityLabel={`Your message${timestamp ? `, sent ${timestamp}` : ''}${accessibleTimestamp ? `, ${accessibleTimestamp}` : ''}. Press and hold for actions.`} delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={styles.userMessage}>
+  // Opaque and neutral: spectral colour is reserved for active states, and the
+  // bubble has to stay legible and distinct over an arbitrary environment.
+  const bubble = dark ? '#1E2530' : '#E7EAEF';
+  return <View style={styles.userMessageWrap}><TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="text" accessibilityLabel={`Your message${timestamp ? `, sent ${timestamp}` : ''}${accessibleTimestamp ? `, ${accessibleTimestamp}` : ''}. Press and hold for actions.`} delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={[styles.userMessage, { backgroundColor: bubble, borderColor: bubble }]}>
     <Text testID={`user-message-text-${message.id}`} selectable={selectable} style={[styles.messageText, { color: textColor }]}>{message.text}</Text>
     {message.attachments?.map(attachment => <Text key={`${message.id}-${attachment.name}`} testID={`message-attachment-${message.id}`} style={[styles.messageAttachment, { color: textColor }]} numberOfLines={1}>↳ {attachment.name} · {attachment.mediaType}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}{attachmentStateLabel(attachment.status)}</Text>)}
     {timestamp ? <Text testID={`message-timestamp-${message.id}`} style={[styles.messageTimestamp, { color: textColor }]}>{timestamp}</Text> : null}
@@ -294,6 +412,25 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const optimisticCountsRef = useRef(new Map<string, number>());
   const targetLabel = target === 'captain' ? 'Magistrate' : target;
   const capture = useVoiceInputAdapter(undefined, voiceInputMode);
+  // Personalization only. An unavailable profile keeps the impersonal greeting
+  // rather than inventing a name for the account.
+  const [greeting, setGreeting] = useState(() => magiGreeting(null));
+  useEffect(() => {
+    let mounted = true;
+    loadMagiGreeting().then(value => { if (mounted) setGreeting(value); }).catch(() => {});
+    return () => { mounted = false; };
+  }, []);
+  // The count of real tool events already recorded against the turn in flight,
+  // so the single working line can say how much is happening without listing it.
+  const activeOperations = useMemo(() => {
+    let count = 0;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'user') break;
+      if (messages[index].kind === 'tool') count += 1;
+      count += messages[index].toolResults?.length || 0;
+    }
+    return count;
+  }, [messages]);
 
   // ScrollView's native content dimensions are only trustworthy after both the
   // viewport and its rendered content have measured. Keep the request pending
@@ -946,17 +1083,33 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const selectMessage = () => { if (activeMessage) setSelectableMessageId(activeMessage.id); setMessageActionsId(null); };
   const regenerateMessage = async () => { if (!activeMessage || !onRegenerate || !activeMessage.runId || activeMessage.regenerateSafe !== true) return; setMessageActionsId(null); try { await onRegenerate(activeMessage); } catch (error) { setSendError(errorText(error, 'This response could not be regenerated safely.')); } };
 
-  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.784)' : 'rgba(255,255,255,0.8)' }, webViewportHeight ? { height: webViewportHeight } : null]}>
-    <View style={styles.shellHeader}>
-      <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread captain attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityHint="Opens navigation and attention details" accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}>
-        <View style={styles.logoWithUnread}><BrandMark dark={dark} />{unreadAttentionCount > 0 ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</View>
-      </TouchableOpacity>
-    </View>
+  const transcript = canonicalTarget ? filterCanonicalMessages(messages, showToolCalls) : filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls);
+  // The resting Magi surface belongs to an empty conversation only, and only
+  // once the read that would populate it has settled - otherwise the greeting
+  // flashes over history that is about to arrive.
+  const showEmptyState = transcript.length === 0 && !isThinking && hydratedHistoryTarget === target;
+  const spectral = dark ? brand.cyan : brand.violet;
+
+  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.28)' : 'rgba(255,255,255,0.30)' }, webViewportHeight ? { height: webViewportHeight } : null]}>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
-      {(canonicalTarget ? filterCanonicalMessages(messages, showToolCalls) : filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls)).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
-      {isThinking ? <View testID="agent-thinking-message" accessibilityRole="text" accessibilityLabel="Magistrate is working" style={styles.assistantMessage}><Text style={[styles.progressLabel, { color: muted }]}>Working…</Text><ThinkingIndicator dark={dark} /></View> : null}
+      {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
+      {isThinking ? <WorkingState dark={dark} muted={muted} operations={activeOperations} /> : null}
     </ScrollView>
-    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={jumpToLatest}><Text style={styles.jumpText}>↓</Text></TouchableOpacity> : null}
+    <EdgeScrims dark={dark} />
+    <EmptyStateMagi dark={dark} visible={showEmptyState} greeting={greeting} active={isThinking || isRecording} />
+    <View style={styles.topBar} pointerEvents="box-none">
+      <GlassCircleButton dark={dark} testID="brand-drawer-toggle" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread captain attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityHint="Opens navigation and attention details" accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} badge={unreadAttentionCount > 0}>
+        <MenuIcon size={ICON_SIZE} color={text} />
+      </GlassCircleButton>
+      <IdentityControl dark={dark} selection={modelSelection} open={modelMenuOpen} onToggle={() => { setModelMenuOpen(value => !value); setAttachmentMenuOpen(false); }} />
+      {/* One contextual control. Magistrate has no "new conversation" endpoint -
+          the captain thread is a single canonical record - so the resting action
+          is Voice Mode, and it becomes the active spectral Stop while Magi works. */}
+      <GlassCircleButton dark={dark} testID="chat-primary-action" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : 'Open Voice Mode'} onPress={() => isThinking ? void stopPendingResponse() : router.push('/voice' as any)}>
+        {isThinking ? <StopIcon size={ICON_SIZE} color={spectral} /> : <SoundwaveIcon size={ICON_SIZE} color={text} />}
+      </GlassCircleButton>
+    </View>
+    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={jumpToLatest}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
     {copiedMessageId ? <Text testID="message-copied" accessibilityLiveRegion="polite" style={styles.copiedLabel}>Copied</Text> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
       {activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Edit your message" onPress={editMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Edit</Text></TouchableOpacity> : null}
@@ -965,7 +1118,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       {activeMessage?.role === 'assistant' && activeMessage.runId && activeMessage.regenerateSafe === true ? <TouchableOpacity accessibilityRole="button" accessibilityLabel={activeMessage.progress === 'failed' ? 'Retry response' : 'Regenerate response'} onPress={() => void regenerateMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>{activeMessage.progress === 'failed' ? 'Retry' : 'Regenerate'}</Text></TouchableOpacity> : null}
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close message actions" onPress={() => setMessageActionsId(null)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>×</Text></TouchableOpacity>
     </View> : null}
-    <View style={styles.composerDock}>
+    <View style={styles.composerDock} pointerEvents="box-none">
     {isRecording ? <View testID="active-voice-surface" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.activeVoiceSurface}><View style={styles.activeVoiceHalo} /><Image source={markActive} style={styles.activeVoiceMark} resizeMode="contain" accessibilityIgnoresInvertColors /><LiveWaveform samples={waveSamples} color={brand.cyan} /></View> : null}
     {attachments.length ? <ScrollView testID="attachment-preview" horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentPreview} contentContainerStyle={styles.attachmentPreviewContent} keyboardShouldPersistTaps="handled">
       {attachments.map(attachment => <View key={attachment.id} testID={`attachment-${attachment.id}`} style={[styles.attachmentChip, { backgroundColor: composerSurface }]}>
@@ -974,9 +1127,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         <TouchableOpacity testID={`remove-${attachment.id}`} accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => { setAttachments(current => current.filter(item => item.id !== attachment.id)); setSendError(null); }} style={styles.attachmentRemove}><Text style={[styles.attachmentRemoveText, { color: muted }]}>×</Text></TouchableOpacity>
       </View>)}
     </ScrollView> : null}
-    <View style={[styles.composer, { backgroundColor: composerSurface }]}>
+    <View style={[styles.composer, { backgroundColor: composerSurface, borderColor: glassEdge(dark) }, blurStyle(24)]}>
       <View style={styles.attachmentControl}>
-        <TouchableOpacity testID="attachment-menu-button" accessibilityRole="button" accessibilityLabel={attachmentMenuOpen ? 'Close attachment menu' : 'Add attachment'} accessibilityState={{ expanded: attachmentMenuOpen }} onPress={() => { setAttachmentMenuOpen(value => !value); setModelMenuOpen(false); }} style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: attachmentMenuOpen ? brand.cyan : muted }]}>＋</Text></TouchableOpacity>
+        <TouchableOpacity testID="attachment-menu-button" accessibilityRole="button" accessibilityLabel={attachmentMenuOpen ? 'Close attachment menu' : 'Add attachment'} accessibilityState={{ expanded: attachmentMenuOpen }} onPress={() => { setAttachmentMenuOpen(value => !value); setModelMenuOpen(false); }} style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: attachmentMenuOpen ? spectral : muted }]}>＋</Text></TouchableOpacity>
         {attachmentMenuOpen ? <View testID="attachment-menu" accessibilityViewIsModal style={[styles.attachmentMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
           <Text style={[styles.menuTitle, { color: text }]}>Add to message</Text>
           <TouchableOpacity testID="attachment-option-images" accessibilityRole="button" accessibilityLabel="Choose photos" onPress={() => void pickImages()} style={styles.attachmentOption}><ImageIcon color={dark ? brand.cyan : brand.violet} /><View><Text style={[styles.attachmentOptionTitle, { color: text }]}>Photos</Text><Text style={[styles.attachmentOptionMeta, { color: muted }]}>Choose from your library</Text></View></TouchableOpacity>
@@ -984,12 +1137,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         </View> : null}
       </View>
       <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onKeyPress={event => { if (isThinking && event.nativeEvent.key === 'Escape') void stopPendingResponse(); }} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable accessibilityLabel={`Message ${targetLabel}`} />
-      <ModelMenu dark={dark} profiles={profiles} loading={capabilityLoading} error={capabilityError} open={modelMenuOpen} selection={modelSelection} onToggle={() => setModelMenuOpen(value => !value)} onSelect={selection => { setModelSelection(selection); onProfileChange(selection?.profileId || null); setModelMenuOpen(false); setSendError(null); }} />
       <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : micStatus === 'requesting' ? 'Requesting microphone permission' : isTranscribing ? 'Transcribing microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing || micStatus === 'requesting' }} style={[styles.composerIconButton, isRecording ? styles.micActiveButton : undefined]} onPress={voiceCaptureBehavior === 'tap-to-toggle' ? () => void handleMicPress() : undefined} onPressIn={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = true; if (!isRecording) void handleMicPress(); } : undefined} onPressOut={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = false; if (isRecording) void handleMicPress(); } : undefined} disabled={isTranscribing || micStatus === 'requesting'}><MicIcon size={24} color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
-      <TouchableOpacity testID={isThinking ? 'stop-captain-response' : 'send-captain-prompt'} accessibilityRole="button" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : promptText.trim() || attachments.length ? `Send message to ${targetLabel}` : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => isThinking ? void stopPendingResponse() : void handleSend()} style={[styles.sendButton, isThinking ? styles.stopButton : undefined]}>{isThinking ? <Text style={styles.stopButtonText}>Stop</Text> : promptText.trim() || attachments.length ? <Text style={styles.sendArrow}>↑</Text> : <SoundwaveIcon color={brand.obsidian} size={20} />}</TouchableOpacity>
+      <TouchableOpacity testID={isThinking ? 'stop-captain-response' : 'send-captain-prompt'} accessibilityRole="button" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : promptText.trim() || attachments.length ? `Send message to ${targetLabel}` : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => isThinking ? void stopPendingResponse() : void handleSend()} style={[styles.sendButton, isThinking ? styles.stopButton : undefined]}>{isThinking ? <StopIcon size={20} color={brand.paper} /> : promptText.trim() || attachments.length ? <ArrowUpIcon size={22} color={brand.paper} /> : <SoundwaveIcon color={brand.paper} size={20} />}</TouchableOpacity>
     </View>
     <View testID="composer-status" style={styles.composerStatus} accessibilityLiveRegion="polite">{editingMessageId ? <Text style={styles.editingLabel}>Editing message</Text> : !isThinking && (micStatus === 'requesting' ? <Text testID="mic-status" style={styles.micTranscribingLabel}>Requesting microphone permission…</Text> : micStatus === 'listening' ? <Text testID="mic-status" style={styles.micListeningLabel}>Listening… {voiceCaptureBehavior === 'hold-to-talk' ? 'release mic to finish' : 'tap mic to finish'}</Text> : micStatus === 'transcribing' ? <Text testID="mic-status" style={styles.micTranscribingLabel}>Transcribing…</Text> : micStatus === 'ready' ? <Text testID="mic-status" style={styles.micReadyLabel}>Transcript ready — review before sending</Text> : micStatus === 'error' ? <Text testID="mic-status" accessibilityRole="alert" style={styles.micErrorLabel}>Microphone unavailable. {sendError || 'Try again.'}</Text> : null)}{queuedPrompts.length ? <Text testID="queued-message-count" style={styles.queuedLabel}>{queuedPrompts.length} queued · sends in order</Text> : null}{sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}</View>
     </View>
+    <ExecutionSheet dark={dark} profiles={profiles} loading={capabilityLoading} error={capabilityError} open={modelMenuOpen} selection={modelSelection} onClose={() => setModelMenuOpen(false)} onSelect={selection => { setModelSelection(selection); onProfileChange(selection?.profileId || null); setModelMenuOpen(false); setSendError(null); }} />
   </KeyboardAvoidingView>;
 }
 
@@ -1043,12 +1196,14 @@ function activityDate(value: string) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onOpenSettings, onOpenAgent, agents, attention, activity, providers, errors, loading }: {
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onOpenSettings, onOpenHome, onOpenAgent, agents, attention, activity, providers, errors, loading }: {
   open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onOpenSettings: () => void;
-  onOpenAgent: (agentId: string) => void;
+  onOpenHome: () => void; onOpenAgent: (agentId: string) => void;
   agents: AgentInfo[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
 }) {
   const router = useRouter();
+  const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
   const fleet = summarizeAgents(agents); const activeAttention = attention.filter(item => item.requires_action !== false);
   const toggleSection = (section: DrawerSection) => setActiveSection(activeSection === section ? null : section);
@@ -1060,32 +1215,83 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
     if (item.pull_request_number) router.push(`/pr-detail?number=${item.pull_request_number}` as any);
     else if (item.url) { const result = await openExternalUrl(item.url); if (!result.ok) Alert.alert('Unable to open activity', result.message); }
   };
-  const rows = [{ key: 'attention' as const, icon: '!', title: 'Attention', count: activeAttention.length }, { key: 'fleet' as const, icon: '⌘', title: 'Fleet Summary', count: agents.length }, { key: 'activity' as const, icon: '↗', title: 'Recent Activity' }, { key: 'connections' as const, icon: '⌁', title: 'Connections' }];
-  return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: dark ? 'rgba(10,14,20,0.98)' : 'rgba(255,255,255,0.98)' }, animatedStyle]} {...panHandlers}>
-    <View style={styles.drawerFixedHeader}><View style={styles.drawerTitleRow}><Text testID="drawer-wordmark" accessibilityRole="header" style={[styles.drawerWordmark, { color: text }]}>Magistrate</Text></View></View>
+  // Projects are the real project names the fleet and activity feed already
+  // carry - the drawer groups them, it does not invent a hierarchy.
+  const projects = useMemo(() => {
+    const counts = new Map<string, number>();
+    activity.forEach(item => { if (item.project) counts.set(item.project, (counts.get(item.project) || 0) + 1); });
+    return Array.from(counts.entries()).sort((left, right) => right[1] - left[1]);
+  }, [activity]);
+  const matches = (label: string) => !searching || !query.trim() || label.toLowerCase().includes(query.trim().toLowerCase());
+  const rows = [
+    { key: 'fleet' as const, icon: FleetIcon, title: 'Fleet', count: agents.length },
+    { key: 'attention' as const, icon: AttentionIcon, title: 'Attention', count: activeAttention.length, alert: activeAttention.length > 0 },
+    { key: 'activity' as const, icon: ActivityIcon, title: 'Activity' },
+    { key: 'projects' as const, icon: ProjectsIcon, title: 'Projects', count: projects.length || undefined },
+    { key: 'connections' as const, icon: ConnectionsIcon, title: 'Connections' },
+  ].filter(row => matches(row.title));
+  // Ongoing work replaces a conventional chat list: these are the things
+  // currently working for the captain, not a server dashboard.
+  const activeWork = fleet.ordered.filter(entry => matches(agentDisplayName(entry.agent))).slice(0, 5);
+  return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: dark ? 'rgba(8,11,17,0.96)' : 'rgba(252,253,254,0.97)' }, blurStyle(28), animatedStyle]} {...panHandlers}>
+    <View style={styles.drawerFixedHeader}><View style={styles.drawerTitleRow}>
+      {searching
+        ? <TextInput testID="drawer-search-input" autoFocus accessibilityLabel="Search Magistrate navigation" placeholder="Search" placeholderTextColor={muted} value={query} onChangeText={setQuery} style={[styles.drawerSearchInput, { color: text, borderColor: glassEdge(dark) }]} />
+        : <Text testID="drawer-wordmark" accessibilityRole="header" style={[styles.drawerWordmark, { color: text }]}>Magistrate</Text>}
+      <TouchableOpacity testID="drawer-search" accessibilityRole="button" accessibilityLabel={searching ? 'Close search' : 'Search Magistrate'} accessibilityState={{ expanded: searching }} onPress={() => { setSearching(value => !value); setQuery(''); }} activeOpacity={0.7} style={[styles.drawerSearchButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}>
+        {searching ? <CloseIcon size={20} color={text} /> : <SearchIcon size={20} color={text} />}
+      </TouchableOpacity>
+    </View></View>
     <ScrollView testID="drawer-scroll" style={styles.drawerScroll} contentContainerStyle={styles.drawerScrollContent} keyboardShouldPersistTaps="handled">
+      {matches('Magi') ? <TouchableOpacity testID="drawer-home" accessibilityRole="button" accessibilityLabel="Magi, the main conversation" onPress={onOpenHome} style={styles.drawerRow}>
+        <View testID="drawer-home-icon" style={styles.drawerIcon}><HomeIcon size={ICON_SIZE} color={muted} /></View><Text style={[styles.drawerRowText, { color: text }]}>Magi</Text>
+      </TouchableOpacity> : null}
       {rows.map(row => <View key={row.key}>
         <TouchableOpacity testID={`drawer-section-${row.key}`} accessibilityRole="button" accessibilityLabel={`${row.title} section`} accessibilityState={{ expanded: activeSection === row.key }} onPress={() => toggleSection(row.key)} style={styles.drawerRow}>
-          <Text testID={`drawer-section-${row.key}-icon`} style={[styles.drawerIcon, { color: muted }]}>{row.icon}</Text><Text style={[styles.drawerRowText, { color: text }]}>{row.title}</Text>{typeof row.count === 'number' ? <Text style={[styles.drawerCount, { color: muted }]}>{row.count}</Text> : null}<View style={styles.chevron} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" />
+          <View testID={`drawer-section-${row.key}-icon`} style={styles.drawerIcon}><row.icon size={ICON_SIZE} color={muted} /></View>
+          <Text style={[styles.drawerRowText, { color: text }]}>{row.title}</Text>
+          {typeof row.count === 'number' && row.count > 0 ? <Text testID={`drawer-count-${row.key}`} style={[styles.drawerCount, row.alert ? styles.drawerCountAlert : undefined, { color: row.alert ? brand.attention : muted }]}>{row.count}</Text> : null}
         </TouchableOpacity>
         {activeSection === row.key ? <View testID={`drawer-panel-${row.key}`} style={styles.sectionPanel}>{row.key === 'attention' ? (
-          loading ? <PanelText text="Loading attention…" muted={muted} /> : errors.attention ? <PanelText text={errors.attention} muted={brand.critical} /> : activeAttention.length === 0 ? <PanelText text="Nothing requires your attention." muted={muted} /> : activeAttention.slice(0, 5).map(item => <TouchableOpacity key={item.id} testID={`attention-item-${item.id}`} onPress={() => void openAttentionItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{providerLabel(item.provider)} · {item.subtitle}</Text></TouchableOpacity>)
+          loading ? <PanelText text="Loading attention…" muted={muted} /> : errors.attention ? <PanelText text={errors.attention} muted={brand.critical} /> : activeAttention.length === 0 ? <PanelText text="Nothing requires your attention." muted={muted} /> : activeAttention.slice(0, 5).map(item => <TouchableOpacity key={item.id} testID={`attention-item-${item.id}`} accessibilityRole="button" accessibilityLabel={`${item.title}. ${providerLabel(item.provider)}. ${item.subtitle}`} onPress={() => void openAttentionItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{providerLabel(item.provider)} · {item.subtitle}</Text></TouchableOpacity>)
         ) : row.key === 'fleet' ? (
           loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No live agent sessions are available." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <FleetAgentRow key={agent.id} agent={agent} activeStatus={displayStatus} dark={dark} onOpenChat={() => onOpenAgent(agent.id)} />)
         ) : row.key === 'activity' ? (
-          loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)
+          loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} accessibilityRole="button" accessibilityLabel={`${item.title}. ${item.description}. ${item.project}`} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)
+        ) : row.key === 'projects' ? (
+          loading ? <PanelText text="Loading projects…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : projects.length === 0 ? <PanelText text="No project activity is available." muted={muted} /> : projects.map(([name, count]) => <View key={name} testID={`drawer-project-${name}`} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{name}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{count} recent item{count === 1 ? '' : 's'}</Text></View>)
         ) : errors.providers ? <PanelText text={errors.providers} muted={brand.critical} /> : providers.length === 0 ? <PanelText text="No connected account data is available." muted={muted} /> : providers.map(provider => <View key={provider.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{provider.provider}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{provider.status}{provider.username ? ` · ${provider.username}` : ''}</Text></View>)}</View> : null}
       </View>)}
+      {activeWork.length ? <View testID="drawer-active-work">
+        <Text style={[styles.drawerGroupLabel, { color: muted }]}>ACTIVE WORK</Text>
+        {activeWork.map(({ agent, displayStatus }) => <TouchableOpacity key={agent.id} testID={`drawer-work-${agent.id}`} accessibilityRole="button" accessibilityLabel={`${agentDisplayName(agent)}, ${displayAgentStatus(displayStatus)}`} onPress={() => onOpenAgent(agent.id)} style={styles.drawerWorkRow}>
+          <View style={[styles.workDot, { backgroundColor: statusColor(displayStatus) }]} />
+          <Text numberOfLines={1} style={[styles.drawerWorkName, { color: text }]}>{agentDisplayName(agent)}</Text>
+          <Text numberOfLines={1} style={[styles.drawerWorkStatus, { color: muted }]}>{displayAgentStatus(displayStatus)}</Text>
+        </TouchableOpacity>)}
+      </View> : null}
     </ScrollView>
-    <View style={styles.drawerBottom}>
-      <TouchableOpacity testID="drawer-settings-control" accessibilityRole="button" accessibilityLabel="Open Settings" onPress={onOpenSettings} activeOpacity={0.75} style={styles.drawerSettingsButton}><GearIcon size={21.6} color={muted} /><Text style={[styles.drawerSettingsText, { color: muted }]}>Settings</Text></TouchableOpacity>
-      <TouchableOpacity testID="settings-open" accessibilityRole="button" accessibilityLabel="Open Account settings" onPress={onOpenSettings} activeOpacity={0.75} style={styles.accountRow}><Text testID="drawer-account-icon" style={[styles.accountIcon, { color: muted }]}>○</Text><Text style={[styles.drawerRowText, { color: text }]}>Account</Text><View style={styles.gearIconContainer}><GearIcon size={21.6} color={muted} /></View></TouchableOpacity>
+    <View style={[styles.drawerBottom, { borderTopColor: glassEdge(dark) }]}>
+      <TouchableOpacity testID="drawer-settings-control" accessibilityRole="button" accessibilityLabel="Open Settings" onPress={onOpenSettings} activeOpacity={0.75} style={[styles.drawerSettingsButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><GearIcon size={21.6} color={text} /><Text style={[styles.drawerSettingsText, { color: text }]}>Settings</Text></TouchableOpacity>
+      <TouchableOpacity testID="settings-open" accessibilityRole="button" accessibilityLabel="Open Account settings" onPress={onOpenSettings} activeOpacity={0.75} style={styles.accountRow}><View testID="drawer-account-icon" style={styles.accountIcon}><AccountIcon size={ICON_SIZE} color={muted} /></View></TouchableOpacity>
     </View>
   </Animated.View>;
 }
 
-const backgroundOptions: Array<{ key: WeatherSceneKey; label: string }> = [
-  { key: 'auto', label: 'Automatic' }, { key: 'dusk-mountain', label: 'Dusk' }, { key: 'clear-day', label: 'Day' }, { key: 'clear-night', label: 'Night' }, { key: 'clouds', label: 'Clouds' }, { key: 'rain', label: 'Rain' }, { key: 'storm', label: 'Storm' }, { key: 'sunset', label: 'Sunset' }, { key: 'minimal-dark', label: 'Minimal' },
+// Environment choices are shown as what they actually look like. Each key maps
+// to the scene image the renderer will use (src/services/environmentTheme.ts);
+// the two minimal environments are flat tones and carry a swatch instead.
+const backgroundOptions: Array<{ key: WeatherSceneKey; label: string; preview?: ImageSourcePropType; swatch?: string }> = [
+  { key: 'auto', label: 'Auto', swatch: 'spectral' },
+  { key: 'minimal-dark', label: 'Minimal Black', swatch: '#05070A' },
+  { key: 'minimal-light', label: 'Minimal Light', swatch: '#F7F8FA' },
+  { key: 'dusk-mountain', label: 'Dusk Mountain', preview: TIME_IMAGES.dusk },
+  { key: 'clear-night', label: 'Clear Night', preview: TIME_IMAGES.night },
+  { key: 'clear-day', label: 'Clear Day', preview: TIME_IMAGES.day },
+  { key: 'sunset', label: 'Sunset', preview: TIME_IMAGES.dusk },
+  { key: 'clouds', label: 'Clouds', preview: TIME_IMAGES.dawn },
+  { key: 'rain', label: 'Rain', preview: TIME_IMAGES.dusk },
+  { key: 'storm', label: 'Storm', preview: TIME_IMAGES.night },
 ];
 const themeOptions: Array<{ key: ChatThemeMode; label: string }> = [
   { key: 'system', label: 'System' }, { key: 'dark', label: 'Dark' }, { key: 'light', label: 'Light' },
@@ -1093,11 +1299,18 @@ const themeOptions: Array<{ key: ChatThemeMode; label: string }> = [
 
 type SettingsSectionKey = 'execution' | 'voice-input' | 'usage' | 'appearance' | 'diagnostics' | 'account';
 
-function SettingsSectionControl({ id, title, expanded, onPress, summary, color, muted }: { id: SettingsSectionKey; title: string; expanded: boolean; onPress: () => void; summary?: string; color: string; muted: string }) {
-  return <View testID={`settings-${id}-section`} style={styles.settingsSection}>
-    <TouchableOpacity testID={id === 'appearance' ? 'settings-theme' : `settings-section-${id}`} accessibilityRole="button" accessibilityLabel={`${title} settings`} accessibilityState={{ expanded }} {...({ 'aria-expanded': expanded } as any)} onPress={onPress} style={styles.settingsSectionHeader} activeOpacity={0.75}>
-      <View style={styles.settingsSectionHeaderCopy}><Text style={[styles.settingsSectionTitle, { color }]}>{title}</Text>{summary ? <Text style={[styles.settingsSectionSummary, { color: muted }]}>{summary}</Text> : null}</View>
-      <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.settingsSectionChevron}>{expanded ? '⌄' : '›'}</Text>
+const SETTINGS_ICONS: Record<SettingsSectionKey, React.ComponentType<{ color: string; size?: number }>> = {
+  execution: SlidersIcon, 'voice-input': BellIcon, usage: ActivityIcon, appearance: PaletteIcon, diagnostics: ShieldIcon, account: AccountIcon,
+};
+
+/** One grouped settings row: large hit target, icon, title, optional value. */
+function SettingsSectionControl({ id, title, expanded, onPress, summary, color, muted, first }: { id: SettingsSectionKey; title: string; expanded: boolean; onPress: () => void; summary?: string; color: string; muted: string; first?: boolean }) {
+  const Icon = SETTINGS_ICONS[id];
+  return <View testID={`settings-${id}-section`}>
+    <TouchableOpacity testID={id === 'appearance' ? 'settings-theme' : `settings-section-${id}`} accessibilityRole="button" accessibilityLabel={`${title} settings`} accessibilityState={{ expanded }} {...({ 'aria-expanded': expanded } as any)} onPress={onPress} style={[styles.settingsRow, first ? undefined : styles.settingsRowDivided]} activeOpacity={0.75}>
+      <View style={styles.settingsRowIcon}><Icon size={ICON_SIZE} color={muted} /></View>
+      <View style={styles.settingsRowCopy}><Text style={[styles.settingsRowTitle, { color }]}>{title}</Text>{summary ? <Text style={[styles.settingsRowSummary, { color: muted }]}>{summary}</Text> : null}</View>
+      <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={expanded ? styles.settingsChevronOpen : undefined}><ChevronRightIcon size={18} color={muted} /></View>
     </TouchableOpacity>
   </View>;
 }
@@ -1132,14 +1345,18 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, exec
   const toggleSection = (section: SettingsSectionKey) => setExpandedSection(current => current === section ? null : section);
   const providers = Array.from(new Map(executionProfiles.map(profile => [profile.provider.id, profile.provider.label])).entries());
   const network = health?.status === 'healthy'; const runtime = Boolean(health?.herdr_socket_connected);
+  // Grouped rows over a tonal surface, as in a native settings sheet: the
+  // grouping comes from the container, not from a border on every control.
+  const groupSurface = dark ? 'rgba(30,37,48,0.92)' : 'rgba(238,241,244,0.96)';
   return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="settings-sheet" style={[styles.settingsSheet, { backgroundColor: dark ? brand.command : '#FFFFFF' }, animatedStyle]}>
-    <TouchableOpacity testID="settings-close" accessibilityRole="button" accessibilityLabel="Close settings" onPress={onClose} style={styles.settingsClose}><Text style={[styles.settingsCloseText, { color: text }]}>×</Text></TouchableOpacity>
-    <Text style={[styles.settingsTitle, { color: text }]}>Settings</Text>
+    <View style={[styles.sheetGrabber, { backgroundColor: muted }]} />
+    <View style={styles.settingsHeader}>
+      <Text accessibilityRole="header" style={[styles.settingsTitle, { color: text }]}>Settings</Text>
+      <TouchableOpacity testID="settings-close" accessibilityRole="button" accessibilityLabel="Close settings" onPress={onClose} style={styles.settingsClose}><Text style={[styles.settingsCloseText, { color: dark ? brand.cyan : brand.violet }]}>Done</Text></TouchableOpacity>
+    </View>
     <ScrollView testID="settings-scroll" style={styles.settingsScroll} contentContainerStyle={styles.settingsScrollContent} keyboardShouldPersistTaps="handled">
-    <View style={styles.settingsStatusGrid}><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: error ? brand.critical : loading ? brand.attention : network ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Network</Text><Text testID="settings-network-status" style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : error ? 'Unavailable' : network ? 'Connected' : 'Degraded'}</Text></View></View><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: runtime ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Runtime</Text><Text style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : runtime ? 'Live' : 'Unavailable'}</Text></View></View></View>
-    {error || executionError ? <Text style={styles.settingsError}>{error || executionError}</Text> : null}
-    <View testID="settings-execution-section" style={styles.settingsSection}>
-    <SettingsSectionControl id="execution" title="Execution" expanded={expandedSection === 'execution'} onPress={() => toggleSection('execution')} color={text} muted={muted} />
+    <View testID="settings-execution-section" style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
+    <SettingsSectionControl first id="execution" title="Models & Execution" expanded={expandedSection === 'execution'} onPress={() => toggleSection('execution')} color={text} muted={muted} />
     {expandedSection === 'execution' ? <View testID="settings-execution-content">
     <Text style={[styles.preferenceLabel, { color: muted }]}>ROUTING PREFERENCE</Text>
     <Text style={[styles.settingsToggleDescription, { color: muted }]}>Selection is saved to this Magistrate account. Runtime migration is not available yet; selected profiles are sent as explicit prompt context.</Text>
@@ -1152,8 +1369,8 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, exec
     {providers.length ? <View style={styles.credentialBlock}><Text style={[styles.preferenceLabel, { color: muted }]}>HARNESS CREDENTIALS</Text><View style={styles.optionRow}>{providers.map(([key, label]) => <TouchableOpacity key={key} testID={`credential-provider-${key}`} accessibilityRole="button" accessibilityState={{ selected: credentialKey === key }} onPress={() => setCredentialKey(key)} style={[styles.optionPill, credentialKey === key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: credentialKey === key ? brand.obsidian : text }]}>{label}</Text></TouchableOpacity>)}</View>{credentialKey ? <View style={styles.credentialInputRow}><TextInput testID="execution-credential-input" accessibilityLabel={`Credential for ${credentialKey}`} secureTextEntry value={credential} onChangeText={setCredential} placeholder="Paste credential (stored encrypted)" placeholderTextColor={muted} style={[styles.credentialInput, { color: text }]} /><TouchableOpacity testID="execution-credential-save" accessibilityRole="button" disabled={!credential.trim()} onPress={() => { const value = credential.trim(); setCredential(''); void onSaveCredential(credentialKey, value); }} style={styles.credentialSave}><Text style={styles.credentialSaveText}>SAVE</Text></TouchableOpacity></View> : null}</View> : null}
     </View> : null}
     </View>
-    <View testID="settings-voice-input-section" style={styles.settingsSection}>
-      <SettingsSectionControl id="voice-input" title="Voice input" expanded={expandedSection === 'voice-input'} onPress={() => toggleSection('voice-input')} color={text} muted={muted} />
+    <View testID="settings-voice-input-section" style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
+      <SettingsSectionControl first id="voice-input" title="Voice" expanded={expandedSection === 'voice-input'} onPress={() => toggleSection('voice-input')} color={text} muted={muted} />
       {expandedSection === 'voice-input' ? <View testID="settings-voice-input-content">
       <Text style={[styles.settingsToggleDescription, { color: muted }]}>Choose how speech becomes a draft. Nothing is sent until you press Send; gateway credentials stay on the server.</Text>
       <View testID="settings-voice-mode-options" style={styles.optionRow}>{VOICE_INPUT_MODE_OPTIONS.map(option => { const capability = capabilityFor(voiceCapabilities, option.id); const selected = preferences.voiceInputMode === option.id; const disabled = capability.available === 'unavailable'; return <TouchableOpacity key={option.id} testID={`voice-mode-option-${option.id}`} accessibilityRole="button" accessibilityLabel={`${option.label}: ${option.description}`} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={() => { const next = { ...preferences, voiceInputMode: option.id }; onPreferencesChange(next); void saveVoiceInputMode(option.id); }} style={[styles.voiceModeOption, selected ? styles.optionPillSelected : undefined, disabled ? styles.modelOptionDisabled : undefined]}><Text style={[styles.optionText, { color: selected ? brand.obsidian : text }]}>{option.label}{disabled ? ' · unavailable' : ''}</Text><Text style={[styles.voiceModeDescription, { color: selected ? brand.obsidian : muted }]}>{capability.reason || option.description}</Text></TouchableOpacity>; })}</View>
@@ -1163,30 +1380,51 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, exec
       <View testID="settings-voice-transcript-options" style={styles.optionRow}>{(['insert', 'auto-send'] as const).map(value => <TouchableOpacity key={value} testID={`voice-transcript-option-${value}`} accessibilityRole="button" accessibilityState={{ selected: preferences.voiceTranscriptBehavior === value }} onPress={() => { const next = { ...preferences, voiceTranscriptBehavior: value }; onPreferencesChange(next); void saveVoiceTranscriptBehavior(value); }} style={[styles.optionPill, preferences.voiceTranscriptBehavior === value ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: preferences.voiceTranscriptBehavior === value ? brand.obsidian : text }]}>{value === 'insert' ? 'Insert for review' : 'Send automatically'}</Text></TouchableOpacity>)}</View>
     </View> : null}
     </View>
-    <View testID="settings-usage-section" style={styles.settingsSection}>
-      <SettingsSectionControl id="usage" title="Usage" expanded={expandedSection === 'usage'} onPress={() => toggleSection('usage')} color={text} muted={muted} summary={usage.length ? `${usage[0].provider}${usage[0].plan ? ` · ${usage[0].plan}` : ''}` : undefined} />
+    <View testID="settings-usage-section" style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
+      <SettingsSectionControl first id="usage" title="Usage" expanded={expandedSection === 'usage'} onPress={() => toggleSection('usage')} color={text} muted={muted} summary={usage.length ? `${usage[0].provider}${usage[0].plan ? ` · ${usage[0].plan}` : ''}` : undefined} />
       {expandedSection === 'usage' ? <View testID="settings-usage-content">
       <Text style={[styles.settingsToggleDescription, { color: muted }]}>Authenticated quota data only. Missing or unavailable amounts stay explicitly unknown.</Text>
       {usageLoading ? <PanelText text="Loading authenticated usage…" muted={muted} /> : usageError ? <PanelText text={usageError} muted={brand.critical} /> : usage.length === 0 ? <PanelText text="Usage is unknown; no authenticated quota data is available." muted={muted} /> : usage.map(item => <View key={item.provider} style={styles.settingsUsageItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.provider}{item.plan ? ` · ${item.plan}` : ''}</Text><Text style={[styles.panelItemMeta, { color: item.status === 'fresh' ? muted : brand.attention }]}>{item.status === 'fresh' && item.windows.length ? item.windows.map(window => `${window.label || window.id || 'window'}: ${typeof window.percentRemaining === 'number' ? `${window.percentRemaining}% left` : typeof window.spentUsd === 'number' && typeof window.limitUsd === 'number' ? `$${window.spentUsd} / $${window.limitUsd}` : 'amount unknown'}`).join(' · ') : item.status === 'auth_required' ? 'Authentication required' : item.error || 'Quota unknown'}</Text></View>)}
     </View> : null}
     </View>
-    <View testID="settings-appearance-section">
-      <SettingsSectionControl id="appearance" title="Appearance" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} color={text} muted={muted} summary="Theme, background, and chat display" />
+    <View testID="settings-appearance-section" style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
+      <SettingsSectionControl first id="appearance" title="Appearance" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} color={text} muted={muted} summary="Theme, background, and chat display" />
       {expandedSection === 'appearance' ? <View testID="settings-appearance-window" accessibilityViewIsModal style={[styles.appearanceWindow, { backgroundColor: dark ? '#171E2A' : '#F4F6F9' }]}>
-      <View style={styles.appearanceHeader}><Text style={[styles.appearanceTitle, { color: text }]}>Appearance</Text><TouchableOpacity testID="settings-appearance-close" accessibilityRole="button" accessibilityLabel="Close appearance settings" onPress={() => toggleSection('appearance')} style={styles.appearanceClose}><Text style={[styles.settingsCloseText, { color: text }]}>×</Text></TouchableOpacity></View>
-      <Text style={[styles.preferenceLabel, { color: muted }]}>BACKGROUND</Text>
-      <View style={styles.optionRow}>{backgroundOptions.map(option => <TouchableOpacity key={option.key} testID={`background-option-${option.key}`} accessibilityRole="button" accessibilityState={{ selected: preferences.background === option.key }} onPress={() => { const next = { ...preferences, background: option.key, customBackgroundUri: undefined }; onPreferencesChange(next); void saveChatBackground(option.key); }} style={[styles.optionPill, preferences.background === option.key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: preferences.background === option.key ? brand.obsidian : text }]}>{option.label}</Text></TouchableOpacity>)}</View>
-      {preferences.customBackgroundUri ? <View style={styles.customBackgroundRow}><Image source={{ uri: preferences.customBackgroundUri }} style={styles.customBackgroundPreview} resizeMode="cover" accessibilityLabel="Custom background preview" /><View style={styles.customBackgroundCopy}><Text style={[styles.settingsToggleTitle, { color: text }]}>Custom background</Text><Text style={[styles.settingsToggleDescription, { color: muted }]}>Stored on this device and used only when selected.</Text></View><TouchableOpacity testID="settings-custom-background-remove" accessibilityRole="button" onPress={() => void removeCustom()} style={styles.secondaryAction}><Text style={[styles.secondaryActionText, { color: brand.critical }]}>Remove</Text></TouchableOpacity></View> : null}
-      <TouchableOpacity testID="settings-custom-background-upload" accessibilityRole="button" onPress={() => void pickCustomBackground()} style={styles.uploadBackgroundButton}><Text style={[styles.optionText, { color: text }]}>{preferences.customBackgroundUri ? 'Replace custom photo' : 'Upload custom photo'}</Text></TouchableOpacity>
-      <Text style={[styles.preferenceLabel, { color: muted }]}>MODE</Text>
-      <View testID="settings-theme-options" style={styles.optionRow}>{themeOptions.map(option => <TouchableOpacity key={option.key} testID={`theme-option-${option.key}`} accessibilityRole="button" accessibilityState={{ selected: preferences.themeMode === option.key }} onPress={() => { const next = { ...preferences, themeMode: option.key }; onPreferencesChange(next); void saveThemeMode(option.key); }} style={[styles.optionPill, preferences.themeMode === option.key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: preferences.themeMode === option.key ? brand.obsidian : text }]}>{option.label}</Text></TouchableOpacity>)}</View>
+      <View style={styles.appearanceHeader}><Text accessibilityRole="header" style={[styles.appearanceTitle, { color: text }]}>Appearance</Text><TouchableOpacity testID="settings-appearance-close" accessibilityRole="button" accessibilityLabel="Close appearance settings" onPress={() => toggleSection('appearance')} style={styles.appearanceClose}><CloseIcon size={22} color={text} /></TouchableOpacity></View>
+      <Text style={[styles.preferenceLabel, { color: muted }]}>THEME</Text>
+      <View testID="settings-theme-options" style={styles.optionRow}>{themeOptions.map(option => <TouchableOpacity key={option.key} testID={`theme-option-${option.key}`} accessibilityRole="button" accessibilityLabel={`${option.label} theme`} accessibilityState={{ selected: preferences.themeMode === option.key }} onPress={() => { const next = { ...preferences, themeMode: option.key }; onPreferencesChange(next); void saveThemeMode(option.key); }} style={[styles.optionPill, preferences.themeMode === option.key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: preferences.themeMode === option.key ? brand.obsidian : text }]}>{option.label}</Text></TouchableOpacity>)}</View>
+      <Text style={[styles.preferenceLabel, { color: muted }]}>ENVIRONMENT</Text>
+      <View testID="settings-environment-grid" style={styles.environmentGrid}>{backgroundOptions.map(option => {
+        const selected = preferences.background === option.key;
+        return <TouchableOpacity key={option.key} testID={`background-option-${option.key}`} accessibilityRole="button" accessibilityLabel={`${option.label} environment`} accessibilityState={{ selected }} {...({ 'aria-selected': selected } as any)} onPress={() => { const next = { ...preferences, background: option.key, customBackgroundUri: undefined }; onPreferencesChange(next); void saveChatBackground(option.key); }} style={styles.environmentTile}>
+          <View style={[styles.environmentThumb, selected ? { borderColor: brand.cyan, borderWidth: 2 } : { borderColor: glassEdge(dark) }]}>
+            {option.preview ? <Image source={option.preview} style={styles.environmentThumbImage} resizeMode="cover" accessibilityIgnoresInvertColors />
+              : option.swatch === 'spectral' ? <LinearGradient colors={[brand.cyan, brand.violet]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.environmentThumbImage} />
+              : <View style={[styles.environmentThumbImage, { backgroundColor: option.swatch }]} />}
+          </View>
+          <Text numberOfLines={1} style={[styles.environmentLabel, { color: selected ? (dark ? brand.cyan : brand.violet) : muted }]}>{option.label}</Text>
+        </TouchableOpacity>;
+      })}</View>
+      <Text style={[styles.preferenceLabel, { color: muted }]}>CUSTOM BACKGROUND</Text>
+      {preferences.customBackgroundUri ? <View style={styles.customBackgroundRow}>
+        <Image source={{ uri: preferences.customBackgroundUri }} style={styles.customBackgroundPreview} resizeMode="cover" accessibilityLabel="Custom background preview" />
+        <View style={styles.customBackgroundCopy}><Text style={[styles.settingsToggleTitle, { color: text }]}>Your photo</Text><Text style={[styles.settingsToggleDescription, { color: muted }]}>Stored on this device and used only while selected.</Text></View>
+        <TouchableOpacity testID="settings-custom-background-remove" accessibilityRole="button" accessibilityLabel="Remove the custom background" onPress={() => void removeCustom()} style={styles.secondaryAction}><Text style={[styles.secondaryActionText, { color: brand.critical }]}>Remove</Text></TouchableOpacity>
+      </View> : null}
+      <TouchableOpacity testID="settings-custom-background-upload" accessibilityRole="button" accessibilityLabel={preferences.customBackgroundUri ? 'Replace the custom background photo' : 'Upload a custom background photo'} onPress={() => void pickCustomBackground()} style={[styles.uploadBackgroundButton, { borderColor: dark ? brand.cyan : brand.violet }]}><Text style={[styles.optionText, { color: dark ? brand.cyan : brand.violet }]}>{preferences.customBackgroundUri ? 'Replace photo' : 'Upload background'}</Text></TouchableOpacity>
+      <Text style={[styles.preferenceLabel, { color: muted }]}>CHAT</Text>
       <View style={styles.settingsToggleRow}><View style={styles.settingsToggleCopy}><Text style={[styles.settingsToggleTitle, { color: text }]}>Show tool calls</Text><Text style={[styles.settingsToggleDescription, { color: muted }]}>Include tool activity in agent conversations.</Text></View><Switch testID="settings-tool-calls-toggle" accessibilityLabel="Show tool calls in chat history" value={preferences.showToolCalls} onValueChange={value => { const next = { ...preferences, showToolCalls: value }; onPreferencesChange(next); void saveToolCallVisibility(value); }} trackColor={{ false: '#424B59', true: brand.cyan }} thumbColor={preferences.showToolCalls ? brand.obsidian : '#F4F5F7'} /></View>
     </View> : null}
     </View>
-    <SettingsSectionControl id="diagnostics" title="Diagnostics" expanded={expandedSection === 'diagnostics'} onPress={() => toggleSection('diagnostics')} color={text} muted={muted} />
+    <View style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
+    <SettingsSectionControl first id="diagnostics" title="Diagnostics" expanded={expandedSection === 'diagnostics'} onPress={() => toggleSection('diagnostics')} color={text} muted={muted} summary="Gateway, Herdr and transport" />
     {expandedSection === 'diagnostics' ? <View testID="settings-diagnostics-content" style={styles.settingsSectionContent}><Text style={[styles.settingsToggleDescription, { color: muted }]}>Gateway, Herdr, and transport details for troubleshooting.</Text><TouchableOpacity testID="settings-diagnostics-open" accessibilityRole="button" accessibilityLabel="Open diagnostics" onPress={() => { onClose(); router.push('/diagnostics' as any); }} style={styles.diagnosticsButton}><Text style={[styles.diagnosticsButtonText, { color: text }]}>Open diagnostics</Text><Text style={[styles.diagnosticsArrow, { color: muted }]}>↗</Text></TouchableOpacity></View> : null}
-    <SettingsSectionControl id="account" title="Account" expanded={expandedSection === 'account'} onPress={() => toggleSection('account')} color={text} muted={muted} summary="Profile and sign-in" />
+    <SettingsSectionControl id="account" title="Account" expanded={expandedSection === 'account'} onPress={() => toggleSection('account')} color={text} muted={muted} summary="Profile, notifications and sign-in" />
     {expandedSection === 'account' ? <View testID="settings-account-content" style={styles.settingsSectionContent}><TouchableOpacity testID="settings-account-open" accessibilityRole="button" accessibilityLabel="Open account settings" onPress={() => { onClose(); router.push('/account' as any); }} style={styles.diagnosticsButton}><Text style={[styles.diagnosticsButtonText, { color: text }]}>Account & notifications</Text><Text style={[styles.diagnosticsArrow, { color: muted }]}>↗</Text></TouchableOpacity><TouchableOpacity testID="settings-logout" accessibilityRole="button" accessibilityLabel="Sign out of Magistrate" onPress={onLogout} style={styles.logoutButton}><Text style={styles.logoutButtonText}>SIGN OUT</Text></TouchableOpacity></View> : null}
+    </View>
+    <View style={styles.settingsStatusGrid}><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: error ? brand.critical : loading ? brand.attention : network ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Network</Text><Text testID="settings-network-status" style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : error ? 'Unavailable' : network ? 'Connected' : 'Degraded'}</Text></View></View><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: runtime ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Runtime</Text><Text style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : runtime ? 'Live' : 'Unavailable'}</Text></View></View></View>
+    {error || executionError ? <Text style={styles.settingsError}>{error || executionError}</Text> : null}
+    <Text testID="settings-about" style={[styles.settingsAbout, { color: muted }]}>Magistrate · Magi is the interface. Fleet, Attention and the environment system are behind it.</Text>
     </ScrollView>
   </Animated.View>;
 }
@@ -1254,7 +1492,19 @@ export default function ChatScreen() {
     fetchUsage().then(result => setUsage(result.providers)).catch(error => setUsageError(errorText(error, 'Usage data could not be loaded.'))).finally(() => setUsageLoading(false));
   }, [settingsOpen]);
   const drawerAnimatedStyle = useAnimatedStyle(() => ({ opacity: drawerProgress.value, transform: [{ translateX: interpolate(drawerProgress.value, [0, 1], [-(drawerWidth + 70), 0]) }] }), [drawerWidth]);
-  const chatAnimatedStyle = useAnimatedStyle(() => ({ transform: [{ translateX: isNarrow ? drawerProgress.value * drawerWidth : 0 }] }), [drawerWidth, isNarrow]);
+  // The chat surface is pushed aside and slightly inset rather than replaced,
+  // so the drawer reads as a layer over the same continuous screen: the current
+  // conversation stays visible, rounded and dimmed behind it (section 11).
+  // The surface is pushed on every breakpoint so the drawer never sits on top
+  // of the control that opens it; only the phone layout also insets and dims it.
+  const chatAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: drawerProgress.value * drawerWidth * (isNarrow ? 0.92 : 1) },
+      { scale: isNarrow ? interpolate(drawerProgress.value, [0, 1], [1, 0.93]) : 1 },
+    ],
+    borderRadius: isNarrow ? interpolate(drawerProgress.value, [0, 1], [0, 26]) : 0,
+  }), [drawerWidth, isNarrow]);
+  const chatDimStyle = useAnimatedStyle(() => ({ opacity: isNarrow ? drawerProgress.value * 0.42 : 0 }), [isNarrow]);
   const settingsAnimatedStyle = useAnimatedStyle(() => ({ opacity: settingsProgress.value, transform: [{ translateY: interpolate(settingsProgress.value, [0, 1], [420, 0]) }] }));
   const swipeToClose = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_, g) => isNarrow && drawerOpen && g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy),
@@ -1269,25 +1519,155 @@ export default function ChatScreen() {
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page} {...(isNarrow ? swipeToOpen.panHandlers : {})}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
-      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
-      <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} /></Animated.View>
+      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => { setDrawerOpen(false); if (target) router.push('/chat' as any); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
+      <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} />
+        <Animated.View pointerEvents={drawerOpen && isNarrow ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
+          <TouchableOpacity testID="drawer-dismiss" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={() => setDrawerOpen(false)} activeOpacity={1} style={styles.chatDimPress} />
+        </Animated.View>
+      </Animated.View>
       <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} health={health} loading={healthLoading} error={healthError} executionError={executionError} preferences={preferences} onPreferencesChange={setPreferences} executionProfiles={executionProfiles} voiceCapabilities={voiceCapabilities} executionSettings={executionSettings} onExecutionSettingsChange={update => { setExecutionSettings(current => ({ ...current, ...update })); void updateExecutionSettings(update).catch(error => setExecutionError(errorText(error, 'The execution setting could not be saved.'))); }} onSaveCredential={async (credentialKey, credential) => { try { await saveExecutionCredential(credentialKey, credential); setExecutionError(null); const capabilities = await fetchExecutionCapabilities(); setExecutionProfiles(profilesFromCapabilities(capabilities)); } catch (error) { setExecutionError(errorText(error, 'The credential could not be saved.')); } }} usage={usage} usageLoading={usageLoading} usageError={usageError} onClose={() => setSettingsOpen(false)} onLogout={() => { setSettingsOpen(false); void logoutGatewaySession(); }} />
     </>}
   </SafeAreaView></EnvironmentBackground>;
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, position: 'relative', borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
-  shellHeader: Platform.select({ web: { position: 'absolute', top: 8, left: 10, right: 10, height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 40, elevation: 20 }, default: { height: 48, flexShrink: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 12, elevation: 12 } }), logoButton: { width: 52, height: 44, alignItems: 'center', justifyContent: 'center' }, logoWithUnread: { position: 'relative', width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, unreadAttentionDot: { position: 'absolute', top: 1, right: 0, width: 8, height: 8, borderRadius: 4, backgroundColor: '#F5C542', borderWidth: 1, borderColor: '#111722' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: Platform.select({ web: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 72, paddingHorizontal: 22, paddingBottom: 124, gap: 16 }, default: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 } }), userMessageWrap: { maxWidth: 680, alignSelf: 'flex-end', flexDirection: 'row', alignItems: 'flex-end', gap: 5 }, userMessage: { flex: 1, paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: brand.cyan, borderWidth: 1, borderColor: brand.cyan }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'flex-start', gap: 5, paddingVertical: 9, paddingHorizontal: 2 }, assistantBody: { flex: 1, minWidth: 0 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, attachedToolResult: { maxWidth: 260, marginTop: 7, paddingVertical: 5, paddingHorizontal: 9, borderRadius: 8, backgroundColor: 'rgba(142,153,170,0.10)', overflow: 'hidden' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 }, progressLabel: { fontSize: 13, fontWeight: '700', marginBottom: 3 }, assistantState: { fontSize: 11, marginTop: 8 }, assistantStateFailed: { color: brand.critical, fontSize: 11, lineHeight: 17, marginTop: 8 }, thinkingSummary: { marginTop: 8, paddingLeft: 9, borderLeftWidth: 2, borderLeftColor: 'rgba(139,108,255,0.5)' }, thinkingSummaryLabel: { fontSize: 10, fontWeight: '800' }, thinkingSummaryText: { fontSize: 12, lineHeight: 17, marginTop: 2 }, sources: { marginTop: 10, gap: 4 }, sourcesTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase' }, sourceRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, minHeight: 38, paddingVertical: 4 }, sourceMarker: { width: 20, fontSize: 12, lineHeight: 18, fontWeight: '800', textAlign: 'center' }, sourceCopy: { flex: 1, minWidth: 0 }, sourceTitle: { fontSize: 12, lineHeight: 17, fontWeight: '700' }, sourceMeta: { fontSize: 10, lineHeight: 14, marginTop: 1 }, sourceQuote: { fontSize: 11, lineHeight: 15, marginTop: 2 }, messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.72, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
-  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, width: 38, height: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(17,23,34,0.62)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 999, zIndex: 30, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 16 }, jumpText: { color: brand.paper, fontSize: 20, lineHeight: 22, fontWeight: '700' }, inlineMessageAction: { minWidth: 32, minHeight: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 16 }, inlineMessageActionText: { color: brand.mutedDark, fontSize: 13, letterSpacing: 1, fontWeight: '800' }, copiedLabel: { position: 'absolute', right: 20, bottom: 128, color: brand.success, fontSize: 11, fontWeight: '800', zIndex: 31 },
-  messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 32, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, minHeight: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
-  composerDock: Platform.select({ web: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 35, paddingBottom: 'env(safe-area-inset-bottom, 0px)' as any, backgroundColor: 'transparent' }, default: { flexShrink: 0 } }), composer: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 20, elevation: 12, borderWidth: 1, borderColor: 'rgba(142,153,170,0.22)', shadowColor: '#000', shadowOpacity: 0.16, shadowRadius: 14 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, stopButton: { width: 58, borderRadius: 21, backgroundColor: brand.critical }, stopButtonText: { color: brand.paper, fontSize: 12, fontWeight: '800' }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
-  attachmentControl: { width: 36, zIndex: 20 }, attachmentMenu: { position: 'absolute', left: -2, bottom: 46, width: 238, borderRadius: 20, padding: 11, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 14 }, attachmentOption: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 8, paddingVertical: 7, borderRadius: 13 }, attachmentOptionTitle: { fontSize: 14, fontWeight: '700' }, attachmentOptionMeta: { fontSize: 11, marginTop: 2 },
-  attachmentPreview: { flexGrow: 0, marginHorizontal: 8, marginBottom: 7, maxHeight: 60 }, attachmentPreviewContent: { gap: 8, paddingHorizontal: 3 }, attachmentChip: { width: 220, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, padding: 5, paddingRight: 7, borderRadius: 15 }, attachmentThumbnail: { width: 46, height: 46, borderRadius: 11 }, attachmentFileIcon: { width: 46, height: 46, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, attachmentCopy: { flex: 1, minWidth: 0 }, attachmentName: { fontSize: 12, fontWeight: '700' }, attachmentMeta: { fontSize: 10, marginTop: 3 }, attachmentRemove: { width: 28, height: 38, alignItems: 'center', justifyContent: 'center' }, attachmentRemoveText: { fontSize: 21, lineHeight: 23 },
-  activeVoiceSurface: { position: 'absolute', left: 8, right: 8, bottom: 68, height: 72, borderRadius: 28, backgroundColor: 'rgba(17,23,34,0.96)', borderWidth: 1, borderColor: brand.cyan, overflow: 'hidden', zIndex: 9, alignItems: 'center', justifyContent: 'center' }, activeVoiceHalo: { position: 'absolute', width: 170, height: 170, borderRadius: 85, backgroundColor: 'rgba(36,216,255,0.12)' }, activeVoiceMark: { width: 52, height: 52, zIndex: 2 }, micActiveButton: { borderWidth: 1, borderColor: brand.cyan, borderRadius: 18, backgroundColor: 'rgba(36,216,255,0.12)' },
+  // The environment owns the canvas: no page padding, no card, no rounded
+  // window. Everything above the transcript floats (prompt sections 4 and 5).
+  page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any,
+  chatStage: { flex: 1, minWidth: 0, zIndex: 1, overflow: 'hidden' },
+  chatDim: { ...StyleSheet.absoluteFill, backgroundColor: '#05070A', zIndex: 60 }, chatDimPress: { flex: 1 },
+  canvas: { flex: 1, minWidth: 0, position: 'relative', overflow: 'hidden' },
+
+  topBar: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, zIndex: 40, elevation: 20, ...Platform.select({ web: { paddingTop: 'calc(10px + env(safe-area-inset-top, 0px))' as any }, default: { paddingTop: 10 } }) },
+  glassCircle: { width: 46, height: 46, borderRadius: 23, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center', overflow: 'visible' },
+  unreadAttentionDot: { position: 'absolute', top: 3, right: 3, width: 9, height: 9, borderRadius: 5, backgroundColor: '#F5C542' },
+  identityControl: { flex: 1, minWidth: 0, minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 6 },
+  identityName: { fontSize: 19, fontWeight: '600', letterSpacing: -0.2 }, identityVariant: { flexShrink: 1, fontSize: 19, fontWeight: '400', letterSpacing: -0.2 }, identityChevron: { transform: [{ rotate: '90deg' }] },
+  mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
+
+  // Readability treatment only where the chrome sits; the middle of the screen
+  // keeps the environment untouched.
+  topScrim: { position: 'absolute', top: 0, left: 0, right: 0, height: 150, zIndex: 2 },
+  bottomScrim: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 220, zIndex: 2 },
+
+  emptyState: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 34, gap: 22, zIndex: 3 },
+  emptyStateMarkWrap: { width: 108, height: 108, alignItems: 'center', justifyContent: 'center' },
+  emptyStateHalo: { position: 'absolute', width: 108, height: 108, borderRadius: 54, backgroundColor: 'rgba(36,216,255,0.22)' },
+  emptyStateMark: { width: 54, height: 54 },
+  greeting: { maxWidth: 460, fontSize: 34, lineHeight: 42, fontWeight: '400', letterSpacing: -0.6, textAlign: 'center' },
+
+  chatHistory: { flex: 1, minHeight: 0 },
+  chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 96, paddingHorizontal: 20, paddingBottom: 132, gap: 18 },
+  userMessageWrap: { maxWidth: 680, alignSelf: 'flex-end', flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
+  userMessage: { flex: 1, paddingVertical: 12, paddingHorizontal: 17, borderRadius: 22, borderWidth: 1 },
+  assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'flex-start', gap: 5, paddingVertical: 2, paddingHorizontal: 2 },
+  assistantBody: { flex: 1, minWidth: 0 },
+  toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 5, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.35)' },
+  attachedToolResult: { maxWidth: 280, marginTop: 7, paddingVertical: 5, paddingHorizontal: 9, borderRadius: 8, backgroundColor: 'rgba(142,153,170,0.10)', overflow: 'hidden' },
+  toolMessageText: { fontSize: 12, lineHeight: 18 },
+  messageText: { fontSize: 17, lineHeight: 26 }, progressLabel: { fontSize: 13, fontWeight: '700', marginBottom: 3 },
+  workingRow: { maxWidth: 680, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 2 },
+  workingLabel: { fontSize: 13, lineHeight: 19 },
+  assistantState: { fontSize: 11, marginTop: 8 }, assistantStateFailed: { color: brand.critical, fontSize: 11, lineHeight: 17, marginTop: 8 },
+  thinkingSummary: { marginTop: 8, paddingLeft: 9, borderLeftWidth: 2, borderLeftColor: 'rgba(139,108,255,0.5)' }, thinkingSummaryLabel: { fontSize: 10, fontWeight: '800' }, thinkingSummaryText: { fontSize: 12, lineHeight: 17, marginTop: 2 },
+  sources: { marginTop: 10, gap: 4 }, sourcesTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase' }, sourceRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, minHeight: 38, paddingVertical: 4 }, sourceMarker: { width: 20, fontSize: 12, lineHeight: 18, fontWeight: '800', textAlign: 'center' }, sourceCopy: { flex: 1, minWidth: 0 }, sourceTitle: { fontSize: 12, lineHeight: 17, fontWeight: '700' }, sourceMeta: { fontSize: 10, lineHeight: 14, marginTop: 1 }, sourceQuote: { fontSize: 11, lineHeight: 15, marginTop: 2 },
+  messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.62, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
+
+  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 108, width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderRadius: 999, zIndex: 30, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 16 },
+  jumpText: { fontSize: 20, lineHeight: 22, fontWeight: '700' },
+  inlineMessageAction: { minWidth: 32, minHeight: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 16 }, inlineMessageActionText: { color: brand.mutedDark, fontSize: 13, letterSpacing: 1, fontWeight: '800' },
+  copiedLabel: { position: 'absolute', right: 20, bottom: 148, color: brand.success, fontSize: 11, fontWeight: '800', zIndex: 31 },
+  messageActions: { position: 'absolute', right: 24, bottom: 108, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 32, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, minHeight: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
+
+  // The composer genuinely floats on every platform: detached from the bottom
+  // edge, inset horizontally, and layered above the transcript.
+  composerDock: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 35, ...Platform.select({ web: { paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))' as any }, default: { paddingBottom: 14 } }) },
+  composer: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 60, borderRadius: 30, paddingHorizontal: 10, paddingVertical: 7, marginHorizontal: 14, maxWidth: 720, alignSelf: 'center', width: '100%', zIndex: 20, elevation: 12, borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 22, shadowOffset: { width: 0, height: 6 } },
+  composerIconButton: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 23, fontWeight: '400' },
+  composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, paddingHorizontal: 2, outlineStyle: 'none' as any },
+  sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, stopButton: { width: 42, borderRadius: 21, backgroundColor: brand.critical }, stopButtonText: { color: brand.paper, fontSize: 12, fontWeight: '800' }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 },
+  composerStatus: { minHeight: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 26, paddingTop: 4 },
+  editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
+
+  attachmentControl: { width: 40, zIndex: 20 }, attachmentMenu: { position: 'absolute', left: -2, bottom: 50, width: 238, borderRadius: 20, padding: 11, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 14 }, attachmentOption: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 8, paddingVertical: 7, borderRadius: 13 }, attachmentOptionTitle: { fontSize: 14, fontWeight: '700' }, attachmentOptionMeta: { fontSize: 11, marginTop: 2 },
+  attachmentPreview: { flexGrow: 0, marginHorizontal: 14, marginBottom: 8, maxHeight: 60 }, attachmentPreviewContent: { gap: 8, paddingHorizontal: 3 }, attachmentChip: { width: 220, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, padding: 5, paddingRight: 7, borderRadius: 15 }, attachmentThumbnail: { width: 46, height: 46, borderRadius: 11 }, attachmentFileIcon: { width: 46, height: 46, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, attachmentCopy: { flex: 1, minWidth: 0 }, attachmentName: { fontSize: 12, fontWeight: '700' }, attachmentMeta: { fontSize: 10, marginTop: 3 }, attachmentRemove: { width: 28, height: 38, alignItems: 'center', justifyContent: 'center' }, attachmentRemoveText: { fontSize: 21, lineHeight: 23 },
+  activeVoiceSurface: { position: 'absolute', left: 14, right: 14, bottom: 78, height: 72, borderRadius: 28, backgroundColor: 'rgba(17,23,34,0.96)', borderWidth: 1, borderColor: brand.cyan, overflow: 'hidden', zIndex: 9, alignItems: 'center', justifyContent: 'center' }, activeVoiceHalo: { position: 'absolute', width: 170, height: 170, borderRadius: 85, backgroundColor: 'rgba(36,216,255,0.12)' }, activeVoiceMark: { width: 52, height: 52, zIndex: 2 }, micActiveButton: { borderWidth: 1, borderColor: brand.cyan, borderRadius: 20, backgroundColor: 'rgba(36,216,255,0.12)' },
   liveWaveform: { position: 'absolute', left: 8, right: 8, bottom: 8, height: 52, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', paddingHorizontal: 14, zIndex: 9 }, liveWaveformBar: { width: 3, borderRadius: 2 },
-  modelControl: { width: 40, zIndex: 15 }, modelButton: { height: 34, width: 34, alignItems: 'center', justifyContent: 'center' }, modelMenu: { position: 'absolute', right: -8, bottom: 44, width: 280, maxHeight: 350, borderRadius: 22, padding: 12, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 10 }, modelOptionsScroll: { maxHeight: 235 }, menuTitle: { fontSize: 14, fontWeight: '800', marginBottom: 7, paddingHorizontal: 7 }, harnessLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase', paddingHorizontal: 7, paddingTop: 8 }, modelOption: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 7, paddingVertical: 6 }, modelOptionDisabled: { opacity: 0.5 }, modelOptionCopy: { flex: 1 }, modelOptionTitle: { fontSize: 13, fontWeight: '700' }, modelOptionMeta: { fontSize: 11, lineHeight: 15, marginTop: 2 }, selectionDot: { width: 7, height: 7, borderRadius: 4 }, modelNotice: { fontSize: 11, lineHeight: 16, paddingHorizontal: 7, paddingTop: 8 }, modelError: { color: '#FFB4B2', fontSize: 11, lineHeight: 16, paddingHorizontal: 7, paddingTop: 8 },
-  drawer: { position: 'absolute', top: 8, bottom: 8, width: 310, zIndex: 10, borderRadius: 24, padding: 14, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 28, elevation: 12 }, drawerDesktop: { left: 58 }, drawerMobile: { left: 8, width: '82%' }, drawerFixedHeader: { flexShrink: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(142,153,170,0.24)', paddingBottom: 9, marginBottom: 5 }, drawerTitleRow: { minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 8 }, drawerWordmark: { flex: 1, fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 25, lineHeight: 32, fontWeight: '500', marginLeft: 4 }, drawerSettingsButton: { minHeight: 36, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 10 }, drawerSettingsText: { fontSize: 12, fontWeight: '700' }, drawerScroll: { flex: 1, minHeight: 0 }, drawerScrollContent: { paddingTop: 4, paddingBottom: 16 }, drawerBottom: { flexShrink: 0, paddingTop: 8, paddingBottom: 'env(safe-area-inset-bottom, 0px)' as any, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(142,153,170,0.24)' }, drawerRow: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 8, paddingHorizontal: 4 }, drawerIcon: { width: 20, fontSize: 16.8, fontWeight: '800', textAlign: 'center' }, gearIconContainer: { width: 20, alignItems: 'center', justifyContent: 'center' }, drawerRowText: { flex: 1, fontSize: 15, fontWeight: '400', textAlign: 'left' }, drawerCount: { fontSize: 11, fontWeight: '800' }, chevron: { width: 18, fontSize: 13, textAlign: 'center' }, sectionPanel: { paddingLeft: 30, paddingRight: 4, paddingBottom: 10, gap: 7 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '800', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 }, fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 7 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, renameRow: { flexDirection: 'row', alignItems: 'center', gap: 7 }, renameInput: { flex: 1, minWidth: 0, height: 40, borderWidth: 1, borderColor: 'rgba(142,153,170,0.4)', borderRadius: 10, paddingHorizontal: 10, fontSize: 16, outlineStyle: 'none' as any }, confirmInterruptRow: { flexDirection: 'row', alignItems: 'center', gap: 9 }, confirmInterruptText: { flex: 1, fontSize: 11 }, popoverLink: { fontSize: 10, fontWeight: '800' }, agentActionMessage: { fontSize: 10, lineHeight: 14 }, accountRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 5 }, accountIcon: { width: 20, fontSize: 22.8, textAlign: 'center' },
-  settingsSheet: { position: 'absolute', left: 8, right: 8, bottom: 8, height: '90%', maxHeight: '92%', zIndex: 20, borderTopLeftRadius: 28, borderTopRightRadius: 28, borderBottomLeftRadius: 18, borderBottomRightRadius: 18, padding: 21, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 30, elevation: 18 }, appearanceLoading: { flex: 1, borderRadius: 26 }, settingsClose: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center', marginLeft: -7, marginTop: -7 }, settingsCloseText: { fontSize: 27, lineHeight: 30, fontWeight: '300' }, settingsTitle: { fontSize: 24, fontWeight: '700', marginTop: -3, marginBottom: 12 }, settingsScroll: { flex: 1 }, settingsScrollContent: { paddingBottom: 28 }, settingsSection: { marginTop: 22, paddingTop: 18, borderTopWidth: 1, borderTopColor: 'rgba(142,153,170,0.18)' }, settingsSectionHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingVertical: 5 }, settingsSectionHeaderCopy: { flex: 1, minWidth: 0 }, settingsSectionTitle: { fontSize: 17, fontWeight: '800' }, settingsSectionSummary: { fontSize: 11, lineHeight: 16, marginTop: 2 }, settingsSectionChevron: { width: 30, textAlign: 'center', fontSize: 22, lineHeight: 24, fontWeight: '400' }, settingsSectionContent: { paddingTop: 6 }, settingsStatusGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 24 }, settingsStatus: { minWidth: 150, flexDirection: 'row', alignItems: 'center', gap: 10 }, statusDot: { width: 9, height: 9, borderRadius: 5 }, settingsLabel: { fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '700' }, settingsValue: { fontSize: 15, fontWeight: '700', marginTop: 2 }, settingsError: { color: '#FFB4B2', fontSize: 12, marginTop: 12 }, settingsToggleRow: { maxWidth: 420, minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 16 }, settingsToggleCopy: { flex: 1 }, settingsToggleTitle: { fontSize: 15, fontWeight: '700' }, settingsToggleDescription: { fontSize: 11, lineHeight: 16, marginTop: 2 }, settingsUsageItem: { paddingVertical: 8 }, credentialBlock: { marginTop: 8, maxWidth: 520 }, credentialInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 }, credentialInput: { flex: 1, minWidth: 0, minHeight: 38, borderWidth: 1, borderColor: 'rgba(142,153,170,0.38)', borderRadius: 10, paddingHorizontal: 10, fontSize: 16, outlineStyle: 'none' as any }, credentialSave: { minHeight: 38, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: brand.cyan }, credentialSaveText: { color: brand.obsidian, fontSize: 10, fontWeight: '800' }, diagnosticsButton: { marginTop: 10, minHeight: 38, flexDirection: 'row', alignItems: 'center', maxWidth: 260 }, diagnosticsButtonText: { flex: 1, fontSize: 15, fontWeight: '700' }, diagnosticsArrow: { fontSize: 17 }, appearanceWindow: { borderRadius: 24, padding: 18, zIndex: 3, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 22, elevation: 20 }, appearanceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }, appearanceTitle: { fontSize: 22, fontWeight: '800' }, appearanceClose: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' }, preferenceLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 0.9, marginTop: 8, marginBottom: 8 }, optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, optionPill: { minHeight: 36, justifyContent: 'center', borderRadius: 18, borderWidth: 1, borderColor: 'rgba(142,153,170,0.38)', paddingHorizontal: 13 }, voiceModeOption: { minWidth: 145, maxWidth: 290, minHeight: 54, justifyContent: 'center', borderRadius: 14, borderWidth: 1, borderColor: 'rgba(142,153,170,0.38)', paddingHorizontal: 12, paddingVertical: 7 }, voiceModeDescription: { fontSize: 10, lineHeight: 14, marginTop: 2 }, customBackgroundRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 12 }, customBackgroundPreview: { width: 56, height: 40, borderRadius: 8 }, customBackgroundCopy: { flex: 1, minWidth: 150 }, customBackgroundTitle: { fontSize: 12, fontWeight: '800' }, customBackgroundDescription: { fontSize: 10, lineHeight: 14, marginTop: 2 }, secondaryAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255,98,95,0.36)' }, secondaryActionText: { fontSize: 11, fontWeight: '800' }, uploadBackgroundButton: { minHeight: 40, justifyContent: 'center', alignItems: 'center', borderRadius: 12, marginTop: 12, borderWidth: 1, borderColor: 'rgba(142,153,170,0.36)' }, optionPillSelected: { backgroundColor: brand.cyan, borderColor: brand.cyan }, optionText: { fontSize: 12, fontWeight: '800' }, logoutButton: { minHeight: 40, marginTop: 22, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255,98,95,0.55)', justifyContent: 'center', alignItems: 'center', maxWidth: 260 }, logoutButtonText: { color: brand.critical, fontFamily: 'monospace', fontSize: 10, fontWeight: '800', letterSpacing: 0.8 }
+
+  // Native-feeling sheet: grabber, large rounded top, Done, grouped rows.
+  sheetLayer: { ...StyleSheet.absoluteFill, zIndex: 45, justifyContent: 'flex-end' },
+  sheetScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(5,7,10,0.46)' },
+  sheetGrabber: { alignSelf: 'center', width: 36, height: 4, borderRadius: 2, opacity: 0.4, marginBottom: 10 },
+  executionSheet: { maxHeight: '76%', borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingTop: 10, paddingHorizontal: 16, ...Platform.select({ web: { paddingBottom: 'calc(18px + env(safe-area-inset-bottom, 0px))' as any }, default: { paddingBottom: 18 } }), shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 30, elevation: 22 },
+  sheetHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  sheetTitle: { fontSize: 20, fontWeight: '700', letterSpacing: -0.2 }, sheetDone: { minHeight: 44, minWidth: 56, alignItems: 'flex-end', justifyContent: 'center' }, sheetDoneText: { fontSize: 17, fontWeight: '600' },
+  executionScroll: { flexGrow: 0 }, executionScrollContent: { paddingBottom: 8 },
+  group: { borderRadius: 18, overflow: 'hidden' }, groupLabel: { fontSize: 11, fontWeight: '700', letterSpacing: 0.9, marginTop: 18, marginBottom: 8, paddingHorizontal: 4 },
+  groupRow: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10 },
+  groupRowDivided: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(142,153,170,0.22)' },
+  groupRowCopy: { flex: 1, minWidth: 0 }, groupRowTitle: { fontSize: 16, fontWeight: '500' }, groupRowMeta: { fontSize: 12, lineHeight: 17, marginTop: 2 }, groupCheck: { fontSize: 17, fontWeight: '700' }, groupNotice: { paddingHorizontal: 16, paddingVertical: 14 },
+
+  modelOptionDisabled: { opacity: 0.5 }, menuTitle: { fontSize: 14, fontWeight: '800', marginBottom: 7, paddingHorizontal: 7 }, modelError: { color: '#FFB4B2', fontSize: 12, lineHeight: 17 },
+
+  // Drawer: sparse rows, one icon system, pinned footer, no cards.
+  drawer: { position: 'absolute', top: 0, bottom: 0, width: 310, zIndex: 10, paddingHorizontal: 14, ...Platform.select({ web: { paddingTop: 'calc(14px + env(safe-area-inset-top, 0px))' as any }, default: { paddingTop: 14 } }), overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.34, shadowRadius: 32, elevation: 14 },
+  drawerDesktop: { left: 0, borderTopRightRadius: 26, borderBottomRightRadius: 26 }, drawerMobile: { left: 0, width: '84%', maxWidth: 360 },
+  drawerFixedHeader: { flexShrink: 0, paddingBottom: 10 },
+  drawerTitleRow: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  drawerWordmark: { flex: 1, fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 26, lineHeight: 34, fontWeight: '500' },
+  drawerSearchInput: { flex: 1, minWidth: 0, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 14, fontSize: 16, outlineStyle: 'none' as any },
+  drawerSearchButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
+  drawerScroll: { flex: 1, minHeight: 0 }, drawerScrollContent: { paddingTop: 4, paddingBottom: 18 },
+  drawerRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 8, paddingHorizontal: 6, borderRadius: 14 },
+  drawerIcon: { width: ICON_SIZE, height: ICON_SIZE, alignItems: 'center', justifyContent: 'center' },
+  drawerRowText: { flex: 1, fontSize: 16, fontWeight: '400', textAlign: 'left' },
+  drawerCount: { fontSize: 13, fontWeight: '600' }, drawerCountAlert: { fontWeight: '800' },
+  drawerGroupLabel: { fontSize: 11, fontWeight: '700', letterSpacing: 0.9, marginTop: 22, marginBottom: 6, paddingHorizontal: 6 },
+  drawerWorkRow: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6, paddingHorizontal: 6, borderRadius: 14 },
+  workDot: { width: 7, height: 7, borderRadius: 4 }, drawerWorkName: { flexShrink: 1, fontSize: 14, fontWeight: '500' }, drawerWorkStatus: { flexShrink: 1, fontSize: 12 },
+  drawerBottom: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, ...Platform.select({ web: { paddingBottom: 'calc(12px + env(safe-area-inset-bottom, 0px))' as any }, default: { paddingBottom: 12 } }) },
+  drawerSettingsButton: { flex: 1, minHeight: 48, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: 24, borderWidth: StyleSheet.hairlineWidth },
+  drawerSettingsText: { fontSize: 15, fontWeight: '600' },
+  accountRow: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24 },
+  accountIcon: { width: ICON_SIZE, height: ICON_SIZE, alignItems: 'center', justifyContent: 'center' },
+  gearIconContainer: { width: 20, alignItems: 'center', justifyContent: 'center' }, chevron: { width: 18, fontSize: 13, textAlign: 'center' },
+  sectionPanel: { paddingLeft: 44, paddingRight: 4, paddingBottom: 12, gap: 8 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { minHeight: 40, justifyContent: 'center', paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '700', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 },
+  fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, renameRow: { flexDirection: 'row', alignItems: 'center', gap: 7 }, renameInput: { flex: 1, minWidth: 0, height: 40, borderWidth: 1, borderColor: 'rgba(142,153,170,0.4)', borderRadius: 10, paddingHorizontal: 10, fontSize: 16, outlineStyle: 'none' as any }, confirmInterruptRow: { flexDirection: 'row', alignItems: 'center', gap: 9 }, confirmInterruptText: { flex: 1, fontSize: 11 }, popoverLink: { fontSize: 10, fontWeight: '800' }, agentActionMessage: { fontSize: 10, lineHeight: 14 },
+
+  settingsSheet: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '90%', maxHeight: '92%', zIndex: 20, borderTopLeftRadius: 30, borderTopRightRadius: 30, paddingTop: 12, paddingHorizontal: 16, shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 34, elevation: 20 },
+  appearanceLoading: { flex: 1 },
+  settingsHeader: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  settingsClose: { minHeight: 44, minWidth: 60, alignItems: 'flex-end', justifyContent: 'center' }, settingsCloseText: { fontSize: 17, fontWeight: '600' },
+  settingsTitle: { fontSize: 26, fontWeight: '700', letterSpacing: -0.4 },
+  settingsScroll: { flex: 1 }, settingsScrollContent: { paddingBottom: 40 },
+  settingsGroup: { borderRadius: 18, overflow: 'hidden', marginTop: 14 },
+  settingsRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 10 },
+  settingsRowDivided: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(142,153,170,0.22)' },
+  settingsRowIcon: { width: ICON_SIZE, height: ICON_SIZE, alignItems: 'center', justifyContent: 'center' },
+  settingsRowCopy: { flex: 1, minWidth: 0 }, settingsRowTitle: { fontSize: 16, fontWeight: '500' }, settingsRowSummary: { fontSize: 12, lineHeight: 17, marginTop: 2 },
+  settingsChevronOpen: { transform: [{ rotate: '90deg' }] },
+  settingsSectionContent: { paddingHorizontal: 16, paddingBottom: 16 },
+  settingsStatusGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 24, marginTop: 26, paddingHorizontal: 4 }, settingsStatus: { minWidth: 150, flexDirection: 'row', alignItems: 'center', gap: 10 }, statusDot: { width: 9, height: 9, borderRadius: 5 }, settingsLabel: { fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '700' }, settingsValue: { fontSize: 15, fontWeight: '700', marginTop: 2 }, settingsError: { color: '#FFB4B2', fontSize: 12, marginTop: 12, paddingHorizontal: 4 },
+  settingsAbout: { fontSize: 12, lineHeight: 18, marginTop: 22, paddingHorizontal: 4 },
+  settingsToggleRow: { maxWidth: 460, minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 8 }, settingsToggleCopy: { flex: 1 }, settingsToggleTitle: { fontSize: 15, fontWeight: '600' }, settingsToggleDescription: { fontSize: 12, lineHeight: 17, marginTop: 2 },
+  settingsUsageItem: { paddingVertical: 8 }, credentialBlock: { marginTop: 8, maxWidth: 520 }, credentialInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 }, credentialInput: { flex: 1, minWidth: 0, minHeight: 40, borderWidth: 1, borderColor: 'rgba(142,153,170,0.38)', borderRadius: 12, paddingHorizontal: 12, fontSize: 16, outlineStyle: 'none' as any }, credentialSave: { minHeight: 40, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 12, backgroundColor: brand.cyan }, credentialSaveText: { color: brand.obsidian, fontSize: 11, fontWeight: '800' },
+  diagnosticsButton: { marginTop: 10, minHeight: 44, flexDirection: 'row', alignItems: 'center', maxWidth: 300 }, diagnosticsButtonText: { flex: 1, fontSize: 15, fontWeight: '600' }, diagnosticsArrow: { fontSize: 17 },
+
+  appearanceWindow: { borderRadius: 20, padding: 16, zIndex: 3 },
+  appearanceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }, appearanceTitle: { fontSize: 20, fontWeight: '700' }, appearanceClose: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  environmentGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  environmentTile: { width: 92, gap: 6 },
+  environmentThumb: { width: 92, height: 64, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden' },
+  environmentThumbImage: { width: '100%', height: '100%' },
+  environmentLabel: { fontSize: 11, fontWeight: '600', textAlign: 'center' },
+
+  preferenceLabel: { fontSize: 11, fontWeight: '700', letterSpacing: 0.9, marginTop: 18, marginBottom: 10 },
+  optionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  optionPill: { minHeight: 40, justifyContent: 'center', borderRadius: 20, borderWidth: 1, borderColor: 'rgba(142,153,170,0.34)', paddingHorizontal: 16 },
+  voiceModeOption: { minWidth: 150, maxWidth: 300, minHeight: 58, justifyContent: 'center', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(142,153,170,0.34)', paddingHorizontal: 14, paddingVertical: 8 }, voiceModeDescription: { fontSize: 11, lineHeight: 15, marginTop: 2 },
+  customBackgroundRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginTop: 4 }, customBackgroundPreview: { width: 92, height: 64, borderRadius: 14 }, customBackgroundCopy: { flex: 1, minWidth: 150 }, customBackgroundTitle: { fontSize: 12, fontWeight: '800' }, customBackgroundDescription: { fontSize: 10, lineHeight: 14, marginTop: 2 },
+  secondaryAction: { minHeight: 40, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255,98,95,0.36)' }, secondaryActionText: { fontSize: 12, fontWeight: '700' },
+  uploadBackgroundButton: { minHeight: 48, justifyContent: 'center', alignItems: 'center', borderRadius: 24, marginTop: 12, borderWidth: 1 },
+  optionPillSelected: { backgroundColor: brand.cyan, borderColor: brand.cyan }, optionText: { fontSize: 13, fontWeight: '700' },
+  logoutButton: { minHeight: 44, marginTop: 22, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255,98,95,0.55)', justifyContent: 'center', alignItems: 'center', maxWidth: 280 }, logoutButtonText: { color: brand.critical, fontSize: 11, fontWeight: '800', letterSpacing: 0.8 },
 });

@@ -2,7 +2,7 @@ import { ImageSourcePropType } from 'react-native';
 
 export type TimePeriod = 'dawn' | 'day' | 'dusk' | 'night';
 export type WeatherKind = 'clear' | 'cloudy' | 'rain' | 'snow' | 'storm';
-export type WeatherSceneKey = 'auto' | 'dusk-mountain' | 'clear-day' | 'clear-night' | 'clouds' | 'rain' | 'storm' | 'sunset' | 'minimal-dark' | 'custom';
+export type WeatherSceneKey = 'auto' | 'dusk-mountain' | 'clear-day' | 'clear-night' | 'clouds' | 'rain' | 'storm' | 'sunset' | 'minimal-dark' | 'minimal-light' | 'custom';
 export interface EnvironmentTheme { timePeriod: TimePeriod; sceneKey: WeatherSceneKey; sceneImage: ImageSourcePropType; weather: WeatherKind; customUri?: string; dimOpacity: number }
 
 export const TIME_IMAGES: Record<TimePeriod, ImageSourcePropType> = {
@@ -43,7 +43,7 @@ export function weatherCodeToKind(code: number): WeatherKind {
   return 'clear';
 }
 function selectedWeather(fetched: WeatherKind): WeatherKind {
-  if (['dusk-mountain', 'clear-day', 'clear-night', 'sunset', 'minimal-dark'].includes(activeSceneKey)) return 'clear';
+  if (['dusk-mountain', 'clear-day', 'clear-night', 'sunset', 'minimal-dark', 'minimal-light'].includes(activeSceneKey)) return 'clear';
   if (activeSceneKey === 'clouds') return 'cloudy';
   if (activeSceneKey === 'rain') return 'rain';
   if (activeSceneKey === 'storm') return 'storm';
@@ -51,10 +51,10 @@ function selectedWeather(fetched: WeatherKind): WeatherKind {
 }
 export function getEnvironmentTheme(weather: WeatherKind = 'clear', date: Date = new Date()): EnvironmentTheme {
   const selectedPeriod: Partial<Record<WeatherSceneKey, TimePeriod>> = {
-    'dusk-mountain': 'dusk', 'clear-day': 'day', 'clear-night': 'night', sunset: 'dusk', 'minimal-dark': 'night',
+    'dusk-mountain': 'dusk', 'clear-day': 'day', 'clear-night': 'night', sunset: 'dusk', 'minimal-dark': 'night', 'minimal-light': 'day',
   };
   const timePeriod = selectedPeriod[activeSceneKey] || getCurrentTimePeriod(date);
   const isBuiltIn = activeSceneKey !== 'custom';
   const isCustom = !isBuiltIn && !!customImageUri;
-  return { timePeriod, sceneKey: activeSceneKey, sceneImage: isCustom ? { uri: customImageUri } : TIME_IMAGES[timePeriod], weather: selectedWeather(weather), customUri: customImageUri || undefined, dimOpacity: activeSceneKey === 'minimal-dark' ? 0.72 : timePeriod === 'day' ? 0.48 : 0.34 };
+  return { timePeriod, sceneKey: activeSceneKey, sceneImage: isCustom ? { uri: customImageUri } : TIME_IMAGES[timePeriod], weather: selectedWeather(weather), customUri: customImageUri || undefined, dimOpacity: activeSceneKey === 'minimal-dark' ? 0.96 : activeSceneKey === 'minimal-light' ? 0.96 : timePeriod === 'day' ? 0.48 : 0.34 };
 }
