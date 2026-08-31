@@ -14,7 +14,7 @@
  * composer's own submission id, which is how an optimistic row is recognised as
  * the same message the server recorded rather than matched on its text.
  */
-import { ConversationMessage } from './ConversationSession';
+import { ConversationAttachment, ConversationMessage } from './ConversationSession';
 
 export const CANONICAL_MESSAGE_TYPES = ['conversation', 'tool', 'internal', 'status'] as const;
 export type CanonicalMessageType = (typeof CANONICAL_MESSAGE_TYPES)[number];
@@ -33,6 +33,9 @@ export interface CanonicalMessage {
   sequence_index: number;
   revision?: number;
   source?: string;
+  /** Authenticated references only; bytes remain in the bounded upload store. */
+  attachments?: ConversationAttachment[];
+  /** Gateway-authored Unix epoch milliseconds. */
   created_at?: number;
   turn_status?: string;
 }
@@ -45,6 +48,27 @@ export interface CanonicalConversation {
 
 const isCanonicalType = (value: unknown): value is CanonicalMessageType =>
   typeof value === 'string' && (CANONICAL_MESSAGE_TYPES as readonly string[]).includes(value);
+
+const normalizeCanonicalAttachments = (raw: unknown): ConversationAttachment[] | undefined => {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.slice(0, 10).flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    const uploadId = typeof value.upload_id === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(value.upload_id) ? value.upload_id : null;
+    if (!uploadId || value.id !== uploadId || value.url !== `/api/v1/uploads/${uploadId}`
+      || typeof value.name !== 'string' || !value.name || value.name.length > 160
+      || typeof value.media_type !== 'string' || !value.media_type || value.media_type.length > 128
+      || typeof value.size !== 'number' || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > 25 * 1024 * 1024) return [];
+    return [{
+      name: value.name,
+      mediaType: value.media_type,
+      size: value.size,
+      status: 'attached' as const,
+      uploadId,
+      url: `/api/v1/uploads/${uploadId}`,
+    }];
+  });
+};
 
 /**
  * Fail-closed validation of one delivered record. An unrecognised role, type,
@@ -68,9 +92,10 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     text: value.text,
     visible_in_chat: value.visible_in_chat === true,
     sequence_index: value.sequence_index,
-    revision: typeof value.revision === 'number' ? value.revision : undefined,
+    revision: typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 ? value.revision : undefined,
     source: value.source === 'voice' ? 'voice' : 'text',
-    created_at: typeof value.created_at === 'number' && value.created_at > 0 ? value.created_at : undefined,
+    attachments: normalizeCanonicalAttachments(value.attachments),
+    created_at: typeof value.created_at === 'number' && Number.isSafeInteger(value.created_at) && value.created_at >= 1_000_000_000_000 ? value.created_at : undefined,
     turn_status: typeof value.turn_status === 'string' ? value.turn_status : undefined,
   };
 }
@@ -111,9 +136,18 @@ function isUnacknowledgedLocalRow(message: ConversationMessage): boolean {
 }
 
 function mergeRow(previous: ConversationMessage | undefined, message: CanonicalMessage): ConversationMessage {
-  // A user row's send time is local knowledge; fall back to the gateway's own
-  // record of when it accepted the turn, never to "now".
-  const sentAt = previous?.sentAt ?? (message.role === 'user' && message.created_at ? message.created_at * 1000 : undefined);
+  // HTTP polling and the socket race by design. Once revision N is rendered,
+  // a delayed revision N-1 must not roll the same canonical row backwards.
+  // Compare only within one canonical generation: after a server-side reset a
+  // reused client submission id can legitimately point at a new message id.
+  if (previous?.canonicalId === message.id
+    && typeof previous.canonicalRevision === 'number'
+    && typeof message.revision === 'number'
+    && message.revision < previous.canonicalRevision) return previous;
+  // The gateway owns time once it acknowledges a row. The composer's Date.now()
+  // exists only on the optimistic placeholder and is replaced by this
+  // millisecond-precision canonical timestamp.
+  const sentAt = message.created_at;
   return {
     ...previous,
     id: canonicalRowId(message),
@@ -121,11 +155,13 @@ function mergeRow(previous: ConversationMessage | undefined, message: CanonicalM
     kind: message.type === 'tool' ? 'tool' : 'conversation',
     text: message.text,
     sentAt,
-    source: previous?.source ?? (message.source === 'voice' ? 'voice' : 'text'),
+    source: message.source === 'voice' ? 'voice' : 'text',
+    attachments: message.attachments ?? previous?.attachments,
     audience: message.role === 'user' ? 'captain' : 'primary',
     delivery: message.role === 'user' ? userDelivery(message.turn_status) : previous?.delivery,
     progress: progressFor(message),
     canonicalId: message.id,
+    canonicalRevision: message.revision ?? previous?.canonicalRevision,
     turnId: message.turn_id,
     sequenceIndex: message.sequence_index,
   };
@@ -136,10 +172,10 @@ function mergeRow(previous: ConversationMessage | undefined, message: CanonicalM
  *
  * `incoming` may be a full list or only the records whose revision changed, so
  * a row is addressed by id and ordered by the gateway's sequence index rather
- * than by its position in the delivered batch. Local-only facts the server does
- * not model - the exact send timestamp, the attachment manifest, the voice/text
- * source - are carried over from the row already rendered, so neither a refresh
- * nor a reconnect rewrites them.
+ * than by its position in the delivered batch. UI-only fields outside the
+ * canonical contract may be carried over from the row already rendered, but
+ * identity, ordering, source, status, text, attachments, and time all come from
+ * the gateway record once that row exists.
  *
  * A row that carries no canonical sequence and is not an in-flight local send
  * is dropped: that is what stops a stale or contaminated cache from surviving
@@ -175,6 +211,10 @@ export function sameRenderedTranscript(left: ConversationMessage[], right: Conve
   return left.every((row, index) => {
     const other = right[index];
     return row.id === other.id && row.text === other.text && row.kind === other.kind
-      && row.delivery === other.delivery && row.progress === other.progress;
+      && row.delivery === other.delivery && row.progress === other.progress
+      && row.sentAt === other.sentAt
+      && row.canonicalId === other.canonicalId
+      && row.canonicalRevision === other.canonicalRevision
+      && row.sequenceIndex === other.sequenceIndex;
   });
 }

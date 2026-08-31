@@ -11,7 +11,7 @@ import { filterCanonicalMessages } from '../src/services/ChatHistory';
 import { ConversationMessage } from '../src/services/ConversationSession';
 
 const canonical = (overrides: Partial<CanonicalMessage> & Pick<CanonicalMessage, 'id' | 'role' | 'text' | 'sequence_index'>): CanonicalMessage => ({
-  type: 'conversation', visible_in_chat: true, turn_status: 'answered', ...overrides,
+  type: 'conversation', visible_in_chat: true, turn_status: 'answered', created_at: 1756000000000, ...overrides,
 });
 
 test('a canonical user message and its optimistic bubble are one row', () => {
@@ -19,14 +19,36 @@ test('a canonical user message and its optimistic bubble are one row', () => {
     { id: 'u-1', role: 'user', text: 'redeploy the demo', source: 'text', sentAt: 1000, audience: 'captain', delivery: 'sending', progress: 'working' },
   ];
   const rows = reconcileCanonicalMessages(optimistic, [
-    canonical({ id: 'cm_1', role: 'user', text: 'redeploy the demo', sequence_index: 0, client_message_id: 'u-1', turn_status: 'awaiting_reply' }),
+    canonical({ id: 'cm_1', role: 'user', text: 'redeploy the demo', sequence_index: 0, client_message_id: 'u-1', turn_status: 'awaiting_reply', created_at: 1756000000456 }),
   ]);
 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].id, 'u-1', 'the submission id stays the row id');
   assert.equal(rows[0].canonicalId, 'cm_1');
   assert.equal(rows[0].delivery, 'sent');
-  assert.equal(rows[0].sentAt, 1000, 'a local send time is never rewritten by a refresh');
+  assert.equal(rows[0].sentAt, 1756000000456, 'gateway time replaces the optimistic placeholder after acknowledgement');
+});
+
+test('canonical attachment references replace optimistic upload state without carrying bytes', () => {
+  const [message] = normalizeCanonicalMessages([{
+    id: 'cm_attachment', turn_id: 'ct_attachment', client_message_id: 'u-attachment',
+    role: 'user', type: 'conversation', text: 'review this', visible_in_chat: true,
+    sequence_index: 0, revision: 1, created_at: 1756000000456,
+    attachments: [{
+      id: 'upload-0000000000000001', upload_id: 'upload-0000000000000001',
+      name: 'notes.txt', media_type: 'text/plain', size: 5,
+      url: '/api/v1/uploads/upload-0000000000000001',
+    }],
+  }]);
+  const rows = reconcileCanonicalMessages([{
+    id: 'u-attachment', role: 'user', text: 'review this', source: 'text',
+    delivery: 'sending', attachments: [{ name: 'notes.txt', mediaType: 'text/plain', status: 'uploading' }],
+  }], [message]);
+
+  assert.deepEqual(rows[0].attachments, [{
+    name: 'notes.txt', mediaType: 'text/plain', size: 5, status: 'attached',
+    uploadId: 'upload-0000000000000001', url: '/api/v1/uploads/upload-0000000000000001',
+  }]);
 });
 
 test('a revised assistant message updates its row instead of appending a second', () => {
@@ -43,6 +65,32 @@ test('a revised assistant message updates its row instead of appending a second'
     ['user', 'run the tests'],
     ['assistant', 'The tests are running and all 42 pass.'],
   ]);
+});
+
+test('an out-of-order revision cannot roll a canonical reply backwards', () => {
+  let rows = reconcileCanonicalMessages([], [
+    canonical({ id: 'cm_a', role: 'assistant', text: 'The final answer.', sequence_index: 999, revision: 3 }),
+  ]);
+  rows = reconcileCanonicalMessages(rows, [
+    canonical({ id: 'cm_a', role: 'assistant', text: 'The partial answer', sequence_index: 999, revision: 2 }),
+  ]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].text, 'The final answer.');
+  assert.equal(rows[0].canonicalRevision, 3);
+});
+
+test('a same-revision turn-status update still reaches the rendered row', () => {
+  let rows = reconcileCanonicalMessages([], [
+    canonical({ id: 'cm_u', role: 'user', text: 'stop this', sequence_index: 0, client_message_id: 'u-stop', revision: 1, turn_status: 'awaiting_reply' }),
+  ]);
+  rows = reconcileCanonicalMessages(rows, [
+    canonical({ id: 'cm_u', role: 'user', text: 'stop this', sequence_index: 0, client_message_id: 'u-stop', revision: 1, turn_status: 'cancelled' }),
+  ]);
+
+  assert.equal(rows[0].canonicalRevision, 1);
+  assert.equal(rows[0].delivery, 'cancelled');
+  assert.equal(rows[0].progress, 'cancelled');
 });
 
 test('repeated identical prompts stay separate rows with their own replies', () => {
@@ -64,16 +112,20 @@ test('messages render in the gateway sequence, not in delivery order', () => {
   assert.deepEqual(rows.map(row => row.text), ['The prompt.', 'The reply.']);
 });
 
-test('an in-flight local send survives a sync; a stale cached row does not', () => {
+test('a canonical-first sync replaces stale cache rows and overlays only an unacknowledged send', () => {
   const existing: ConversationMessage[] = [
-    { id: 'poisoned-duplicate', role: 'assistant', text: 'A duplicate from the terminal era.', source: 'text', audience: 'primary' },
-    { id: 'u-inflight', role: 'user', text: 'just sent', source: 'text', audience: 'captain', delivery: 'sending' },
+    { id: 'u-old', role: 'user', text: 'stale cached text', source: 'text', sentAt: 123, audience: 'captain', delivery: 'sent', canonicalId: 'cm_x', sequenceIndex: 0 },
+    { id: 'poisoned-duplicate', role: 'assistant', text: 'A duplicate from the terminal era.', source: 'text', audience: 'primary', canonicalId: 'cm_poison', sequenceIndex: 999 },
+    { id: 'u-inflight', role: 'user', text: 'just sent', source: 'text', sentAt: 1756000000999, audience: 'captain', delivery: 'sending' },
   ];
   const rows = reconcileCanonicalMessages(existing, [
-    canonical({ id: 'cm_x', role: 'user', text: 'an earlier turn', sequence_index: 0, client_message_id: 'u-old' }),
+    canonical({ id: 'cm_x', role: 'user', text: 'an earlier turn', sequence_index: 0, client_message_id: 'u-old', created_at: 1756000000123 }),
   ], { authoritative: true });
 
   assert.deepEqual(rows.map(row => row.id), ['u-old', 'u-inflight']);
+  assert.deepEqual(rows.map(row => row.text), ['an earlier turn', 'just sent']);
+  assert.equal(rows[0].sentAt, 1756000000123);
+  assert.equal(rows[1].sentAt, 1756000000999);
 });
 
 test('a full list read drops a recorded row the gateway no longer returns', () => {

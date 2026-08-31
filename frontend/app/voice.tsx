@@ -7,7 +7,7 @@ import Svg, { G, Path, Polygon } from 'react-native-svg';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import { submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
-import { normalizeCanonicalMessages, reconcileCanonicalMessages } from '../src/services/CanonicalConversation';
+import { reconcileCanonicalMessages } from '../src/services/CanonicalConversation';
 import { appendConversationMessage, getConversationMessages, resetConversationMessages, useConversationMessages } from '../src/services/ConversationSession';
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
@@ -183,7 +183,7 @@ export default function VoiceScreen() {
     // voice turn canonically (see CHAT_ARCHITECTURE_FIX.md). Applying the
     // returned turn is what keeps one record behind both surfaces instead of a
     // locally minted voice row that chat would later have to reconcile.
-    const canonical = normalizeCanonicalMessages(result.conversation?.messages);
+    const canonical = result.conversation?.messages || [];
     if (canonical.length) resetConversationMessages('captain', reconcileCanonicalMessages(getConversationMessages('captain'), canonical));
     else appendConversationMessage('captain', { id: result.move_id ? `move-${result.move_id}` : `voice-a-${Date.now()}`, role: 'assistant', text: responseText, sentAt: Date.now(), source: 'voice', audience: 'primary', runId: result.move_id });
     setVoiceState('SPEAKING');

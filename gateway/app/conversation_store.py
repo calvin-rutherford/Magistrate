@@ -25,6 +25,8 @@ terminal row has no audience and must fail closed rather than become chat.
 """
 from __future__ import annotations
 
+import json
+import re
 import secrets
 import sqlite3
 import time
@@ -54,13 +56,16 @@ MAX_INTERNAL_EVENTS_PER_TURN = 8
 MAX_PRIMARY_TEXT = 20_000
 MAX_MESSAGE_WINDOW = 200
 TURN_MATCH_WINDOW = 40
+MAX_ATTACHMENTS_PER_MESSAGE = 10
+_SAFE_UPLOAD_ID = re.compile(r'^[A-Za-z0-9_-]{16,64}$')
 # SQLite is single-writer; the poll, the socket loop, and a prompt can all
 # arrive together, so wait for the lock instead of failing the request.
 _BUSY_TIMEOUT_SECONDS = 5.0
 
 
 def _now() -> int:
-    return int(time.time())
+    """Unix epoch milliseconds, the canonical timestamp precision."""
+    return int(time.time() * 1000)
 
 
 def prompt_match_key(text: str) -> str:
@@ -86,6 +91,43 @@ def _session():
         conn.close()
 
 
+def _attachment_records(attachments: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    """Bounded public references to bytes owned by the authenticated upload store."""
+    if attachments is None:
+        return None
+    if len(attachments) > MAX_ATTACHMENTS_PER_MESSAGE:
+        raise ValueError('A message may include at most 10 attachments.')
+    records: List[Dict[str, Any]] = []
+    for attachment in attachments:
+        upload_id = str(attachment.get('upload_id') or '')
+        name = str(attachment.get('filename') or attachment.get('name') or '')
+        media_type = str(attachment.get('media_type') or '')
+        size = attachment.get('size')
+        if (not _SAFE_UPLOAD_ID.fullmatch(upload_id) or not name or len(name) > 160
+                or not media_type or len(media_type) > 128 or not isinstance(size, int)
+                or isinstance(size, bool) or size < 0 or size > 25 * 1024 * 1024):
+            raise ValueError('Invalid canonical attachment metadata.')
+        records.append({
+            'id': upload_id,
+            'upload_id': upload_id,
+            'name': name,
+            'media_type': media_type,
+            'size': size,
+            'url': f'/api/v1/uploads/{upload_id}',
+        })
+    return records
+
+
+def _decode_attachments(value: str) -> List[Dict[str, Any]]:
+    try:
+        parsed = json.loads(value or '[]')
+        if not isinstance(parsed, list):
+            return []
+        return _attachment_records(parsed) or []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+
 def _public_message(row: sqlite3.Row, client_message_id: Optional[str]) -> Dict[str, Any]:
     return {
         'id': row['id'],
@@ -98,6 +140,7 @@ def _public_message(row: sqlite3.Row, client_message_id: Optional[str]) -> Dict[
         'sequence_index': row['sequence_index'],
         'revision': row['revision'],
         'source': row['source'],
+        'attachments': _decode_attachments(row['attachments_json']),
         'created_at': row['created_at'],
         'updated_at': row['updated_at'],
     }
@@ -144,6 +187,7 @@ def _upsert_message(
     conn: sqlite3.Connection, *, conversation_id: str, turn_id: str, turn_index: int,
     slot: str, offset: int, role: str, message_type: str, text: str, visible: bool,
     source: str, force: bool = False,
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create or revise the one message holding ``slot`` in this turn.
 
@@ -160,28 +204,40 @@ def _upsert_message(
         'SELECT * FROM conversation_messages WHERE turn_id = ? AND slot = ?', (turn_id, slot)
     ).fetchone()
     now = _now()
+    attachment_records = _attachment_records(attachments)
+    attachments_json = json.dumps(attachment_records, separators=(',', ':'), sort_keys=True) if attachment_records is not None else None
     if existing is None:
         message_id = 'cm_' + secrets.token_hex(10)
         conn.execute(
             '''INSERT INTO conversation_messages
                (id, turn_id, conversation_id, role, type, slot, text, visible_in_chat,
-                sequence_index, revision, source, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)''',
+                sequence_index, revision, source, attachments_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)''',
             (message_id, turn_id, conversation_id, role, message_type, slot, text,
-             1 if visible else 0, _sequence_for(turn_index, offset), source, now, now),
+             1 if visible else 0, _sequence_for(turn_index, offset), source,
+             attachments_json or '[]', now, now),
         )
         return _public_message(
             conn.execute('SELECT * FROM conversation_messages WHERE id = ?', (message_id,)).fetchone(),
             None,
         )
+    attachments_changed = attachments_json is not None and existing['attachments_json'] != attachments_json
     if not force and not _should_replace(existing['text'], text):
         return None
-    if force and existing['text'] == text:
+    if force and existing['text'] == text and not attachments_changed:
         return None
-    conn.execute(
-        'UPDATE conversation_messages SET text = ?, revision = revision + 1, updated_at = ? WHERE id = ?',
-        (text, now, existing['id']),
-    )
+    if attachments_json is None:
+        conn.execute(
+            'UPDATE conversation_messages SET text = ?, revision = revision + 1, updated_at = ? WHERE id = ?',
+            (text, now, existing['id']),
+        )
+    else:
+        conn.execute(
+            '''UPDATE conversation_messages
+               SET text = ?, attachments_json = ?, revision = revision + 1, updated_at = ?
+               WHERE id = ?''',
+            (text, attachments_json, now, existing['id']),
+        )
     return _public_message(
         conn.execute('SELECT * FROM conversation_messages WHERE id = ?', (existing['id'],)).fetchone(),
         None,
@@ -203,6 +259,7 @@ def _should_replace(stored: str, incoming: str) -> bool:
 def record_prompt(
     user_id: str, target: str, client_message_id: str, text: str, *, source: str = 'text',
     submitted_text: Optional[str] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Record one canonical user turn, idempotent on ``client_message_id``.
 
@@ -250,6 +307,7 @@ def record_prompt(
             conn, conversation_id=conversation_id, turn_id=turn_id, turn_index=turn_index,
             slot=_PROMPT_SLOT, offset=_PROMPT_OFFSET, role='user', message_type='conversation',
             text=text or (submitted_text or ''), visible=True, source=source, force=True,
+            attachments=attachments,
         )
         _touch_conversation(conn, conversation_id)
         return {

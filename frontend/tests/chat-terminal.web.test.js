@@ -8,6 +8,7 @@ let browser;
 // Assigned once the dev server has picked a port; the suites read it at call
 // time, never at module load.
 let URL;
+const HISTORY_READY_TIMEOUT = 45_000;
 
 test.before(async () => {
   server = await startWebServer({ readyPath: '/chat' });
@@ -35,7 +36,12 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
   }
   await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages, simulateLiveUpdates, historyScenario, promptFailure) => {
     if (clearStorage) { localStorage.clear(); sessionStorage.clear(); }
-    if (initialMessages.length) localStorage.setItem('magistrate.chat.messages.v2.captain', JSON.stringify(initialMessages));
+    if (initialMessages.length) {
+      const canonical = Object.fromEntries(initialMessages.filter(message => message.canonicalId).map(message => [message.canonicalId, message]));
+      const pending = Object.fromEntries(initialMessages.filter(message => !message.canonicalId && message.role === 'user' && ['sending', 'failed'].includes(message.delivery)).map(message => [message.id, message]));
+      localStorage.setItem('magistrate.chat.canonical.v1.captain', JSON.stringify({ schema_version: 'conversation-cache.v1', messages: canonical }));
+      localStorage.setItem('magistrate.chat.pending.v1.captain', JSON.stringify({ schema_version: 'conversation-pending.v1', messages: pending }));
+    }
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let postPromptHistoryRequests = 0;
@@ -51,15 +57,15 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         const parsed = JSON.parse(localStorage.getItem(RECORD_KEY));
         if (parsed && Array.isArray(parsed.turns)) return parsed;
       } catch { /* a fresh record */ }
-      return { turns: (historyScenario?.seedTurns || []).map((turn, index) => ({ status: 'answered', tools: [], index, createdAt: 1756000000, ...turn })) };
+      return { turns: (historyScenario?.seedTurns || []).map((turn, index) => ({ status: 'answered', tools: [], index, createdAt: 1756000000000, ...turn })) };
     };
     const saveRecord = record => localStorage.setItem(RECORD_KEY, JSON.stringify(record));
     const canonicalMessages = () => {
       const messages = [];
       loadRecord().turns.forEach(turn => {
         const turnId = `ct_${turn.index}`;
-        const base = { turn_id: turnId, turn_status: turn.status, revision: 1 };
-        messages.push({ ...base, id: `cm_${turn.index}_u`, client_message_id: turn.clientMessageId, role: 'user', type: 'conversation', text: turn.text, visible_in_chat: true, sequence_index: turn.index * 1000, created_at: turn.createdAt, source: turn.source || 'text' });
+        const base = { turn_id: turnId, turn_status: turn.status, revision: 1, created_at: turn.createdAt };
+        messages.push({ ...base, id: `cm_${turn.index}_u`, client_message_id: turn.clientMessageId, role: 'user', type: 'conversation', text: turn.text, visible_in_chat: true, sequence_index: turn.index * 1000, source: turn.source || 'text', attachments: turn.attachments || [] });
         (turn.tools || []).forEach((tool, position) => messages.push({ ...base, id: `cm_${turn.index}_t${position}`, role: 'assistant', type: 'tool', text: tool, visible_in_chat: false, sequence_index: turn.index * 1000 + 1 + position }));
         if (turn.reply) messages.push({ ...base, id: `cm_${turn.index}_a`, role: 'assistant', type: 'conversation', text: turn.reply, visible_in_chat: true, sequence_index: turn.index * 1000 + 999, revision: turn.replyRevision || 1 });
       });
@@ -135,9 +141,17 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         const body = JSON.parse(options?.body || '{}');
         const record = loadRecord();
         let turn = record.turns.find(item => item.clientMessageId === body.message_id);
+        const canonicalAttachments = (body.attachments || []).map(attachment => ({
+          id: attachment.upload_id, upload_id: attachment.upload_id, name: attachment.filename,
+          media_type: attachment.media_type, size: attachment.size,
+          url: `/api/v1/uploads/${attachment.upload_id}`,
+        }));
         if (!turn) {
-          turn = { clientMessageId: body.message_id, text: body.text, status: 'awaiting_reply', tools: [], index: record.turns.length, createdAt: Math.floor(Date.now() / 1000) };
+          turn = { clientMessageId: body.message_id, text: body.text, status: 'awaiting_reply', tools: [], index: record.turns.length, createdAt: Date.now(), attachments: canonicalAttachments };
           record.turns.push(turn);
+        } else {
+          turn.text = body.text;
+          turn.attachments = canonicalAttachments;
         }
         const reply = syntheticReply();
         if (reply) { turn.reply = reply; turn.status = 'answered'; }
@@ -242,6 +256,10 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
   await page.evaluate(() => { const toast = document.getElementById('error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   await page.waitForSelector('[data-testid="model-menu-button"]');
+  // The product publishes this only after the authoritative conversation read
+  // has been applied and committed. Do not race canonical hydration with a
+  // fixed sleep or infer readiness from whichever row happened to paint first.
+  await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: HISTORY_READY_TIMEOUT });
   return page;
 }
 
@@ -967,6 +985,12 @@ test('normalized chat messages persist across a page reload without replaying te
 async function pageWaitForText(page, text) {
   await page.waitForFunction(expected => document.querySelector('[data-testid="chat-history"]')?.innerText.includes(expected), {}, text);
 }
+async function cachedCanonicalMessages(page) {
+  return page.evaluate(() => {
+    const payload = JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.captain'));
+    return Object.values(payload?.messages || {}).sort((left, right) => left.sequenceIndex - right.sequenceIndex);
+  });
+}
 test('the agent response is appended to the conversation once the gateway replies', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, 'Understood, working on it now.');
   await submit(page, 'status please');
@@ -977,23 +1001,32 @@ test('the agent response is appended to the conversation once the gateway replie
   await page.close();
 });
 
-test('a persisted captain message reconnects to its canonical reply on reload', async () => {
+test('canonical-first hydration replaces a stale cache, keeps only unacknowledged sends, and uses gateway time', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [
-    { id: 'u-stale', role: 'user', kind: 'conversation', text: 'reconcile this persisted turn', source: 'text', audience: 'captain', delivery: 'sent', sentAt: 123, canonicalId: 'cm_0_u', sequenceIndex: 0 },
+    { id: 'u-stale', role: 'user', kind: 'conversation', text: 'stale local text', source: 'text', audience: 'captain', delivery: 'sent', sentAt: 123, canonicalId: 'cm_0_u', canonicalRevision: 1, sequenceIndex: 0 },
+    { id: 'cm-poison', role: 'assistant', kind: 'conversation', text: 'cache-only reply must disappear', source: 'text', audience: 'primary', sentAt: 124, canonicalId: 'cm_poison', canonicalRevision: 1, sequenceIndex: 999 },
+    { id: 'u-unacknowledged', role: 'user', kind: 'conversation', text: 'still sending locally', source: 'text', audience: 'captain', delivery: 'sending', sentAt: 1760000000123 },
   ], false, {
     manual: true,
     seedTurns: [{ clientMessageId: 'u-stale', text: 'reconcile this persisted turn', reply: 'The persisted primary response.' }],
   });
-  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The persisted primary response.'));
+  await pageWaitForText(page, 'The persisted primary response.');
+  await pageWaitForText(page, 'still sending locally');
   const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.match(history, /reconcile this persisted turn/);
   assert.match(history, /The persisted primary response/);
+  assert.match(history, /still sending locally/);
+  assert.doesNotMatch(history, /stale local text|cache-only reply/);
   assert.ok(history.indexOf('reconcile this persisted turn') < history.indexOf('The persisted primary response'));
-  assert.equal((await page.$$('[data-testid^="user-message-"]')).filter(Boolean).length >= 1, true);
-  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain')));
+  await page.waitForFunction(() => {
+    const payload = JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.captain'));
+    return Object.keys(payload?.messages || {}).length === 2;
+  });
+  const persisted = await cachedCanonicalMessages(page);
   assert.deepEqual(persisted.map(message => message.text), ['reconcile this persisted turn', 'The persisted primary response.']);
-  assert.equal(persisted[0].id, 'u-stale', 'the submission id keeps the persisted row and the canonical record as one message');
-  assert.equal(persisted[0].sentAt, 123, 'a real local send time is never overwritten by the server record');
+  assert.equal(persisted[0].id, 'u-stale', 'client_message_id still joins the optimistic bubble to the canonical row');
+  assert.equal(persisted[0].sentAt, 1756000000000, 'gateway millisecond time replaces the optimistic/cache timestamp');
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.chat.messages.v2.captain')), null, 'the terminal-era array is invalidated, not merged');
   await page.close();
 });
 
@@ -1149,16 +1182,19 @@ test('repeated canonical delivery keeps one turn, and tool events stay bounded l
   await reloaded.close();
 });
 
-test('a sent user timestamp remains exact across optimistic state, polling, persistence, and reload', async () => {
+test('gateway millisecond time replaces the optimistic timestamp and survives polling and reload', async () => {
   const page = await openChat({ width: 900, height: 700 });
   await submit(page, 'timestamp check');
   const selector = '[data-testid^="user-message-u-"]';
   await page.waitForSelector(selector);
   assert.equal(await page.$eval(`${selector} [data-testid^="user-message-text-"]`, element => element.innerText), 'timestamp check');
+  await page.waitForFunction(() => Object.keys(JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.captain'))?.messages || {}).length === 1);
   const before = await page.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText);
   assert.match(before, /\d/);
-  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain'))[0]);
-  assert.equal(typeof persisted.sentAt, 'number');
+  const persisted = (await cachedCanonicalMessages(page))[0];
+  const gatewayTime = await page.evaluate(() => JSON.parse(localStorage.getItem('__mockGatewayConversation')).turns[0].createdAt);
+  assert.equal(persisted.sentAt, gatewayTime);
+  assert.ok(gatewayTime > 1_000_000_000_000, 'the canonical record retains millisecond precision');
   // The background auto-refresh poll runs every 3s (see ChatCanvas's syncFromHistory).
   await new Promise(resolve => setTimeout(resolve, 3400));
   assert.equal(await page.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText), before);
@@ -1168,8 +1204,8 @@ test('a sent user timestamp remains exact across optimistic state, polling, pers
   const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
   await reloaded.waitForSelector(selector);
   assert.equal(await reloaded.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText), before);
-  const afterReload = await reloaded.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain'))[0].sentAt);
-  assert.equal(afterReload, persisted.sentAt);
+  const afterReload = (await cachedCanonicalMessages(reloaded))[0].sentAt;
+  assert.equal(afterReload, gatewayTime);
   await reloaded.close();
 });
 
@@ -1222,7 +1258,7 @@ test('one captain turn with leaked metadata renders exactly one captain row and 
   assert.match(rows.agent[0], /The deploy is healthy and finished at 09:12\./);
   assert.doesNotMatch(rows.text, FORBIDDEN);
   assert.doesNotMatch(rows.text, /hidden-secret/);
-  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain')));
+  const persisted = await cachedCanonicalMessages(page);
   assert.deepEqual(persisted.map(message => [message.role, message.kind, message.audience]), [
     ['user', 'conversation', 'captain'], ['assistant', 'tool', 'primary'], ['assistant', 'conversation', 'primary'],
   ]);
@@ -1251,10 +1287,24 @@ test('a reply the gateway keeps revising stays one primary row and settles on th
   });
   await submit(page, 'run the tests');
   await pageWaitForText(page, settled);
-  await new Promise(resolve => setTimeout(resolve, 3600));
+  // Polling and WebSocket delivery can cross in flight. Re-deliver revision 2
+  // after revision 3 is visible: canonical identity must reject the stale row,
+  // not briefly or permanently roll the assistant bubble backwards.
+  await page.evaluate(staleText => window.__historySocket?.onmessage?.({ data: JSON.stringify({
+    type: 'conversation_messages', target: 'captain', messages: [{
+      id: 'cm_0_a', turn_id: 'ct_0', role: 'assistant', type: 'conversation',
+      text: staleText, visible_in_chat: true, sequence_index: 999, revision: 2,
+      turn_status: 'answered', source: 'text',
+    }],
+  }) }), middle);
+  await new Promise(resolve => setTimeout(resolve, 250));
   let rows = await conversationRows(page);
   assert.equal(rows.user.length, 1);
   assert.equal(rows.agent.length, 1, `expected one primary row, got ${JSON.stringify(rows.agent)}`);
+  assert.match(rows.agent[0], /The tests are running and all 42 of them pass\./);
+  await new Promise(resolve => setTimeout(resolve, 3600));
+  rows = await conversationRows(page);
+  assert.equal(rows.agent.length, 1);
   assert.match(rows.agent[0], /The tests are running and all 42 of them pass\./);
   await page.close();
 

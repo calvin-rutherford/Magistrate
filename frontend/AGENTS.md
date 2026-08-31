@@ -26,7 +26,7 @@ Sharp edges when driving the web build in headless Chrome:
 
 The captain thread renders the gateway's canonical conversation record: `fetchCanonicalConversation` plus `conversation_messages` events, merged by `src/services/CanonicalConversation.ts` (append by canonical id, update on revision, order by `sequence_index`). Read `../CHAT_ARCHITECTURE_FIX.md` before changing it, and do not reintroduce text matching, optimistic counting, or prompt-boundary inference there.
 
-Worker panes (`?agentId=`) are still terminal-derived: `fetchAgentHistory` bounded by `CHAT_HISTORY_LINES`, cursor paging on upward scroll, and `ChatIdentity` revision matching. Those branches are marked `TRANSITIONAL` in `app/(tabs)/chat.tsx`. Working agents can expose transiently empty snapshots, so consumers must tolerate them. A message the gateway discovered leaves `sentAt` unset unless the record carries a real `created_at`; a locally sent message keeps its original timestamp and no refresh may rewrite it.
+Worker panes (`?agentId=`) are still terminal-derived: `fetchAgentHistory` bounded by `CHAT_HISTORY_LINES`, cursor paging on upward scroll, and `ChatIdentity` revision matching. Those branches are marked `TRANSITIONAL` in `app/(tabs)/chat.tsx`. Working agents can expose transiently empty snapshots, so consumers must tolerate them. Captain time is gateway-authored epoch milliseconds: local `Date.now()` exists only on an optimistic row and canonical `created_at` replaces it on acknowledgement. A terminal-derived worker message leaves `sentAt` unset unless its source carries a real timestamp.
 
 ## Backend model selection contract
 

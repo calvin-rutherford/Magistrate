@@ -4,12 +4,14 @@ Every case here is a duplicate or leak class the old architecture produced by
 treating a mutable Herdr snapshot as the chat database.
 """
 from pathlib import Path
+import sqlite3
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import conversation_store as store
+from app import db
 from app.herdr_client import classify_history_rows, parse_agent_history
 from app.main import app
 from conftest import TEST_HEADERS, TEST_SESSION_TOKEN
@@ -45,6 +47,42 @@ def test_the_same_client_message_id_records_exactly_one_turn():
     assert second['turn_id'] == first['turn_id']
     assert visible() == [('user', 'conversation', 'redeploy the demo')]
     assert [item['client_message_id'] for item in store.list_messages(USER, TARGET)['messages']] == ['u-1']
+
+
+def test_preview_schema_gains_attachment_metadata_and_millisecond_time(monkeypatch, tmp_path):
+    preview_db = tmp_path / 'preview.db'
+    with sqlite3.connect(preview_db) as conn:
+        conn.execute('''CREATE TABLE conversation_messages (
+            id TEXT PRIMARY KEY, turn_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+            role TEXT NOT NULL, type TEXT NOT NULL, slot TEXT NOT NULL, text TEXT NOT NULL,
+            visible_in_chat INTEGER NOT NULL, sequence_index INTEGER NOT NULL,
+            revision INTEGER NOT NULL, source TEXT NOT NULL,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            UNIQUE(turn_id, slot)
+        )''')
+        conn.execute('''INSERT INTO conversation_messages
+            VALUES ('cm_preview', 'ct_preview', 'cv_preview', 'user', 'conversation',
+                    'prompt', 'preview row', 1, 0, 1, 'text', 1756000000, 1756000001)''')
+    monkeypatch.setattr(db, 'DB_PATH', str(preview_db))
+
+    db.init_db()
+
+    with sqlite3.connect(preview_db) as conn:
+        row = conn.execute(
+            'SELECT attachments_json, created_at, updated_at FROM conversation_messages WHERE id = ?',
+            ('cm_preview',),
+        ).fetchone()
+    assert row == ('[]', 1_756_000_000_000, 1_756_000_001_000)
+
+
+def test_canonical_timestamps_keep_gateway_millisecond_precision(monkeypatch):
+    monkeypatch.setattr(store.time, 'time', lambda: 1_756_000_000.456)
+
+    turn = store.record_prompt(USER, TARGET, 'u-time', 'what time was this accepted')
+    [message] = store.list_messages(USER, TARGET)['messages']
+
+    assert turn['messages'][0]['created_at'] == 1_756_000_000_456
+    assert message['created_at'] == 1_756_000_000_456
 
 
 def test_an_edited_resubmission_replaces_its_own_text_and_keeps_one_turn():

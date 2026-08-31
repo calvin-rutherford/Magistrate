@@ -961,11 +961,11 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
                 selection = None
     prompt_text = contract.text or ''
+    stored_uploads = []
     if contract.attachments:
         # Attachment ids are opaque and must belong to this principal. Verify
         # every piece of client metadata against the stored record before the
         # provider sees a manifest; names and sizes from JSON are never trusted.
-        stored_uploads = []
         for attachment in contract.attachments:
             stored = get_upload(principal.user_id, attachment.upload_id)
             if not stored:
@@ -997,7 +997,7 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
     client_message_id = contract.message_id or 'srv-' + secrets.token_hex(8)
     turn = record_prompt(
         principal.user_id, contract.target, client_message_id, contract.text or '',
-        source='text', submitted_text=prompt_text,
+        source='text', submitted_text=prompt_text, attachments=stored_uploads,
     )
     result = await herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
     if result.get('status') == 'error':

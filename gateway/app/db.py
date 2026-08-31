@@ -435,9 +435,9 @@ def init_db():
 
     # The canonical conversation record. Herdr terminal output is an ingestion
     # adapter into these tables, never the chat database itself; see
-    # app/conversation_store.py and CHAT_ARCHITECTURE_FIX.md. Every statement
-    # here is additive, so an existing deployment database gains the tables on
-    # the next startup without touching or rewriting any other row.
+    # app/conversation_store.py and CHAT_ARCHITECTURE_FIX.md. Migrations are
+    # confined to these new canonical tables, so legacy deployment rows remain
+    # untouched.
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
@@ -483,6 +483,7 @@ def init_db():
         sequence_index INTEGER NOT NULL,
         revision INTEGER NOT NULL,
         source TEXT NOT NULL,
+        attachments_json TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(turn_id, slot),
@@ -490,13 +491,32 @@ def init_db():
         FOREIGN KEY(conversation_id) REFERENCES conversations(id)
     )
     ''')
-    # Deployments created before prompt_key existed gain it additively; the
-    # ingestion adapter falls back to the visible prompt text when it is NULL.
+    # Deployments created before prompt_key/attachment metadata existed gain
+    # them additively; the adapter falls back to visible prompt text when the
+    # former is NULL and existing rows have no attachment references.
     turn_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_turns)')}
     if 'prompt_key' not in turn_columns:
         cursor.execute('ALTER TABLE conversation_turns ADD COLUMN prompt_key TEXT')
+    message_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_messages)')}
+    if 'attachments_json' not in message_columns:
+        cursor.execute("ALTER TABLE conversation_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_turns_conversation ON conversation_turns(conversation_id, sequence_index)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation ON conversation_messages(conversation_id, sequence_index)')
+    # Early preview builds wrote canonical timestamps as epoch seconds. SQLite's
+    # INTEGER already holds milliseconds, so normalize only those unmistakably
+    # second-scale values; the migration is idempotent and touches no legacy
+    # application table.
+    for table in ('conversations', 'conversation_turns', 'conversation_messages'):
+        cursor.execute(
+            f'''UPDATE {table}
+                SET created_at = created_at * 1000, updated_at = updated_at * 1000
+                WHERE created_at > 0 AND created_at < 100000000000'''
+        )
+        cursor.execute(
+            f'''UPDATE {table}
+                SET updated_at = updated_at * 1000
+                WHERE updated_at > 0 AND updated_at < 100000000000'''
+        )
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS attention_action_confirmations (

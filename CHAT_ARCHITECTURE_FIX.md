@@ -54,8 +54,14 @@ conversation_turns    (id, conversation_id, client_message_id, prompt_key,
                        status, sequence_index, created_at, updated_at)
 conversation_messages (id, turn_id, conversation_id, role, type, slot, text,
                        visible_in_chat, sequence_index, revision, source,
-                       created_at, updated_at)
+                       attachments_json, created_at, updated_at)
 ```
+
+All three `created_at`/`updated_at` pairs are Unix epoch **milliseconds**. The
+Gateway authors them; the composer's `Date.now()` is only an optimistic
+placeholder until the canonical user row arrives. This avoids reconciliation
+between client-millisecond and server-second values and makes reloads reproduce
+the exact canonical time.
 
 Two constraints carry the whole guarantee:
 
@@ -82,13 +88,31 @@ socket ──WS /events (conversation_messages)──► ingest_terminal_rows() 
 
 The client contract is now just two rules: **append when a new canonical message
 arrives, update when an existing one changes.** `frontend/src/services/CanonicalConversation.ts`
-is the only place that implements it, and it does so by id and sequence index —
-no text matching, no optimistic counting, no prompt-boundary inference, no
-replay reconciliation.
+is the only place that implements it, and it does so by id, monotonic revision,
+and sequence index — no text matching, timestamp comparison, optimistic
+counting, prompt-boundary inference, or replay reconciliation. A delayed poll or
+socket revision cannot roll a newer rendered revision backwards.
+
+Opening captain chat reads the gateway first and replaces the canonical cache
+wholesale. It then overlays only local `sending`/`failed` rows whose
+`client_message_id` is absent from that response. The history exposes
+`aria-busy=true` until those rows have committed, giving scroll anchoring and
+browser checks a deterministic hydration boundary. An upward reader scroll
+cancels every queued latest-position operation, including a pending measurement
+retry, so asynchronous canonical rendering cannot pull the captain back down.
+The prompt endpoint writes its turn and user row before awaiting Herdr, so an
+accepted prompt is already readable even while assistant ingestion is pending.
 
 Voice Mode shares the same record: `POST /api/v1/voice/moves` records a completed
 move as a canonical turn, so chat and voice are one transcript rather than two
 locally minted ones.
+
+Attachments obey the same authority boundary. The user row stores only bounded,
+validated metadata (`upload_id`, stable id, safe name, MIME type, size, and the
+authenticated `/api/v1/uploads/{id}` reference) in `attachments_json`. Bytes stay
+in the private upload store introduced by PR #55; no blob, filesystem path, or
+client-claimed metadata enters the transcript. A reload therefore renders the
+same attachment without depending on local cache state.
 
 ## What was removed or simplified
 
@@ -99,20 +123,27 @@ locally minted ones.
   boundaries, tool accumulation).
 - `ConversationSession` lost `insertConversationMessageAfter`, which existed only
   to splice a discovered reply under the right user row.
-- The local mirror moved to `magistrate.chat.messages.v2.<target>`. The v1 key is
-  **deleted, not migrated**: it was written from mutable terminal history and can
-  contain exactly the duplicated and contaminated rows this change removes.
-  Restoring it would resurface them. Local rows without canonical identity are
-  also dropped on the first sync, so a poisoned cache cannot survive one open.
+- Captain persistence is now two explicitly non-authoritative maps:
+  `magistrate.chat.canonical.v1.captain` is keyed by canonical message id, and
+  `magistrate.chat.pending.v1.captain` is keyed by `client_message_id` and holds
+  only genuinely unacknowledged sends. The old v1/v2 captain arrays are
+  **deleted, not migrated**: they were hydrated before the server read and could
+  race a newer record back out of the UI. Worker targets retain their
+  transitional `magistrate.chat.messages.v2.<target>` cache.
 
 ## Production migration
 
 The new tables and the `prompt_key` column are created by `init_db()` at startup
-with `CREATE TABLE IF NOT EXISTS` and a guarded `ALTER TABLE`. Every statement is
-additive: an existing deployment database (the demo runs against a SQLite file
-outside the checkout) gains the tables on the next restart and no other row is
-read, rewritten, or dropped. There is no downgrade step and no data backfill —
-the canonical record starts empty and fills from the next prompt onward.
+with `CREATE TABLE IF NOT EXISTS` and a guarded `ALTER TABLE`. An existing
+deployment database (the demo runs against a SQLite file outside the checkout)
+gains those objects on restart; no pre-existing application table or row is
+rewritten or dropped. The canonical record starts empty and fills from the next
+prompt onward. An idempotent, canonical-table-only normalization multiplies
+unmistakable preview-era epoch-second timestamps by 1000, so a database briefly
+run from an earlier revision of this branch remains readable at millisecond
+precision. The guarded `attachments_json` column addition defaults existing
+canonical rows to `[]`; upload bytes remain in their existing store. There is no
+downgrade step.
 
 ## Remaining limitations
 
@@ -169,13 +200,14 @@ the canonical record starts empty and fills from the next prompt onward.
 1. Restart the gateway so `init_db()` creates the new tables, then confirm:
    `sqlite3 "$MAGISTRATE_DB_PATH" '.tables'` lists `conversations`,
    `conversation_turns`, `conversation_messages`.
-2. Open Chat. It starts empty on the first load after the fix — the v1 local
-   mirror is discarded and the canonical record has no turns yet.
+2. Open Chat. It starts empty on the first load after the fix — terminal-era
+   local arrays are discarded and the canonical record has no turns yet.
 3. Send one message. Expect exactly one captain bubble and, when the agent
    answers, exactly one assistant bubble. Watch it for a minute while the agent
    writes: the reply text should change in place and never duplicate.
-4. Reload the page. The transcript must be identical — it is re-read from the
-   gateway, not replayed from the terminal.
+4. Reload the page. The transcript (including attachment name, type, size, and
+   attached state) must be identical — it is re-read from the gateway, not
+   replayed from the terminal or a local attachment cache.
 5. Send the same wording twice. Two captain rows, each with its own reply.
 6. Send a message and press Stop (or Escape). The row shows "Response stopped",
    and output the agent produces afterwards must never appear as that turn's

@@ -16,7 +16,7 @@ import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
-import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, loadPendingConversationMessages, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, saveVoiceCaptureBehavior, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl, validatedWebUrl } from '../../src/utils/externalLinks';
@@ -253,6 +253,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [unreadAttentionCount, setUnreadAttentionCount] = useState(() => notificationManager.getUnreadEvents().length);
   const [historyBefore, setHistoryBefore] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [hydratedHistoryTarget, setHydratedHistoryTarget] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [micStatus, setMicStatus] = useState<'idle' | 'requesting' | 'listening' | 'transcribing' | 'ready' | 'error'>('idle');
@@ -270,6 +271,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const inputRef = useRef<TextInput>(null);
   const holdActiveRef = useRef(false);
   const atBottomRef = useRef(true);
+  const lastHistoryOffsetRef = useRef(0);
   const initialHistoryLoadedRef = useRef(false);
   const initialScrollCancelledRef = useRef(false);
   const historyViewportMeasuredRef = useRef(false);
@@ -324,7 +326,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         if (finalScrollTimerRef.current) clearTimeout(finalScrollTimerRef.current);
         finalScrollTimerRef.current = setTimeout(() => {
           finalScrollTimerRef.current = null;
-          scrollRef.current?.scrollToEnd({ animated: false });
+          // A real upward scroll after the jump is newer intent than this
+          // one-paint measurement retry and must never be pulled back down.
+          if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: false });
         }, 50);
       }
     });
@@ -332,6 +336,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const jumpToLatest = () => {
     setHasNewMessages(false);
     setIsScrolledUp(false);
+    // Until the native scroll event reports its exact final offset, any
+    // non-bottom event must be treated as movement away from latest.
+    lastHistoryOffsetRef.current = Number.POSITIVE_INFINITY;
     requestLatestScroll(true);
   };
   useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
@@ -344,6 +351,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   useEffect(() => {
     const request = ++historyRequestRef.current;
     initialHistoryLoadedRef.current = false;
+    lastHistoryOffsetRef.current = 0;
     initialScrollCancelledRef.current = false;
     historyViewportMeasuredRef.current = false;
     historyContentMeasuredRef.current = false;
@@ -356,6 +364,13 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       initialHistoryLoadedRef.current = true;
       resolveHistoryReady();
       if (scrollToLatest) requestLatestScroll();
+      // Publish readiness only after React has had a frame to commit the
+      // canonical rows that were applied immediately before this call. Tests,
+      // assistive technology, and scroll anchoring can all observe aria-busy
+      // instead of racing a fetch or relying on an arbitrary sleep.
+      requestAnimationFrame(() => {
+        if (request === historyRequestRef.current) setHydratedHistoryTarget(target);
+      });
     };
     historyReadyRef.current = new Promise<void>(resolve => { resolveHistoryReady = resolve; });
     activePromptRef.current?.controller.abort();
@@ -375,18 +390,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     };
     const existingIds = new Set(getConversationMessages(target).map(message => message.id));
     getConversationMessages(target).forEach(rememberOptimistic);
-    const hydration = hydrateConversationMessages(target).then(hydrated => hydrated.forEach(message => {
-      if (!existingIds.has(message.id)) rememberOptimistic(message);
-    }));
+    const hydration = canonicalTarget
+      ? loadPendingConversationMessages(target)
+      : hydrateConversationMessages(target).then(hydrated => {
+        hydrated.forEach(message => { if (!existingIds.has(message.id)) rememberOptimistic(message); });
+        return hydrated;
+      });
     // The canonical record is the transcript, so opening the captain thread is
     // a plain read: no scrollback seeding, no identity bookkeeping, no replay
     // suppression. Worker panes still seed from terminal scrollback below.
     const loadCanonicalConversation = async (): Promise<void> => {
       try {
-        await hydration;
+        // Fetch the authority before considering any local state. Only pending
+        // client_message_ids are then overlaid; cached canonical rows never
+        // participate in hydration or row-by-row reconciliation.
         const result = await fetchCanonicalConversation(target);
+        const pending = await hydration;
         if (request !== historyRequestRef.current) return;
-        applyCanonicalMessages(result.messages, { replace: true });
+        applyCanonicalMessages(result.messages, { replace: true, pending });
         setHistoryBefore(null);
       } catch (error) {
         if (request !== historyRequestRef.current) return;
@@ -555,7 +576,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
-    atBottomRef.current = atBottom; setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
+    const movedUp = contentOffset.y < lastHistoryOffsetRef.current - 1;
+    lastHistoryOffsetRef.current = contentOffset.y;
+    atBottomRef.current = atBottom;
+    // Upward movement is newer reader intent even when a browser does not emit
+    // onScrollBeginDrag (keyboard and wheel scrolling on web). Cancel every
+    // queued auto-position operation, not only the final measurement retry.
+    if (!atBottom && movedUp) {
+      pendingLatestScrollRef.current = false;
+      if (latestScrollFrameRef.current !== null) {
+        cancelAnimationFrame(latestScrollFrameRef.current);
+        latestScrollFrameRef.current = null;
+      }
+      if (finalScrollTimerRef.current) {
+        clearTimeout(finalScrollTimerRef.current);
+        finalScrollTimerRef.current = null;
+      }
+    }
+    setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
     if (contentOffset.y < 36) void loadOlderHistory();
   };
   const handleHistoryLayout = () => {
@@ -570,6 +608,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     // A captain who starts reading older content has expressed an intentional
     // position; do not override it when an asynchronous render catches up.
     pendingLatestScrollRef.current = false;
+    if (latestScrollFrameRef.current !== null) {
+      cancelAnimationFrame(latestScrollFrameRef.current);
+      latestScrollFrameRef.current = null;
+    }
+    if (finalScrollTimerRef.current) {
+      clearTimeout(finalScrollTimerRef.current);
+      finalScrollTimerRef.current = null;
+    }
     if (!initialHistoryLoadedRef.current) initialScrollCancelledRef.current = true;
   };
   const addAttachments = (selected: ComposerAttachment[]) => {
@@ -634,9 +680,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
    * merges into the rows already rendered. Returns true when the turn this
    * canvas is waiting on has been answered.
    */
-  const applyCanonicalMessages = (incoming: CanonicalMessage[], { replace = false } = {}): boolean => {
+  const applyCanonicalMessages = (incoming: CanonicalMessage[], { replace = false, pending = [] }: { replace?: boolean; pending?: ConversationMessage[] } = {}): boolean => {
     const current = getConversationMessages(target);
-    const next = reconcileCanonicalMessages(current, incoming, { authoritative: replace });
+    const currentIds = new Set(current.map(message => message.id));
+    const base = pending.length ? [...current, ...pending.filter(message => !currentIds.has(message.id))] : current;
+    const next = reconcileCanonicalMessages(base, incoming, { authoritative: replace });
     if (!sameRenderedTranscript(current, next)) {
       const wasAtBottom = atBottomRef.current;
       resetConversationMessages(target, next);
@@ -794,7 +842,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         // The gateway answers with the canonical turn it recorded, including a
         // reply the harness returned synchronously. Nothing is minted locally,
         // so there is no local row for a later read to reconcile or duplicate.
-        const canonical = normalizeCanonicalMessages(response?.conversation?.messages);
+        const canonical = response?.conversation?.messages || [];
         if (activePromptRef.current?.token === token) activePromptRef.current = { ...activePromptRef.current, turnId: response?.conversation?.turn_id };
         if (canonical.length && applyCanonicalMessages(canonical)) return;
       } else {
@@ -904,7 +952,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         <View style={styles.logoWithUnread}><BrandMark dark={dark} />{unreadAttentionCount > 0 ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</View>
       </TouchableOpacity>
     </View>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
       {(canonicalTarget ? filterCanonicalMessages(messages, showToolCalls) : filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls)).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={brand.obsidian} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
       {isThinking ? <View testID="agent-thinking-message" accessibilityRole="text" accessibilityLabel="Magistrate is working" style={styles.assistantMessage}><Text style={[styles.progressLabel, { color: muted }]}>Working…</Text><ThinkingIndicator dark={dark} /></View> : null}
     </ScrollView>
