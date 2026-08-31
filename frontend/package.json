@@ -55,7 +55,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "npm run test:agent-status && npm run test:ambient && npm run test:chat-history && npm run test:chat-formatting && npm run test:pending-intents && npm run test:voice && npm run test:operating-permissions && npm run test:auth && npm run test:chat && npm run test:shell && npm run test:home && npm run test:github && npm run test:notifications",
+    "test": "npm run test:agent-status && npm run test:ambient && npm run test:chat-history && npm run test:chat-formatting && npm run test:pending-intents && npm run test:voice && npm run test:operating-permissions && npm run test:auth && npm run test:chat && npm run test:shell && npm run test:home && npm run test:github && npm run test:notifications && npm run test:truthful",
     "test:auth": "node --test tests/auth-lifecycle.web.test.js",
     "test:chat": "node --test tests/chat-terminal.web.test.js",
     "test:shell": "node --test tests/workspace-shell.web.test.js",
@@ -68,6 +68,7 @@
     "test:voice": "npx tsx --test tests/voice-session.test.ts tests/voice-branding.test.ts tests/voice-input-modes.test.ts && node --test tests/voice-page.web.test.js",
     "test:notifications": "node --test tests/notifications.web.test.js",
     "test:github": "node --test tests/github-prs.web.test.js",
+    "test:truthful": "node --test tests/truthful-contracts.web.test.js",
     "test:ambient": "node --test tests/ambient-source.test.js"
   },
   "private": true
