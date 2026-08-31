@@ -1,39 +1,27 @@
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
 const test = require('node:test');
-const puppeteer = require('puppeteer-core');
-
-const PORT = Number(process.env.MAGISTRATE_WEB_TEST_PORT) || 8096;
-const BASE = `http://127.0.0.1:${PORT}`;
-let server;
-let browser;
+const { launchBrowser, startWebServer } = require('./helpers/web-server');
 
 const events = [
   { id: 'question-1', provider: 'firstmate', title: 'Deployment choice', subtitle: 'Choose the rollout window.', priority: 'HIGH', status: 'needs-decision', project: 'Magistrate', target_id: 'deploy-1', context: { task_id: 'task-1', decision_key: 'deploy-1' }, url: '/attention?item=question-1', deep_link: '/attention?item=question-1', requires_action: true, notification_kind: 'captain_question', revision: '1' },
   { id: 'pr-2', provider: 'github', title: 'Review ready', subtitle: 'A pull request needs your review.', priority: 'MEDIUM', status: 'ready', url: '/pr-detail?number=2', deep_link: '/pr-detail?number=2', requires_action: true, notification_kind: 'pr_ready', revision: '1' }
 ];
 
-async function waitForServer() {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    try { if ((await fetch(`${BASE}/chat`)).ok) return; } catch {}
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-  throw new Error('Expo web server did not become ready');
-}
+let server;
+let browser;
+// Assigned once the dev server has picked a port; the suites read it at call
+// time, never at module load.
+let BASE;
 
 test.before(async () => {
-  server = spawn(path.join(process.cwd(), 'node_modules', '.bin', 'expo'), ['start', '--web', '--port', String(PORT)], {
-    cwd: process.cwd(), env: { ...process.env, CI: '1' }, stdio: 'ignore'
-  });
-  await waitForServer();
-  browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+  server = await startWebServer({ readyPath: '/chat' });
+  BASE = server.base;
+  browser = await launchBrowser();
 });
 
 test.after(async () => {
   await browser?.close();
-  server?.kill('SIGTERM');
+  await server?.stop();
 });
 
 async function openApp({ notificationMode, eventBatch = [], attention = events, url = '/chat' } = {}) {
