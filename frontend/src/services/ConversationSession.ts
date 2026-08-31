@@ -7,6 +7,19 @@ export interface ConversationAttachment {
   size?: number;
 }
 
+/** Provenance supplied by the gateway/provider; never inferred from prose. */
+export interface ConversationSource {
+  id: string;
+  title: string;
+  url: string;
+  publisher?: string;
+  retrievedAt?: string;
+  quote?: string;
+  page?: string | number;
+}
+
+export type ConversationProgress = 'queued' | 'working' | 'streaming' | 'complete' | 'failed' | 'cancelled';
+
 export interface ConversationMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -20,6 +33,14 @@ export interface ConversationMessage {
   attachments?: ConversationAttachment[];
   /** Safe, bounded labels for structured tool results attached to this reply. */
   toolResults?: string[];
+  /** Structured provenance only; arbitrary URLs in text are not promoted here. */
+  sources?: ConversationSource[];
+  /** Provider-labelled summary only; raw reasoning is never stored or rendered. */
+  thinkingSummary?: { provider: string; text: string };
+  /** A future backend may opt a run into idempotent regeneration. */
+  runId?: string;
+  regenerateSafe?: boolean;
+  progress?: ConversationProgress;
   /** Explicit conversation boundary; terminal-derived rows without it are not restored. */
   audience?: 'captain' | 'primary';
   delivery?: 'sending' | 'sent' | 'failed' | 'cancelled';
@@ -65,8 +86,19 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       const toolResults = Array.isArray(value.toolResults)
         ? value.toolResults.filter(result => typeof result === 'string' && result.length > 0 && result.length <= 48).slice(0, 6) as string[]
         : undefined;
+      const sources = Array.isArray(value.sources) ? value.sources.filter(source => {
+        if (!source || typeof source !== 'object') return false;
+        const candidate = source as Record<string, unknown>;
+        if (typeof candidate.id !== 'string' || candidate.id.length < 1 || candidate.id.length > 120 || typeof candidate.title !== 'string' || !candidate.title.trim() || candidate.title.length > 240 || typeof candidate.url !== 'string' || !/^https?:\/\//i.test(candidate.url)) return false;
+        return !candidate.publisher || (typeof candidate.publisher === 'string' && candidate.publisher.length <= 120);
+      }).slice(0, 20).map(source => {
+        const candidate = source as Record<string, unknown>;
+        return { id: candidate.id as string, title: candidate.title as string, url: candidate.url as string, publisher: candidate.publisher as string | undefined, retrievedAt: typeof candidate.retrievedAt === 'string' ? candidate.retrievedAt : undefined, quote: typeof candidate.quote === 'string' ? candidate.quote.slice(0, 500) : undefined, page: typeof candidate.page === 'string' || typeof candidate.page === 'number' ? candidate.page : undefined };
+      }) : undefined;
+      const thinkingSummary = value.thinkingSummary && typeof value.thinkingSummary === 'object' ? (() => { const candidate = value.thinkingSummary as Record<string, unknown>; return typeof candidate.provider === 'string' && typeof candidate.text === 'string' ? { provider: candidate.provider.slice(0, 48), text: candidate.text.slice(0, 280) } : undefined; })() : undefined;
+      const progress = ['queued', 'working', 'streaming', 'complete', 'failed', 'cancelled'].includes(String(value.progress)) ? value.progress as ConversationMessage['progress'] : undefined;
       const role = value.role as 'user' | 'assistant';
-      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: 'conversation', attachments, toolResults, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
+      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
     });
     const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
     const currentById = new Map(current.map(message => [message.id, message]));
@@ -126,7 +158,7 @@ export function updateConversationMessage(target: string, id: string, text: stri
   updateConversationMessageState(target, id, { text, sentAt });
 }
 
-export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'audience'>>) {
+export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience'>>) {
   const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
   const next = current.map(message => message.id === id ? { ...message, ...update } : message);
   messagesByTarget.set(target, next); persist(target, next); emit(target);
