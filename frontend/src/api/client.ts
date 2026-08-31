@@ -1,21 +1,35 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSyncExternalStore } from 'react';
+import { Platform } from 'react-native';
+import {
+  clearGatewaySessionPayload,
+  getGatewaySessionPayload,
+  removeLegacyGatewaySessionPayload,
+  setGatewaySessionPayload,
+} from '../services/GatewaySessionStorage';
 import { parseAgentHistory } from '../services/ChatHistory';
 import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
 import { OperatingPermissionMode } from '../services/OperatingPermissionModes';
 
 // Production builds must provide an HTTPS gateway (usually same-origin on web).
 // HTTP localhost is intentionally limited to local development.
-export const GATEWAY_URL = process.env.EXPO_PUBLIC_GATEWAY_URL || (
+const configuredGatewayUrl = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim();
+
+// A native release must be pointed at the public TLS gateway at build time.
+// The localhost default is deliberately limited to local development and web;
+// private runner addresses and credentials are never valid app configuration.
+export const GATEWAY_URL = configuredGatewayUrl || (
   typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.host}/api/v1` : 'http://localhost:8000/api/v1'
 );
 
 function assertGatewayTransport(): void {
-  if (process.env.NODE_ENV === 'production') {
-    const parsed = new URL(GATEWAY_URL);
-    const local = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
-    if (parsed.protocol !== 'https:' && !local) throw new Error('Production gateway configuration must use HTTPS.');
+  if (process.env.NODE_ENV !== 'production') return;
+  if (Platform.OS !== 'web' && !configuredGatewayUrl) {
+    throw new Error('Native production builds must configure EXPO_PUBLIC_GATEWAY_URL.');
   }
+  const parsed = new URL(GATEWAY_URL);
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !local) throw new Error('Production gateway configuration must use HTTPS.');
+  if (Platform.OS !== 'web' && local) throw new Error('Native production builds cannot use a localhost gateway.');
 }
 assertGatewayTransport();
 
@@ -39,7 +53,6 @@ export class GatewayNetworkError extends Error {
   constructor(message = 'Gateway is unavailable. Check the connection and try again.') { super(message); this.name = 'GatewayNetworkError'; }
 }
 
-const SESSION_STORAGE_KEY = 'magistrate.gateway.session';
 const rawFetch = (...args: Parameters<typeof fetch>) => fetch(...args);
 let sessionToken: string | null = null;
 let sessionInfo: GatewaySession | null = null;
@@ -96,7 +109,7 @@ function scheduleExpiry(session: GatewaySession): void {
 async function persistSession(session: GatewaySession): Promise<void> {
   sessionToken = session.token;
   sessionInfo = session;
-  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(storedSessionPayload(session)));
+  await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(session)));
   scheduleExpiry(session);
 }
 
@@ -165,7 +178,7 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
   if (serverSession?.token) validated.token = serverSession.token;
   sessionToken = validated.token;
   sessionInfo = validated;
-  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(storedSessionPayload(validated))).catch(() => {});
+  await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(validated))).catch(() => {});
   scheduleExpiry(validated);
   publish({ status: 'authenticated', session: validated, error: null });
   return validated;
@@ -177,8 +190,13 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
   restorePromise = (async () => {
     publish({ status: 'checking', session: sessionInfo, error: null });
     let stored: string | null = null;
-    try { stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY); }
-    catch { publish({ status: 'authentication-required', session: null, error: 'Saved session storage is unavailable.' }); return null; }
+    try {
+      // Never migrate the old AsyncStorage bearer into a trusted session. The
+      // native store owns all future session restores.
+      await removeLegacyGatewaySessionPayload();
+      stored = await getGatewaySessionPayload();
+    }
+    catch { publish({ status: 'authentication-required', session: null, error: 'Saved secure session storage is unavailable.' }); return null; }
     let candidate: GatewaySession | null = null;
     if (stored) {
       try {
@@ -220,7 +238,7 @@ export async function invalidateGatewaySession(message = 'Authentication require
     sessionToken = null;
     sessionInfo = null;
     clearExpiryTimer();
-    await AsyncStorage.removeItem(SESSION_STORAGE_KEY).catch(() => {});
+    await clearGatewaySessionPayload().catch(() => {});
     publish({ status: 'authentication-required', session: null, error: message });
   })().finally(() => { invalidationPromise = null; });
   return invalidationPromise;

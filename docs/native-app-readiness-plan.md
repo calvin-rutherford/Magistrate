@@ -1,7 +1,17 @@
-# Magistrate native iPhone friend-beta readiness plan
+# Magistrate native iPhone readiness plan
 
-**Audit point:** `8d3cb38` (`origin/main`, 2026-08-30)  
-**Scope:** Expo/React Native client, active FastAPI gateway path, deployment and CI.  
+**Audit point:** `8d3cb38` (`origin/main`, 2026-08-30)
+
+> **Deskless Operator Alpha update:** The current implementation slice is
+> documented in [`deskless-operator-alpha.md`](./deskless-operator-alpha.md).
+> It establishes the owner foundation (EAS configuration seam, native secure
+> session storage, versioned pending intents, and explicit push registration)
+> without claiming an EAS project link, signed build, physical iPhone result,
+> native App Intent, Action Button, or APNs delivery. This document's inventory
+> below is the historical baseline used to scope that slice; re-run the stated
+> checks before treating any older absence as current state.
+
+**Scope:** Expo/React Native client, active FastAPI gateway path, deployment and CI.
 **Evidence rule:** No native build, TestFlight install, Siri invocation, Action Button invocation, push delivery, Bluetooth route, or physical-device behavior was claimed or observed. This is a plan, not an implementation.
 
 ## Executive decision

@@ -2,7 +2,7 @@ import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { AppState, AppStateStatus, Platform } from 'react-native';
-import { router } from 'expo-router';
+import { enqueuePendingIntent, PendingIntentPayload } from './PendingIntentRouter';
 import {
   acknowledgeNotificationEvents,
   fetchNotificationEvents,
@@ -23,7 +23,7 @@ if (Platform.OS !== 'web') {
   });
 }
 
-export type NativePushStatus = 'not-started' | 'registering' | 'registered' | 'permission-denied' | 'unavailable' | 'offline' | 'error';
+export type NativePushStatus = 'not-started' | 'registering' | 'registered' | 'permission-required' | 'permission-denied' | 'unavailable' | 'offline' | 'error';
 
 function copyFor(events: NotificationEvent[]) {
   if (events.length > 1) return { title: `${events.length} items need your attention`, body: 'Questions or captain decisions are waiting.', url: '/attention' };
@@ -33,13 +33,11 @@ function copyFor(events: NotificationEvent[]) {
     : { title: 'Your answer is needed', body: event.subtitle, url: event.deep_link || event.url };
 }
 
-function openNotificationUrl(value: unknown): void {
-  if (typeof value !== 'string' || !value.startsWith('/')) return;
-  // These are app-owned routes produced by the gateway. External provider URLs
-  // are never accepted as a router destination from push data.
-  if (value.startsWith('/attention') || value.startsWith('/chat') || value.startsWith('/pr-detail')) {
-    router.push(value as never);
-  }
+function openNotificationData(value: unknown): void {
+  // RootLayout owns navigation. Queueing here preserves a cold/terminated
+  // notification tap through authentication and validates the route centrally.
+  if (typeof value === 'string') enqueuePendingIntent(value);
+  else if (value && typeof value === 'object') enqueuePendingIntent(value as PendingIntentPayload);
 }
 
 class NotificationManagerService {
@@ -84,7 +82,7 @@ class NotificationManagerService {
     this.fallbackListeners.forEach(listener => listener(this.fallbackEvents));
   }
 
-  async registerNativePushToken(): Promise<NativePushStatus> {
+  async registerNativePushToken(requestPermission = false): Promise<NativePushStatus> {
     if (Platform.OS === 'web') return 'unavailable';
     if (this.registering || this.status === 'registered') return this.status;
     this.registering = true;
@@ -96,11 +94,15 @@ class NotificationManagerService {
       }
       const current = await Notifications.getPermissionsAsync();
       let granted = current.granted || current.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL;
-      if (!granted && current.canAskAgain) {
+      if (!granted && requestPermission && current.canAskAgain) {
         const requested = await Notifications.requestPermissionsAsync({ ios: { allowAlert: true, allowBadge: false, allowSound: false } });
         granted = requested.granted || requested.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL;
       }
       if (!granted) {
+        if (!requestPermission && current.canAskAgain) {
+          this.setStatus('permission-required');
+          return this.status;
+        }
         await revokeNativePushToken().catch(() => undefined);
         this.setStatus('permission-denied');
         return this.status;
@@ -124,18 +126,28 @@ class NotificationManagerService {
     }
   }
 
+  /** Install before authentication so a terminated notification tap survives the auth gate. */
+  installNotificationRouting() {
+    if (Platform.OS === 'web' || this.responseSubscription) return;
+    // This is the real remote-push response path. No local notification is
+    // scheduled from the reconciliation feed.
+    this.responseSubscription = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data || {};
+      openNotificationData(data.intent_version ? data : data.route || data.url);
+    });
+    const initialData = Notifications.getLastNotificationResponse()?.notification.request.content.data || {};
+    openNotificationData(initialData.intent_version ? initialData : initialData.route || initialData.url);
+  }
+
   startMonitoring() {
     if (this.intervalId) return;
     this.appStateSubscription = AppState.addEventListener('change', state => { this.appState = state; });
     if (Platform.OS !== 'web') {
-      // This is the real remote-push response path. No local notification is
-      // scheduled from the reconciliation feed.
-      void this.registerNativePushToken();
-      this.responseSubscription = Notifications.addNotificationResponseReceivedListener(response => {
-        openNotificationUrl(response.notification.request.content.data?.url);
-      });
-      const initialUrl = Notifications.getLastNotificationResponse()?.notification.request.content.data?.url;
-      openNotificationUrl(initialUrl);
+      this.installNotificationRouting();
+      // Do not trigger an OS permission prompt during authenticated startup.
+      // Account settings supplies the explicit user action; this call only
+      // registers a permission already granted by the owner.
+      void this.registerNativePushToken(false);
     }
     void this.poll();
     this.intervalId = setInterval(() => void this.poll(), 10_000);
@@ -145,9 +157,7 @@ class NotificationManagerService {
     if (this.intervalId) clearInterval(this.intervalId);
     this.intervalId = null;
     this.appStateSubscription?.remove();
-    this.responseSubscription?.remove();
     this.appStateSubscription = null;
-    this.responseSubscription = null;
   }
 
   private async poll() {
@@ -158,7 +168,7 @@ class NotificationManagerService {
       // remote sends. Web receives this feed for its open-tab fallback.
       const { events } = await fetchNotificationEvents(false);
       if (!events.length) {
-        if (Platform.OS !== 'web' && (this.status === 'offline' || this.status === 'error')) void this.registerNativePushToken();
+        if (Platform.OS !== 'web' && (this.status === 'offline' || this.status === 'error')) void this.registerNativePushToken(false);
         return;
       }
       let delivered = false;
@@ -188,7 +198,7 @@ class NotificationManagerService {
       const notification = new BrowserNotification(copy.title, { body: copy.body, data: { url: copy.url } });
       notification.onclick = () => {
         if (typeof window !== 'undefined') window.focus();
-        openNotificationUrl(copy.url);
+        openNotificationData(copy.url);
         notification.close?.();
       };
       return true;

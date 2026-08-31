@@ -1,23 +1,33 @@
 {
   "cli": {
-    "version": ">= 12.0.0"
+    "version": ">= 23.0.0",
+    "appVersionSource": "remote",
+    "requireCommit": true
   },
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "ios": {
-        "simulator": true
-      }
+      "channel": "development",
+      "environment": "development"
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "channel": "preview",
+      "environment": "preview"
     },
     "production": {
-      "distribution": "store"
+      "distribution": "store",
+      "channel": "production",
+      "environment": "production",
+      "autoIncrement": true
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "ios": {
+        "ascAppId": "${EXPO_ASC_APP_ID}"
+      }
+    }
   }
 }
