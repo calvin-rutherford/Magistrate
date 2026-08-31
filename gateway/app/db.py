@@ -409,6 +409,43 @@ def init_db():
     )
     ''')
 
+    # Attention actions are a separate authority from notification state.  The
+    # action key binds one live source revision and exact target; outcomes are
+    # retained so retries cannot execute the decision twice.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS attention_action_outcomes (
+        action_key TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        decision_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        source_revision TEXT NOT NULL,
+        status TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )
+    ''')
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(attention_action_outcomes)")}
+    if "item_id" not in columns:
+        cursor.execute("ALTER TABLE attention_action_outcomes ADD COLUMN item_id TEXT NOT NULL DEFAULT ''")
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS attention_action_confirmations (
+        confirmation_hash TEXT PRIMARY KEY,
+        action_key TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER
+    )
+    ''')
+
     cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = 'default_user'")
     if not cursor.fetchone():
         now = int(time.time())

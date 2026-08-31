@@ -37,6 +37,14 @@ class GestureInputContract(BaseModel):
 class NotificationAckContract(BaseModel):
     item_ids: List[str]
 
+class AttentionActionContract(BaseModel):
+    action_key: str = Field(min_length=12, max_length=128, pattern=r'^aa1_[A-Za-z0-9]+$')
+    action: Literal['approve', 'reject']
+    target_id: str = Field(min_length=1, max_length=200, pattern=r'^[A-Za-z0-9._:-]+$')
+
+class AttentionActionExecuteContract(AttentionActionContract):
+    confirmation_token: str = Field(min_length=16, max_length=128)
+
 class NotificationPreferencesContract(BaseModel):
     enabled: bool = True
     quiet_start: Optional[int] = None
