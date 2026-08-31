@@ -41,7 +41,8 @@ from app.providers.teams import TeamsProviderAdapter
 from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
 from app.usage import get_usage
 from app.ar_glasses import router as ar_router
-from app.uploads import MAX_UPLOAD_BYTES, save_upload, get_upload
+from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BYTES,
+                         associate_uploads, save_upload, get_upload, validate_upload_metadata)
 
 init_db()
 
@@ -80,6 +81,25 @@ UPLOADS_DIR = GATEWAY_DIR / 'uploads' / 'avatars'
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
 app.include_router(ar_router)
+
+# Bound request envelopes before Starlette parses multipart/JSON bodies. The
+# per-file and aggregate checks below remain authoritative because multipart
+# overhead makes a precise Content-Length limit impossible.
+MAX_PROMPT_REQUEST_BYTES = 1_000_000
+MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + (MAX_UPLOAD_COUNT * 4096) + 1_000_000
+
+@app.middleware('http')
+async def enforce_bounded_request_size(request: Request, call_next):
+    content_length = request.headers.get('content-length')
+    try:
+        length = int(content_length) if content_length is not None else 0
+    except ValueError:
+        return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
+    if request.url.path == '/api/v1/uploads' and length > MAX_UPLOAD_REQUEST_BYTES:
+        return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
+    if request.url.path == '/api/v1/captain/prompt' and length > MAX_PROMPT_REQUEST_BYTES:
+        return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
+    return await call_next(request)
 
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
@@ -522,19 +542,45 @@ async def get_voice_capabilities(principal: Principal = Depends(require_scope('v
         }],
     }
 
+async def _read_bounded_upload(file: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(min(1024 * 1024, MAX_UPLOAD_BYTES + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail='Files must be smaller than 25 MB.')
+        chunks.append(chunk)
+    return b''.join(chunks)
+
+
 @app.post('/api/v1/uploads')
-async def upload_chat_files(files: List[UploadFile] = File(...), principal: Principal = Depends(require_scope('command'))):
+async def upload_chat_files(
+    files: List[UploadFile] = File(...),
+    message_id: Optional[str] = Form(None),
+    principal: Principal = Depends(require_scope('command')),
+):
     if not files:
         raise HTTPException(status_code=400, detail='At least one file is required.')
+    if len(files) > MAX_UPLOAD_COUNT:
+        raise HTTPException(status_code=413, detail='A message may include at most 10 attachments.')
+    if message_id and not re.fullmatch(r'^[A-Za-z0-9_-]{8,128}$', message_id):
+        raise HTTPException(status_code=422, detail='Invalid chat message id.')
     uploaded = []
-    for file in files:
-        content = await file.read(MAX_UPLOAD_BYTES + 1)
-        if len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail='Files must be smaller than 25 MB.')
-        try:
+    total = 0
+    try:
+        for file in files:
+            content = await _read_bounded_upload(file)
+            total += len(content)
+            if total > MAX_UPLOAD_TOTAL_BYTES:
+                raise HTTPException(status_code=413, detail='The attachments in one message are too large.')
             uploaded.append(save_upload(principal.user_id, file.filename or 'upload', file.content_type, content))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if message_id:
+            associate_uploads(principal.user_id, message_id, [item['upload_id'] for item in uploaded])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {'uploads': uploaded}
 
 
@@ -705,15 +751,34 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
                 selection = None
     prompt_text = contract.text or ''
     if contract.attachments:
-        # Attachment ids are opaque and must belong to this session's principal;
-        # client-supplied filenames/sizes are never trusted for authorization.
-        attachment_names = []
+        # Attachment ids are opaque and must belong to this principal. Verify
+        # every piece of client metadata against the stored record before the
+        # provider sees a manifest; names and sizes from JSON are never trusted.
+        stored_uploads = []
         for attachment in contract.attachments:
             stored = get_upload(principal.user_id, attachment.upload_id)
             if not stored:
                 raise HTTPException(status_code=404, detail='One or more attached files are unavailable.')
-            attachment_names.append(stored['filename'])
-        prompt_text = prompt_text + ('\n\n' if prompt_text else '') + 'Attached files: ' + ', '.join(attachment_names)
+            try:
+                validate_upload_metadata(stored, attachment.filename, attachment.media_type, attachment.size)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            stored_uploads.append(stored)
+        if contract.message_id:
+            try:
+                associate_uploads(principal.user_id, contract.message_id, [item['upload_id'] for item in stored_uploads])
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Herdr's current prompt contract is text-only. Forward a bounded,
+        # human-readable manifest through the normal Herdr -> Firstmate path;
+        # never put bytes, local paths, credentials, or bearer tokens in the
+        # prompt/history. A provider that cannot accept even this manifest must
+        # return its real error, which the client surfaces instead of claiming
+        # delivery.
+        attachment_summary = ', '.join(
+            f"{item['filename']} ({item['media_type']}, {item['size']} bytes)" for item in stored_uploads
+        )
+        prompt_text = prompt_text + ('\n\n' if prompt_text else '') + 'Attached files: ' + attachment_summary
     return await herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
 
 @app.post('/api/v1/agents/{agent_id}/send-key')

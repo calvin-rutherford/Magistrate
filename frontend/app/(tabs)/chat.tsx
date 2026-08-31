@@ -7,13 +7,13 @@ import { AccessibilityInfo, Alert, Image, KeyboardAvoidingView, NativeScrollEven
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
-import { AgentInfo, AuthProviderInfo, CHAT_HISTORY_LINES, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload } from '../../src/api/client';
+import { AgentInfo, AuthProviderInfo, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { filterAgentHistory, toolCallPreview } from '../../src/services/ChatHistory';
-import { appendConversationMessage, ConversationMessage, getConversationMessages, hydrateConversationMessages, prependConversationMessages, updateConversationMessage, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, prependConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl } from '../../src/utils/externalLinks';
@@ -23,7 +23,8 @@ const markPaper = require('../../assets/images/magistrate-mark-paper-256.png');
 const markInk = require('../../assets/images/magistrate-mark-ink-256.png');
 const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B', mutedDark: '#8E99AA', mutedLight: '#667180', cyan: '#24D8FF', violet: '#8B6CFF', success: '#43D17A', attention: '#FFB347', critical: '#FF625F' };
 
-type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file' };
+type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file'; status?: 'ready' | 'uploading' | 'uploaded' | 'failed'; uploaded?: ChatUpload };
+type QueuedPrompt = { id: string; text: string; attachments: ComposerAttachment[]; editId: string | null };
 type DrawerSection = 'attention' | 'fleet' | 'activity' | 'connections' | null;
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
@@ -155,16 +156,25 @@ function ModelMenu({ dark, profiles, loading, error, open, selection, onToggle, 
   </View>;
 }
 
-function UserMessage({ message, textColor, selectable, onLongPress }: { message: ConversationMessage; textColor: string; selectable: boolean; onLongPress: () => void }) {
-  // Keep the transcript deliberately plain: the chat surface is only the
-  // captain's message and the agent's reply. Transport metadata and timestamps
-  // belong in diagnostics, not in the conversation a captain reads.
+function UserMessage({ message, textColor, selectable, onLongPress, onRetry }: { message: ConversationMessage; textColor: string; selectable: boolean; onLongPress: () => void; onRetry?: () => void }) {
+  // Keep transport metadata out of the transcript, but retain a compact
+  // filename/type/size summary so a reload remains useful to the captain.
   return <TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="button" accessibilityLabel="Your message. Press and hold for actions." delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={styles.userMessage}>
     <Text testID={`user-message-text-${message.id}`} selectable={selectable} style={[styles.messageText, { color: textColor }]}>{message.text}</Text>
+    {message.attachments?.map(attachment => <Text key={`${message.id}-${attachment.name}`} testID={`message-attachment-${message.id}`} style={[styles.messageAttachment, { color: textColor }]} numberOfLines={1}>↳ {attachment.name} · {attachment.mediaType}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}</Text>)}
+    {message.delivery === 'sending' ? <Text testID={`message-sending-${message.id}`} style={styles.messageDelivery}>Sending…</Text> : null}
+    {message.delivery === 'failed' ? <View style={styles.messageFailure}><Text testID={`message-failed-${message.id}`} style={styles.messageFailed}>Not sent. Check the attachment and retry.</Text>{onRetry ? <TouchableOpacity testID={`retry-message-${message.id}`} accessibilityRole="button" onPress={onRetry}><Text style={styles.retryText}>Retry</Text></TouchableOpacity> : null}</View> : null}
   </TouchableOpacity>;
 }
 
 const historyKey = (message: { role: string; kind?: string; text: string }) => `${message.role}|${message.kind || 'conversation'}|${message.text}`;
+const stableHistoryId = (message: { role: string; kind?: string; text: string }) => {
+  // Herdr history ids are preferred. This bounded fallback keeps the WebSocket
+  // and polling paths convergent when an older gateway omits ids.
+  let hash = 2166136261;
+  for (const character of historyKey(message)) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  return `history-${(hash >>> 0).toString(36)}`;
+};
 function conversationalPromptResponse(response: unknown): string | null {
   if (typeof response !== 'string' || !response.trim()) return null;
   try {
@@ -198,7 +208,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [messageActionsId, setMessageActionsId] = useState<string | null>(null);
   const [selectableMessageId, setSelectableMessageId] = useState<string | null>(null);
   const [isThinking, setIsThinking] = useState(false);
-  const [queuedPrompts, setQueuedPrompts] = useState<Array<{ id: string; text: string }>>([]);
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [isScrolledUp, setIsScrolledUp] = useState(false);
   const [hasNewMessages, setHasNewMessages] = useState(false);
@@ -215,6 +225,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const pendingAttachmentsByMessageRef = useRef(new Map<string, ComposerAttachment[]>());
   const [webViewportHeight, setWebViewportHeight] = useState<number | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
@@ -234,6 +245,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // a prior Herdr history read), so syncFromHistory only appends genuinely new
   // ones - see the mount effect below, which seeds this without rendering.
   const knownKeysRef = useRef<Set<string>>(new Set());
+  const optimisticCountsRef = useRef(new Map<string, number>());
   const targetLabel = target === 'captain' ? 'Magistrate' : target;
   const capture = useVoiceInputAdapter(undefined, voiceInputMode);
 
@@ -286,13 +298,26 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     // The captain thread is shared with Voice Mode (see ConversationSession),
     // so switching back to it keeps whatever it already holds in memory for
     // this session; other targets start each visit with a clean thread.
-    knownKeysRef.current = new Set(getConversationMessages(target).map(historyKey));
-    const hydration = hydrateConversationMessages(target).then(hydrated => hydrated.forEach(message => knownKeysRef.current.add(historyKey(message))));
+    knownKeysRef.current = new Set();
+    optimisticCountsRef.current = new Map();
+    const rememberOptimistic = (message: ConversationMessage) => {
+      const key = historyKey(message);
+      knownKeysRef.current.add(key);
+      optimisticCountsRef.current.set(key, (optimisticCountsRef.current.get(key) || 0) + 1);
+    };
+    const existingIds = new Set(getConversationMessages(target).map(message => message.id));
+    getConversationMessages(target).forEach(rememberOptimistic);
+    const hydration = hydrateConversationMessages(target).then(hydrated => hydrated.forEach(message => {
+      if (!existingIds.has(message.id)) rememberOptimistic(message);
+    }));
     // Seed known-message keys from recent Herdr scrollback so the live poll
     // below doesn't treat pre-existing history as new and replay it into the
     // thread - chat only ever shows what happens while it's open.
     const loadHistory = async (attempt: number): Promise<void> => {
       try {
+        // Hydrate optimistic messages before seeding server identities so a
+        // delayed reload cannot leave an unreconciled duplicate count.
+        await hydration;
         const result = await fetchAgentHistory(target);
         if (request !== historyRequestRef.current) return;
         // A working agent can briefly leave an empty terminal snapshot (redraw
@@ -301,7 +326,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           await new Promise<void>(resolve => setTimeout(resolve, 2000));
           return loadHistory(attempt + 1);
         }
-        result.messages.forEach(message => knownKeysRef.current.add(historyKey(message)));
+        result.messages.forEach(message => {
+          const key = historyKey(message);
+          const optimisticCount = optimisticCountsRef.current.get(key) || 0;
+          if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
+          knownKeysRef.current.add(message.id ? `id:${message.id}` : key);
+        });
         setHistoryBefore(result.next_before || null);
       } catch (error) {
         if (request !== historyRequestRef.current) return;
@@ -400,7 +430,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     try {
       const result = await fetchAgentHistory(target, CHAT_HISTORY_LINES, { before: historyBefore });
       prependConversationMessages(target, result.messages.map(message => ({ id: message.id || `history-${Date.now()}-${Math.random()}`, role: message.role, kind: message.kind, text: message.text, source: 'text' as const })));
-      result.messages.forEach(message => knownKeysRef.current.add(historyKey(message)));
+      result.messages.forEach(message => {
+        const key = historyKey(message);
+        const optimisticCount = optimisticCountsRef.current.get(key) || 0;
+        if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
+        knownKeysRef.current.add(message.id ? `id:${message.id}` : key);
+      });
       setHistoryBefore(result.next_before || null);
     } catch (error) { setSendError(errorText(error, 'Older chat history could not be loaded.')); }
     finally { setHistoryLoading(false); }
@@ -426,7 +461,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!initialHistoryLoadedRef.current) initialScrollCancelledRef.current = true;
   };
   const addAttachments = (selected: ComposerAttachment[]) => {
-    setAttachments(current => [...current, ...selected]);
+    const normalized = selected.map(item => ({ ...item, status: 'ready' as const }));
+    const currentCount = attachments.length;
+    if (currentCount + normalized.length > CHAT_MAX_UPLOAD_COUNT) { setSendError('A message may include at most 10 attachments.'); return; }
+    const total = attachments.reduce((sum, item) => sum + (item.size || 0), 0) + normalized.reduce((sum, item) => sum + (item.size || 0), 0);
+    if (total > CHAT_MAX_UPLOAD_TOTAL_BYTES) { setSendError('The attachments in one message are too large.'); return; }
+    const invalid = normalized.find(item => validateChatAttachment(item.name, item.mimeType, item.size));
+    if (invalid) { setSendError(validateChatAttachment(invalid.name, invalid.mimeType, invalid.size) || 'This file type is not supported.'); return; }
+    setAttachments(current => [...current, ...normalized]);
     setSendError(null);
   };
   const pickImages = async () => {
@@ -435,9 +477,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, quality: 1 });
       if (!result.canceled) addAttachments(result.assets.map((asset, index) => ({
         id: `image-${Date.now()}-${index}`,
-        name: asset.fileName || `Image ${attachments.length + index + 1}`,
+        name: asset.fileName || `Image-${attachments.length + index + 1}.jpg`,
         uri: asset.uri,
-        mimeType: asset.mimeType,
+        mimeType: asset.mimeType || 'image/jpeg',
         size: asset.fileSize,
         kind: 'image',
       })));
@@ -457,23 +499,39 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       })));
     } catch (error) { setSendError(errorText(error, 'The file picker could not be opened.')); }
   };
-  const appendMessage = (message: ConversationMessage) => {
+  const appendMessage = (message: ConversationMessage, optimistic = true) => {
     const wasAtBottom = atBottomRef.current;
-    knownKeysRef.current.add(historyKey(message));
+    const key = historyKey(message);
+    if (optimistic) {
+      knownKeysRef.current.add(key);
+      optimisticCountsRef.current.set(key, (optimisticCountsRef.current.get(key) || 0) + 1);
+    } else {
+      knownKeysRef.current.add(message.id ? `id:${message.id}` : key);
+    }
     appendConversationMessage(target, message);
     if (!wasAtBottom) setHasNewMessages(true);
     if (wasAtBottom) requestLatestScroll();
   };
   // Merges normalized Herdr events and HTTP history into the visible thread.
   // The same deduplication path is used by WebSocket delivery and polling.
-  const appendHistoryMessages = (incoming: Array<{ role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }>): boolean => {
+  const appendHistoryMessages = (incoming: Array<{ id?: string; role: 'user' | 'assistant'; kind: 'conversation' | 'tool'; text: string }>): boolean => {
     let appendedReply = false;
     incoming.forEach(message => {
       const key = historyKey(message);
-      const alreadyVisible = getConversationMessages(target).some(existing => existing.text === message.text);
-      if (knownKeysRef.current.has(key) || alreadyVisible) return;
-      knownKeysRef.current.add(key);
-      appendMessage({ id: `live-${Date.now()}-${Math.random().toString(36).slice(2)}`, role: message.role, kind: message.kind, text: message.text, sentAt: undefined, source: 'text' });
+      const identity = message.id ? `id:${message.id}` : key;
+      // Do not compare text alone: two legitimate turns can say the same
+      // thing. Gateway history ids, or the stable legacy fallback, make the
+      // WebSocket and polling sources share one dedupe identity. Reconcile one
+      // optimistic local copy with its first server copy.
+      if (knownKeysRef.current.has(identity)) return;
+      const optimisticCount = optimisticCountsRef.current.get(key) || 0;
+      if (message.id && optimisticCount > 0) {
+        optimisticCountsRef.current.set(key, optimisticCount - 1);
+        knownKeysRef.current.add(identity);
+        return;
+      }
+      knownKeysRef.current.add(identity);
+      appendMessage({ id: message.id || stableHistoryId(message), role: message.role, kind: message.kind, text: message.text, sentAt: undefined, source: 'text' }, false);
       if (message.role === 'assistant' && message.kind === 'conversation') appendedReply = true;
     });
     return appendedReply;
@@ -510,8 +568,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   }, [target]);
   const submitPrompt = async (trimmed: string, editId: string | null = null, pendingAttachments: ComposerAttachment[] = []) => {
     const now = new Date();
-    if (editId) { updateConversationMessage(target, editId, trimmed, now.getTime()); setEditingMessageId(null); }
-    else appendMessage({ id: `u-${Date.now()}`, role: 'user', text: trimmed, sentAt: now.getTime(), source: 'text' });
+    const messageId = editId || `u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const attachmentSummaries: ConversationAttachment[] = pendingAttachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size }));
+    pendingAttachmentsByMessageRef.current.set(messageId, pendingAttachments);
+    if (editId) { updateConversationMessageState(target, editId, { text: trimmed, sentAt: now.getTime(), attachments: attachmentSummaries, delivery: 'sending' }); setEditingMessageId(null); }
+    else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: now.getTime(), source: 'text', attachments: attachmentSummaries, delivery: 'sending' });
     setPromptText(''); setSendError(null); setIsThinking(true);
     try {
       // Do not let the initial history seed race this submission (see
@@ -520,10 +581,20 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       await historyReadyRef.current;
       if (modelSelection && !modelSelection.available) throw new Error(modelSelection.availabilityReason || 'The selected execution profile is unavailable.');
       const uploaded: ChatUpload[] = [];
-      for (const attachment of pendingAttachments) uploaded.push(await uploadChatFile(attachment.uri, attachment.name, attachment.mimeType));
-      const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded);
-      setAttachments([]);
+      for (const attachment of pendingAttachments) {
+        setAttachments(current => current.map(item => item.id === attachment.id ? { ...item, status: 'uploading' } : item));
+        const result = attachment.uploaded || await uploadChatFile(attachment.uri, attachment.name, attachment.mimeType, messageId);
+        uploaded.push(result);
+        setAttachments(current => current.map(item => item.id === attachment.id ? { ...item, status: 'uploaded', uploaded: result } : item));
+      }
+      const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded, messageId);
       if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The message was not accepted.');
+      updateConversationMessageState(target, messageId, {
+        delivery: 'sent',
+        attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size })),
+      });
+      const pendingIds = new Set(pendingAttachments.map(attachment => attachment.id));
+      setAttachments(current => current.filter(item => !pendingIds.has(item.id)));
       const reply = conversationalPromptResponse(response?.response);
       if (reply) { appendMessage({ id: `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text' }); setIsThinking(false); return; }
       // Herdr acknowledges first and answers in its terminal. The WebSocket
@@ -536,13 +607,17 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         setTimeout(() => void pollForReply(), 1000);
       };
       void pollForReply();
-    } catch (error) { setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); setIsThinking(false); }
+    } catch (error) {
+      updateConversationMessageState(target, messageId, { delivery: 'failed' });
+      setAttachments(current => current.map(item => pendingAttachments.some(pending => pending.id === item.id) ? { ...item, status: 'failed' } : item));
+      setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); setIsThinking(false);
+    }
   };
   useEffect(() => {
     if (isThinking || queuedPrompts.length === 0) return;
     const next = queuedPrompts[0];
     setQueuedPrompts(queue => queue.slice(1));
-    void submitPrompt(next.text);
+    void submitPrompt(next.text, next.editId, next.attachments);
   }, [isThinking, queuedPrompts]); // eslint-disable-line react-hooks/exhaustive-deps
   const handleSend = async () => {
     const trimmed = promptText.trim();
@@ -552,10 +627,15 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (!routingReady && modelSelection) { setSendError('Execution settings are still unavailable; your message was not sent.'); return; }
     if (!trimmed) { if (!isThinking) router.push('/voice' as any); return; }
     if (isThinking) {
-      setQueuedPrompts(queue => [...queue, { id: `q-${Date.now()}`, text: trimmed }]);
-      setPromptText(''); setSendError(null); return;
+      setQueuedPrompts(queue => [...queue, { id: `q-${Date.now()}`, text: trimmed, attachments: [...attachments], editId: editingMessageId }]);
+      setAttachments([]); setPromptText(''); setSendError(null); return;
     }
     await submitPrompt(trimmed, editingMessageId, attachments);
+  };
+  const retryMessage = (message: ConversationMessage) => {
+    const pending = pendingAttachmentsByMessageRef.current.get(message.id);
+    if (!pending) { setSendError('Reattach the file to retry this message; the local file is no longer available.'); return; }
+    void submitPrompt(message.text, message.id, pending);
   };
   const activeMessage = messages.find(message => message.id === messageActionsId);
   const editMessage = () => {
@@ -571,7 +651,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       <TouchableOpacity testID="brand-drawer-toggle" accessibilityRole="button" accessibilityLabel={drawerOpen ? 'Collapse Magistrate drawer' : 'Open Magistrate drawer'} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} style={styles.logoButton} activeOpacity={0.72}><BrandMark dark={dark} /></TouchableOpacity>
     </View>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`}>
-      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text></View>)}
+      {filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls).map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <View key={message.id} testID={message.kind === 'tool' ? 'tool-history-message' : 'agent-message'} style={message.kind === 'tool' ? styles.toolMessage : styles.assistantMessage}><Text selectable style={[message.kind === 'tool' ? styles.toolMessageText : styles.messageText, { color: message.kind === 'tool' ? muted : text }]}>{message.kind === 'tool' ? toolCallPreview(message.text) : message.text}</Text></View>)}
     </ScrollView>
     {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={styles.jumpButton} onPress={() => { setHasNewMessages(false); setIsScrolledUp(false); requestLatestScroll(true); }}><Text style={styles.jumpText}>{hasNewMessages ? '↓ New message' : '↓ Latest'}</Text></TouchableOpacity> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
@@ -584,7 +664,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     {attachments.length ? <ScrollView testID="attachment-preview" horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentPreview} contentContainerStyle={styles.attachmentPreviewContent} keyboardShouldPersistTaps="handled">
       {attachments.map(attachment => <View key={attachment.id} testID={`attachment-${attachment.id}`} style={[styles.attachmentChip, { backgroundColor: composerSurface }]}>
         {attachment.kind === 'image' ? <Image source={{ uri: attachment.uri }} style={styles.attachmentThumbnail} resizeMode="cover" /> : <View style={[styles.attachmentFileIcon, { backgroundColor: dark ? 'rgba(36,216,255,0.12)' : 'rgba(139,108,255,0.10)' }]}><FileIcon color={dark ? brand.cyan : brand.violet} /></View>}
-        <View style={styles.attachmentCopy}><Text numberOfLines={1} style={[styles.attachmentName, { color: text }]}>{attachment.name}</Text><Text style={[styles.attachmentMeta, { color: muted }]}>{attachment.kind === 'image' ? 'Image' : 'File'}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}</Text></View>
+        <View style={styles.attachmentCopy}><Text numberOfLines={1} style={[styles.attachmentName, { color: text }]}>{attachment.name}</Text><Text style={[styles.attachmentMeta, { color: attachment.status === 'failed' ? brand.critical : muted }]}>{attachment.status === 'uploading' ? 'Uploading…' : attachment.status === 'failed' ? 'Upload failed · retry' : attachment.kind === 'image' ? 'Image' : 'File'}{attachment.status !== 'uploading' && formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}</Text></View>
         <TouchableOpacity testID={`remove-${attachment.id}`} accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => { setAttachments(current => current.filter(item => item.id !== attachment.id)); setSendError(null); }} style={styles.attachmentRemove}><Text style={[styles.attachmentRemoveText, { color: muted }]}>×</Text></TouchableOpacity>
       </View>)}
     </ScrollView> : null}
@@ -817,13 +897,25 @@ export default function ChatScreen() {
   useEffect(() => { settingsProgress.value = withTiming(settingsOpen ? 1 : 0, { duration: reducedMotion ? 1 : 300, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [settingsOpen, settingsProgress, reducedMotion]);
   useEffect(() => {
     let mounted = true;
-    Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchRecentActivity(), fetchAuthProviders(), fetchHealth()]).then(([agentResult, attentionResult, activityResult, providerResult, healthResult]) => {
+    let refreshInFlight = false;
+    const refresh = async () => {
+      // One bounded refresh at a time prevents a slow gateway from creating a
+      // polling backlog. This is the fallback for valid realtime events too:
+      // the gateway has no attention push channel yet.
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      const results = await Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchRecentActivity(), fetchAuthProviders(), fetchHealth()]);
+      refreshInFlight = false;
       if (!mounted) return;
+      const [agentResult, attentionResult, activityResult, providerResult, healthResult] = results;
       setErrors({ agents: agentResult.status === 'rejected' ? errorText(agentResult.reason, 'Agent data could not be loaded.') : null, attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null, activity: activityResult.status === 'rejected' ? errorText(activityResult.reason, 'Recent activity could not be loaded.') : null, providers: providerResult.status === 'rejected' ? errorText(providerResult.reason, 'Connections data could not be loaded.') : null });
       if (agentResult.status === 'fulfilled') setAgents(agentResult.value); if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value); if (activityResult.status === 'fulfilled') setActivity(activityResult.value.items); if (providerResult.status === 'fulfilled') setProviders(providerResult.value);
       if (healthResult.status === 'fulfilled') setHealth(healthResult.value); else setHealthError(errorText(healthResult.reason, 'Network status could not be loaded.'));
       setLoading(false); setHealthLoading(false);
-    }); return () => { mounted = false; };
+    };
+    void refresh();
+    const interval = setInterval(() => void refresh(), 15000);
+    return () => { mounted = false; clearInterval(interval); };
   }, []);
   useEffect(() => {
     if (!settingsOpen) return;
@@ -855,7 +947,7 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any, chatStage: { flex: 1, minWidth: 0, padding: 8, zIndex: 1 }, canvas: { flex: 1, minWidth: 0, borderRadius: 26, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 8, overflow: 'hidden' },
   shellHeader: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 3 }, logoButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }, mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: 'rgba(36,216,255,0.15)' }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 },
+  chatHistory: { flex: 1, minHeight: 0 }, chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 24, paddingHorizontal: 22, paddingBottom: 22, gap: 16 }, userMessage: { maxWidth: 680, alignSelf: 'flex-end', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 22, backgroundColor: brand.cyan, borderWidth: 1, borderColor: brand.cyan }, assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 2 }, toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.45)' }, toolMessageText: { fontFamily: 'monospace', fontSize: 12, lineHeight: 18 }, messageText: { fontSize: 17, lineHeight: 26 }, messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageDelivery: { fontSize: 10, marginTop: 6, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
   jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 90, backgroundColor: brand.cyan, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, zIndex: 5 }, jumpText: { color: brand.obsidian, fontSize: 12, fontWeight: '800' },
   messageActions: { position: 'absolute', right: 24, bottom: 82, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 12, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, height: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
   composer: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 60, borderRadius: 30, paddingHorizontal: 9, paddingVertical: 7, marginHorizontal: 8, zIndex: 10 }, composerIconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 21, fontWeight: '500' }, composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, outlineStyle: 'none' as any }, sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, thinkingButton: { backgroundColor: brand.cyan }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 }, composerStatus: { minHeight: 22, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18 }, editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },

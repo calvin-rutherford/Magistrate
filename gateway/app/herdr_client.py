@@ -373,9 +373,15 @@ class HerdrClient:
         # normalized content gives clients stable cursors within retained
         # scrollback while keeping the public response independent of ANSI rows.
         entries = []
+        occurrences: dict[str, int] = {}
         for message in messages:
             key = f"{message.get('role')}|{message.get('kind')}|{message.get('text')}"
-            entries.append({**message, 'id': hashlib.sha256(key.encode()).hexdigest()[:20]})
+            # Terminal snapshots do not expose durable message ids. Include
+            # the occurrence number so two legitimate identical turns remain
+            # distinct while WS/poll/history reads converge on the same id.
+            occurrence = occurrences.get(key, 0)
+            occurrences[key] = occurrence + 1
+            entries.append({**message, 'id': hashlib.sha256(f'{key}|{occurrence}'.encode()).hexdigest()[:20]})
         start = 0
         end = len(entries)
         ids = [entry['id'] for entry in entries]

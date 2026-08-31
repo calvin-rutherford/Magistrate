@@ -4,6 +4,16 @@ import pytest
 from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient, parse_agent_history
 
 
+@pytest.mark.asyncio
+async def test_history_ids_keep_identical_turns_distinct(monkeypatch):
+    client = HerdrClient()
+    monkeypatch.setattr(client, 'resolve_target', AsyncMock(return_value='w1:p1'))
+    monkeypatch.setattr(client, 'read_agent_output', AsyncMock(return_value='› repeat\n\n• repeat\n\n• repeat\n'))
+    history = await client.get_agent_history('captain')
+    assert len(history['messages']) == 3
+    assert len({message['id'] for message in history['messages']}) == 3
+
+
 def test_history_parser_unwraps_hard_wrapped_prose_but_keeps_lists():
     output = """• Implemented and opened PR #24
   (https://github.com/example/pull/24).
