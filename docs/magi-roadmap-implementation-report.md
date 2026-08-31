@@ -151,3 +151,16 @@ Foreground voice tests, redeploy authenticated smoke, and the physical iPhone/ne
 7. A thin Objective reaches a real acceptance criterion with linked evidence; only then consider Phase 1 expansion.
 
 **Bottom line:** build less surface area, persist the outcome, verify it independently, and make the phone a trustworthy command surface before making it ambient. The workstation disappears only after the machinery underneath is reliable enough to deserve disappearance.
+
+## Bounded Attention action seam added after this audit
+
+The completion gap for real Attention decisions is now closed only for the
+narrow owner-alpha case documented in [`notifications.md`](./notifications.md):
+a live Firstmate `needs-decision` captain hold with an exact task id, decision
+key, and revision. The Gateway exposes server-issued `attention-action.v1`
+keys, a separate confirmation exchange, and durable idempotent outcomes for
+`approve` or `reject`; it records bounded evidence without transcripts or
+secrets. This does not change the roadmap boundary or authorize general
+provider reviews/merges, deploys, destructive/irreversible work,
+credential/security changes, or external-public actions. Physical/native and
+external deployment evidence remain open gates.

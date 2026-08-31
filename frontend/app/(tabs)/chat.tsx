@@ -109,6 +109,15 @@ function FileIcon({ color, size = 18 }: { color: string; size?: number }) {
   </Svg>;
 }
 
+/** Never says an attachment is done unless the gateway confirmed that state. */
+const attachmentStateLabel = (status?: ConversationAttachment['status']) => {
+  if (status === 'uploading') return ' · Uploading…';
+  if (status === 'stored') return ' · Stored, not yet sent';
+  if (status === 'attached') return ' · Attached';
+  if (status === 'failed') return ' · Upload failed';
+  return '';
+};
+
 const formatAttachmentSize = (size?: number) => {
   if (!size) return '';
   if (size < 1024) return `${size} B`;
@@ -170,7 +179,7 @@ function UserMessage({ message, textColor, selectable, onLongPress, onRetry, onA
   const accessibleTimestamp = formatAccessibleTimestamp(message.sentAt);
   return <View style={styles.userMessageWrap}><TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="text" accessibilityLabel={`Your message${timestamp ? `, sent ${timestamp}` : ''}${accessibleTimestamp ? `, ${accessibleTimestamp}` : ''}. Press and hold for actions.`} delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={styles.userMessage}>
     <Text testID={`user-message-text-${message.id}`} selectable={selectable} style={[styles.messageText, { color: textColor }]}>{message.text}</Text>
-    {message.attachments?.map(attachment => <Text key={`${message.id}-${attachment.name}`} testID={`message-attachment-${message.id}`} style={[styles.messageAttachment, { color: textColor }]} numberOfLines={1}>↳ {attachment.name} · {attachment.mediaType}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}</Text>)}
+    {message.attachments?.map(attachment => <Text key={`${message.id}-${attachment.name}`} testID={`message-attachment-${message.id}`} style={[styles.messageAttachment, { color: textColor }]} numberOfLines={1}>↳ {attachment.name} · {attachment.mediaType}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}{attachmentStateLabel(attachment.status)}</Text>)}
     {timestamp ? <Text testID={`message-timestamp-${message.id}`} style={[styles.messageTimestamp, { color: textColor }]}>{timestamp}</Text> : null}
     {message.delivery === 'sending' ? <Text testID={`message-sending-${message.id}`} style={styles.messageDelivery}>Sending…</Text> : null}
     {message.delivery === 'cancelled' ? <Text testID={`message-cancelled-${message.id}`} style={styles.messageDelivery}>Response stopped</Text> : null}
@@ -498,10 +507,13 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       const result = await fetchAgentHistory(target, CHAT_HISTORY_LINES, { before: historyBefore });
       // An older page is terminal-derived like every other read, so it goes
       // through the same exclusion: internally addressed records are never
-      // restored as messages of either role.
+      // restored as messages of either role. Server-known rows must also keep
+      // the gateway's stable id - minting a local one would break cursor/dedup
+      // identity and present a row we cannot re-address, so a row without one
+      // is dropped instead.
       prependConversationMessages(target, sanitizeTerminalHistory(result.messages).reduce<ConversationMessage[]>((rows, message) => {
-        if (message.kind === 'control') return rows;
-        rows.push({ id: message.id || `history-${Date.now()}-${Math.random()}`, role: message.role, kind: message.kind, text: message.text, source: 'text', sources: message.sources, thinkingSummary: message.thinkingSummary, runId: message.runId, regenerateSafe: message.regenerateSafe, progress: message.progress || (message.role === 'assistant' ? 'complete' : undefined) });
+        if (message.kind === 'control' || typeof message.id !== 'string' || !message.id) return rows;
+        rows.push({ id: message.id, role: message.role, kind: message.kind, text: message.text, source: 'text', sources: message.sources, thinkingSummary: message.thinkingSummary, runId: message.runId, regenerateSafe: message.regenerateSafe, progress: message.progress || (message.role === 'assistant' ? 'complete' : undefined) });
         return rows;
       }, []));
       result.messages.forEach(message => {
@@ -820,7 +832,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     const messageId = editId || queuedMessageId || `u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const token = ++promptTokenRef.current;
     const controller = new AbortController();
-    const attachmentSummaries: ConversationAttachment[] = pendingAttachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size }));
+    // The bubble shows the file as uploading until the gateway confirms it. A
+    // local pick is never rendered as a completed attachment.
+    const attachmentSummaries: ConversationAttachment[] = pendingAttachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size, status: attachment.uploaded ? 'stored' : 'uploading', uploadId: attachment.uploaded?.upload_id }));
     pendingAttachmentsByMessageRef.current.set(messageId, pendingAttachments);
     if (editId || queuedMessageId) {
       updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'working' });
@@ -841,16 +855,22 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         if (!isCurrent()) return;
         uploaded.push(result);
         setAttachments(current => current.map(item => item.id === attachment.id ? { ...item, status: 'uploaded', uploaded: result } : item));
+        // Reflect each confirmed upload as it lands rather than after the whole batch.
+        updateConversationMessageState(target, messageId, { attachments: attachmentSummaries.map(summary => summary.name === result.filename && !summary.uploadId ? { ...summary, status: 'stored', uploadId: result.upload_id } : summary) });
       }
       const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded, messageId, controller.signal);
       if (!isCurrent()) return;
       if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The message was not accepted.');
-      updateConversationMessageState(target, messageId, { delivery: 'sent', progress: 'complete', attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size })) });
+      // Only the server-confirmed records are kept, and 'attached' is claimed
+      // solely because the gateway accepted the prompt carrying this manifest.
+      updateConversationMessageState(target, messageId, { delivery: 'sent', progress: 'complete', attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size, status: 'attached' as const, uploadId: item.upload_id })) });
       const pendingIds = new Set(pendingAttachments.map(attachment => attachment.id));
       setAttachments(current => current.filter(item => !pendingIds.has(item.id)));
       const reply = conversationalPromptResponse(response?.response);
       if (reply) {
-        appendMessage({ id: `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text', audience: 'primary', progress: response.progress || 'complete', sources: response.sources, thinkingSummary: response.thinkingSummary, runId: response.runId, regenerateSafe: response.regenerateSafe });
+        // A server-issued run id is the stable identity for a server-known
+        // response; the local fallback applies only when the gateway sends none.
+        appendMessage({ id: response.runId ? `run-${response.runId}` : `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text', audience: 'primary', progress: response.progress || 'complete', sources: response.sources, thinkingSummary: response.thinkingSummary, runId: response.runId, regenerateSafe: response.regenerateSafe });
         activePromptRef.current = null; setIsThinking(false); return;
       }
       const pollForReply = async () => {
@@ -863,7 +883,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     } catch (error) {
       if (!isCurrent()) return;
       activePromptRef.current = null;
-      updateConversationMessageState(target, messageId, { delivery: 'failed', progress: 'failed' });
+      updateConversationMessageState(target, messageId, { delivery: 'failed', progress: 'failed', attachments: attachmentSummaries.map(summary => summary.status === 'stored' ? summary : { ...summary, status: 'failed' as const }) });
       setAttachments(current => current.map(item => pendingAttachments.some(pending => pending.id === item.id) ? { ...item, status: 'failed' } : item));
       setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); setIsThinking(false);
     }
@@ -916,7 +936,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (isThinking) {
       const sentAt = Date.now();
       const messageId = editingMessageId || `u-${sentAt}-${Math.random().toString(36).slice(2, 10)}`;
-      const attachmentSummaries: ConversationAttachment[] = attachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size }));
+      const attachmentSummaries: ConversationAttachment[] = attachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size, status: attachment.uploaded ? 'stored' : 'uploading', uploadId: attachment.uploaded?.upload_id }));
       if (editingMessageId) updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'queued' });
       else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt, source: 'text', attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'queued' });
       setQueuedPrompts(queue => [...queue, { id: `q-${sentAt}`, messageId, text: trimmed, attachments: [...attachments], editId: editingMessageId }]);

@@ -7,7 +7,15 @@ class TeamsProviderAdapter(ProviderAdapter):
         return 'teams'
 
     def is_configured(self) -> bool:
+        # No Microsoft Teams OAuth application, redirect URI, or tenant consent exists for
+        # owner alpha. Reporting False keeps the surface honestly unavailable.
         return False
+
+    def is_deferred(self) -> bool:
+        return True
+
+    def unavailable_reason(self) -> str:
+        return 'Microsoft Teams is deferred for this release. It becomes available only when Microsoft Teams OAuth credentials are configured.'
 
     def default_scopes(self) -> List[str]:
         return ['User.Read', 'Chat.Read', 'ChannelMessage.Read.All']

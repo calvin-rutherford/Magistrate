@@ -83,7 +83,7 @@ export default function HomeScreen() {
     if (!result.ok) Alert.alert('Unable to open attention item', result.message);
   };
 
-  const healthStatus = loading ? 'CONNECTING' : healthError ? 'UNAVAILABLE' : health?.status === 'healthy' ? (health.herdr_socket_connected ? 'OPERATIONAL' : 'DEGRADED') : (health?.status || 'UNKNOWN').toUpperCase();
+  const healthStatus = loading ? 'CONNECTING' : healthError ? 'UNAVAILABLE' : health?.status === 'healthy' && health.herdr_socket_connected ? 'OPERATIONAL' : health?.status === 'healthy' ? 'DEGRADED' : (health?.status || 'UNKNOWN').toUpperCase();
   const healthColor = healthError || healthStatus === 'UNAVAILABLE' ? '#FCA5A5' : healthStatus === 'OPERATIONAL' ? '#34D399' : '#F59E0B';
   const healthSubtext = loading ? 'Loading gateway status' : healthError ? 'Gateway status unavailable' : health?.herdr_socket_connected ? 'Gateway and Herdr connected' : 'Gateway reachable; Herdr unavailable';
 
@@ -133,6 +133,11 @@ export default function HomeScreen() {
             <StatusRing statusText={healthStatus} statusColor={healthColor} subText={healthSubtext} />
           </TouchableOpacity>
           <Text style={styles.sphereHint}>TAP SPHERE FOR SYSTEM TELEMETRY ↗</Text>
+          {healthError ? <Text testID="diagnostics-health-error" accessibilityRole="alert" style={styles.errorText}>{healthError}</Text> : null}
+          {/* A version we did not observe is never substituted, and any source
+              the gateway reports as degraded is named rather than hidden. */}
+          {health ? <Text testID="diagnostics-herdr-version" style={styles.sphereHint}>HERDR VERSION: {health.herdr_version || 'NOT REPORTED'}</Text> : null}
+          {health?.degraded_sources?.length ? <Text testID="diagnostics-degraded-sources" style={styles.sphereHint}>UNAVAILABLE SOURCES: {health.degraded_sources.join(', ').toUpperCase()}</Text> : null}
         </View>
 
         <View style={styles.sectionHeader}>

@@ -362,10 +362,13 @@ export interface UsageSummary {
 }
 
 export interface HealthInfo {
-  status: string;
+  status: 'healthy' | 'degraded' | string;
   service: string;
   herdr_socket_connected: boolean;
-  herdr_version?: string;
+  /** Null whenever the gateway did not observe a live Herdr snapshot. */
+  herdr_version?: string | null;
+  degraded_sources?: string[];
+  firstmate_available?: boolean;
   firstmate_tasks_count?: number;
 }
 
@@ -415,7 +418,7 @@ export interface ExecutionSettings {
   unavailable_behavior: 'error' | 'fallback';
   migration_supported: boolean;
   credential_storage?: string;
-  credentials?: Array<{ credential_key: string; configured: boolean }>;
+  credentials?: { credential_key: string; configured: boolean }[];
 }
 
 export interface TaskInfo {
@@ -440,6 +443,7 @@ export interface AttentionItem {
   target_id?: string;
   project: string;
   requires_action?: boolean;
+  action?: AttentionAction;
 }
 
 export interface NotificationEvent extends AttentionItem {
@@ -516,14 +520,56 @@ export interface UserProfile {
   active_theme?: string;
 }
 
+export type AuthProviderStatus = 'connected' | 'disconnected' | 'expired' | 'unavailable';
+
 export interface AuthProviderInfo {
   provider: string;
-  status: 'connected' | 'disconnected' | 'expired';
+  status: AuthProviderStatus;
   username: string;
   capabilities: string[];
   auth_url: string | null;
-  available?: boolean;
-  configuration?: 'available' | 'unavailable' | string;
+  available: boolean;
+  /** Intentionally out of scope for this release; can never be connected. */
+  deferred: boolean;
+  /** Safe, server-authored explanation for any non-connected state. */
+  unavailable_reason: string | null;
+  configuration: 'available' | 'unavailable';
+}
+
+/**
+ * Decode one provider row so the UI cannot render an unbacked connection.
+ *
+ * 'connected' survives only when the gateway says the provider is available and
+ * reports that exact status. Anything else - an unknown status string, a
+ * connected status on an unavailable provider, a deferred provider - fails
+ * closed to the honest state. The gateway already enforces this; repeating it
+ * here means a stale or spoofed payload still cannot produce a fake connection.
+ */
+export function normalizeAuthProvider(raw: unknown): AuthProviderInfo | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.provider !== 'string' || !value.provider.trim()) return null;
+  const deferred = value.deferred === true;
+  const available = value.available === true && !deferred;
+  const reported = value.status;
+  const status: AuthProviderStatus = !available
+    ? 'unavailable'
+    : reported === 'connected' || reported === 'expired' ? reported : 'disconnected';
+  const reason = typeof value.unavailable_reason === 'string' && value.unavailable_reason.trim()
+    ? value.unavailable_reason.trim().slice(0, 300)
+    : status === 'unavailable' ? 'This provider is unavailable on the connected gateway.' : null;
+  return {
+    provider: value.provider.trim().slice(0, 64),
+    status,
+    // An identity is only meaningful next to a live grant.
+    username: status === 'connected' || status === 'expired' ? String(value.username || '').slice(0, 160) : '',
+    capabilities: Array.isArray(value.capabilities) ? value.capabilities.filter((item): item is string => typeof item === 'string').slice(0, 20) : [],
+    auth_url: typeof value.auth_url === 'string' ? value.auth_url : null,
+    available,
+    deferred,
+    unavailable_reason: reason,
+    configuration: available ? 'available' : 'unavailable',
+  };
 }
 
 export interface GitHubPR {
@@ -540,7 +586,7 @@ export interface GitHubPR {
   mergeable: string;
   summary: string;
   body: string;
-  reviews: Array<{ author: string; state: string; submitted_at?: string }>;
+  reviews: { author: string; state: string; submitted_at?: string }[];
   created_at: string | null;
   updated_at: string | null;
   merged_at: string | null;
@@ -603,6 +649,47 @@ export async function fetchAttention(): Promise<AttentionItem[]> {
   return checkedJson<AttentionItem[]>(res);
 }
 
+export interface AttentionAction {
+  schema_version: 'attention-action.v1';
+  action_key: string;
+  decision_key: string;
+  source_revision: string;
+  target: { provider: 'firstmate'; task_id: string; decision_key: string };
+  allowed_actions: Array<'approve' | 'reject'>;
+  confirmation_required: true;
+  consequence: string;
+  reversible: boolean;
+  status: 'available' | 'unsupported' | 'pending' | 'succeeded' | 'failed' | 'stale' | string;
+  reason?: string | null;
+}
+
+export interface AttentionActionConfirmation {
+  schema_version: 'attention-action.v1';
+  status: 'confirmation_required';
+  action_key: string;
+  action: 'approve' | 'reject';
+  decision_key: string;
+  source_revision: string;
+  target: AttentionAction['target'];
+  consequence: string;
+  reversible: boolean;
+  confirmation_token: string;
+  expires_at: number;
+}
+
+export interface AttentionActionOutcome {
+  schema_version: 'attention-action.v1';
+  item_id?: string | null;
+  action_key: string;
+  decision_key: string;
+  action: 'approve' | 'reject';
+  target: AttentionAction['target'];
+  status: 'pending' | 'succeeded' | 'failed' | 'rejected' | 'stale' | string;
+  evidence: Record<string, string | boolean | number | null>;
+  timestamp: number;
+  idempotent?: boolean;
+}
+
 export interface UnifiedAttentionRecord {
   id: string;
   provider: string;
@@ -620,6 +707,7 @@ export interface UnifiedAttentionRecord {
   consequential?: boolean;
   revision?: string;
   context?: Record<string, string | number | boolean | null>;
+  action?: AttentionAction;
 }
 
 export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]> {
@@ -628,6 +716,32 @@ export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]>
   const data = await checkedJson<unknown>(res);
   if (!Array.isArray(data)) throw new Error('Gateway returned invalid attention data.');
   return data as UnifiedAttentionRecord[];
+}
+
+export async function prepareAttentionAction(actionKey: string, action: 'approve' | 'reject', targetId: string): Promise<AttentionActionConfirmation> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}/prepare`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action_key: actionKey, action, target_id: targetId }),
+  });
+  return checkedJson<AttentionActionConfirmation>(res);
+}
+
+export async function executeAttentionAction(actionKey: string, action: 'approve' | 'reject', targetId: string, confirmationToken: string): Promise<AttentionActionOutcome> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}/execute`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action_key: actionKey, action, target_id: targetId, confirmation_token: confirmationToken }),
+  });
+  return checkedJson<AttentionActionOutcome>(res);
+}
+
+export async function fetchAttentionAction(actionKey: string): Promise<AttentionAction | AttentionActionOutcome> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}`);
+  return checkedJson<AttentionAction | AttentionActionOutcome>(res);
+}
+
+export async function fetchAttentionActionForItem(itemId: string): Promise<AttentionAction | AttentionActionOutcome> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/by-item/${encodeURIComponent(itemId)}`);
+  return checkedJson<AttentionAction | AttentionActionOutcome>(res);
 }
 
 export async function fetchRecentActivity(limit = 20): Promise<RecentActivityFeed> {
@@ -666,6 +780,27 @@ export interface ChatUpload {
   filename: string;
   media_type: string;
   size: number;
+  /** Server-issued processing state. Only 'stored' means the bytes landed. */
+  status: 'stored';
+  /** Whether the gateway associated this upload with a chat message. */
+  attached: boolean;
+}
+
+/** Strip an upload record down to the fields the prompt contract accepts. */
+export function attachmentManifest(uploads: ChatUpload[]): Array<Pick<ChatUpload, 'upload_id' | 'filename' | 'media_type' | 'size'>> {
+  return uploads.map(({ upload_id, filename, media_type, size }) => ({ upload_id, filename, media_type, size }));
+}
+
+function normalizeChatUpload(raw: unknown): ChatUpload {
+  const value = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  // A 200 is not evidence the file was processed. Require the server-issued
+  // state before the composer is allowed to show anything but a failure.
+  if (value.status !== 'stored') throw new Error('The gateway did not confirm the upload was stored.');
+  if (typeof value.upload_id !== 'string' || !value.upload_id) throw new Error('Gateway returned no upload record.');
+  if (typeof value.filename !== 'string' || typeof value.media_type !== 'string' || typeof value.size !== 'number' || !Number.isSafeInteger(value.size) || value.size < 0) {
+    throw new Error('Gateway returned an invalid upload record.');
+  }
+  return { upload_id: value.upload_id, filename: value.filename, media_type: value.media_type, size: value.size, status: 'stored', attached: value.attached === true };
 }
 
 export function validateChatAttachment(filename: string, mimeType: string | undefined, size: number | undefined): string | null {
@@ -694,9 +829,9 @@ export async function uploadChatFile(uri: string, filename: string, mimeType?: s
   }
   if (messageId) formData.append('message_id', messageId);
   const res = await authorizedFetch(GATEWAY_URL + '/uploads', { method: 'POST', body: formData });
-  const data = await checkedJson<{ uploads?: ChatUpload[] }>(res);
+  const data = await checkedJson<{ uploads?: unknown[] }>(res);
   if (!data.uploads?.length) throw new Error('Gateway returned no upload record.');
-  return data.uploads[0];
+  return normalizeChatUpload(data.uploads[0]);
 }
 
 export async function uploadUserAvatar(imageUri: string, mimeType: string = 'image/jpeg'): Promise<any> {
@@ -725,7 +860,9 @@ export async function uploadUserAvatar(imageUri: string, mimeType: string = 'ima
 export async function fetchAuthProviders(): Promise<AuthProviderInfo[]> {
   const res = await authorizedFetch(GATEWAY_URL + '/auth/providers', {
   });
-  return checkedJson<AuthProviderInfo[]>(res);
+  const data = await checkedJson<unknown>(res);
+  if (!Array.isArray(data)) throw new Error('Gateway returned invalid provider data.');
+  return data.map(normalizeAuthProvider).filter((item): item is AuthProviderInfo => item !== null);
 }
 
 export async function fetchUsage(): Promise<UsageSummary> {
@@ -808,7 +945,7 @@ async function requireOk<T>(res: Response): Promise<T> {
 
 export async function fetchVoiceInputCapabilities(): Promise<VoiceInputCapabilities> {
   const res = await authorizedFetch(GATEWAY_URL + '/voice/capabilities');
-  const data = await checkedJson<{ modes?: Array<{ id: VoiceInputMode; label: string; available: boolean; reason?: string }>; provider?: string; configured?: boolean }>(res);
+  const data = await checkedJson<{ modes?: { id: VoiceInputMode; label: string; available: boolean; reason?: string }[]; provider?: string; configured?: boolean }>(res);
   if (!Array.isArray(data.modes)) throw new Error('Gateway returned invalid voice capabilities.');
   return {
     modes: data.modes.map(mode => ({ id: mode.id, label: mode.label, available: mode.available ? 'available' : 'unavailable', reason: mode.reason })),
@@ -884,6 +1021,8 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
 }
 
 export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[], messageId?: string, signal?: AbortSignal) {
+  // Only server-confirmed, stored uploads may be referenced in a prompt.
+  if (attachments?.some(item => item.status !== 'stored')) throw new Error('An attachment was not confirmed as stored by the gateway.');
   const res = await authorizedFetch(GATEWAY_URL + '/captain/prompt', {
     method: 'POST',
     signal,
@@ -897,7 +1036,7 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       text,
       target,
       ...(profileId !== undefined ? { profile_id: profileId, ...(harness && model ? { harness, model } : {}) } : harness && model ? { harness, model } : {}),
-      ...(attachments?.length ? { attachments } : {}),
+      ...(attachments?.length ? { attachments: attachmentManifest(attachments) } : {}),
       ...(messageId ? { message_id: messageId } : {})
     })
   });

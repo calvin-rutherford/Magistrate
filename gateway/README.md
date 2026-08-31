@@ -11,6 +11,31 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 `v1`. Do not commit either value. `MAGISTRATE_ENV=development` or
 `MAGISTRATE_ENV=test` permits an in-memory ephemeral key for local-only use.
 
+## Attention action API
+
+`GET /api/v1/attention/unified` may return an `attention-action.v1` `action`
+object for a safe, concrete Firstmate `needs-decision` item. The object binds a
+server-issued `action_key` to the exact Firstmate `task_id`, `decision_key`, and
+source revision. The owner-only command scope is required for both steps:
+
+1. `POST /api/v1/attention/actions/{action_key}/prepare` with
+   `{action_key, action: "approve"|"reject", target_id}`. The response is a
+   short-lived confirmation token and the exact target/consequence/reversible
+   contract to show the captain.
+2. `POST /api/v1/attention/actions/{action_key}/execute` with the same fields
+   plus `confirmation_token` after an explicit confirmation.
+
+The Gateway re-reads live Attention before both steps, rejects stale, replayed,
+mismatched, unauthorized, risky, and unconfirmed requests, and stores only
+bounded safe evidence. Retries return the recorded outcome without executing
+again. `GET /api/v1/attention/actions/{action_key}` returns the live action or
+recorded outcome for reload reconciliation. Notification acknowledgement
+endpoints remain read/unread bookkeeping and cannot execute an action.
+
+This API is not general authority. GitHub reviews/merges, deploys, destructive
+or irreversible operations, external communications, credentials, and
+security-sensitive actions are outside the supported boundary.
+
 OAuth credentials are stored as `v<version>:<Fernet token>`. Current reads
 accept only the configured current version and raise on malformed, tampered,
 unversioned, or otherwise unauthenticated values. They never return the input

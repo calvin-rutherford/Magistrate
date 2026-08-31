@@ -7,7 +7,15 @@ class JiraProviderAdapter(ProviderAdapter):
         return 'jira'
 
     def is_configured(self) -> bool:
+        # No Jira OAuth application, redirect URI, or tenant consent exists for
+        # owner alpha. Reporting False keeps the surface honestly unavailable.
         return False
+
+    def is_deferred(self) -> bool:
+        return True
+
+    def unavailable_reason(self) -> str:
+        return 'Jira is deferred for this release. It becomes available only when Jira OAuth credentials are configured.'
 
     def default_scopes(self) -> List[str]:
         return ['read:jira-user', 'read:jira-work', 'offline_access']

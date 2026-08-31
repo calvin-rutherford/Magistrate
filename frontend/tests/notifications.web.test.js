@@ -1,39 +1,27 @@
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
 const test = require('node:test');
-const puppeteer = require('puppeteer-core');
-
-const PORT = Number(process.env.MAGISTRATE_WEB_TEST_PORT) || 8096;
-const BASE = `http://127.0.0.1:${PORT}`;
-let server;
-let browser;
+const { launchBrowser, startWebServer } = require('./helpers/web-server');
 
 const events = [
-  { id: 'question-1', provider: 'firstmate', title: 'Deployment choice', subtitle: 'Choose the rollout window.', priority: 'HIGH', status: 'needs-decision', project: 'Magistrate', target_id: 'deploy-1', context: { task_id: 'task-1', decision_key: 'deploy-1' }, url: '/attention?item=question-1', deep_link: '/attention?item=question-1', requires_action: true, notification_kind: 'captain_question', revision: '1' },
+  { id: 'question-1', provider: 'firstmate', title: 'Deployment choice', subtitle: 'Choose the rollout window.', priority: 'HIGH', status: 'needs-decision', project: 'Magistrate', target_id: 'deploy-1', context: { task_id: 'task-1', decision_key: 'deploy-1' }, action: { schema_version: 'attention-action.v1', action_key: 'aa1_attention_question_1', decision_key: 'deploy-1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, allowed_actions: ['approve', 'reject'], confirmation_required: true, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, status: 'available' }, url: '/attention?item=question-1', deep_link: '/attention?item=question-1', requires_action: true, notification_kind: 'captain_question', revision: '1' },
   { id: 'pr-2', provider: 'github', title: 'Review ready', subtitle: 'A pull request needs your review.', priority: 'MEDIUM', status: 'ready', url: '/pr-detail?number=2', deep_link: '/pr-detail?number=2', requires_action: true, notification_kind: 'pr_ready', revision: '1' }
 ];
 
-async function waitForServer() {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    try { if ((await fetch(`${BASE}/chat`)).ok) return; } catch {}
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-  throw new Error('Expo web server did not become ready');
-}
+let server;
+let browser;
+// Assigned once the dev server has picked a port; the suites read it at call
+// time, never at module load.
+let BASE;
 
 test.before(async () => {
-  server = spawn(path.join(process.cwd(), 'node_modules', '.bin', 'expo'), ['start', '--web', '--port', String(PORT)], {
-    cwd: process.cwd(), env: { ...process.env, CI: '1' }, stdio: 'ignore'
-  });
-  await waitForServer();
-  browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+  server = await startWebServer({ readyPath: '/chat' });
+  BASE = server.base;
+  browser = await launchBrowser();
 });
 
 test.after(async () => {
   await browser?.close();
-  server?.kill('SIGTERM');
+  await server?.stop();
 });
 
 async function openApp({ notificationMode, eventBatch = [], attention = events, url = '/chat' } = {}) {
@@ -41,6 +29,7 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
   await page.evaluateOnNewDocument(({ mode, batch, attentionItems }) => {
     window.__notificationEvents = [...batch];
     window.__notificationCalls = [];
+    window.__attentionActionCalls = [];
     window.__browserNotifications = [];
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (resource, options) => {
@@ -61,6 +50,19 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
         window.__notificationCalls.push({ url: requestUrl, method: options?.method });
         const next = window.__notificationEvents.shift() || [];
         return Promise.resolve(new Response(JSON.stringify({ events: next, unread: next }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (requestUrl.includes('/api/v1/attention/actions/by-item/')) {
+        const action = attentionItems.find(item => item.action)?.action;
+        return Promise.resolve(new Response(JSON.stringify(action || { status: 'unsupported' }), { status: action ? 200 : 404, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (requestUrl.includes('/api/v1/attention/actions/') && requestUrl.endsWith('/prepare')) {
+        window.__attentionActionCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
+        const requestBody = JSON.parse(options?.body || '{}');
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'attention-action.v1', status: 'confirmation_required', action_key: 'aa1_attention_question_1', action: requestBody.action || 'approve', decision_key: 'deploy-1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, confirmation_token: 'confirmation-token-123456', expires_at: 4102444800 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (requestUrl.includes('/api/v1/attention/actions/') && requestUrl.endsWith('/execute')) {
+        window.__attentionActionCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'attention-action.v1', action_key: 'aa1_attention_question_1', action: 'approve', decision_key: 'deploy-1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, status: 'succeeded', evidence: { provider: 'firstmate', decision_key: 'deploy-1', target_id: 'task-1', operation: 'captain-hold-answer', recorded: true }, timestamp: 1700000000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (requestUrl.includes('/api/v1/attention/unified')) return Promise.resolve(new Response(JSON.stringify(attentionItems), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/agents')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -117,6 +119,24 @@ test('a PR Attention target preserves exact in-app detail routing and metadata',
   await page.click('[data-testid="attention-item-pr-2"]');
   await page.waitForFunction(() => location.pathname === '/pr-detail' && document.body.innerText.includes('Full PR context'));
   assert.match(await page.evaluate(() => document.body.innerText), /acme\/ship · #2|fix\/attention|3 passed, 0 failed/);
+  await page.close();
+});
+
+test('Attention approve/reject requires explicit confirmation and displays bounded evidence', async () => {
+  const page = await openApp({ notificationMode: 'unsupported', url: '/attention', eventBatch: [[]] });
+  await page.click('[data-testid="attention-item-question-1"]');
+  await page.click('[data-testid="attention-reject-question-1"]');
+  await page.waitForSelector('[data-testid="attention-confirmation"]');
+  assert.match(await page.$eval('[data-testid="attention-confirmation"]', node => node.textContent), /REJECT|task-1|Consequence|Reversible: Yes/);
+  assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 1, 'prepare is not execution');
+  await page.click('[data-testid="attention-action-cancel"]');
+  assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 1, 'cancel never executes');
+  await page.click('[data-testid="attention-approve-question-1"]');
+  await page.waitForSelector('[data-testid="attention-confirmation"]');
+  await page.click('[data-testid="attention-action-confirm"]');
+  await page.waitForSelector('[data-testid="attention-action-evidence"]');
+  assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 3, 'only prepare and one execute are sent');
+  assert.match(await page.$eval('[data-testid="attention-action-evidence"]', node => node.textContent), /SUCCEEDED|deploy-1|task-1/);
   await page.close();
 });
 

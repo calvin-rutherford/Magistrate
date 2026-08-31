@@ -1,32 +1,26 @@
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const path = require('node:path');
 const test = require('node:test');
-const puppeteer = require('puppeteer-core');
+const path = require('node:path');
+const { launchBrowser, startWebServer } = require('./helpers/web-server');
 
-const PORT = Number(process.env.MAGISTRATE_WEB_TEST_PORT) || 8091;
-const URL = `http://127.0.0.1:${PORT}/chat`;
 let server;
 let browser;
-
-async function waitForServer() {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    try { if ((await fetch(URL)).ok) return; } catch {}
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-  throw new Error('Expo web server did not become ready');
-}
+// Assigned once the dev server has picked a port; the suites read it at call
+// time, never at module load.
+let URL;
 
 test.before(async () => {
-  server = spawn(path.join(process.cwd(), 'node_modules', '.bin', 'expo'), ['start', '--web', '--port', String(PORT)], { cwd: process.cwd(), env: { ...process.env, CI: '1' }, stdio: 'ignore' });
-  await waitForServer();
+  server = await startWebServer({ readyPath: '/chat' });
+  URL = `${server.base}/chat`;
   // Fake device/UI flags let getUserMedia() resolve with a synthetic audio
   // track instead of prompting for real microphone hardware/permission.
-  browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+  browser = await launchBrowser({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
 });
 
-test.after(async () => { await browser?.close(); server?.kill('SIGTERM'); });
+test.after(async () => {
+  await browser?.close();
+  await server?.stop();
+});
 
 async function openChat(viewport, emptyInventory = false, promptResponseText = '', route = URL, visualViewportShortfall = 0, historyRace = false, preserveStorage = false, colorScheme = 'light', seedMessages = [], liveUpdates = false, chatHistoryScenario = null) {
   const page = await browser.newPage();
@@ -87,7 +81,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/uploads')) {
         uploadCount += 1;
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
-        return Promise.resolve(new Response(JSON.stringify({ uploads: [{ upload_id: `upload-${String(uploadCount).padStart(16, '0')}`, filename: 'package.json', media_type: 'application/json', size: 123 }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        return Promise.resolve(new Response(JSON.stringify({ uploads: [{ upload_id: `upload-${String(uploadCount).padStart(16, '0')}`, filename: 'package.json', media_type: 'application/json', size: 123, status: 'stored', attached: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/captain/prompt')) {
         promptSent = true;
@@ -446,7 +440,7 @@ test('navigating into chat from another screen preserves the viewport scale and 
       return nativeFetch(resource, options);
     };
   });
-  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'networkidle0' });
+  await page.goto(`${server.base}/`, { waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.getElementById('error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForSelector('a[href="/chat"]');
   const before = await page.evaluate(() => ({ scale: window.visualViewport.scale, innerWidth: window.innerWidth, innerHeight: window.innerHeight }));

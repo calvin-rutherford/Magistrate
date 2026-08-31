@@ -52,6 +52,16 @@ export default function StatusScreen() {
             <Text style={styles.metricLabel}>SERVICE</Text>
             <Text style={styles.metricValue}>{health?.service || 'Unavailable'}</Text>
           </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>HERDR VERSION</Text>
+            {/* Null whenever the gateway did not observe a live snapshot; a
+                placeholder build number here would be an invented metric. */}
+            <Text testID="status-herdr-version" style={styles.metricValue}>{health?.herdr_version || 'Not reported'}</Text>
+          </View>
+          {health?.degraded_sources?.length ? <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>UNAVAILABLE SOURCES</Text>
+            <Text testID="status-degraded-sources" style={styles.metricValue}>{health.degraded_sources.join(', ').toUpperCase()}</Text>
+          </View> : null}
         </GlassSurface>
 
         <TouchableOpacity onPress={load} accessibilityRole="button" accessibilityLabel="Refresh system status"><Text style={styles.refreshText}>REFRESH LIVE STATUS</Text></TouchableOpacity>

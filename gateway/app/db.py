@@ -409,6 +409,43 @@ def init_db():
     )
     ''')
 
+    # Attention actions are a separate authority from notification state.  The
+    # action key binds one live source revision and exact target; outcomes are
+    # retained so retries cannot execute the decision twice.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS attention_action_outcomes (
+        action_key TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        decision_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        source_revision TEXT NOT NULL,
+        status TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )
+    ''')
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(attention_action_outcomes)")}
+    if "item_id" not in columns:
+        cursor.execute("ALTER TABLE attention_action_outcomes ADD COLUMN item_id TEXT NOT NULL DEFAULT ''")
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS attention_action_confirmations (
+        confirmation_hash TEXT PRIMARY KEY,
+        action_key TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER
+    )
+    ''')
+
     cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = 'default_user'")
     if not cursor.fetchone():
         now = int(time.time())
@@ -484,9 +521,15 @@ def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # A stored 'connected' row is not by itself evidence of a usable account.
+    # Join the credential so callers can tell a real, unexpired OAuth grant from
+    # a stale row and never present a connected state without one.
     cursor.execute('''
-    SELECT id, provider, provider_user_id, provider_username, status, scopes, updated_at
-    FROM connected_accounts WHERE user_id = ?
+    SELECT a.id, a.provider, a.provider_user_id, a.provider_username, a.status, a.scopes, a.updated_at,
+           c.access_token_enc, c.expires_at
+    FROM connected_accounts a
+    LEFT JOIN oauth_credentials c ON c.connected_account_id = a.id
+    WHERE a.user_id = ?
     ''', (user_id,))
     rows = cursor.fetchall()
     conn.close()
@@ -500,7 +543,9 @@ def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]
             'provider_username': r[3],
             'status': r[4],
             'scopes': r[5].split(',') if r[5] else [],
-            'updated_at': r[6]
+            'updated_at': r[6],
+            'has_credential': bool(r[7]),
+            'credential_expires_at': r[8] if isinstance(r[8], int) else None,
         })
     return result
 
@@ -561,6 +606,9 @@ def disconnect_account(user_id: str, provider: str) -> bool:
     now = int(time.time())
 
     cursor.execute("UPDATE connected_accounts SET status = 'disconnected', updated_at = ? WHERE id = ?", (now, account_id))
+    # A disconnected account must not retain a credential: leaving the row would
+    # let a later listing reconstruct a connected-looking state without consent.
+    cursor.execute('DELETE FROM oauth_credentials WHERE connected_account_id = ?', (account_id,))
     conn.commit()
     conn.close()
     return True

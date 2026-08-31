@@ -5,14 +5,21 @@ import { agentDisplayName } from '../../src/services/AgentStatus';
 
 export default function FleetScreen() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<boolean>(false);
 
   useEffect(() => {
     const loadFleet = async () => {
       try {
         const ag = await fetchAgents();
         setAgents(ag || []);
+        setError(null);
       } catch (e) {
-        console.error(e);
+        // An unreachable fleet is not an empty fleet. Clear the list and say so.
+        setAgents([]);
+        setError(e instanceof Error && e.message ? e.message : 'The agent fleet could not be loaded.');
+      } finally {
+        setLoaded(true);
       }
     };
     loadFleet();
@@ -24,8 +31,12 @@ export default function FleetScreen() {
       <Text style={styles.subHeader}>Live execution sessions</Text>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>HERDR ACTIVE SESSIONS ({agents.length})</Text>
-        {agents.length === 0 ? (
+        <Text style={styles.sectionTitle}>HERDR ACTIVE SESSIONS ({!loaded ? '…' : error ? '—' : agents.length})</Text>
+        {error ? (
+          <Text testID="fleet-error" accessibilityRole="alert" style={styles.errorText}>{error}</Text>
+        ) : !loaded ? (
+          <Text style={styles.emptyText}>Reading live Herdr sessions…</Text>
+        ) : agents.length === 0 ? (
           <Text style={styles.emptyText}>No Herdr agent sessions active.</Text>
         ) : (
           agents.map((ag) => (
@@ -47,6 +58,7 @@ const styles = StyleSheet.create({
   section: { marginBottom: 20 },
   sectionTitle: { fontSize: 14, fontWeight: 'bold', color: '#94A3B8', borderBottomWidth: 1, borderBottomColor: '#23304D', paddingBottom: 6, marginBottom: 10 },
   emptyText: { color: '#64748B', fontSize: 13, fontStyle: 'italic' },
+  errorText: { color: '#FCA5A5', fontSize: 13 },
   card: { backgroundColor: '#161F33', borderRadius: 8, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: '#23304D' },
   cardTitle: { fontSize: 15, fontWeight: 'bold', color: '#F8FAFC' },
   cardDetail: { fontSize: 12, color: '#94A3B8', marginTop: 4 }

@@ -76,12 +76,14 @@ export function isTerminalRevision(previous: string, next: string): boolean {
 }
 
 /**
- * Ids minted locally by the composer or a synchronous reply. Only these carry
- * text the captain actually submitted, so terminal output must never rewrite
- * them - that is what keeps two identical messages sent at different times two
- * separate rows.
+ * Ids for rows whose text is already authoritative: the composer's own
+ * submissions and a synchronous gateway reply (`run-<runId>` when the gateway
+ * issued a run id, else the local `a-` fallback). Terminal output must never
+ * rewrite these - it would replace the captain's submitted text or the
+ * gateway's complete reply with a reflowed terminal rendering, and it is what
+ * keeps two identical messages sent at different times two separate rows.
  */
-const LOCALLY_AUTHORED_ID = /^(?:u-|a-|q-|voice-u-|voice-a-)/;
+const LOCALLY_AUTHORED_ID = /^(?:u-|a-|q-|run-|voice-u-|voice-a-)/;
 export function isLocallyAuthoredId(id: string): boolean {
   return LOCALLY_AUTHORED_ID.test(id);
 }

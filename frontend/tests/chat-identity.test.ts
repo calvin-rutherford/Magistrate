@@ -61,6 +61,10 @@ test('a growing terminal composer row collapses into one row, but a submitted me
   const submitted = { id: 'u-1756000000000-abc', role: 'user', kind: 'conversation', text: "let's start using the pi" };
   assert.equal(revisionTargetId([submitted], { role: 'user', kind: 'conversation', text: "let's start using the pi harness" }), null);
   assert.equal(isLocallyAuthoredId('u-1756000000000-abc'), true);
+  // A synchronous gateway reply keyed by its run id is complete text; a later
+  // terminal read of the same reply must not truncate or reflow it.
+  assert.equal(revisionTargetId([{ id: 'run-abc123', role: 'assistant', kind: 'conversation', text: 'The complete gateway reply.' }], { role: 'assistant', kind: 'conversation', text: 'The complete gateway reply' }), null);
+  assert.equal(isLocallyAuthoredId('run-abc123'), true);
   assert.equal(isLocallyAuthoredId('voice-a-12'), true);
   assert.equal(isLocallyAuthoredId('a1b2c3d4e5f6a7b8c9d0'), false);
   assert.equal(isLocallyAuthoredId('history-1abc'), false);

@@ -9,7 +9,7 @@ import asyncio
 import time
 import re
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.auth import Principal, issue_session, revoke_session, require_scope, verify_token
@@ -17,7 +17,8 @@ from app.herdr_client import DEFAULT_HISTORY_LINES, HERDR_MAX_READ_LINES, HerdrC
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
 from app.contracts import (UniversalInputContract, ExecutionSettingsContract, ExecutionCredentialContract, GestureInputContract,
-                           NotificationAckContract, NotificationPreferencesContract,
+                           NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
+                           AttentionActionExecuteContract,
                            RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
@@ -27,6 +28,8 @@ from app.db import (init_db, get_profile, update_profile, get_connected_accounts
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
 from app.attention_service import attention_service
+from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
+                                   prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
 from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
                                list_registered_push_users, registered_local_hour,
                                reconcile_notification_events, dispatch_notification_events,
@@ -259,11 +262,14 @@ oauth_transaction_store = OAuthTransactionStore()
 async def get_runtime(principal: Principal = Depends(require_scope('read'))):
     snapshot = await herdr_client.get_snapshot()
     fm_snapshot = await fm_client.get_snapshot()
+    # A missing snapshot means Herdr is unreachable. Reporting a placeholder
+    # version/protocol here would be an invented metric, so report null instead.
+    herdr_connected = bool(snapshot.get('version'))
     return {
         'herdr': {
-            'status': 'connected' if snapshot.get('version') else 'disconnected',
-            'version': snapshot.get('version', '0.8.2'),
-            'protocol': snapshot.get('protocol', 20),
+            'status': 'connected' if herdr_connected else 'disconnected',
+            'version': snapshot.get('version') if herdr_connected else None,
+            'protocol': snapshot.get('protocol') if herdr_connected else None,
             'agents_count': len(snapshot.get('agents', []))
         },
         'firstmate': {
@@ -277,13 +283,21 @@ async def get_runtime(principal: Principal = Depends(require_scope('read'))):
 async def get_health(principal: Principal = Depends(require_scope('read'))):
     snapshot = await herdr_client.get_snapshot()
     fm_snapshot = await fm_client.get_snapshot()
+    herdr_connected = bool(snapshot.get('version'))
+    firstmate_available = bool(fm_snapshot.get('fm_home'))
+    # The gateway process answering is not the same claim as the product being
+    # healthy. Degrade explicitly when a live source is missing, and never
+    # substitute a placeholder Herdr version for one we did not observe.
+    degraded = [name for name, ok in (('herdr', herdr_connected), ('firstmate', firstmate_available)) if not ok]
     return {
-        'status': 'healthy',
+        'status': 'degraded' if degraded else 'healthy',
+        'degraded_sources': degraded,
         'service': 'magistrate-gateway',
         'version': '1.0.0',
-        'herdr_version': snapshot.get('version', '0.8.2'),
-        'herdr_socket_connected': bool(snapshot.get('version')),
+        'herdr_version': snapshot.get('version') if herdr_connected else None,
+        'herdr_socket_connected': herdr_connected,
         'firstmate_home': fm_snapshot.get('fm_home'),
+        'firstmate_available': firstmate_available,
         'firstmate_tasks_count': len(fm_snapshot.get('tasks', []))
     }
 
@@ -319,24 +333,58 @@ async def upload_account_avatar(
     return {'status': 'success', 'avatar_url': public_url, 'profile': updated}
 
 # OAUTH & CONNECTED ACCOUNTS ENDPOINTS
+def _provider_connection_state(adapter, account: dict) -> Dict[str, Any]:
+    """Resolve a provider row that can never claim an unbacked connection.
+
+    'connected' requires all three of: operator OAuth configuration, a stored
+    credential, and an unexpired credential. Any missing piece downgrades to the
+    specific honest state, so a stale database row, a revoked deployment
+    credential, or a deferred provider can never render as connected.
+    """
+    available = bool(adapter.is_configured())
+    deferred = bool(adapter.is_deferred())
+    stored_status = account.get('status') or 'disconnected'
+    username = account.get('provider_username') or ''
+    expires_at = account.get('credential_expires_at')
+    expired = isinstance(expires_at, int) and expires_at <= int(time.time())
+
+    if not available:
+        reason = adapter.unavailable_reason()
+        # The identity is withheld too: showing a username beside an
+        # unavailable provider reads as a connection that does not exist.
+        return {'status': 'unavailable', 'username': '', 'available': False,
+                'deferred': deferred, 'unavailable_reason': reason}
+    if stored_status != 'connected':
+        return {'status': 'disconnected', 'username': '', 'available': True,
+                'deferred': deferred, 'unavailable_reason': None}
+    if not account.get('has_credential'):
+        return {'status': 'disconnected', 'username': '', 'available': True, 'deferred': deferred,
+                'unavailable_reason': 'The stored credential for this account is missing. Reconnect to restore access.'}
+    if expired:
+        return {'status': 'expired', 'username': username, 'available': True, 'deferred': deferred,
+                'unavailable_reason': 'The stored credential has expired. Reconnect to restore access.'}
+    return {'status': 'connected', 'username': username, 'available': True,
+            'deferred': deferred, 'unavailable_reason': None}
+
+
 @app.get('/api/v1/auth/providers')
 async def list_auth_providers(principal: Principal = Depends(require_scope('providers'))):
     db_accounts = {a['provider']: a for a in get_connected_accounts(principal.user_id)}
     result = []
     for p_name, adapter in providers.items():
-        acc = db_accounts.get(p_name, {})
-        # Listing integrations must not create a state-less OAuth URL. The
-        # authenticated connect route creates the real, one-time transaction.
-        auth_url = None
-        available = adapter.is_configured()
+        state = _provider_connection_state(adapter, db_accounts.get(p_name, {}))
         result.append({
             'provider': p_name,
-            'status': acc.get('status', 'disconnected'),
-            'username': acc.get('provider_username') or '',
+            'status': state['status'],
+            'username': state['username'],
             'capabilities': adapter.capabilities(),
-            'available': available,
-            'auth_url': auth_url,
-            'configuration': 'available' if available else 'unavailable'
+            'available': state['available'],
+            'deferred': state['deferred'],
+            'unavailable_reason': state['unavailable_reason'],
+            # Listing integrations must not create a state-less OAuth URL. The
+            # authenticated connect route creates the real, one-time transaction.
+            'auth_url': None,
+            'configuration': 'available' if state['available'] else 'unavailable'
         })
     return result
 
@@ -389,8 +437,12 @@ async def oauth_callback(provider: str, code: str = Query(None), state: str = Qu
 
         profile = await adapter.get_user_profile(access_token)
         username = profile.get('username') or profile.get('login') or profile.get('email')
-        provider_user_id = profile.get('id') or profile.get('account_id')
-        if not isinstance(username, str) or not username or not isinstance(provider_user_id, str) or not provider_user_id:
+        raw_identity = profile.get('id') or profile.get('account_id')
+        # GitHub and several other providers issue a numeric account id. Requiring
+        # a string here previously rejected every real GitHub identity, so the
+        # only truthful outcome was a failure; accept int and normalize instead.
+        provider_user_id = str(raw_identity) if isinstance(raw_identity, (str, int)) and not isinstance(raw_identity, bool) else ''
+        if not isinstance(username, str) or not username or not provider_user_id:
             raise ValueError('Provider profile did not return an authenticated identity.')
 
         upsert_connected_account(
@@ -457,6 +509,77 @@ async def get_teams_mentions(principal: Principal = Depends(require_scope('provi
 @app.get('/api/v1/attention/unified')
 async def get_unified_attention(principal: Principal = Depends(require_scope('read'))):
     return await attention_service.get_unified_attention_items()
+
+
+def _require_owner(principal: Principal) -> None:
+    # Command-capable sessions are still checked against the configured owner;
+    # a future observer/read-only session must never gain action authority by
+    # merely receiving an action-shaped payload.
+    owner_id = os.getenv('MAGISTRATE_BOOTSTRAP_USER_ID', 'default_user').strip()
+    if principal.user_id != owner_id:
+        raise HTTPException(status_code=403, detail='Only the authenticated owner may execute Attention actions.')
+
+
+def _action_error(exc: AttentionActionError) -> HTTPException:
+    status = exc.code if exc.code in {'stale', 'rejected', 'pending'} else ('rejected' if exc.code in {'unsupported', 'unsupported_risk', 'confirmation_invalid', 'replay_mismatch'} else 'failed')
+    return HTTPException(status_code=exc.status_code, detail={'code': exc.code, 'status': status, 'message': exc.detail})
+
+
+@app.post('/api/v1/attention/actions/{action_key}/prepare')
+async def prepare_attention_action(action_key: str, contract: AttentionActionContract, principal: Principal = Depends(require_scope('command'))):
+    _require_owner(principal)
+    if contract.action_key != action_key:
+        raise HTTPException(status_code=409, detail={'code': 'mismatch', 'message': 'The action key in the request does not match the route.'})
+    try:
+        items = await attention_service.get_unified_attention_items()
+        return prepare_confirmation(items, action_key, contract.action, contract.target_id, principal.user_id, principal.session_id)
+    except AttentionActionError as exc:
+        raise _action_error(exc) from exc
+
+
+@app.post('/api/v1/attention/actions/{action_key}/execute')
+async def execute_attention_action(action_key: str, contract: AttentionActionExecuteContract, principal: Principal = Depends(require_scope('command'))):
+    _require_owner(principal)
+    if contract.action_key != action_key:
+        raise HTTPException(status_code=409, detail={'code': 'mismatch', 'message': 'The action key in the request does not match the route.'})
+    try:
+        items = await attention_service.get_unified_attention_items()
+        return await execute_confirmation(
+            items, action_key, contract.action, contract.target_id, contract.confirmation_token,
+            principal.user_id, principal.session_id, fm_client.fm_home,
+        )
+    except AttentionActionError as exc:
+        raise _action_error(exc) from exc
+
+
+@app.get('/api/v1/attention/actions/by-item/{item_id}')
+async def get_attention_action_for_item(item_id: str, principal: Principal = Depends(require_scope('read'))):
+    """Reload-safe lookup for a detail route whose source item has resolved."""
+    existing = outcome_for_item(item_id, principal.user_id)
+    if existing:
+        return _public_outcome(existing)
+    items = await attention_service.get_unified_attention_items()
+    for item in items:
+        if item.get('id') == item_id:
+            action = action_for_item(item)
+            if action:
+                return action
+            break
+    raise HTTPException(status_code=404, detail={'code': 'stale', 'message': 'Attention action is no longer available.'})
+
+
+@app.get('/api/v1/attention/actions/{action_key}')
+async def get_attention_action(action_key: str, principal: Principal = Depends(require_scope('read'))):
+    """Reload-safe action/outcome state without exposing execution internals."""
+    existing = _outcome_row(action_key, principal.user_id)
+    if existing:
+        return _public_outcome(existing)
+    items = await attention_service.get_unified_attention_items()
+    for item in items:
+        action = action_for_item(item)
+        if action and action['action_key'] == action_key:
+            return action
+    raise HTTPException(status_code=404, detail={'code': 'stale', 'message': 'Attention action is no longer available.'})
 
 @app.get('/api/v1/usage')
 async def get_usage_summary(provider: Optional[str] = None, principal: Principal = Depends(require_scope('read'))):
@@ -588,7 +711,11 @@ async def upload_chat_files(
             associate_uploads(principal.user_id, message_id, [item['upload_id'] for item in uploaded])
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {'uploads': uploaded}
+    # The client must not infer processing success from a 200 alone. Report the
+    # state the server actually reached: bytes stored and validated, and whether
+    # the upload is already associated with a chat message.
+    attached = bool(message_id)
+    return {'uploads': [{**item, 'attached': attached} for item in uploaded]}
 
 
 @app.get('/api/v1/uploads/{upload_id}')
