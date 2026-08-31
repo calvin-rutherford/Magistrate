@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSyncExternalStore } from 'react';
 import { Platform } from 'react-native';
 import {
@@ -760,10 +761,17 @@ export async function fetchRecentActivity(limit = 20): Promise<RecentActivityFee
   return data;
 }
 
+export const ACCOUNT_DISPLAY_NAME_KEY = 'magistrate.account.display-name';
+
 export async function fetchUserProfile(): Promise<UserProfile> {
   const res = await authorizedFetch(GATEWAY_URL + '/account/profile', {
   });
-  return checkedJson<UserProfile>(res);
+  const profile = await checkedJson<UserProfile>(res);
+  // Cache the observed name so cosmetic surfaces (the Magi greeting) can
+  // personalize without making an authorized request of their own - a 401 on
+  // such a request would invalidate the whole session for a decoration.
+  try { await AsyncStorage.setItem(ACCOUNT_DISPLAY_NAME_KEY, profile.name || ''); } catch { /* personalization is optional */ }
+  return profile;
 }
 
 export async function updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {

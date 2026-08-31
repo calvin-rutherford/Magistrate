@@ -194,10 +194,15 @@ test('a 403 remains an authorization error and does not invalidate the session',
 test('logout revokes the session locally and returns to the authentication gate', async () => {
   const page = await open();
   await connect(page);
+  // The drawer slides in and Settings is a long scroller, so wait for the layer
+  // to arrive and bring Sign out into view before pressing it.
   await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   await page.click('[data-testid="settings-open"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
   await page.click('[data-testid="settings-section-account"]');
   await page.waitForSelector('[data-testid="settings-logout"]');
+  await page.$eval('[data-testid="settings-logout"]', element => element.scrollIntoView({ block: 'center' }));
   await page.click('[data-testid="settings-logout"]');
   await page.waitForSelector('[data-testid="bootstrap-secret"]');
   assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
