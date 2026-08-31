@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 import os
 import json
 import asyncio
+import secrets
 import time
 import re
 from pathlib import Path
@@ -22,6 +23,9 @@ from app.contracts import (UniversalInputContract, ExecutionSettingsContract, Ex
                            RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
+from app.conversation_store import (CONVERSATION_SCHEMA, MAX_MESSAGE_WINDOW, ingest_terminal_rows,
+                                    list_messages as list_conversation_messages, record_primary_reply,
+                                    record_prompt, reset_conversation, set_turn_status, turn_messages)
 from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
                     disconnect_account, get_execution_preferences, get_execution_credential_status,
                     save_execution_preferences, save_execution_credential, delete_execution_credential)
@@ -148,6 +152,30 @@ async def stop_notification_reconciler():
         _notification_reconciler_task = None
 
 
+# The captain thread is the conversation Magistrate owns end to end, and the
+# only one whose transcript comes from the canonical record. Worker panes also
+# contain autonomous and Firstmate-authored turns with no Magistrate submission
+# id, so they keep reading terminal history until every turn has durable identity.
+CANONICAL_CONVERSATION_TARGET = 'captain'
+
+
+async def _ingest_target_snapshot(user_id: str, target: str, lines: int = DEFAULT_HISTORY_LINES) -> Optional[str]:
+    """Fold the current terminal snapshot into the canonical record.
+
+    This is the only place terminal output enters the conversation. A working
+    agent can expose a transiently empty snapshot, and Herdr may be unreachable
+    entirely; neither may hide the record that already exists. The failure is
+    returned rather than swallowed so the caller reports it instead of
+    presenting a stale transcript as a current one.
+    """
+    try:
+        snapshot = await herdr_client.read_typed_rows(target, lines=lines)
+        ingest_terminal_rows(user_id, target, snapshot.get('rows', []))
+        return None
+    except Exception as exc:
+        return f'{type(exc).__name__}: {exc}'[:200]
+
+
 @app.websocket('/api/v1/events')
 async def agent_events(websocket: WebSocket):
     """Authenticate in the first frame; credentials never travel in a URL."""
@@ -176,6 +204,7 @@ async def agent_events(websocket: WebSocket):
             return
         target = requested_target if principal is not None and isinstance(requested_target, str) and requested_target else 'captain'
         seen: set[str] = set()
+        revisions: Dict[str, int] = {}
         await websocket.send_json({'type': 'connected', 'target': target})
         while True:
             try:
@@ -187,9 +216,29 @@ async def agent_events(websocket: WebSocket):
                 if isinstance(message, dict) and isinstance(message.get('target'), str):
                     target = message['target']
                     seen.clear()
+                    revisions.clear()
                     await websocket.send_json({'type': 'subscribed', 'target': target})
             except asyncio.TimeoutError:
                 pass
+            if target == CANONICAL_CONVERSATION_TARGET:
+                # Canonical delivery: ingest the snapshot, then send only the
+                # messages whose revision this connection has not seen. A
+                # re-read that changed nothing sends nothing, and a revised
+                # message arrives with the id the client already rendered.
+                await _ingest_target_snapshot(principal.user_id, target)
+                payload = list_conversation_messages(principal.user_id, target)
+                fresh = [item for item in payload['messages'] if revisions.get(item['id']) != item['revision']]
+                # Rebuilt rather than accumulated: the delivered window slides,
+                # so this stays bounded by the window instead of by session age.
+                revisions = {item['id']: item['revision'] for item in payload['messages']}
+                if fresh:
+                    await websocket.send_json({
+                        'type': 'conversation_messages', 'schema_version': CONVERSATION_SCHEMA,
+                        'target': target, 'messages': fresh,
+                    })
+                continue
+            # Worker panes still read their transcript from the terminal; see
+            # CHAT_ARCHITECTURE_FIX.md for why that path is transitional.
             history = await herdr_client.get_agent_history(target, lines=DEFAULT_HISTORY_LINES)
             fresh = []
             for item in history.get('messages', []):
@@ -742,9 +791,36 @@ async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source
 @app.post('/api/v1/voice/moves')
 async def create_voice_move(request: VoiceMoveRequest, principal: Principal = Depends(require_scope('voice'))):
     try:
-        return await voice_move_service.handle(request, principal.user_id)
+        result = await voice_move_service.handle(request, principal.user_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Voice Mode shares the captain thread, so a completed voice turn is
+    # recorded canonically exactly like a typed one. Without this the chat
+    # transcript and the voice transcript would be two different records.
+    if result.get('status') == 'completed':
+        client_message_id = request.client_message_id or result.get('move_id')
+        if client_message_id:
+            turn = record_prompt(
+                principal.user_id, CANONICAL_CONVERSATION_TARGET, client_message_id,
+                result.get('utterance') or request.utterance, source='voice',
+            )
+            response = result.get('response')
+            if isinstance(response, str) and response.strip():
+                record_primary_reply(
+                    principal.user_id, CANONICAL_CONVERSATION_TARGET, turn['turn_id'], response,
+                    source='voice',
+                )
+            return {
+                **result,
+                'conversation': {
+                    'schema_version': CONVERSATION_SCHEMA,
+                    'target': CANONICAL_CONVERSATION_TARGET,
+                    'conversation_id': turn['conversation_id'],
+                    'turn_id': turn['turn_id'],
+                    'messages': turn_messages(turn['turn_id']),
+                },
+            }
+    return result
 
 # FLEET, ATTENTION & AGENTS
 @app.get('/api/v1/execution/capabilities')
@@ -914,7 +990,65 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
             f"{item['filename']} ({item['media_type']}, {item['size']} bytes)" for item in stored_uploads
         )
         prompt_text = prompt_text + ('\n\n' if prompt_text else '') + 'Attached files: ' + attachment_summary
-    return await herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
+    # The canonical turn is created before the provider sees the prompt: the
+    # frontend's message_id is the submission identity, so a retry or replay
+    # reuses this turn instead of minting a second user message, and the
+    # terminal adapter can attribute the reply even when it arrives much later.
+    client_message_id = contract.message_id or 'srv-' + secrets.token_hex(8)
+    turn = record_prompt(
+        principal.user_id, contract.target, client_message_id, contract.text or '',
+        source='text', submitted_text=prompt_text,
+    )
+    result = await herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
+    if result.get('status') == 'error':
+        set_turn_status(principal.user_id, contract.target, client_message_id, 'failed')
+    else:
+        response = result.get('response')
+        if isinstance(response, str) and response.strip():
+            # A harness that answers synchronously is recorded here, so the
+            # reply has canonical identity from the start and the poll that
+            # later re-reads the same turn revises it instead of adding a row.
+            record_primary_reply(principal.user_id, contract.target, turn['turn_id'], response)
+    return {
+        **result,
+        'message_id': client_message_id,
+        'conversation': {
+            'schema_version': CONVERSATION_SCHEMA,
+            'target': contract.target,
+            'conversation_id': turn['conversation_id'],
+            'turn_id': turn['turn_id'],
+            'messages': turn_messages(turn['turn_id']),
+        },
+    }
+
+# CANONICAL CONVERSATION RECORD
+# The chat transcript is the gateway's own record (see app/conversation_store.py
+# and CHAT_ARCHITECTURE_FIX.md). Terminal snapshots only feed it.
+@app.get('/api/v1/conversations/{target}/messages')
+async def get_conversation_messages(
+    target: str,
+    lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
+    limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
+    principal: Principal = Depends(require_scope('read')),
+):
+    ingest_error = await _ingest_target_snapshot(principal.user_id, target, lines=lines)
+    # The record is still authoritative when the live snapshot could not be
+    # read; the failure travels with it rather than being presented as success.
+    return {**list_conversation_messages(principal.user_id, target, limit=limit), 'ingest_error': ingest_error}
+
+
+@app.post('/api/v1/conversations/{target}/reset')
+async def post_conversation_reset(target: str, principal: Principal = Depends(require_scope('command'))):
+    """Discard this conversation's canonical record for a genuinely fresh thread."""
+    return reset_conversation(principal.user_id, target)
+
+
+@app.post('/api/v1/conversations/{target}/turns/{client_message_id}/cancel')
+async def post_conversation_turn_cancel(
+    target: str, client_message_id: str, principal: Principal = Depends(require_scope('command')),
+):
+    set_turn_status(principal.user_id, target, client_message_id, 'cancelled')
+    return {'status': 'cancelled', 'target': target, 'client_message_id': client_message_id}
 
 @app.post('/api/v1/agents/{agent_id}/send-key')
 async def send_agent_key(agent_id: str, key: str = Query('Enter'), principal: Principal = Depends(require_scope('command'))):

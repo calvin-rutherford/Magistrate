@@ -35,15 +35,59 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
   }
   await page.evaluateOnNewDocument((noOverrides, responseText, simulateHistoryRace, clearStorage, initialMessages, simulateLiveUpdates, historyScenario, promptFailure) => {
     if (clearStorage) { localStorage.clear(); sessionStorage.clear(); }
-    if (initialMessages.length) localStorage.setItem('magistrate.chat.messages.captain', JSON.stringify(initialMessages));
+    if (initialMessages.length) localStorage.setItem('magistrate.chat.messages.v2.captain', JSON.stringify(initialMessages));
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let postPromptHistoryRequests = 0;
-    // `phases` supplies successive post-prompt history reads (the last repeats),
-    // reproducing a Herdr snapshot whose reply text grows while it renders.
-    const phaseMessages = () => historyScenario.phases
-      ? historyScenario.phases[Math.min(postPromptHistoryRequests, historyScenario.phases.length - 1)]
-      : historyScenario.messages;
+
+    // A stand-in for the gateway's canonical conversation record (see
+    // gateway/app/conversation_store.py). It lives in its own storage key so it
+    // survives a reload exactly as the server-side record does, separately from
+    // the app's own cache of it.
+    const RECORD_KEY = '__mockGatewayConversation';
+    if (clearStorage) localStorage.removeItem(RECORD_KEY);
+    const loadRecord = () => {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(RECORD_KEY));
+        if (parsed && Array.isArray(parsed.turns)) return parsed;
+      } catch { /* a fresh record */ }
+      return { turns: (historyScenario?.seedTurns || []).map((turn, index) => ({ status: 'answered', tools: [], index, createdAt: 1756000000, ...turn })) };
+    };
+    const saveRecord = record => localStorage.setItem(RECORD_KEY, JSON.stringify(record));
+    const canonicalMessages = () => {
+      const messages = [];
+      loadRecord().turns.forEach(turn => {
+        const turnId = `ct_${turn.index}`;
+        const base = { turn_id: turnId, turn_status: turn.status, revision: 1 };
+        messages.push({ ...base, id: `cm_${turn.index}_u`, client_message_id: turn.clientMessageId, role: 'user', type: 'conversation', text: turn.text, visible_in_chat: true, sequence_index: turn.index * 1000, created_at: turn.createdAt, source: turn.source || 'text' });
+        (turn.tools || []).forEach((tool, position) => messages.push({ ...base, id: `cm_${turn.index}_t${position}`, role: 'assistant', type: 'tool', text: tool, visible_in_chat: false, sequence_index: turn.index * 1000 + 1 + position }));
+        if (turn.reply) messages.push({ ...base, id: `cm_${turn.index}_a`, role: 'assistant', type: 'conversation', text: turn.reply, visible_in_chat: true, sequence_index: turn.index * 1000 + 999, revision: turn.replyRevision || 1 });
+      });
+      return [...messages, ...(historyScenario?.extras || [])];
+    };
+    // The gateway records a reply the harness returned synchronously and refuses
+    // a transport acknowledgement; see _prompt_response in herdr_client.py.
+    const syntheticReply = () => {
+      if (!responseText || !responseText.trim()) return null;
+      try {
+        const envelope = JSON.parse(responseText);
+        const source = envelope && typeof envelope === 'object' && envelope.result && typeof envelope.result === 'object' ? envelope.result : envelope;
+        const value = source && typeof source === 'object' ? source.response || source.text : null;
+        return typeof value === 'string' && value.trim() ? value.trim() : null;
+      } catch { return responseText.trim(); }
+    };
+    // Later phases patch the newest turn, reproducing a reply the gateway keeps
+    // revising as the terminal snapshot it ingests grows.
+    const applyTurnPhase = () => {
+      const phases = historyScenario?.turnPhases;
+      if (!phases) return;
+      const record = loadRecord();
+      const turn = record.turns[record.turns.length - 1];
+      if (!turn || turn.frozen) return;
+      Object.assign(turn, phases[Math.min(postPromptHistoryRequests, phases.length - 1)]);
+      if (turn.reply) turn.status = 'answered';
+      saveRecord(record);
+    };
     if (historyScenario) {
       class FakeWebSocket {
         static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -53,10 +97,10 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
           const emit = () => {
             if (!promptSent || this.readyState !== FakeWebSocket.OPEN) { setTimeout(emit, 20); return; }
             // The same event is delivered twice by the socket and again by the
-            // poll: identity must converge on one row.
-            const payload = JSON.stringify({ type: 'agent_history', target: 'captain', messages: phaseMessages() });
+            // poll: canonical identity must converge on one row.
+            const payload = JSON.stringify({ type: 'conversation_messages', target: 'captain', messages: canonicalMessages() });
             setTimeout(() => { this.onmessage?.({ data: payload }); this.onmessage?.({ data: payload }); }, historyScenario.delay || 0);
-            if (historyScenario.phases) setTimeout(emit, 700);
+            setTimeout(emit, 700);
           };
           emit();
         }
@@ -87,8 +131,43 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         promptSent = true;
         window.__magistrateApiCalls.push({ url, method: options?.method, body: options?.body });
         if (promptFailure) return Promise.resolve(new Response(JSON.stringify({ detail: 'Gateway lost the active run.' }), { status: 502, headers: { 'Content-Type': 'application/json' } }));
-        const response = new Response(JSON.stringify({ status: 'submitted', target: 'captain', response: responseText }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        // One turn per message_id, exactly as the gateway records it.
+        const body = JSON.parse(options?.body || '{}');
+        const record = loadRecord();
+        let turn = record.turns.find(item => item.clientMessageId === body.message_id);
+        if (!turn) {
+          turn = { clientMessageId: body.message_id, text: body.text, status: 'awaiting_reply', tools: [], index: record.turns.length, createdAt: Math.floor(Date.now() / 1000) };
+          record.turns.push(turn);
+        }
+        const reply = syntheticReply();
+        if (reply) { turn.reply = reply; turn.status = 'answered'; }
+        saveRecord(record);
+        const turnId = `ct_${turn.index}`;
+        const response = new Response(JSON.stringify({
+          status: 'submitted', target: 'captain', response: responseText, message_id: body.message_id,
+          conversation: { schema_version: 'conversation.v1', target: 'captain', turn_id: turnId, messages: canonicalMessages().filter(message => message.turn_id === turnId) },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         return historyScenario?.promptDelay ? new Promise(resolve => setTimeout(() => resolve(response), historyScenario.promptDelay)) : Promise.resolve(response);
+      }
+      if (url.includes('/api/v1/conversations/captain/messages')) {
+        window.__canonicalReads = (window.__canonicalReads || 0) + 1;
+        window.__historyRequests = [...(window.__historyRequests || []), url];
+        if (promptSent && !historyScenario?.manual) { applyTurnPhase(); postPromptHistoryRequests += 1; }
+        const payload = JSON.stringify({ schema_version: 'conversation.v1', target: 'captain', messages: canonicalMessages() });
+        const response = new Response(payload, { status: 200, headers: { 'Content-Type': 'application/json' } });
+        return promptSent && postPromptHistoryRequests === 1 && historyScenario?.delay
+          ? new Promise(resolve => setTimeout(() => resolve(response), historyScenario.delay))
+          : Promise.resolve(response);
+      }
+      if (url.includes('/cancel')) {
+        window.__magistrateApiCalls.push({ url, method: options?.method });
+        const record = loadRecord();
+        const clientMessageId = decodeURIComponent(url.split('/turns/')[1].split('/')[0]);
+        const turn = record.turns.find(item => item.clientMessageId === clientMessageId);
+        // A cancelled turn is frozen: later harness output is never its reply.
+        if (turn) { turn.status = 'cancelled'; turn.frozen = true; }
+        saveRecord(record);
+        return Promise.resolve(new Response(JSON.stringify({ status: 'cancelled' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/interrupt')) {
         window.__magistrateApiCalls.push({ url, method: options?.method });
@@ -109,16 +188,13 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       if (url.includes('/api/v1/execution/settings')) return Promise.resolve(new Response(JSON.stringify({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/usage')) return Promise.resolve(new Response(JSON.stringify({ generated_at: '2026-08-29T18:00:00Z', schema_version: 5, source: 'quota-axi', providers: [{ provider: 'codex', plan: 'plus', status: 'fresh', stale: false, windows: [{ label: 'week', percentRemaining: 20 }] }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-      if (historyScenario && url.includes('/api/v1/agents/captain/history')) {
-        if (!promptSent || historyScenario.manual) {
-          const initialMessages = Array.isArray(historyScenario.initialMessages) ? historyScenario.initialMessages : [];
-          return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: initialMessages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-        }
-        const response = new Response(JSON.stringify({ target: 'captain', messages: phaseMessages() }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-        postPromptHistoryRequests += 1;
-        return postPromptHistoryRequests === 1 && historyScenario.delay
-          ? new Promise(resolve => setTimeout(() => resolve(response), historyScenario.delay))
-          : Promise.resolve(response);
+      // The captain thread never reads terminal history any more. Answering it
+      // with a leaky payload proves the canvas ignores it entirely.
+      if (url.includes('/api/v1/agents/captain/history')) {
+        window.__captainTerminalReads = (window.__captainTerminalReads || 0) + 1;
+        return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: [
+          { id: 'terminal-leak', role: 'assistant', kind: 'conversation', text: 'Terminal-derived row that must never render.' },
+        ] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (historyScenario?.workerPhases && url.includes('/api/v1/agents/w1%3Ap7/history')) {
         const phases = historyScenario.workerPhases;
@@ -193,14 +269,11 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
 });
 
 test('chat starts at the measured latest content and preserves older-message reading position', async () => {
-  const seedMessages = Array.from({ length: 12 }, (_, index) => ({
-    id: `seed-${index}`,
-    role: index % 2 ? 'assistant' : 'user',
-    text: `turn ${index}`,
-    source: 'text',
-    audience: index % 2 ? 'primary' : 'captain',
+  // Six recorded turns, straight from the canonical record.
+  const seedTurns = Array.from({ length: 6 }, (_, index) => ({
+    clientMessageId: `seed-${index}`, text: `turn ${index * 2}`, reply: `turn ${index * 2 + 1}`,
   }));
-  const page = await openChat({ width: 900, height: 700 }, false, 'Reply', URL, 0, false, false, 'light', seedMessages);
+  const page = await openChat({ width: 900, height: 700 }, false, 'Reply', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
   await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-seed-"]').length === 6);
   const fixedControls = () => page.evaluate(() => {
     const logo = document.querySelector('[data-testid="brand-drawer-toggle"]').getBoundingClientRect();
@@ -266,14 +339,14 @@ test('chat starts at the measured latest content and preserves older-message rea
 });
 
 test('floating chat controls stay pressable and leave the final message clear', async () => {
-  const seedMessages = Array.from({ length: 20 }, (_, index) => ({
-    id: `floating-${index}`,
-    role: index % 2 ? 'assistant' : 'user',
-    text: `floating turn ${index}`,
-    source: 'text',
-    audience: index % 2 ? 'primary' : 'captain',
+  // Seed the gateway record, not the local mirror: an authoritative captain
+  // sync intentionally discards local-only rows from the terminal era.
+  const seedTurns = Array.from({ length: 10 }, (_, index) => ({
+    clientMessageId: `floating-${index * 2}`,
+    text: `floating turn ${index * 2}`,
+    reply: `floating turn ${index * 2 + 1}`,
   }));
-  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', seedMessages);
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
   await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-floating-"]').length === 10);
   await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
   await page.waitForSelector('[data-testid="jump-to-latest"]');
@@ -635,11 +708,9 @@ test('Settings sections are collapsed, keyboard accessible, and retain persisted
 });
 
 test('pending response moves thinking into history and Stop/Escape share interruption without late insertion', async () => {
-  const messages = [
-    { id: 'stop-user', role: 'user', kind: 'conversation', text: 'first request' },
-    { id: 'stop-agent', role: 'assistant', kind: 'conversation', text: 'late response must stay hidden' },
-  ];
-  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { messages, manual: true, promptDelay: 5000 });
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
+    turnPhases: [{ reply: 'late response must stay hidden' }], promptDelay: 5000,
+  });
   await submit(page, 'first request');
   const pendingState = await page.evaluate(() => ({ history: document.querySelector('[data-testid="chat-history"]')?.innerText, stop: Boolean(document.querySelector('[data-testid="stop-captain-response"]')), thinking: Boolean(document.querySelector('[data-testid="agent-thinking-message"]')) }));
   assert.equal(pendingState.stop, true, `expected pending control; state=${JSON.stringify(pendingState)}`);
@@ -650,11 +721,13 @@ test('pending response moves thinking into history and Stop/Escape share interru
   assert.ok(await page.$('[data-testid="send-captain-prompt"]'));
   assert.ok(await page.$('[data-testid^="message-cancelled-"]'));
   assert.equal((await page.$$('[data-testid^="user-message-u-"]')).length, 1, 'the captain message remains available');
-  await page.evaluate(payload => window.__historySocket?.onmessage?.({ data: JSON.stringify({ type: 'agent_history', target: 'captain', messages: payload }) }), messages);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  // The cancelled turn is frozen server-side, so the harness output that arrives
+  // afterwards is never recorded as its reply and never rendered.
+  await new Promise(resolve => setTimeout(resolve, 3600));
   assert.doesNotMatch(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /late response/);
   assert.equal((await page.$$('[data-testid="agent-message"]')).length, 0);
   assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/interrupt')).length), 1);
+  assert.ok(await page.evaluate(() => window.__magistrateApiCalls.some(call => call.url.includes('/cancel'))), 'stopping must cancel the canonical turn');
   await page.close();
 });
 
@@ -856,8 +929,9 @@ test('the composer mic and wrench icons render at the same size as the voice-mod
 });
 
 test('a herdr RPC acknowledgement envelope never reaches the conversation', async () => {
-  // Gateways one deploy behind still return herdr's raw acknowledgement in
-  // `response`; it is transport metadata, not the agent's message.
+  // The prompt endpoint still echoes herdr's raw acknowledgement in `response`;
+  // it is transport metadata, so it is never recorded as a canonical reply and
+  // the captain thread never reads that field.
   const envelope = JSON.stringify({ jsonrpc: '2.0', id: 7, result: { ok: true, target: 'captain' } });
   const page = await openChat({ width: 900, height: 700 }, false, envelope);
   await submit(page, 'status please');
@@ -870,8 +944,8 @@ test('a herdr RPC acknowledgement envelope never reaches the conversation', asyn
   await page.close();
 });
 
-test('a response appearing while the initial history read is in flight is not lost', async () => {
-  const page = await openChat({ width: 900, height: 700 }, false, 'Reply arrived via history.', URL, 0, true);
+test('a response appearing while the initial conversation read is in flight is not lost', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, 'Reply arrived via history.', URL, 0, true, false, 'light', [], false, { delay: 900 });
   await submit(page, 'race response');
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('Reply arrived via history.'), { timeout: 10_000 });
   const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
@@ -903,45 +977,47 @@ test('the agent response is appended to the conversation once the gateway replie
   await page.close();
 });
 
-test('reload reconciles a persisted captain message with its server primary response', async () => {
-  const serverMessages = [
-    { id: 'reloaded-user', role: 'user', kind: 'conversation', text: 'reconcile this persisted turn' },
-    { id: 'reloaded-agent', role: 'assistant', kind: 'conversation', text: 'The persisted primary response.' },
-  ];
-  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [
-    { id: 'u-stale', role: 'user', kind: 'conversation', text: 'reconcile this persisted turn', source: 'text', audience: 'captain', delivery: 'sent', sentAt: 123 },
-  ], false, { initialMessages: serverMessages, messages: serverMessages, manual: true });
+test('a persisted captain message reconnects to its canonical reply on reload', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [
+    { id: 'u-stale', role: 'user', kind: 'conversation', text: 'reconcile this persisted turn', source: 'text', audience: 'captain', delivery: 'sent', sentAt: 123, canonicalId: 'cm_0_u', sequenceIndex: 0 },
+  ], false, {
+    manual: true,
+    seedTurns: [{ clientMessageId: 'u-stale', text: 'reconcile this persisted turn', reply: 'The persisted primary response.' }],
+  });
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The persisted primary response.'));
   const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.match(history, /reconcile this persisted turn/);
   assert.match(history, /The persisted primary response/);
   assert.ok(history.indexOf('reconcile this persisted turn') < history.indexOf('The persisted primary response'));
-  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain')));
+  assert.equal((await page.$$('[data-testid^="user-message-"]')).filter(Boolean).length >= 1, true);
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain')));
   assert.deepEqual(persisted.map(message => message.text), ['reconcile this persisted turn', 'The persisted primary response.']);
+  assert.equal(persisted[0].id, 'u-stale', 'the submission id keeps the persisted row and the canonical record as one message');
+  assert.equal(persisted[0].sentAt, 123, 'a real local send time is never overwritten by the server record');
   await page.close();
 });
 
-test('an unmatched internal audience cannot be resurrected during reload repair', async () => {
-  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [
-    { id: 'u-captain-only', role: 'user', kind: 'conversation', text: 'captain-only turn', source: 'text', audience: 'captain', delivery: 'sent' },
-  ], false, { initialMessages: [
-    { id: 'internal-user', role: 'user', kind: 'conversation', text: 'internal worker turn' },
-    { id: 'internal-reply', role: 'assistant', kind: 'conversation', text: 'Internal worker reply must stay hidden.' },
-  ], manual: true });
+test('internal canonical records are never rendered as conversation', async () => {
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
+    manual: true,
+    seedTurns: [{ clientMessageId: 'u-captain-only', text: 'captain-only turn', reply: 'The captain reply.' }],
+    extras: [
+      { id: 'cm_internal_u', turn_id: 'ct_9', role: 'user', type: 'internal', text: 'internal worker turn', visible_in_chat: false, sequence_index: 9000, revision: 1 },
+      { id: 'cm_internal_a', turn_id: 'ct_9', role: 'assistant', type: 'internal', text: 'Internal worker reply must stay hidden.', visible_in_chat: false, sequence_index: 9001, revision: 1 },
+      { id: 'cm_status', turn_id: 'ct_9', role: 'assistant', type: 'status', text: 'Working (2s)', visible_in_chat: false, sequence_index: 9002, revision: 1 },
+    ],
+  });
+  await pageWaitForText(page, 'The captain reply.');
   await new Promise(resolve => setTimeout(resolve, 1200));
   const history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.match(history, /captain-only turn/);
-  assert.doesNotMatch(history, /Internal worker reply/);
+  assert.doesNotMatch(history, /Internal worker reply|internal worker turn|Working \(2s\)/);
   await page.close();
 });
 
 test('a delayed primary response remains paired with its captain message', async () => {
-  const messages = [
-    { id: 'delayed-user', role: 'user', kind: 'conversation', text: 'delayed persistence turn' },
-    { id: 'delayed-agent', role: 'assistant', kind: 'conversation', text: 'The delayed primary response.' },
-  ];
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
-    initialMessages: [], messages, delay: 1500, promptDelay: 2500,
+    turnPhases: [{ reply: 'The delayed primary response.' }], delay: 1500, promptDelay: 2500,
   });
   await submit(page, 'delayed persistence turn');
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('The delayed primary response.'), { timeout: 10_000 });
@@ -1023,20 +1099,20 @@ test('user bubbles are opaque and repeated legitimate messages remain distinct',
   await page.close();
 });
 
-test('captain boundary dedupes WebSocket/poll, suppresses worker audiences, and persists only bounded attached tools', async () => {
-  const messages = [
-    { id: 'server-user-1', role: 'user', kind: 'conversation', text: 'live source question' },
-    { id: 'server-tool-1', role: 'assistant', kind: 'tool', text: 'Running npm test --token hidden-secret' },
-    { id: 'server-calm-1', role: 'assistant', kind: 'conversation', text: '/calm animation status' },
-    { id: 'server-envelope-1', role: 'assistant', kind: 'conversation', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
-    { id: 'server-raw-terminal', role: 'assistant', kind: 'conversation', text: '$ cat /tmp/raw-terminal-output' },
-    { id: 'server-agent-1', role: 'assistant', kind: 'conversation', text: 'Actual response only.' },
-    { id: 'worker-prompt', role: 'user', kind: 'conversation', text: 'FIRSTMATE_OP: inspect this for Firstmate' },
-    { id: 'worker-tool', role: 'assistant', kind: 'tool', text: '$ cat /tmp/raw-pane-output' },
-    { id: 'worker-reply', role: 'assistant', kind: 'conversation', text: 'Scout report for Firstmate only.' },
-    { id: 'metadata', role: 'assistant', kind: 'conversation', text: 'pane_id=w1:p9 tab_id=secret' },
-  ];
-  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { messages, delay: 500 });
+test('repeated canonical delivery keeps one turn, and tool events stay bounded labels', async () => {
+  // The gateway classified these before delivery: the leak classes arrive as
+  // internal records and the tool event arrives as a bounded label, never as a
+  // shell command. The socket and the poll then redeliver the same records.
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
+    delay: 500,
+    turnPhases: [{ reply: 'Actual response only.', tools: ['Running…'] }],
+    extras: [
+      { id: 'cm_leak_rpc', turn_id: 'ct_9', role: 'assistant', type: 'internal', text: '{"jsonrpc":"2.0","result":{"ok":true}}', visible_in_chat: false, sequence_index: 9000, revision: 1 },
+      { id: 'cm_leak_worker', turn_id: 'ct_9', role: 'user', type: 'internal', text: 'FIRSTMATE_OP: inspect this for Firstmate', visible_in_chat: false, sequence_index: 9001, revision: 1 },
+      { id: 'cm_leak_scout', turn_id: 'ct_9', role: 'assistant', type: 'internal', text: 'Scout report for Firstmate only.', visible_in_chat: false, sequence_index: 9002, revision: 1 },
+      { id: 'cm_leak_pane', turn_id: 'ct_9', role: 'assistant', type: 'internal', text: 'pane_id=w1:p9 tab_id=secret', visible_in_chat: false, sequence_index: 9003, revision: 1 },
+    ],
+  });
   await submit(page, 'live source question');
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('Actual response only.'), { timeout: 10_000 });
   await new Promise(resolve => setTimeout(resolve, 3400));
@@ -1044,6 +1120,7 @@ test('captain boundary dedupes WebSocket/poll, suppresses worker audiences, and 
   assert.equal((await page.$$('[data-testid="agent-message"]')).length, 1);
   let historyText = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
   assert.doesNotMatch(historyText, /calm|jsonrpc|hidden-secret|Running npm test|FIRSTMATE_OP|Scout report|pane_id|tab_id|raw-pane|raw-terminal/);
+  assert.doesNotMatch(historyText, /Terminal-derived row/, 'the captain thread must ignore terminal history entirely');
 
   await page.$eval('[data-testid="brand-drawer-toggle"]', element => element.click());
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
@@ -1060,7 +1137,7 @@ test('captain boundary dedupes WebSocket/poll, suppresses worker audiences, and 
   assert.equal((await page.$$('[data-testid="tool-history-message"]')).length, 1);
   await page.close();
 
-  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [], false, { manual: true });
   await reloaded.waitForSelector('[data-testid="tool-history-message"]');
   assert.equal((await reloaded.$$('[data-testid="agent-message"]')).length, 1);
   assert.equal((await reloaded.$$('[data-testid="tool-history-message"]')).length, 1);
@@ -1080,7 +1157,7 @@ test('a sent user timestamp remains exact across optimistic state, polling, pers
   assert.equal(await page.$eval(`${selector} [data-testid^="user-message-text-"]`, element => element.innerText), 'timestamp check');
   const before = await page.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText);
   assert.match(before, /\d/);
-  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain'))[0]);
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain'))[0]);
   assert.equal(typeof persisted.sentAt, 'number');
   // The background auto-refresh poll runs every 3s (see ChatCanvas's syncFromHistory).
   await new Promise(resolve => setTimeout(resolve, 3400));
@@ -1091,28 +1168,30 @@ test('a sent user timestamp remains exact across optimistic state, polling, pers
   const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true);
   await reloaded.waitForSelector(selector);
   assert.equal(await reloaded.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText), before);
-  const afterReload = await reloaded.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain'))[0].sentAt);
+  const afterReload = await reloaded.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain'))[0].sentAt);
   assert.equal(afterReload, persisted.sentAt);
   await reloaded.close();
 });
 
 // Regression for the deployed-demo report after PRs #61/#63: agent/internal
 // metadata rendered as highlighted user messages, and one captain turn plus one
-// primary reply rendered twice. The fixtures below carry the exact leaked
-// classes and the exact duplicate sequences.
+// primary reply rendered twice. The gateway now classifies these at ingestion
+// (see gateway/tests/test_conversation_store.py), so the browser cases assert
+// the second half of the contract: a client that is handed these records - by a
+// stale cache, or by a mislabelled delivery - still renders none of them.
 const LEAKED_METADATA = [
   // Pi boxes a tool envelope exactly like a user turn.
-  { id: 'leak-envelope', role: 'user', kind: 'conversation', text: 'edit gateway/app/notifications.py\n\n... 340     elif parsed.path == "/pr-detail":\n341         target_type = "pull-request"' },
-  { id: 'leak-firstmate', role: 'user', kind: 'conversation', text: 'FIRSTMATE_OP: v1 launch-brief: you are a crewmate' },
-  { id: 'leak-worker-reply', role: 'assistant', kind: 'conversation', text: 'Scout report for Firstmate only.' },
-  { id: 'leak-spinner', role: 'assistant', kind: 'conversation', text: '⠦ Working...' },
-  { id: 'leak-cwd', role: 'assistant', kind: 'conversation', text: '~/.treehouse/Magistrate-7ab3fc/1/Magistrate (fm/magistra...' },
-  { id: 'leak-provider', role: 'assistant', kind: 'conversation', text: 'model: claude-opus-5' },
-  { id: 'leak-trace', role: 'assistant', kind: 'conversation', text: 'session_id: 5f2c-trace' },
-  { id: 'leak-pane', role: 'assistant', kind: 'conversation', text: 'pane_id=w1:p9 tab_id=secret' },
-  { id: 'leak-rpc', role: 'assistant', kind: 'conversation', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
-  { id: 'leak-terminal', role: 'assistant', kind: 'conversation', text: '$ cat /tmp/raw-pane-output' },
-];
+  { role: 'user', text: 'edit gateway/app/notifications.py\n\n... 340     elif parsed.path == "/pr-detail":\n341         target_type = "pull-request"' },
+  { role: 'user', text: 'FIRSTMATE_OP: v1 launch-brief: you are a crewmate' },
+  { role: 'assistant', text: 'Scout report for Firstmate only.' },
+  { role: 'assistant', text: '⠦ Working...' },
+  { role: 'assistant', text: '~/.treehouse/Magistrate-7ab3fc/1/Magistrate (fm/magistra...' },
+  { role: 'assistant', text: 'model: claude-opus-5' },
+  { role: 'assistant', text: 'session_id: 5f2c-trace' },
+  { role: 'assistant', text: 'pane_id=w1:p9 tab_id=secret' },
+  { role: 'assistant', text: '{"jsonrpc":"2.0","result":{"ok":true}}' },
+  { role: 'assistant', text: '$ cat /tmp/raw-pane-output' },
+].map((row, index) => ({ ...row, id: `cm_leak_${index}`, turn_id: 'ct_9', type: 'internal', visible_in_chat: false, sequence_index: 9000 + index, revision: 1 }));
 const FORBIDDEN = /notifications\.py|pr-detail|pull-request|FIRSTMATE_OP|crewmate|Scout report|Working\.\.\.|treehouse|claude-opus-5|session_id|pane_id|tab_id|jsonrpc|raw-pane/;
 
 const conversationRows = page => page.evaluate(() => ({
@@ -1125,16 +1204,15 @@ const conversationRows = page => page.evaluate(() => ({
 }));
 
 test('one captain turn with leaked metadata renders exactly one captain row and one primary row', async () => {
-  const messages = [
-    { id: 'captain-prompt', role: 'user', kind: 'conversation', text: 'summarize the deploy' },
-    { id: 'captain-tool', role: 'assistant', kind: 'tool', text: 'Running npm test --token hidden-secret' },
-    { id: 'captain-reply', role: 'assistant', kind: 'conversation', text: 'The deploy is healthy and finished at 09:12.' },
-    ...LEAKED_METADATA,
-  ];
-  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { messages, delay: 300 });
+  const scenario = {
+    delay: 300,
+    turnPhases: [{ reply: 'The deploy is healthy and finished at 09:12.', tools: ['Running…'] }],
+    extras: LEAKED_METADATA,
+  };
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, scenario);
   await submit(page, 'summarize the deploy');
   await pageWaitForText(page, 'The deploy is healthy and finished at 09:12.');
-  // Let the socket replay and several polls redeliver the identical event.
+  // Let the socket replay and several polls redeliver the identical records.
   await new Promise(resolve => setTimeout(resolve, 6800));
   const rows = await conversationRows(page);
   assert.equal(rows.user.length, 1, `expected one captain row, got ${JSON.stringify(rows.user)}`);
@@ -1144,12 +1222,15 @@ test('one captain turn with leaked metadata renders exactly one captain row and 
   assert.match(rows.agent[0], /The deploy is healthy and finished at 09:12\./);
   assert.doesNotMatch(rows.text, FORBIDDEN);
   assert.doesNotMatch(rows.text, /hidden-secret/);
-  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.captain')));
-  assert.deepEqual(persisted.map(message => [message.role, message.audience]), [['user', 'captain'], ['assistant', 'primary']]);
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.messages.v2.captain')));
+  assert.deepEqual(persisted.map(message => [message.role, message.kind, message.audience]), [
+    ['user', 'conversation', 'captain'], ['assistant', 'tool', 'primary'], ['assistant', 'conversation', 'primary'],
+  ]);
+  assert.ok(persisted.every(message => typeof message.canonicalId === 'string'), 'every persisted captain row carries canonical identity');
   await page.close();
 
-  // Reload must reconcile, not replay: still exactly two rows.
-  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [], false, { initialMessages: messages, messages, manual: true });
+  // Reload reads the same canonical record: still exactly two visible rows.
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [], false, { ...scenario, manual: true });
   await pageWaitForText(reloaded, 'The deploy is healthy and finished at 09:12.');
   await new Promise(resolve => setTimeout(resolve, 3600));
   const afterReload = await conversationRows(reloaded);
@@ -1159,16 +1240,14 @@ test('one captain turn with leaked metadata renders exactly one captain row and 
   await reloaded.close();
 });
 
-test('a reply whose snapshot text keeps growing stays one primary row and settles on the final text', async () => {
-  const prompt = { id: 'grow-prompt', role: 'user', kind: 'conversation', text: 'run the tests' };
-  // Herdr has no durable ids, so the gateway hashes content: each read of a
-  // still-rendering reply arrives with a different id.
-  const reply = text => ({ id: `grow-${text.length}`, role: 'assistant', kind: 'conversation', text });
+test('a reply the gateway keeps revising stays one primary row and settles on the final text', async () => {
   const partial = 'The tests are running';
   const middle = 'The tests are running and 30 of them have';
   const settled = 'The tests are running and all 42 of them pass.';
+  // One canonical message, three revisions - the shape a Herdr snapshot growing
+  // between reads now produces in the canonical record.
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
-    phases: [[prompt, reply(partial)], [prompt, reply(middle)], [prompt, reply(settled)]],
+    turnPhases: [{ reply: partial, replyRevision: 1 }, { reply: middle, replyRevision: 2 }, { reply: settled, replyRevision: 3 }],
   });
   await submit(page, 'run the tests');
   await pageWaitForText(page, settled);
@@ -1179,9 +1258,7 @@ test('a reply whose snapshot text keeps growing stays one primary row and settle
   assert.match(rows.agent[0], /The tests are running and all 42 of them pass\./);
   await page.close();
 
-  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [], false, {
-    initialMessages: [prompt, reply(settled)], messages: [prompt, reply(settled)], manual: true,
-  });
+  const reloaded = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'light', [], false, { manual: true });
   await pageWaitForText(reloaded, settled);
   await new Promise(resolve => setTimeout(resolve, 3600));
   rows = await conversationRows(reloaded);
@@ -1232,19 +1309,25 @@ test('a worker thread excludes firstmate prompts and worker metadata and never d
   await page.close();
 });
 
-test('streaming, gateway error, and cancellation fixtures render truthful states', async () => {
-  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [
-    { id: 'fixture-stream', role: 'assistant', kind: 'conversation', text: 'Partial answer', audience: 'primary', source: 'text', progress: 'streaming' },
-    { id: 'fixture-error', role: 'assistant', kind: 'conversation', text: 'Partial gateway answer', audience: 'primary', source: 'text', progress: 'failed' },
-    { id: 'fixture-cancel', role: 'assistant', kind: 'conversation', text: 'Stopped answer', audience: 'primary', source: 'text', progress: 'cancelled' },
-  ], false, { manual: true, initialMessages: [] });
-  await page.waitForSelector('[data-testid="assistant-streaming-fixture-stream"]');
-  assert.equal(await page.$eval('[data-testid="assistant-streaming-fixture-stream"]', element => element.innerText), 'Updating response…');
-  assert.match(await page.$eval('[data-testid="assistant-failed-fixture-error"]', element => element.innerText), /Response stopped before completion/);
-  assert.equal(await page.$eval('[data-testid="assistant-cancelled-fixture-cancel"]', element => element.innerText), 'Response stopped');
+test('gateway error and cancellation fixtures render truthful states', async () => {
+  // The turn's own status is what drives these labels now; the canonical record
+  // never claims a completed response for a failed or cancelled turn. The
+  // 'streaming' label is pinned in tests/chat-evidence.test.ts, which the
+  // canonical record deliberately does not produce (see CHAT_ARCHITECTURE_FIX.md).
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
+    manual: true,
+    seedTurns: [
+      { clientMessageId: 'u-fixture-error', text: 'gateway failure fixture', reply: 'Partial gateway answer', status: 'failed' },
+      { clientMessageId: 'u-fixture-cancel', text: 'cancellation fixture', reply: 'Stopped answer', status: 'cancelled' },
+    ],
+  });
+  await pageWaitForText(page, 'Partial gateway answer');
+  assert.match(await page.$eval('[data-testid^="assistant-failed-"]', element => element.innerText), /Response stopped before completion/);
+  assert.equal(await page.$eval('[data-testid^="assistant-cancelled-"]', element => element.innerText), 'Response stopped');
+  assert.match(await page.$eval('[data-testid^="message-cancelled-"]', element => element.innerText), /Response stopped/);
   await page.close();
 
-  const failed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, initialMessages: [] }, true);
+  const failed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true }, true);
   await submit(failed, 'gateway interruption fixture');
   await failed.waitForSelector('[data-testid^="message-failed-"]');
   assert.match(await failed.$eval('[data-testid^="message-failed-"]', element => element.innerText), /Not sent/);

@@ -279,6 +279,80 @@ def parse_agent_history(output: str) -> List[Dict[str, str]]:
     return messages
 
 
+def _is_renderable_tool_call(text: str) -> bool:
+    """A tool row we can safely label. Mirrors isRenderableToolCall in ChatHistory.ts."""
+    value = text.strip()
+    if not value or _is_harness_artifact(value):
+        return False
+    return bool(
+        re.match(r'^(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching|Searching)\b', value, re.IGNORECASE)
+        or _MARKERLESS_TOOL.match(value)
+        or _is_tool_envelope(value)
+    )
+
+
+_TOOL_LABELS = {
+    'bash': 'Bash', 'read': 'Read', 'edit': 'Edit', 'write': 'Write', 'glob': 'Glob',
+    'grep': 'Grep', 'task': 'Task', 'websearch': 'WebSearch', 'webfetch': 'WebFetch',
+}
+_ACTIVITY_VERBS = re.compile(
+    r'^(Running|Calling|Reading|Writing|Editing|Exploring|Fetching|Searching|Ran|Called|Searched'
+    r'|Viewed|Created|Updated|Deleted|Downloaded|Committed|Pushed)\b', re.IGNORECASE)
+
+
+def tool_call_preview(text: str) -> str:
+    """The bounded label a tool event is allowed to carry into chat.
+
+    A tool row's raw text is a shell command or file excerpt: it can contain
+    tokens, paths, and secrets, and it belongs to the terminal rather than the
+    conversation record. The canonical store keeps only this label. Mirrors
+    toolCallPreview in frontend/src/services/ChatHistory.ts.
+    """
+    value = re.sub(r'\s+', ' ', text.strip())
+    if value.startswith('$'):
+        return 'Bash'
+    named = re.match(r'^(Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\b', value, re.IGNORECASE)
+    if named:
+        return _TOOL_LABELS.get(named.group(1).lower(), named.group(1))
+    activity = _ACTIVITY_VERBS.match(value)
+    if not activity:
+        if _is_tool_envelope(text):
+            verb = re.match(r'^([A-Za-z_]+)', value)
+            return verb.group(1).capitalize() if verb else 'Tool'
+        return 'Tool'
+    verb = activity.group(1)
+    return f'{verb}…' if re.match(r'^(Running|Calling|Reading|Writing|Editing|Exploring|Fetching|Searching)$', verb, re.IGNORECASE) else verb
+
+
+def classify_history_rows(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Retype parsed terminal rows that are not conversation as 'control'.
+
+    A snapshot carries no audience field, so a row that is not recognisable
+    conversation must fail closed instead of being promoted to a message of
+    either role. Retyped rows are retained rather than deleted because they
+    still mark the audience boundary they occupied. Mirrors
+    sanitizeTerminalHistory in frontend/src/services/ChatHistory.ts.
+    """
+    classified: List[Dict[str, str]] = []
+    for message in messages:
+        kind = message.get('kind')
+        text = message.get('text') or ''
+        if kind == 'control':
+            classified.append(dict(message))
+            continue
+        if kind == 'tool':
+            renderable = message.get('role') == 'assistant' and _is_renderable_tool_call(text)
+            classified.append({**message, 'kind': 'tool' if renderable else 'control'})
+            continue
+        conversational = (
+            not _is_harness_artifact(text)
+            and not _RAW_TERMINAL.match(_ANSI.sub('', text).strip())
+            and not _is_tool_envelope(text)
+        )
+        classified.append(dict(message) if conversational else {**message, 'kind': 'control'})
+    return classified
+
+
 def _prompt_response(output: str) -> Optional[str]:
     """Extract a real synchronous reply, never transport JSON or tool output."""
     response = output.strip()
@@ -491,6 +565,18 @@ class HerdrClient:
             # conversation, so return that instead of an empty history.
             return await self.read_agent_output(resolved_target, lines=lines, source='visible', output_format=output_format)
         return stdout.decode('utf-8', errors='replace') if stdout else ''
+
+    async def read_typed_rows(self, target: str, lines: int = DEFAULT_HISTORY_LINES) -> Dict[str, Any]:
+        """Snapshot rows typed for canonical ingestion, with no message identity.
+
+        This is the ingestion adapter's only entry point: the terminal supplies
+        typed rows, and app/conversation_store.py decides what they mean for the
+        canonical record. Content hashing (get_agent_history) stays on the
+        legacy worker-pane path, where terminal text is still the transcript.
+        """
+        resolved_target = await self.resolve_target(target)
+        output = await self.read_agent_output(resolved_target, lines=lines, output_format='ansi')
+        return {'target': resolved_target, 'rows': classify_history_rows(parse_agent_history(output))}
 
     async def get_agent_history(
         self, target: str, lines: int = DEFAULT_HISTORY_LINES,

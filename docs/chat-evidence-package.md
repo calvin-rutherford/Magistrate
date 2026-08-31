@@ -21,6 +21,31 @@ asyncio.run(check())
 PY
 ```
 
+## Real captured snapshot fixtures
+
+`gateway/tests/fixtures/*.ansi` are live `HerdrClient.read_agent_output(..., output_format='ansi')`
+captures taken read-only from running panes, committed so ingestion is tested against real terminal
+bytes rather than hand-written history arrays. `gateway/tests/test_conversation_store.py` drives them
+through parse -> classify -> `ingest_terminal_rows`, asserting that a real Pi pane's user-boxed file
+excerpt adds nothing to a conversation, that a real Claude reply with no attributable prompt never
+becomes chat, and that the real reply text re-read at three points while it renders stays one message
+with three revisions.
+
+Recapture (read-only; replace the pane id with one from `herdr api snapshot`):
+
+```sh
+cd gateway && PYTHONPATH=. uv run python - <<'PY'
+import asyncio, pathlib
+from app.herdr_client import HerdrClient
+async def capture():
+    raw = await HerdrClient().read_agent_output('w1W:p2', lines=300, output_format='ansi')
+    pathlib.Path('tests/fixtures/live-claude-captain-pane.ansi').write_text(raw)
+asyncio.run(capture())
+PY
+```
+
+Scan a new capture for credentials, private hostnames, and home paths before committing it.
+
 ## Fixtures and truthful states
 
 - `frontend/tests/chat-evidence.test.ts` covers unknown worker/user records failing closed, local timestamps (including accessible full timestamps), and the exact streaming, gateway-failure, and cancellation labels.

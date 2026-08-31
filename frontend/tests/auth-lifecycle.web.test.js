@@ -62,7 +62,19 @@ async function open(mode = 'normal', preserveStorage = false) {
         if (!state.valid || authorization !== 'Bearer browser-test-session') return json({ detail: 'Authentication required' }, 401);
         if (mode === 'active-401' && url.includes('/captain/prompt')) return json({ detail: 'Invalid or expired session' }, 401);
         if (mode === 'scope-403' && url.includes('/captain/prompt')) return json({ detail: 'Missing required scope: command' }, 403);
-        if (url.includes('/captain/prompt')) return json({ status: 'submitted', target: 'captain', response: 'Authenticated reply from Firstmate.' });
+        // The captain transcript is the gateway's canonical record, so a prompt
+        // answers with the turn it recorded rather than a bare reply string.
+        const canonicalMessages = () => state.turn ? [
+          { id: 'cm_0_u', turn_id: 'ct_0', client_message_id: state.turn.clientMessageId, role: 'user', type: 'conversation', text: state.turn.text, visible_in_chat: true, sequence_index: 0, revision: 1, turn_status: 'answered' },
+          { id: 'cm_0_a', turn_id: 'ct_0', role: 'assistant', type: 'conversation', text: 'Authenticated reply from Firstmate.', visible_in_chat: true, sequence_index: 999, revision: 1, turn_status: 'answered' },
+        ] : [];
+        if (url.includes('/captain/prompt')) {
+          let body = {};
+          try { body = JSON.parse(options.body || '{}'); } catch {}
+          state.turn = { clientMessageId: body.message_id, text: body.text };
+          return json({ status: 'submitted', target: 'captain', message_id: body.message_id, conversation: { schema_version: 'conversation.v1', target: 'captain', turn_id: 'ct_0', messages: canonicalMessages() } });
+        }
+        if (url.includes('/conversations/') && url.includes('/messages')) return json({ schema_version: 'conversation.v1', target: 'captain', messages: canonicalMessages() });
         if (url.includes('/execution/capabilities')) return json({ harnesses: [], profiles: [], source: 'test', configured: false });
         if (url.includes('/execution/settings')) return json({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
         if (url.includes('/notifications/events')) return json({ events: [] });

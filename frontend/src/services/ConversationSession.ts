@@ -54,6 +54,14 @@ export interface ConversationMessage {
   /** Explicit conversation boundary; terminal-derived rows without it are not restored. */
   audience?: 'captain' | 'primary';
   delivery?: 'sending' | 'sent' | 'failed' | 'cancelled';
+  /**
+   * Identity issued by the gateway's canonical conversation record (see
+   * CanonicalConversation.ts). Present on every captain row; absent on a row
+   * still in flight and on terminal-derived worker-pane rows.
+   */
+  canonicalId?: string;
+  turnId?: string;
+  sequenceIndex?: number;
 }
 
 // The active thread is kept in memory for reactive rendering and mirrored as
@@ -62,7 +70,16 @@ export interface ConversationMessage {
 const messagesByTarget = new Map<string, ConversationMessage[]>();
 const listenersByTarget = new Map<string, Set<() => void>>();
 const EMPTY_MESSAGES: ConversationMessage[] = [];
-const STORAGE_PREFIX = 'magistrate.chat.messages.';
+// v2 is the canonical-record era. The v1 mirror was written from mutable
+// terminal history and can hold duplicated or contaminated rows, so it is
+// deleted rather than migrated: the gateway is the transcript now, and
+// resurfacing v1 state would reintroduce exactly the rows this replaced.
+const STORAGE_PREFIX = 'magistrate.chat.messages.v2.';
+const LEGACY_STORAGE_PREFIXES = ['magistrate.chat.messages.'];
+const discardLegacyStorage = (target: string) => {
+  const suffix = encodeURIComponent(target);
+  void Promise.all(LEGACY_STORAGE_PREFIXES.map(prefix => AsyncStorage.removeItem(prefix + suffix))).catch(() => {});
+};
 const persist = (target: string, messages: ConversationMessage[]) => {
   void AsyncStorage.setItem(STORAGE_PREFIX + encodeURIComponent(target), JSON.stringify(messages)).catch(() => {});
 };
@@ -70,6 +87,7 @@ const persist = (target: string, messages: ConversationMessage[]) => {
 export async function hydrateConversationMessages(target: string): Promise<ConversationMessage[]> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_PREFIX + encodeURIComponent(target));
+    discardLegacyStorage(target);
     if (!raw) return getConversationMessages(target);
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return getConversationMessages(target);
@@ -79,7 +97,11 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       // known to have crossed the captain/primary boundary, while retaining
       // locally-created messages from older app versions.
       const trustedLegacyId = item.role === 'user' ? /^(?:u-|voice-u-)/.test(item.id) : /^(?:a-|voice-a-)/.test(item.id);
-      return item.kind !== 'tool' && (item.audience === (item.role === 'user' ? 'captain' : 'primary') || trustedLegacyId);
+      // A canonical row carries a server-issued id, so a tool event restored
+      // with one is a real recorded event rather than a parsed terminal row.
+      const canonical = typeof item.canonicalId === 'string' && item.canonicalId.length > 0;
+      if (item.kind === 'tool' && !canonical) return false;
+      return item.audience === (item.role === 'user' ? 'captain' : 'primary') || trustedLegacyId || canonical;
     }).map(item => {
       const value = item as Record<string, unknown>;
       const attachments = Array.isArray(value.attachments) ? value.attachments.filter(attachment => {
@@ -112,7 +134,7 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       const thinkingSummary = value.thinkingSummary && typeof value.thinkingSummary === 'object' ? (() => { const candidate = value.thinkingSummary as Record<string, unknown>; return typeof candidate.provider === 'string' && typeof candidate.text === 'string' ? { provider: candidate.provider.slice(0, 48), text: candidate.text.slice(0, 280) } : undefined; })() : undefined;
       const progress = ['queued', 'working', 'streaming', 'complete', 'failed', 'cancelled'].includes(String(value.progress)) ? value.progress as ConversationMessage['progress'] : undefined;
       const role = value.role as 'user' | 'assistant';
-      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
+      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: value.kind === 'tool' ? 'tool' : 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
     });
     const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
     const currentById = new Map(current.map(message => [message.id, message]));
@@ -120,10 +142,11 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       const live = currentById.get(stored.id);
       if (!live) return stored;
       currentById.delete(stored.id);
-      // An optimistic message can change while AsyncStorage is loading. The
-      // in-memory copy is newer, but a timestamp missing from either side must
-      // not erase the real timestamp from the other.
-      return { ...stored, ...live, sentAt: live.sentAt ?? stored.sentAt };
+      // An optimistic message can change while AsyncStorage is loading, so its
+      // mutable delivery fields win. The send timestamp is immutable local
+      // knowledge, though: an early canonical read carries only second-level
+      // server time and must not overwrite the exact persisted send instant.
+      return { ...stored, ...live, sentAt: stored.sentAt ?? live.sentAt };
     });
     const merged = [...hydrated, ...current.filter(message => currentById.has(message.id))];
     messagesByTarget.set(target, merged);
@@ -155,15 +178,6 @@ export function prependConversationMessages(target: string, messages: Conversati
   messagesByTarget.set(target, next); persist(target, next); emit(target);
 }
 
-export function insertConversationMessageAfter(target: string, afterId: string, message: ConversationMessage) {
-  const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
-  if (current.some(existing => existing.id === message.id)) return;
-  const index = current.findIndex(existing => existing.id === afterId);
-  if (index < 0) return;
-  const next = [...current.slice(0, index + 1), message, ...current.slice(index + 1)];
-  messagesByTarget.set(target, next); persist(target, next); emit(target);
-}
-
 export function resetConversationMessages(target: string, messages: ConversationMessage[] = EMPTY_MESSAGES) {
   messagesByTarget.set(target, messages); persist(target, messages); emit(target);
 }
@@ -172,7 +186,7 @@ export function updateConversationMessage(target: string, id: string, text: stri
   updateConversationMessageState(target, id, { text, sentAt });
 }
 
-export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience'>>) {
+export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience' | 'canonicalId' | 'turnId' | 'sequenceIndex'>>) {
   const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
   const next = current.map(message => message.id === id ? { ...message, ...update } : message);
   messagesByTarget.set(target, next); persist(target, next); emit(target);

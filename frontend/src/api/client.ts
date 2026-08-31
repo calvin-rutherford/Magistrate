@@ -6,6 +6,7 @@ import {
   removeLegacyGatewaySessionPayload,
   setGatewaySessionPayload,
 } from '../services/GatewaySessionStorage';
+import { CanonicalMessage, normalizeCanonicalMessages } from '../services/CanonicalConversation';
 import { parseAgentHistory } from '../services/ChatHistory';
 import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
 import { OperatingPermissionMode } from '../services/OperatingPermissionModes';
@@ -324,6 +325,13 @@ export interface AgentHistoryMessage {
   runId?: string;
   regenerateSafe?: boolean;
   progress?: 'queued' | 'working' | 'streaming' | 'complete' | 'failed' | 'cancelled';
+}
+
+export interface CanonicalConversationResult {
+  schema_version?: string;
+  target: string;
+  conversation_id?: string;
+  messages: CanonicalMessage[];
 }
 
 export interface AgentHistoryResult {
@@ -976,16 +984,20 @@ export interface VoiceMoveResult {
   status: 'ready' | 'confirmation_required' | 'confirmation_expired' | 'prohibited' | 'completed' | 'error';
   target: string; intent: string; impact: string; requires_confirmation: boolean;
   confirmation_token?: string; confirmation_message?: string; response?: string; error?: string;
+  /** The canonical turn a completed move recorded in the shared captain thread. */
+  conversation?: Partial<CanonicalConversationResult> & { turn_id?: string };
 }
 
 export async function submitVoiceMove(utterance: string, target: string, idempotencyKey: string,
-  execute = false, confirmationToken?: string): Promise<VoiceMoveResult> {
+  execute = false, confirmationToken?: string, clientMessageId?: string): Promise<VoiceMoveResult> {
   const res = await authorizedFetch(GATEWAY_URL + '/voice/moves', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ schema_version: 'voice-move.v1', utterance, target, source: 'voice-page',
-      idempotency_key: idempotencyKey, execute, confirmation_token: confirmationToken })
+      idempotency_key: idempotencyKey, execute, confirmation_token: confirmationToken,
+      ...(clientMessageId ? { client_message_id: clientMessageId } : {}) })
   });
-  return requireOk<VoiceMoveResult>(res);
+  const data = await requireOk<VoiceMoveResult>(res);
+  return { ...data, conversation: data.conversation ? { ...data.conversation, messages: normalizeCanonicalMessages(data.conversation.messages) } : undefined };
 }
 
 // Herdr exposes its read count as uint32 and bounds retained history separately
@@ -1020,6 +1032,30 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
   return data;
 }
 
+/**
+ * The captain transcript, straight from the gateway's canonical record.
+ *
+ * This replaces reading captain chat out of terminal history: every message
+ * here has a durable id, a turn, and a type, so the client appends or updates
+ * rather than re-deriving a transcript from mutable snapshots. See
+ * CHAT_ARCHITECTURE_FIX.md.
+ */
+export async function fetchCanonicalConversation(target: string = 'captain', lines: number = CHAT_HISTORY_LINES): Promise<CanonicalConversationResult> {
+  const res = await authorizedFetch(GATEWAY_URL + '/conversations/' + encodeURIComponent(target) + '/messages?lines=' + lines, {
+  });
+  const data = await checkedJson<Partial<CanonicalConversationResult>>(res);
+  if (!Array.isArray(data.messages)) throw new Error('Gateway returned an invalid conversation record.');
+  return { ...data, target: data.target || target, messages: normalizeCanonicalMessages(data.messages) };
+}
+
+/** Tell the gateway a turn was stopped, so late harness output is not its reply. */
+export async function cancelConversationTurn(target: string, clientMessageId: string): Promise<void> {
+  const res = await authorizedFetch(GATEWAY_URL + '/conversations/' + encodeURIComponent(target) + '/turns/' + encodeURIComponent(clientMessageId) + '/cancel', {
+    method: 'POST',
+  });
+  await checkedJson<{ status: string }>(res);
+}
+
 export async function sendCaptainPrompt(text: string, source: string = 'iphone', target: string = 'captain', harness?: string, model?: string, profileId?: string | null, attachments?: ChatUpload[], messageId?: string, signal?: AbortSignal) {
   // Only server-confirmed, stored uploads may be referenced in a prompt.
   if (attachments?.some(item => item.status !== 'stored')) throw new Error('An attachment was not confirmed as stored by the gateway.');
@@ -1040,7 +1076,11 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
       ...(messageId ? { message_id: messageId } : {})
     })
   });
-  return checkedJson<{ status: string; target?: string; response?: string; error?: string; sources?: AgentHistorySource[]; thinkingSummary?: { provider: string; text: string }; runId?: string; regenerateSafe?: boolean; progress?: AgentHistoryMessage['progress'] }>(res);
+  const data = await checkedJson<{ status: string; target?: string; response?: string; error?: string; message_id?: string; conversation?: Partial<CanonicalConversationResult> & { turn_id?: string }; sources?: AgentHistorySource[]; thinkingSummary?: { provider: string; text: string }; runId?: string; regenerateSafe?: boolean; progress?: AgentHistoryMessage['progress'] }>(res);
+  // The gateway answers with the canonical turn it just recorded, so the
+  // composer renders server identity immediately instead of a local guess that
+  // a later read would have to reconcile.
+  return { ...data, conversation: data.conversation ? { ...data.conversation, target: data.conversation.target || target, messages: normalizeCanonicalMessages(data.conversation.messages) } : undefined };
 }
 
 export async function interruptAgent(agentId: string): Promise<AgentControlResult> {

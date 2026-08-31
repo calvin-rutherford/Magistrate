@@ -66,5 +66,8 @@ class VoiceMoveRequest(BaseModel):
     target: str = Field(default='captain', min_length=1, max_length=200)
     source: str = Field(default='voice-page', max_length=50)
     idempotency_key: str = Field(min_length=8, max_length=200)
+    # The client's submission identity for this utterance, so a voice turn is
+    # recorded in the canonical conversation exactly like a typed one.
+    client_message_id: Optional[str] = Field(default=None, min_length=8, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
     execute: bool = False
     confirmation_token: Optional[str] = None
