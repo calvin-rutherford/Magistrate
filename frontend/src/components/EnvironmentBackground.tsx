@@ -71,7 +71,7 @@ function WeatherOverlay({ kind, dark }: { kind: WeatherKind; dark: boolean }) {
   return <View pointerEvents="none" style={[styles.weather, styles.clouds]} />;
 }
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0D1322' }, bgImage: { flex: 1, width: '100%', height: '100%' }, contentArea: { flex: 1 },
+  container: { flex: 1, backgroundColor: '#0D1322' }, bgImage: { flex: 1 }, contentArea: { flex: 1 },
   darkDimOverlay: { ...StyleSheet.absoluteFill, backgroundColor: '#07101D' },
   // Voice keeps the selected environment visible underneath a near-obsidian
   // treatment, preserving the dark immersive contract without breaking custom backgrounds.

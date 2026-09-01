@@ -1,3 +1,4 @@
+import '../src/global.css';
 import { Stack, usePathname, useRouter } from 'expo-router';
 import Head from 'expo-router/head';
 import * as Linking from 'expo-linking';
