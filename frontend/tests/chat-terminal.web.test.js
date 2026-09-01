@@ -476,7 +476,10 @@ test('floating chat controls stay pressable and leave the final message clear', 
   }));
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
   await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-floating-"]').length === 10);
-  await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  // A direct scrollTop assignment is not reader intent. Use the browser's
+  // actual upward wheel path so this test follows the sticky-bottom contract.
+  await page.hover('[data-testid="chat-history"]');
+  await page.mouse.wheel({ deltaY: -10_000 });
   await page.waitForSelector('[data-testid="jump-to-latest"]');
   const topClearance = await page.evaluate(() => {
     const header = document.querySelector('[data-testid="chat-header"]').getBoundingClientRect();
