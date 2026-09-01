@@ -196,6 +196,7 @@ def _upsert_message(
     source: str, force: bool = False,
     attachments: Optional[List[Dict[str, Any]]] = None,
     structurally_bounded: bool = False,
+    observation_complete: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Create or revise the one message holding ``slot`` in this turn.
 
@@ -238,12 +239,19 @@ def _upsert_message(
     attachments_changed = attachments_json is not None and existing['attachments_json'] != attachments_json
     if not force and message_type == 'conversation':
         if structurally_bounded:
-            # A later prompt boundary in this same snapshot makes this
-            # segment a complete, ordered terminal observation. Use that
-            # structurally bounded observation as-is so a reply corrupted by a
-            # prior degraded frame can be repaired; never subtract prompt text
-            # or use textual similarity to decide what to remove.
-            text = text.strip()
+            # A later prompt boundary makes this segment ordered, but does not
+            # prove that a partial observation contains the whole earlier reply.
+            # Preserve the stored prose prefix unless the harness also gives us
+            # an explicit completion observation. This is intentionally a
+            # structural decision; never subtract prompt text or use textual
+            # similarity to decide what to remove.
+            if observation_complete:
+                text = text.strip()
+            else:
+                merged = merge_captured_text(existing['text'], text)
+                if merged is None or len(merged) < len(existing['text']):
+                    return None
+                text = merged
         else:
             merged = merge_captured_text(existing['text'], text)
             if merged is None:
@@ -801,6 +809,10 @@ def ingest_terminal_rows(
             changed.extend(_apply_segment(
                 conn, conversation_id, turn, segment, complete=complete,
                 structurally_bounded=structurally_bounded,
+                # A later prompt closes the old segment for ordering/status,
+                # but is not proof that the old reply was fully observed. Only
+                # an explicit completion observation may replace stored prose.
+                observation_complete=(response_complete is True),
             ))
         if changed:
             _touch_conversation(conn, conversation_id)
@@ -810,6 +822,7 @@ def ingest_terminal_rows(
 def _apply_segment(
     conn: sqlite3.Connection, conversation_id: str, turn: sqlite3.Row, segment: _Segment,
     *, complete: bool, structurally_bounded: bool = False,
+    observation_complete: bool = False,
 ) -> List[Dict[str, Any]]:
     changed: List[Dict[str, Any]] = []
     turn_index = turn['sequence_index']
@@ -837,7 +850,7 @@ def _apply_segment(
             conn, conversation_id=conversation_id, turn_id=turn['id'], turn_index=turn_index,
             slot=_PRIMARY_SLOT, offset=_PRIMARY_OFFSET, role='assistant',
             message_type='conversation', text=primary, visible=True, source='terminal',
-            structurally_bounded=structurally_bounded,
+            structurally_bounded=structurally_bounded, observation_complete=observation_complete,
         )
         if reply:
             changed.append(reply)

@@ -63,12 +63,15 @@ function ActiveMark({ size }: { size: number }) {
 
 const RIPPLE_PALETTE = [brand.violet, brand.cyan, brand.green, brand.cyan, brand.violet];
 const RIPPLE_BASE_DURATION_MS = 2600;
-// These are deliberately irregular filament paths rather than perfect circles:
-// the approved mark sits in a spectral/cosmic field, not a target reticle.
+// These are deliberately broken, offset filament arcs rather than closed
+// loops: the approved mark sits in a spectral/cosmic field, not a target
+// reticle. The gaps also leave room for the field to breathe as it moves.
 const RIPPLE_FILAMENTS = [
-  'M50 4 C70 2 96 17 98 45 C100 72 79 97 51 96 C23 96 2 77 4 49 C6 22 28 5 50 4',
-  'M50 10 C74 7 91 24 92 49 C93 72 73 91 49 90 C25 89 9 72 10 49 C11 27 28 12 50 10',
-  'M50 17 C69 15 84 29 84 49 C84 69 69 83 50 83 C31 83 17 69 17 50 C17 31 31 19 50 17',
+  'M50 4 C72 2 94 17 98 40',
+  'M88 18 C98 37 95 59 84 76',
+  'M64 91 C43 99 20 89 11 70',
+  'M12 41 C7 25 20 10 39 6',
+  'M26 86 C11 75 5 57 9 41',
 ];
 
 /**
@@ -106,7 +109,7 @@ function VoiceRippleField({ audioPeak, reducedMotion }: { audioPeak: Animated.Va
       }]}>
         <Svg width="100%" height="100%" viewBox="0 0 100 100">
           <Path d={path} fill="none" stroke={RIPPLE_PALETTE[index % RIPPLE_PALETTE.length]} strokeWidth="0.65" strokeLinecap="round" opacity="0.9" />
-          <Path d={path} fill="none" stroke={RIPPLE_PALETTE[(index + 1) % RIPPLE_PALETTE.length]} strokeWidth="0.35" strokeLinecap="round" opacity="0.5" transform="rotate(3 50 50)" />
+          <Path d={path} fill="none" stroke={RIPPLE_PALETTE[(index + 1) % RIPPLE_PALETTE.length]} strokeWidth="0.35" strokeLinecap="round" opacity="0.5" transform="rotate(8 50 50)" />
         </Svg>
       </Animated.View>;
     })}

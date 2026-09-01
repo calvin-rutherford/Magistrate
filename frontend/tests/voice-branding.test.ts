@@ -30,6 +30,13 @@ test('no giant secondary triangle or equalizer-style bars remain', () => {
   assert.doesNotMatch(voiceSource, /testID="voice-waveform"/);
 });
 
+test('the ripple field uses broken filament arcs rather than target-like closed rings', () => {
+  const rippleBlock = voiceSource.match(/const RIPPLE_FILAMENTS = \[(.*?)\];/s)?.[1] || '';
+  assert.equal((rippleBlock.match(/'M/g) || []).length, 5);
+  assert.doesNotMatch(rippleBlock, /Z/i);
+  assert.match(voiceSource, /rotate\(8 50 50\)/);
+});
+
 test('the ripple field is the one audio-reactive layer, and the mark itself never scales with amplitude', () => {
   assert.match(voiceSource, /function VoiceRippleField/);
   assert.match(voiceSource, /testID="voice-ripple-field"/);

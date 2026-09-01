@@ -920,6 +920,26 @@ def test_structural_boundary_repairs_a_prior_cross_role_revision_without_text_su
     ]
 
 
+def test_incomplete_structural_boundary_preserves_stored_reply_prefix():
+    first = store.record_prompt(USER, TARGET, 'u-prefix-1', 'first turn')
+    store.record_primary_reply(USER, TARGET, first['turn_id'], 'The complete stored reply prefix survives.')
+    store.record_prompt(USER, TARGET, 'u-prefix-2', 'next turn')
+
+    # The later user row is structural ordering evidence, not proof that this
+    # partial terminal view contains the whole earlier reply. Without an
+    # explicit completion observation, a shorter overlap cannot truncate it.
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'first turn'),
+        ('assistant', 'conversation', 'The complete stored reply'),
+        ('user', 'conversation', 'next turn'),
+    ), response_complete=False)
+
+    replies = [row for row in store.list_messages(USER, TARGET)['messages'] if row['role'] == 'assistant']
+    assert [(row['turn_id'], row['text'], row['revision']) for row in replies] == [
+        (first['turn_id'], 'The complete stored reply prefix survives.', 1),
+    ]
+
+
 def test_structural_later_boundary_does_not_trim_a_legitimate_quoted_prompt():
     store.record_prompt(USER, TARGET, 'u-quoted-1', 'quote this')
     store.record_prompt(USER, TARGET, 'u-quoted-2', 'Hello')
