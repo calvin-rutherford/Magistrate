@@ -102,6 +102,28 @@ test('parser keeps only conversational prose, typing Claude unmarked tool rows a
 });
 
 // Mirrors gateway/tests/test_captain_history.py — the two parsers must agree.
+test('an unmarked Update(path) invocation is typed as tool activity, never assistant prose', () => {
+  const output = [
+    '❯ The app seems tinted. Please dispatch the three presentation fixes.',
+    '',
+    '● Aye, captain — three clear items. Dispatching a focused pass now.',
+    '',
+    '  Update(data/magistrate-composer-float-t5/brief.md)',
+    '',
+    '● 1. Remove the unintended tint.',
+    '  2. Float the composer.',
+    '  3. Make the drawer header transparent.',
+  ].join('\n');
+
+  const messages = parseAgentHistory(output);
+  assert.deepEqual(messages.map(message => [message.role, message.kind]), [
+    ['user', 'conversation'], ['assistant', 'conversation'],
+    ['assistant', 'tool'], ['assistant', 'conversation'],
+  ]);
+  assert.equal(messages[2].text, 'Update(data/magistrate-composer-float-t5/brief.md)');
+  assert.equal(toolCallPreview(messages[2].text), 'Update');
+});
+
 test('tool visibility keeps only compact provider-style tool previews', () => {
   const messages: AgentHistoryMessage[] = [
     { role: 'assistant', kind: 'conversation', text: 'The deployment is healthy.' },

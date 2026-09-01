@@ -56,6 +56,10 @@ MAX_INTERNAL_EVENTS_PER_TURN = 8
 MAX_PRIMARY_TEXT = 20_000
 MAX_MESSAGE_WINDOW = 200
 TURN_MATCH_WINDOW = 40
+# A prompt can scroll off Claude's alternate-screen viewport while its reply is
+# still growing. Continue only from substantial assistant prose already bound
+# to exactly one turn; shorter/common fragments are not an audience signal.
+REPLY_CONTINUITY_MIN_CHARS = 40
 MAX_ATTACHMENTS_PER_MESSAGE = 10
 _SAFE_UPLOAD_ID = re.compile(r'^[A-Za-z0-9_-]{16,64}$')
 # SQLite is single-writer; the poll, the socket loop, and a prompt can all
@@ -401,11 +405,11 @@ def _turn_messages(conn: sqlite3.Connection, turn_id: str, client_message_id: Op
 
 
 class _Segment:
-    """One prompt row from the snapshot with the agent activity that follows it."""
+    """One prompt row, or a continuity-anchored viewport head, and its activity."""
 
     __slots__ = ('prompt', 'prose', 'tools', 'internal')
 
-    def __init__(self, prompt: str) -> None:
+    def __init__(self, prompt: Optional[str]) -> None:
         self.prompt = prompt
         self.prose: List[str] = []
         self.tools: List[str] = []
@@ -426,6 +430,7 @@ def build_segments(rows: Iterable[Dict[str, str]]) -> List[_Segment]:
     """
     segments: List[_Segment] = []
     current: Optional[_Segment] = None
+    saw_user_boundary = False
     for row in rows:
         role, kind = row.get('role'), row.get('kind')
         text = (row.get('text') or '').strip()
@@ -434,15 +439,24 @@ def build_segments(rows: Iterable[Dict[str, str]]) -> List[_Segment]:
         if kind == 'control':
             if role == 'user':
                 current = None
+                saw_user_boundary = True
             elif current is not None:
                 current.internal.append(text)
             continue
         if role == 'user':
+            saw_user_boundary = True
             current = _Segment(text)
             segments.append(current)
             continue
         if current is None:
-            continue
+            # Claude's alternate screen eventually pushes the prompt above the
+            # visible viewport while leaving the growing assistant blocks at
+            # its head. Preserve only that leading activity; assistant output
+            # after an observed user/control boundary remains unattributed.
+            if saw_user_boundary:
+                continue
+            current = _Segment(None)
+            segments.append(current)
         if kind == 'tool':
             current.tools.append(text)
         else:
@@ -475,14 +489,38 @@ def join_primary_text(blocks: List[str]) -> str:
     return '\n\n'.join(kept)[:MAX_PRIMARY_TEXT]
 
 
+def _has_reply_continuity(stored: str, incoming: str) -> bool:
+    """Whether assistant prose is a strong continuation anchor for one turn."""
+    if not stored or not incoming:
+        return False
+    if min(len(stored), len(incoming)) >= REPLY_CONTINUITY_MIN_CHARS and (
+        stored in incoming or incoming in stored
+    ):
+        return True
+    # A newly recognised tool line can disappear from the corrected incoming
+    # prose. The unchanged prose block before/after it is still a valid anchor.
+    for old_block in stored.split('\n\n'):
+        for new_block in incoming.split('\n\n'):
+            shared = 0
+            for old_char, new_char in zip(old_block, new_block):
+                if old_char != new_char:
+                    break
+                shared += 1
+            if shared >= REPLY_CONTINUITY_MIN_CHARS:
+                return True
+    return False
+
+
 def _match_segments_to_turns(
     turns: List[sqlite3.Row], segments: List[_Segment],
 ) -> List[Tuple[sqlite3.Row, _Segment]]:
     """Pair each snapshot segment with the turn that produced it.
 
-    Both lists are in conversation order, so matching newest-first is what keeps
-    an older repeated phrase from stealing the newest turn's reply and still
-    works when the retained snapshot has scrolled past the older turns.
+    Prompt-bearing segments match newest-first. A single leading segment whose
+    prompt has scrolled off may continue a turn only when its assistant prose
+    overlaps the primary reply already attributed to exactly one recent turn.
+    This is deliberately not an "open turn" fallback: no overlap or ambiguous
+    overlap means no write.
     """
     matched: List[Tuple[sqlite3.Row, _Segment]] = []
     used: set[str] = set()
@@ -491,7 +529,7 @@ def _match_segments_to_turns(
         for turn in turns
     }
     for segment in reversed(segments):
-        if not segment.has_activity:
+        if segment.prompt is None or not segment.has_activity:
             continue
         for turn in reversed(turns):
             if turn['id'] in used:
@@ -500,7 +538,22 @@ def _match_segments_to_turns(
                 used.add(turn['id'])
                 matched.append((turn, segment))
                 break
-    matched.reverse()
+
+    for segment in segments:
+        if segment.prompt is not None or not segment.has_activity:
+            continue
+        incoming = join_primary_text(segment.prose)
+        candidates = [
+            turn for turn in turns
+            if turn['id'] not in used
+            and _has_reply_continuity(turn['reply_text'] or '', incoming)
+        ]
+        if len(candidates) == 1:
+            turn = candidates[0]
+            used.add(turn['id'])
+            matched.append((turn, segment))
+
+    matched.sort(key=lambda pair: pair[0]['sequence_index'])
     return matched
 
 
@@ -514,12 +567,13 @@ def _recent_turns(conn: sqlite3.Connection, conversation_id: str) -> List[sqlite
     rows = conn.execute(
         '''SELECT t.id AS id, t.sequence_index AS sequence_index, t.status AS status,
                   t.client_message_id AS client_message_id, t.prompt_key AS prompt_key,
-                  m.text AS prompt_text
+                  prompt.text AS prompt_text, reply.text AS reply_text
            FROM conversation_turns t
-           LEFT JOIN conversation_messages m ON m.turn_id = t.id AND m.slot = ?
+           LEFT JOIN conversation_messages prompt ON prompt.turn_id = t.id AND prompt.slot = ?
+           LEFT JOIN conversation_messages reply ON reply.turn_id = t.id AND reply.slot = ?
            WHERE t.conversation_id = ? AND t.status NOT IN ('cancelled', 'failed')
            ORDER BY t.sequence_index DESC LIMIT ?''',
-        (_PROMPT_SLOT, conversation_id, TURN_MATCH_WINDOW),
+        (_PROMPT_SLOT, _PRIMARY_SLOT, conversation_id, TURN_MATCH_WINDOW),
     ).fetchall()
     return list(reversed(rows))
 

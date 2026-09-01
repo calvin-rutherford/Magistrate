@@ -1,0 +1,33 @@
+[0m[38;5;231m●[0m Acknowledged, captain — running delivery regression test
+  reply-regression-1788232091 now.
+
+  [0m[38;5;246mRead [0m[1m[38;5;246m1[0m[38;5;246m file [0m
+
+[0m[38;5;231m●[0m Inspection complete, captain — first 20 lines read, nothing modified.
+
+  1. [0m[1mA growing reply is one message, not many.[0m The moment the assistant begins
+     answering, the gateway should create exactly one conversation row bound to that
+     turn and then keep rewriting that same row as more text arrives, so its identity
+     never depends on the words it currently contains. Every snapshot of the
+     terminal is a fresh observation of one evolving message, which means the correct
+     operation is always an update in place rather than an append — and the row is
+     only considered final when the turn itself is observed to close, never when a
+     single snapshot happens to look complete.
+  2. [0m[1mInterleaved machinery must be classified, not concatenated.[0m While a reply is
+     still growing, tool invocations, status lines, and harness chrome appear in the
+     same terminal stream and frequently land in the middle of the prose, so the
+     classifier has to type each row on its own merits before anything is written to
+     the conversation record. A row it cannot confidently identify as assistant prose
+     must be excluded or typed as tool activity rather than folded into the visible
+     message, because an unrecognized fragment silently glued to the answer is worse
+     than one omitted from it. 
+  3. [0m[1mDelivery must push every revision, and the client must trust the newest one.[0m
+     Each update to that single row needs to reach the browser promptly over the live
+     channel, with polling as a backstop, and each revision must carry a
+     monotonically increasing number so a slow or out-of-order delivery can never
+     overwrite newer text with older text. The client's contract stays deliberately
+                                             [0m[38;5;114m✔ Update installed · Restart to update[0m
+[0m[38;5;244m─────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;5;246m❯ [0m
+[0m[38;5;244m─────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;5;220m⏵⏵ auto mode on[0m[38;5;246m (shift+tab to cycle) · esc to interrupt · ← for agents[0m
