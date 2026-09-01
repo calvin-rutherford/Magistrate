@@ -48,7 +48,7 @@ function WeatherOverlay({ kind }: { kind: WeatherKind }) {
   return <View pointerEvents="none" style={[styles.weather, styles.clouds]} />;
 }
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0D1322' }, bgImage: { flex: 1, width: '100%', height: '100%' }, contentArea: { flex: 1 },
+  container: { flex: 1, backgroundColor: '#0D1322' }, bgImage: { flex: 1 }, contentArea: { flex: 1 },
   darkDimOverlay: { ...StyleSheet.absoluteFill, backgroundColor: '#07101D' }, weather: { ...StyleSheet.absoluteFill },
   clouds: { backgroundColor: 'rgba(35, 45, 58, 0.18)' }, storm: { backgroundColor: 'rgba(18, 20, 38, 0.38)' },
   rain: { position: 'absolute', width: 1, height: 34, backgroundColor: 'rgba(180, 211, 225, 0.16)', transform: [{ rotate: '12deg' }] },

@@ -1,3 +1,4 @@
+import '../src/global.css';
 import { Stack } from 'expo-router';
 import React, { useEffect } from 'react';
 import { notificationManager } from '../src/services/NotificationManager';
