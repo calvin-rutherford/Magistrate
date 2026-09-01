@@ -7,7 +7,6 @@ import { AccessibilityInfo, Alert, Image, ImageSourcePropType, KeyboardAvoidingV
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
-import { LinearGradient } from 'expo-linear-gradient';
 import { AgentHistoryMessage, AgentInfo, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgents, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ComposeIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, InfoIcon, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
@@ -89,19 +88,6 @@ function GlassCircleButton({ dark, onPress, accessibilityLabel, accessibilityHin
     {children}
     {badge ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}
   </TouchableOpacity>;
-}
-
-/**
- * Readability treatment for the floating chrome. The environment keeps the
- * canvas; only the two edges the chrome occupies get a tonal gradient, so a
- * custom photograph is never covered by an opaque panel (prompt section 5).
- */
-function EdgeScrims({ dark }: { dark: boolean }) {
-  const base = dark ? '5,7,10' : '247,248,250';
-  return <>
-    <LinearGradient pointerEvents="none" testID="chat-top-scrim" colors={[`rgba(${base},0.72)`, `rgba(${base},0.30)`, `rgba(${base},0)`]} style={styles.topScrim} />
-    <LinearGradient pointerEvents="none" testID="chat-bottom-scrim" colors={[`rgba(${base},0)`, `rgba(${base},0.52)`, `rgba(${base},0.88)`]} style={styles.bottomScrim} />
-  </>;
 }
 
 /**
@@ -353,9 +339,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const dark = isDarkTheme(useChatColorScheme());
   const text = dark ? '#F4F5F7' : brand.ink;
   const muted = dark ? brand.mutedDark : brand.mutedLight;
-  // The composer is floating chrome, not a bottom sheet: keep the same adaptive
-  // glass fill as the drawer button and header controls.
-  const composerSurface = glassFill(dark);
+  // The composer remains floating chrome; only its surface fill is transparent.
+  const composerSurface = 'transparent';
   const messages = useConversationMessages(target);
   // The captain thread is the conversation the gateway records canonically.
   // Worker panes are observation surfaces with no submitted turns, so they keep
@@ -1104,7 +1089,6 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
       {isThinking ? <WorkingState dark={dark} muted={muted} operations={activeOperations} /> : null}
     </ScrollView>
-    <EdgeScrims dark={dark} />
     <EmptyStateMagi dark={dark} visible={showEmptyState} greeting={greeting} active={isThinking || isRecording} />
     <View testID="chat-header" style={styles.headerDock} pointerEvents="box-none" onLayout={handleHeaderLayout}>
       <View style={styles.topBar} pointerEvents="box-none">
@@ -1553,11 +1537,6 @@ const styles = StyleSheet.create({
   identityControl: { flex: 1, minWidth: 0, minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 6 },
   identityName: { fontSize: 19, fontWeight: '600', letterSpacing: -0.2 }, identityVariant: { flexShrink: 1, fontSize: 19, fontWeight: '400', letterSpacing: -0.2 }, identityChevron: { transform: [{ rotate: '90deg' }] },
   mark: { width: 37, height: 37 }, tinyDot: { width: 8, height: 8, borderRadius: 4 },
-
-  // Readability treatment only where the chrome sits; the middle of the screen
-  // keeps the environment untouched.
-  topScrim: { position: 'absolute', top: 0, left: 0, right: 0, height: 150, zIndex: 2 },
-  bottomScrim: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 220, zIndex: 2 },
 
   emptyState: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 34, gap: 22, zIndex: 3 },
   emptyStateMarkWrap: { width: 108, height: 108, alignItems: 'center', justifyContent: 'center' },
