@@ -807,6 +807,182 @@ def test_promptless_prose_without_unique_continuity_still_fails_closed():
     ]
 
 
+def test_real_pi_boundary_fixture_produces_one_canonical_row_per_role():
+    """The retained ANSI capture is the production cross-role defect shape.
+
+    The damaged capture retains the next Pi prompt's foreground submission
+    marker but loses its background fill. That marker is structural evidence;
+    the parser must not fold the prompt into the preceding assistant prose.
+    """
+    parsed = typed_rows('production-pi-cross-role-boundary-dropped-box.ansi')
+    assert [(row['role'], row['kind']) for row in parsed if row['text'] in {
+        'Still testing. Just want to check chat persistence.', 'Hello'
+    }] == [('user', 'conversation'), ('user', 'conversation')]
+    first = store.record_prompt(USER, TARGET, 'u-real-boundary-1', 'Still testing. Just want to check chat persistence.')
+    second = store.record_prompt(USER, TARGET, 'u-real-boundary-2', 'Hello')
+
+    # This is the same parse -> classify -> store path used by both the polling
+    # endpoint and the socket loop. Replaying it is the poll/socket convergence
+    # case and must not mint a duplicate user row or revision.
+    store.ingest_terminal_rows(USER, TARGET, parsed, response_complete=True)
+    before_reload = store.list_messages(USER, TARGET)['messages']
+    store.ingest_terminal_rows(USER, TARGET, parsed, response_complete=True)
+    after_reload = store.list_messages(USER, TARGET)['messages']
+
+    conversation = [(row['role'], row['type'], row['text']) for row in after_reload if row['type'] == 'conversation']
+    assert conversation == [
+        ('user', 'conversation', 'Still testing. Just want to check chat persistence.'),
+        ('assistant', 'conversation', 'Understood, captain. Chat persistence check received.'),
+        ('user', 'conversation', 'Hello'),
+    ]
+    assert 'Hello' not in conversation[1][2]
+    assert len([row for row in after_reload if row['role'] == 'user']) == 2
+    assert after_reload == before_reload
+    assert first['turn_id'] != second['turn_id']
+
+
+def test_real_pi_boundary_is_clean_in_the_canonical_http_payload(monkeypatch):
+    parsed = typed_rows('production-pi-cross-role-boundary.ansi')
+    store.record_prompt(USER, TARGET, 'u-http-real-1', 'Still testing. Just want to check chat persistence.')
+    store.record_prompt(USER, TARGET, 'u-http-real-2', 'Hello')
+
+    async def captured_snapshot(target, lines=None):
+        return {'target': target, 'agent_status': 'idle', 'rows': parsed}
+
+    monkeypatch.setattr('app.main.herdr_client.read_typed_rows', captured_snapshot)
+    payload = client.get(f'/api/v1/conversations/{TARGET}/messages', headers=TEST_HEADERS).json()
+    visible_payload = [item for item in payload['messages'] if item['type'] == 'conversation']
+    assert [(item['role'], item['text']) for item in visible_payload] == [
+        ('user', 'Still testing. Just want to check chat persistence.'),
+        ('assistant', 'Understood, captain. Chat persistence check received.'),
+        ('user', 'Hello'),
+        ('assistant', 'Hello, captain.'),
+    ]
+    assert len([item for item in visible_payload if item['role'] == 'user']) == 2
+    assert not any(item['type'] in {'internal', 'status'} for item in payload['messages'])
+    assert not any('FIRSTMATE_OP' in item['text'] or 'pane_id' in item['text'] for item in payload['messages'])
+
+
+def test_real_pi_complete_boundary_retains_the_later_assistant_reply():
+    parsed = typed_rows('production-pi-cross-role-boundary.ansi')
+    store.record_prompt(USER, TARGET, 'u-real-complete-1', 'Still testing. Just want to check chat persistence.')
+    store.record_prompt(USER, TARGET, 'u-real-complete-2', 'Hello')
+    store.ingest_terminal_rows(USER, TARGET, parsed, response_complete=True)
+    assert [(row['role'], row['type'], row['text']) for row in store.list_messages(USER, TARGET)['messages'] if row['type'] == 'conversation'] == [
+        ('user', 'conversation', 'Still testing. Just want to check chat persistence.'),
+        ('assistant', 'conversation', 'Understood, captain. Chat persistence check received.'),
+        ('user', 'conversation', 'Hello'),
+        ('assistant', 'conversation', 'Hello, captain.'),
+    ]
+
+
+def test_reply_must_not_cross_known_user_boundary_without_structural_prompt_evidence():
+    """The store-side defense does not search reply text for the later prompt."""
+    first = store.record_prompt(USER, TARGET, 'u-boundary-store-1', 'first turn')
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'first turn'),
+        ('assistant', 'conversation', 'The first reply is complete.'),
+    ))
+    store.record_prompt(USER, TARGET, 'u-boundary-store-2', 'Hello')
+
+    # Deliberately model a degraded terminal frame with the later user row
+    # missing entirely. Text overlap with "Hello" must not authorize an
+    # extension of turn one; only a separately observed structural prompt does.
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'first turn'),
+        ('assistant', 'conversation', 'The first reply is complete. Hello'),
+    ))
+    replies = [row for row in store.list_messages(USER, TARGET)['messages'] if row['role'] == 'assistant']
+    assert [(row['turn_id'], row['text'], row['revision']) for row in replies] == [
+        (first['turn_id'], 'The first reply is complete.', 1),
+    ]
+
+
+def test_structural_boundary_repairs_a_prior_cross_role_revision_without_text_subtraction():
+    first = store.record_prompt(USER, TARGET, 'u-repair-1', 'Still testing')
+    # Reproduce the persisted production corruption before the next prompt was
+    # known to the store.
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'Still testing'),
+        ('assistant', 'conversation', 'Understood, captain. Hello'),
+    ))
+    store.record_prompt(USER, TARGET, 'u-repair-2', 'Hello')
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'Still testing'),
+        ('assistant', 'conversation', 'Understood, captain.'),
+        ('user', 'conversation', 'Hello'),
+        ('assistant', 'conversation', 'Hello, captain.'),
+    ), response_complete=True)
+    replies = [row for row in store.list_messages(USER, TARGET)['messages'] if row['role'] == 'assistant']
+    assert [(row['turn_id'], row['text']) for row in replies] == [
+        (first['turn_id'], 'Understood, captain.'),
+        (replies[1]['turn_id'], 'Hello, captain.'),
+    ]
+
+
+def test_incomplete_structural_boundary_preserves_stored_reply_prefix():
+    first = store.record_prompt(USER, TARGET, 'u-prefix-1', 'first turn')
+    store.record_primary_reply(USER, TARGET, first['turn_id'], 'The complete stored reply prefix survives.')
+    store.record_prompt(USER, TARGET, 'u-prefix-2', 'next turn')
+
+    # The later user row is structural ordering evidence, not proof that this
+    # partial terminal view contains the whole earlier reply. Without an
+    # explicit completion observation, a shorter overlap cannot truncate it.
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'first turn'),
+        ('assistant', 'conversation', 'The complete stored reply'),
+        ('user', 'conversation', 'next turn'),
+    ), response_complete=False)
+
+    replies = [row for row in store.list_messages(USER, TARGET)['messages'] if row['role'] == 'assistant']
+    assert [(row['turn_id'], row['text'], row['revision']) for row in replies] == [
+        (first['turn_id'], 'The complete stored reply prefix survives.', 1),
+    ]
+
+
+def test_structural_later_boundary_does_not_trim_a_legitimate_quoted_prompt():
+    store.record_prompt(USER, TARGET, 'u-quoted-1', 'quote this')
+    store.record_prompt(USER, TARGET, 'u-quoted-2', 'Hello')
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'quote this'),
+        ('assistant', 'conversation', 'The assistant may quote Hello here.'),
+        ('user', 'conversation', 'Hello'),
+        ('assistant', 'conversation', 'Hello, captain.'),
+    ), response_complete=True)
+    replies = [row['text'] for row in store.list_messages(USER, TARGET)['messages'] if row['role'] == 'assistant']
+    assert replies == ['The assistant may quote Hello here.', 'Hello, captain.']
+
+
+def test_real_rapid_pi_capture_keeps_two_submissions_distinct_across_reload():
+    parsed = typed_rows('captured-pi-rapid-two-user-turns.ansi')
+    prompts = [row['text'] for row in parsed if row['role'] == 'user' and row['kind'] == 'conversation']
+    assert prompts == [
+        'Reply with exactly the two words: Alpha ready.',
+        'Reply with exactly the two words: Bravo ready.',
+    ]
+    for index, prompt in enumerate(prompts):
+        store.record_prompt(USER, TARGET, f'u-rapid-{index}', prompt)
+    store.ingest_terminal_rows(USER, TARGET, parsed, response_complete=True)
+    first_read = store.list_messages(USER, TARGET)['messages']
+    store.ingest_terminal_rows(USER, TARGET, parsed, response_complete=True)
+    assert store.list_messages(USER, TARGET)['messages'] == first_read
+    assert [row['text'] for row in first_read if row['role'] == 'user'] == prompts
+
+
+def test_same_wording_still_uses_submission_identity_not_text_identity():
+    """The raw Pi boundary path is still keyed by two client submissions."""
+    fixture = typed_rows('production-pi-cross-role-boundary.ansi')
+    store.record_prompt(USER, TARGET, 'u-same-1', 'Hello')
+    store.record_prompt(USER, TARGET, 'u-same-2', 'Hello')
+    # There is one real Hello boundary in this capture, so it may match only
+    # one of the two identical canonical turns; the other remains a distinct
+    # user row rather than being deduplicated or stolen by text matching.
+    store.ingest_terminal_rows(USER, TARGET, fixture)
+    users = [row for row in store.list_messages(USER, TARGET)['messages'] if row['role'] == 'user']
+    assert [row['text'] for row in users] == ['Hello', 'Hello']
+    assert [row['client_message_id'] for row in users] == ['u-same-1', 'u-same-2']
+
+
 def test_production_update_invocation_is_tool_activity_not_visible_prose():
     parsed = typed_rows('production-claude-update-leak.ansi')
     assert [(row['role'], row['kind']) for row in parsed] == [

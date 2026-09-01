@@ -48,13 +48,15 @@ test('voice control keeps the compact stage and enlarged branded mark proportion
   });
   await page.goto(VOICE_URL, { waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="voice-control"]');
-  const sizes = await page.$eval('[data-testid="voice-control"]', element => Array.from(element.querySelectorAll('svg')).map(svg => Math.round(svg.getBoundingClientRect().width)));
+  // The stage is now an invisible hit target (no ghost-triangle SVG behind
+  // the mark), so its size comes from the touchable's own box.
+  const stageWidth = await page.$eval('[data-testid="voice-control"]', element => Math.round(element.getBoundingClientRect().width));
+  const markWidth = await page.$eval('[data-testid="voice-active-mark"]', element => Math.round(element.getBoundingClientRect().width));
   const viewportWidth = await page.evaluate(() => innerWidth);
   const expectedStage = (viewportWidth < 680 ? Math.min(Math.max(viewportWidth - 34, 200), 360) : Math.min(viewportWidth * 0.46, 520)) * 0.95;
   const expectedMark = (viewportWidth < 680 ? Math.min(Math.max(viewportWidth * 0.54, 140), 220) : Math.min(viewportWidth * 0.28, 270)) * 1.2;
-  assert.equal(sizes.length >= 2, true);
-  assert.ok(Math.abs(sizes[0] - expectedStage) <= 12, JSON.stringify({ sizes, expectedStage, expectedMark, viewportWidth }));
-  assert.ok(Math.abs(sizes[1] - expectedMark) <= 12, JSON.stringify({ sizes, expectedStage, expectedMark, viewportWidth }));
+  assert.ok(Math.abs(stageWidth - expectedStage) <= 12, JSON.stringify({ stageWidth, expectedStage, viewportWidth }));
+  assert.ok(Math.abs(markWidth - expectedMark) <= 12, JSON.stringify({ markWidth, expectedMark, viewportWidth }));
   await page.close();
 });
 
@@ -128,6 +130,36 @@ test('voice mode listens continuously: transcribes a turn, answers in the thread
   assert.deepEqual(await page.evaluate(() => window.__spokenTexts), ['Two agents are live and both are idle.']);
   await page.waitForFunction(() => document.body.innerText.includes('Listening'), { timeout: 20_000 });
   assert.equal(new URL(page.url()).pathname, '/voice');
+  await page.close();
+});
+
+test('voice ripple field reacts to injected amplitude while the canonical mark stays geometrically stable', async () => {
+  const page = await browser.newPage();
+  await page.setViewport({ width: 390, height: 844 });
+  await page.evaluateOnNewDocument(() => {
+    localStorage.setItem('magistrate.notifications.web-permission-asked', 'true');
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (resource, options) => {
+      const url = typeof resource === 'string' ? resource : resource.url;
+      if (url.includes('/api/v1/auth/session')) {
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (url.includes('/api/v1/voice/capabilities')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'voice-capabilities.v1', provider: 'browser', configured: true, modes: [{ id: 'browser', label: 'Browser speech', available: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      return nativeFetch(resource, options);
+    };
+  });
+  await page.goto(VOICE_URL, { waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => typeof window.__voiceSetTestAmplitude === 'function' && document.body.innerText.includes('Listening'), { timeout: 20_000 });
+  const before = await page.$eval('[data-testid="voice-active-mark"]', element => element.getBoundingClientRect().toJSON());
+  const quietRipple = await page.$eval('[data-testid="voice-ripple-layer-4"]', element => ({ opacity: getComputedStyle(element).opacity, rect: element.getBoundingClientRect().toJSON() }));
+  await page.evaluate(() => window.__voiceSetTestAmplitude?.(1));
+  await new Promise(resolve => setTimeout(resolve, 650));
+  const after = await page.$eval('[data-testid="voice-active-mark"]', element => element.getBoundingClientRect().toJSON());
+  const loudRipple = await page.$eval('[data-testid="voice-ripple-layer-4"]', element => ({ opacity: getComputedStyle(element).opacity, rect: element.getBoundingClientRect().toJSON() }));
+  assert.ok(Math.abs(before.width - after.width) < 0.5 && Math.abs(before.height - after.height) < 0.5, JSON.stringify({ before, after }));
+  assert.ok(Math.abs(quietRipple.rect.width - loudRipple.rect.width) > 1 || quietRipple.opacity !== loudRipple.opacity, JSON.stringify({ quietRipple, loudRipple }));
   await page.close();
 });
 

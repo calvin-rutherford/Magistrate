@@ -1,9 +1,8 @@
-import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react';
 import { AccessibilityInfo, Animated, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { G, Path, Polygon } from 'react-native-svg';
+import Svg, { Defs, G, LinearGradient as SvgLinearGradient, Path, Polygon, Stop } from 'react-native-svg';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import { submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
@@ -11,9 +10,18 @@ import { reconcileCanonicalMessages } from '../src/services/CanonicalConversatio
 import { appendConversationMessage, getConversationMessages, resetConversationMessages, useConversationMessages } from '../src/services/ConversationSession';
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
-import { loadChatPreferences, useChatColorScheme } from '../src/services/ChatPreferences';
+import { loadChatPreferences } from '../src/services/ChatPreferences';
 import { capabilityFor, getLocalVoiceCapabilities, resolveVoiceInputMode, VoiceInputCapabilities, VoiceInputMode } from '../src/services/VoiceInputModes';
-import { ACTIVE_MARK_SPIRAL, ACTIVE_MARK_TRIANGLE, audioEnergyScale, clampAudioPeak, waveformBarHeight } from '../src/services/VoiceVisuals';
+import { audioEnergyScale, clampAudioPeak, ENVELOPE_SILENCE_FLOOR, ringPhaseOffset, ringSpeedScale, updateAudioEnvelope, ACTIVE_MARK_SPIRAL, ACTIVE_MARK_TRIANGLE } from '../src/services/VoiceVisuals';
+
+/** Test-only amplitude injection so browser evidence can be captured without a
+ * real microphone. Web-only by construction (native never defines `window`),
+ * so the native capture path is unaffected. */
+declare global {
+  var __voiceSetTestAmplitude: ((value: number | null) => void) | undefined;
+}
+
+const SPECTRAL_RING_COUNT = 5;
 
 const brand = {
   obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B',
@@ -35,29 +43,75 @@ const stateCopy: Record<VoiceState, { title: string; detail: string }> = {
   ERROR: { title: 'Voice paused', detail: 'Tap the mark to try again' },
 };
 
-function ActiveMark({ size, coreColor }: { size: number; coreColor: string }) {
-  return <Svg width={size} height={size} viewBox="0 0 512 512" accessibilityLabel="Magistrate active voice mark">
-    <G fill="none" strokeWidth={16} strokeLinecap="round" strokeLinejoin="round" opacity={0.72}>
-      <G stroke={brand.magenta} transform="translate(-5 2)"><Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} /></G>
-      <G stroke={brand.cyan} transform="translate(5 -2)"><Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} /></G>
-      <G stroke={brand.green}><Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} /></G>
-    </G>
-    <G fill="none" stroke={coreColor} strokeWidth={7} strokeLinecap="round" strokeLinejoin="round" opacity={0.94}>
+// Single thin stroke carrying the spectral gradient itself, rather than three
+// offset monochrome copies plus a white core: the approved reference is one
+// line, not a stack of them.
+function ActiveMark({ size }: { size: number }) {
+  return <Svg testID="voice-active-mark" width={size} height={size} viewBox="0 0 512 512" accessibilityLabel="Magistrate active voice mark">
+    <Defs>
+      <SvgLinearGradient id="magistrateSpectralStroke" x1="0%" y1="0%" x2="100%" y2="100%">
+        <Stop offset="0%" stopColor={brand.violet} />
+        <Stop offset="50%" stopColor={brand.cyan} />
+        <Stop offset="100%" stopColor={brand.green} />
+      </SvgLinearGradient>
+    </Defs>
+    <G fill="none" stroke="url(#magistrateSpectralStroke)" strokeWidth={7} strokeLinecap="round" strokeLinejoin="round">
       <Polygon points={ACTIVE_MARK_TRIANGLE} /><Path d={ACTIVE_MARK_SPIRAL} />
     </G>
   </Svg>;
 }
 
-function EnergyWaves({ amplitude, active }: { amplitude: number; active: boolean }) {
-  const levels = [0.55, 0.82, 1, 0.72, 0.48];
-  return <View testID="voice-energy-waves" pointerEvents="none" style={styles.energyWaves}>{levels.map((level, index) => <View key={index} style={[styles.energyBar, { height: 22 + (active ? amplitude * 74 * level : 8), opacity: active ? 0.22 + amplitude * 0.65 : 0.08, backgroundColor: [brand.green, brand.cyan, brand.violet, brand.cyan, brand.magenta][index] }]} />)}</View>;
-}
+const RIPPLE_PALETTE = [brand.violet, brand.cyan, brand.green, brand.cyan, brand.violet];
+const RIPPLE_BASE_DURATION_MS = 2600;
+// These are deliberately broken, offset filament arcs rather than closed
+// loops: the approved mark sits in a spectral/cosmic field, not a target
+// reticle. The gaps also leave room for the field to breathe as it moves.
+const RIPPLE_FILAMENTS = [
+  'M50 4 C72 2 94 17 98 40',
+  'M88 18 C98 37 95 59 84 76',
+  'M64 91 C43 99 20 89 11 70',
+  'M12 41 C7 25 20 10 39 6',
+  'M26 86 C11 75 5 57 9 41',
+];
 
-function Waveform({ samples, listening }: { samples: number[]; listening: boolean }) {
-  return <View testID="voice-waveform" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.waveform}>
-    {samples.map((sample, index) => {
-      const color = [brand.green, brand.cyan, brand.violet, brand.magenta][index % 4];
-      return <View key={index} style={[styles.waveBar, { height: waveformBarHeight(sample, listening), backgroundColor: color, opacity: listening ? 0.92 : 0.24 }]} />;
+/**
+ * The cosmic/spectral field behind the mark. Each layer is a thin, imperfect
+ * filament loop with its own phase and speed, so it reads as a living wave
+ * field rather than synchronized target rings. Amplitude changes displacement,
+ * scale, opacity, and glow here only; the triangle and spiral never change
+ * geometry or scale.
+ */
+function VoiceRippleField({ audioPeak, reducedMotion }: { audioPeak: Animated.Value; reducedMotion: boolean }) {
+  const [phases] = useState(() => Array.from({ length: SPECTRAL_RING_COUNT }, () => new Animated.Value(0)));
+  useEffect(() => {
+    if (reducedMotion) { phases.forEach(phase => phase.setValue(0.5)); return; }
+    const loops = phases.map((phase, index) => {
+      phase.setValue(0);
+      return Animated.loop(Animated.timing(phase, { toValue: 1, duration: RIPPLE_BASE_DURATION_MS * ringSpeedScale(index), useNativeDriver: false }));
+    });
+    const timers = loops.map((loop, index) => setTimeout(() => loop.start(), ringPhaseOffset(index) * RIPPLE_BASE_DURATION_MS));
+    return () => { timers.forEach(clearTimeout); loops.forEach(loop => loop.stop()); };
+  }, [phases, reducedMotion]);
+  const ampScale = audioPeak.interpolate({ inputRange: [0, 1], outputRange: [1, audioEnergyScale(1)] });
+  const ampGlow = audioPeak.interpolate({ inputRange: [0, 1], outputRange: [1, 2.2] });
+  const ampDisplacement = audioPeak.interpolate({ inputRange: [0, 1], outputRange: [0, 3] });
+  return <View testID="voice-ripple-field" pointerEvents="none" style={styles.rippleField}>
+    {phases.map((phase, index) => {
+      const spreadPercent = 48 + index * 12;
+      const breathe = phase.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.94, 1, 0.94] });
+      const baseOpacity = phase.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.06, 0.18, 0.06] });
+      const path = RIPPLE_FILAMENTS[index % RIPPLE_FILAMENTS.length];
+      return <Animated.View key={index} testID={`voice-ripple-layer-${index}`} style={[styles.rippleLayer, {
+        width: `${spreadPercent}%`, height: `${spreadPercent}%`,
+        opacity: Animated.multiply(baseOpacity, ampGlow),
+        shadowColor: RIPPLE_PALETTE[index % RIPPLE_PALETTE.length], shadowRadius: audioPeak.interpolate({ inputRange: [0, 1], outputRange: [3, 16] }),
+        transform: [{ translateX: index % 2 ? ampDisplacement : Animated.multiply(ampDisplacement, -1) }, { translateY: index % 2 ? Animated.multiply(ampDisplacement, -1) : ampDisplacement }, { scale: breathe }, { scale: ampScale }],
+      }]}>
+        <Svg width="100%" height="100%" viewBox="0 0 100 100">
+          <Path d={path} fill="none" stroke={RIPPLE_PALETTE[index % RIPPLE_PALETTE.length]} strokeWidth="0.65" strokeLinecap="round" opacity="0.9" />
+          <Path d={path} fill="none" stroke={RIPPLE_PALETTE[(index + 1) % RIPPLE_PALETTE.length]} strokeWidth="0.35" strokeLinecap="round" opacity="0.5" transform="rotate(8 50 50)" />
+        </Svg>
+      </Animated.View>;
     })}
   </View>;
 }
@@ -65,7 +119,6 @@ function Waveform({ samples, listening }: { samples: number[]; listening: boolea
 export default function VoiceScreen() {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
-  const dark = useChatColorScheme() !== 'light';
   const compact = width < 680 || height < 720;
   const [voiceState, setVoiceState] = useReducer(transitionVoiceState, 'READY' as VoiceState);
   const [intermediate, setIntermediate] = useState('');
@@ -78,7 +131,6 @@ export default function VoiceScreen() {
   const modeNoticeRef = useRef('');
   const [pendingMove, setPendingMove] = useState<VoiceMoveResult | null>(null);
   const [pendingKey, setPendingKey] = useState('');
-  const [waveSamples, setWaveSamples] = useState<number[]>(() => new Array(38).fill(0.04));
   const [reducedMotion, setReducedMotion] = useState(false);
   const [, setBackgroundReady] = useState(false);
   const messages = useConversationMessages('captain');
@@ -98,15 +150,25 @@ export default function VoiceScreen() {
   // recorded under the same canonical turn the optimistic row already shows.
   const clientMessageIdRef = useRef('');
   const sessionId = useId().replace(/[^A-Za-z0-9_-]/g, '');
-  const [ripple] = useState(() => new Animated.Value(0));
   const [audioPeak] = useState(() => new Animated.Value(0));
   const [hoverProgress] = useState(() => new Animated.Value(0));
+  // The smoothed envelope's own state, stepped deterministically each tick by
+  // updateAudioEnvelope; audioPeak is only its Animated tween for rendering.
+  const envelopeRef = useRef(ENVELOPE_SILENCE_FLOOR);
+  // A test can call window.__voiceSetTestAmplitude(0..1) to drive the ripple
+  // field without a real microphone; null restores the real capture reading.
+  const testAmplitudeRef = useRef<number | null>(null);
   useEffect(() => {
     captureRef.current = capture;
     stateRef.current = voiceState;
     intermediateRef.current = intermediate;
     amplitudeRef.current = capture.amplitude;
   });
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    globalThis.__voiceSetTestAmplitude = value => { testAmplitudeRef.current = value; };
+    return () => { globalThis.__voiceSetTestAmplitude = undefined; };
+  }, []);
 
   useEffect(() => {
     // Voice is a deep-linkable page, so apply the persisted account background
@@ -128,13 +190,6 @@ export default function VoiceScreen() {
     const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
     return () => subscription.remove();
   }, []);
-
-  useEffect(() => {
-    if (reducedMotion) { ripple.setValue(0.34); audioPeak.setValue(0); return; }
-    const animation = Animated.loop(Animated.timing(ripple, { toValue: 1, duration: 2100, useNativeDriver: Platform.OS !== 'web' }));
-    ripple.setValue(0); animation.start();
-    return () => animation.stop();
-  }, [audioPeak, reducedMotion, ripple]);
 
   useEffect(() => {
     if (voiceState !== 'LISTENING' || reducedMotion) audioPeak.setValue(0);
@@ -165,7 +220,7 @@ export default function VoiceScreen() {
     if (capability.available === 'unavailable') { fail(capability.reason || `${capability.label} is unavailable.`); return; }
     ttsService.stop();
     setError(''); setNotice(modeNoticeRef.current); setIntermediate(''); setFinalTranscript(''); setPendingMove(null); setPendingKey('');
-    setWaveSamples(new Array(38).fill(0.04));
+    envelopeRef.current = ENVELOPE_SILENCE_FLOOR;
     setVoiceState('STARTING');
     try {
       await captureRef.current.start();
@@ -234,12 +289,13 @@ export default function VoiceScreen() {
 
   useEffect(() => {
     if (voiceState !== 'LISTENING') return;
+    const TICK_MS = 160;
     const timer = setInterval(() => {
       const now = Date.now();
-      const peak = clampAudioPeak(amplitudeRef.current * 7);
-      setWaveSamples(current => [...current.slice(1), Math.max(0.04, peak)]);
-      if (!reducedMotion) Animated.timing(audioPeak, { toValue: peak, duration: 120, useNativeDriver: false }).start();
-      if (amplitudeRef.current > 0.026) {
+      const rawAmplitude = testAmplitudeRef.current ?? amplitudeRef.current;
+      envelopeRef.current = updateAudioEnvelope(envelopeRef.current, clampAudioPeak(rawAmplitude * 7), TICK_MS);
+      if (!reducedMotion) Animated.timing(audioPeak, { toValue: envelopeRef.current, duration: 120, useNativeDriver: false }).start();
+      if (rawAmplitude > 0.026) {
         heardSpeechRef.current = true;
         lastSpeechAtRef.current = now;
       }
@@ -247,7 +303,7 @@ export default function VoiceScreen() {
       const quietFor = now - lastSpeechAtRef.current;
       if ((heardSpeechRef.current && elapsed >= MIN_TURN_MS && quietFor >= QUIET_AFTER_SPEECH_MS) ||
           (elapsed >= MAX_TURN_MS && Boolean(intermediateRef.current.trim()))) void finishTurn();
-    }, 160);
+    }, TICK_MS);
     return () => clearInterval(timer);
   }, [audioPeak, finishTurn, reducedMotion, voiceState]);
 
@@ -288,29 +344,20 @@ export default function VoiceScreen() {
   };
 
   const currentCopy = stateCopy[voiceState];
-  const textColor = dark ? brand.paper : brand.ink;
-  const mutedColor = dark ? brand.mutedDark : brand.mutedLight;
-  const surfaceColor = dark ? 'rgba(17,23,34,0.78)' : 'rgba(255,255,255,0.82)';
-  const borderColor = dark ? brand.borderDark : brand.borderLight;
+  // Voice Mode is a dedicated near-black ceremonial canvas regardless of the
+  // captain's chat theme/environment choice, so its palette is fixed rather
+  // than tracking the account's light/dark preference.
+  const textColor = brand.paper;
+  const mutedColor = brand.mutedDark;
+  const surfaceColor = 'rgba(17,23,34,0.78)';
+  const borderColor = brand.borderDark;
   // useWindowDimensions can report 0x0 on the first web render; clamp so SVG sizes stay valid.
   // Keep the control compact while giving the mark more visual weight.
   const markSize = (compact ? Math.min(Math.max(width * 0.54, 140), 220) : Math.min(width * 0.28, 270)) * 1.2;
   const stageSize = (compact ? Math.min(Math.max(width - 34, 200), 360) : Math.min(width * 0.46, 520)) * 0.95;
   const visibleMessages = messages.slice(-3);
-  const rippleScale = Animated.multiply(
-    ripple.interpolate({ inputRange: [0, 1], outputRange: [0.78, 1.34] }),
-    audioPeak.interpolate({ inputRange: [0, 1], outputRange: [1, audioEnergyScale(1)] }),
-  );
-  const rippleOpacity = ripple.interpolate({ inputRange: [0, 0.28, 1], outputRange: [0, voiceState === 'READY' ? 0.1 : 0.42, 0] });
 
-  // Keep this layer translucent: EnvironmentBackground owns the persisted
-  // scene/custom image underneath, while this gradient supplies Voice Mode's
-  // branded contrast treatment instead of replacing that user choice.
-  const gradientColors: [string, string, string] = dark
-    ? ['rgba(5,7,10,0.68)', 'rgba(10,15,23,0.58)', 'rgba(5,7,10,0.68)']
-    : ['rgba(247,248,250,0.58)', 'rgba(238,241,244,0.48)', 'rgba(247,248,250,0.58)'];
-
-  return <EnvironmentBackground hideBottomControls voiceMode><LinearGradient colors={gradientColors} style={styles.screen}>
+  return <EnvironmentBackground hideBottomControls voiceMode>
     <SafeAreaView style={styles.safeArea}>
       <View style={[styles.header, compact && styles.headerCompact]}>
         <View><Text style={[styles.eyebrow, { color: brand.cyan }]}>FIRSTMATE / VOICE</Text><Text style={[styles.continuity, { color: mutedColor }]}>One continuous thread</Text></View>
@@ -328,17 +375,10 @@ export default function VoiceScreen() {
         </View>
 
         <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState) }} onPress={handleMainControl} {...(hoverHandlers as any)} disabled={['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
-          <Svg width={stageSize} height={stageSize} viewBox="0 0 512 512" style={styles.stageTriangle}>
-            <Polygon points="256,484 34,78 478,78" fill={dark ? 'rgba(36,216,255,0.035)' : 'rgba(139,108,255,0.035)'} stroke={borderColor} strokeWidth={1.2} />
-          </Svg>
-          <Animated.View style={[styles.ripple, { borderColor: brand.green, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
-          <Animated.View style={[styles.ripple, styles.rippleMid, { borderColor: brand.cyan, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
-          <Animated.View style={[styles.ripple, styles.rippleInner, { borderColor: brand.magenta, opacity: rippleOpacity, transform: [{ scale: rippleScale }] }]} />
-          <EnergyWaves amplitude={capture.amplitude} active={voiceState === 'LISTENING'} />
-          <Animated.View style={[styles.markHalo, { shadowColor: voiceState === 'THINKING' ? brand.violet : brand.cyan, transform: [{ translateY: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }, { scale: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.015] }) }] }]}><ActiveMark size={markSize} coreColor={dark ? brand.paper : brand.ink} /></Animated.View>
+          <VoiceRippleField audioPeak={audioPeak} reducedMotion={reducedMotion} />
+          <Animated.View style={[styles.markHalo, { shadowColor: voiceState === 'THINKING' ? brand.violet : brand.cyan, transform: [{ translateY: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }, { scale: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.015] }) }] }]}><ActiveMark size={markSize} /></Animated.View>
         </TouchableOpacity>
 
-        <Waveform samples={waveSamples} listening={voiceState === 'LISTENING'} />
         <View style={styles.liveTranscript} accessibilityLiveRegion="polite">
           <Text testID="voice-live-transcript" style={[styles.liveTranscriptText, { color: intermediate || finalTranscript ? textColor : mutedColor }]}>
             {intermediate || finalTranscript || (voiceState === 'LISTENING' ? 'Your words will appear here…' : ' ')}
@@ -366,12 +406,12 @@ export default function VoiceScreen() {
         </View> : null}
       </ScrollView>
     </SafeAreaView>
-  </LinearGradient></EnvironmentBackground>;
+  </EnvironmentBackground>;
 }
 
 const interfaceFont = Platform.select({ web: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", default: undefined });
 const styles = StyleSheet.create({
-  screen: { flex: 1 }, safeArea: { flex: 1 },
+  safeArea: { flex: 1 },
   header: { minHeight: 72, paddingHorizontal: 28, paddingTop: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 18 },
   headerCompact: { minHeight: 62, paddingHorizontal: 17, paddingTop: 7 },
   eyebrow: { fontFamily: interfaceFont, fontSize: 11, lineHeight: 16, fontWeight: '700', letterSpacing: 1.4 },
@@ -386,13 +426,10 @@ const styles = StyleSheet.create({
   stateTitleCompact: { fontSize: 30, lineHeight: 35 },
   stateDetail: { fontFamily: interfaceFont, fontSize: 13, lineHeight: 19, marginTop: 5, textAlign: 'center' },
   modeLabel: { fontFamily: interfaceFont, fontSize: 10, lineHeight: 15, marginTop: 5, textAlign: 'center', textTransform: 'uppercase', letterSpacing: 0.8 },
-  stage: { position: 'relative', alignItems: 'center', justifyContent: 'center', marginTop: 3 }, stageTriangle: { position: 'absolute', pointerEvents: 'none' },
-  ripple: { position: 'absolute', width: '54%', height: '54%', borderRadius: 999, borderWidth: 2, pointerEvents: 'none' },
-  rippleMid: { width: '44%', height: '44%', borderWidth: 1.5 }, rippleInner: { width: '34%', height: '34%', borderWidth: 1 },
+  stage: { position: 'relative', alignItems: 'center', justifyContent: 'center', marginTop: 3 },
+  rippleField: { position: 'absolute', width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' },
+  rippleLayer: { position: 'absolute', alignItems: 'center', justifyContent: 'center', shadowOpacity: 0.3, pointerEvents: 'none' },
   markHalo: { alignItems: 'center', justifyContent: 'center', shadowOpacity: 0.45, shadowRadius: 32, shadowOffset: { width: 0, height: 10 } },
-  energyWaves: { position: 'absolute', width: '48%', height: '34%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, zIndex: 0 }, energyBar: { width: 3, borderRadius: 999 },
-  waveform: { width: '100%', maxWidth: 560, height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingHorizontal: 10, marginTop: -12 },
-  waveBar: { width: 3, borderRadius: 999 },
   liveTranscript: { minHeight: 66, width: '100%', maxWidth: 720, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10 },
   liveTranscriptText: { fontFamily: interfaceFont, fontSize: 17, lineHeight: 25, textAlign: 'center' },
   turnHint: { fontFamily: interfaceFont, fontSize: 11, lineHeight: 16, marginTop: 5 },

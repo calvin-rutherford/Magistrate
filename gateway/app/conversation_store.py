@@ -195,6 +195,8 @@ def _upsert_message(
     slot: str, offset: int, role: str, message_type: str, text: str, visible: bool,
     source: str, force: bool = False,
     attachments: Optional[List[Dict[str, Any]]] = None,
+    structurally_bounded: bool = False,
+    observation_complete: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Create or revise the one message holding ``slot`` in this turn.
 
@@ -204,6 +206,12 @@ def _upsert_message(
     strict subset of what was already recorded. ``force`` skips that guard for
     text the client itself submitted, where a shorter edit is a real correction
     rather than a partial re-read.
+
+    Terminal-derived primary replies are admitted only after
+    :func:`_terminal_reply_respects_known_user_boundary` has paired the
+    snapshot's structural prompt boundaries. This is the second, independent
+    defense against cross-role duplication: a classifier failure cannot extend
+    an earlier canonical reply merely because its text overlaps a later prompt.
     """
     if not text:
         return None
@@ -230,13 +238,28 @@ def _upsert_message(
         )
     attachments_changed = attachments_json is not None and existing['attachments_json'] != attachments_json
     if not force and message_type == 'conversation':
-        merged = merge_captured_text(existing['text'], text)
-        if merged is None:
-            # Fail closed. A new disjoint window cannot prove whether it is a
-            # continuation, a different audience, or a provider correction;
-            # preserving the captured prefix is safer than replacing it.
-            return None
-        text = merged
+        if structurally_bounded:
+            # A later prompt boundary makes this segment ordered, but does not
+            # prove that a partial observation contains the whole earlier reply.
+            # Preserve the stored prose prefix unless the harness also gives us
+            # an explicit completion observation. This is intentionally a
+            # structural decision; never subtract prompt text or use textual
+            # similarity to decide what to remove.
+            if observation_complete:
+                text = text.strip()
+            else:
+                merged = merge_captured_text(existing['text'], text)
+                if merged is None or len(merged) < len(existing['text']):
+                    return None
+                text = merged
+        else:
+            merged = merge_captured_text(existing['text'], text)
+            if merged is None:
+                # Fail closed. A new disjoint window cannot prove whether it is
+                # a continuation, a different audience, or a provider correction;
+                # preserving the captured prefix is safer than replacing it.
+                return None
+            text = merged
     elif not force and existing['text'] == text:
         return None
     if existing['text'] == text and not attachments_changed:
@@ -638,48 +661,98 @@ def _has_reply_continuity(stored: str, incoming: str) -> bool:
     return False
 
 
+def _terminal_reply_respects_known_user_boundary(
+    turn: sqlite3.Row, turns: List[sqlite3.Row], observed_prompt_turn_ids: set[str],
+) -> bool:
+    """Named invariant: **reply-must-not-cross-known-user-boundary**.
+
+    A later canonical user turn is an ordering fact, not text to search for.
+    An earlier terminal reply may therefore be revised only when the same
+    snapshot also exposes a structural prompt boundary for every later turn
+    that could separate it. Text overlap is allowed by ``merge_captured_text``
+    only after this gate; it can never open the gate or extend a reply across a
+    known user turn by itself.
+    """
+    later = [candidate for candidate in turns if candidate['sequence_index'] > turn['sequence_index']]
+    return not later or all(candidate['id'] in observed_prompt_turn_ids for candidate in later)
+
+
 def _match_segments_to_turns(
     turns: List[sqlite3.Row], segments: List[_Segment],
-) -> List[Tuple[sqlite3.Row, _Segment]]:
-    """Pair each snapshot segment with the turn that produced it.
+) -> List[Tuple[sqlite3.Row, _Segment, bool]]:
+    """Pair snapshot segments with turns using structural prompt boundaries.
 
     Prompt-bearing segments match newest-first. A single leading segment whose
     prompt has scrolled off may continue a turn only when its assistant prose
     overlaps the primary reply already attributed to exactly one recent turn.
-    This is deliberately not an "open turn" fallback: no overlap or ambiguous
-    overlap means no write.
+    That continuity fallback is permitted only when every later canonical turn
+    is also structurally observed in this snapshot. Thus neither a bad role
+    classification nor text overlap can make turn N's reply consume turn N+1.
     """
-    matched: List[Tuple[sqlite3.Row, _Segment]] = []
+    matched: List[Tuple[sqlite3.Row, _Segment, bool]] = []
     used: set[str] = set()
+    observed_prompt_turn_ids: set[str] = set()
     keys = {
         turn['id']: prompt_match_key(turn['prompt_key'] or turn['prompt_text'] or '')
         for turn in turns
     }
+    # First map every prompt-bearing segment, including a prompt with no reply
+    # yet. Its existence is still the structural boundary needed to close an
+    # earlier turn.
     for segment in reversed(segments):
-        if segment.prompt is None or not segment.has_activity:
+        if segment.prompt is None:
             continue
         for turn in reversed(turns):
             if turn['id'] in used:
                 continue
             if keys[turn['id']] and keys[turn['id']] == prompt_match_key(segment.prompt):
                 used.add(turn['id'])
-                matched.append((turn, segment))
+                observed_prompt_turn_ids.add(turn['id'])
+                if segment.has_activity:
+                    matched.append((
+                        turn, segment,
+                        bool(
+                            _terminal_reply_respects_known_user_boundary(
+                                turn, turns, observed_prompt_turn_ids
+                            ) and any(
+                                candidate['sequence_index'] > turn['sequence_index']
+                                for candidate in turns
+                            )
+                        ),
+                    ))
                 break
 
     for segment in segments:
         if segment.prompt is not None or not segment.has_activity:
             continue
         incoming = join_primary_text(segment.prose)
+        # Determine ambiguity before applying the ordering gate. Filtering
+        # first would turn an ambiguous overlap into "the newest eligible
+        # turn", which is exactly the open-turn guess this adapter must never
+        # make.
         candidates = [
             turn for turn in turns
             if turn['id'] not in used
             and _has_reply_continuity(turn['reply_text'] or '', incoming)
         ]
-        if len(candidates) == 1:
+        if len(candidates) == 1 and _terminal_reply_respects_known_user_boundary(
+            candidates[0], turns, observed_prompt_turn_ids
+        ):
             turn = candidates[0]
             used.add(turn['id'])
-            matched.append((turn, segment))
+            matched.append((
+                turn, segment,
+                bool(any(candidate['sequence_index'] > turn['sequence_index'] for candidate in turns)),
+            ))
 
+    # This is the independent store-side gate. A parser can accidentally fold
+    # a later user row into an older assistant segment; if its later canonical
+    # prompt was not separately observed in this snapshot, discard the whole
+    # older terminal revision rather than trying to subtract matching words.
+    matched = [
+        pair for pair in matched
+        if _terminal_reply_respects_known_user_boundary(pair[0], turns, observed_prompt_turn_ids)
+    ]
     matched.sort(key=lambda pair: pair[0]['sequence_index'])
     return matched
 
@@ -729,11 +802,18 @@ def ingest_terminal_rows(
             return []
         matches = _match_segments_to_turns(turns, build_segments(rows))
         newest_turn_id = matches[-1][0]['id'] if matches else None
-        for turn, segment in matches:
+        for turn, segment, structurally_bounded in matches:
             complete = segment.closed or (
                 response_complete is True and turn['id'] == newest_turn_id
             )
-            changed.extend(_apply_segment(conn, conversation_id, turn, segment, complete=complete))
+            changed.extend(_apply_segment(
+                conn, conversation_id, turn, segment, complete=complete,
+                structurally_bounded=structurally_bounded,
+                # A later prompt closes the old segment for ordering/status,
+                # but is not proof that the old reply was fully observed. Only
+                # an explicit completion observation may replace stored prose.
+                observation_complete=(response_complete is True),
+            ))
         if changed:
             _touch_conversation(conn, conversation_id)
     return changed
@@ -741,7 +821,8 @@ def ingest_terminal_rows(
 
 def _apply_segment(
     conn: sqlite3.Connection, conversation_id: str, turn: sqlite3.Row, segment: _Segment,
-    *, complete: bool,
+    *, complete: bool, structurally_bounded: bool = False,
+    observation_complete: bool = False,
 ) -> List[Dict[str, Any]]:
     changed: List[Dict[str, Any]] = []
     turn_index = turn['sequence_index']
@@ -769,6 +850,7 @@ def _apply_segment(
             conn, conversation_id=conversation_id, turn_id=turn['id'], turn_index=turn_index,
             slot=_PRIMARY_SLOT, offset=_PRIMARY_OFFSET, role='assistant',
             message_type='conversation', text=primary, visible=True, source='terminal',
+            structurally_bounded=structurally_bounded, observation_complete=observation_complete,
         )
         if reply:
             changed.append(reply)

@@ -55,9 +55,12 @@ export function EnvironmentBackground({ children, hideBottomControls = false, vo
   return <View testID="environment-background" style={styles.container} {...panResponder.panHandlers}>
     <Animated.View style={[styles.container, { opacity: fade }]}>
       <ImageBackground source={theme.sceneImage} style={styles.bgImage} resizeMode="cover">
-        {!preserveCanvas ? <WeatherOverlay kind={theme.weather} dark={dark} /> : null}
-        {!preserveCanvas ? <View testID="environment-dim-overlay" style={[styles.darkDimOverlay, { backgroundColor: minimalScrim(theme.sceneKey) || (dark ? '#07101D' : '#FFFFFF'), opacity: minimalScrim(theme.sceneKey) ? theme.dimOpacity : voiceMode ? 0.58 : highContrast ? (dark ? 0.78 : 0.28) : dark ? theme.dimOpacity : Math.min(theme.dimOpacity, 0.16) }]} /> : null}
-        {voiceMode ? <View pointerEvents="none" style={styles.voiceModeTreatment} /> : null}
+        {!preserveCanvas && !voiceMode ? <WeatherOverlay kind={theme.weather} dark={dark} /> : null}
+        {!preserveCanvas && !voiceMode ? <View testID="environment-dim-overlay" style={[styles.darkDimOverlay, { backgroundColor: minimalScrim(theme.sceneKey) || (dark ? '#07101D' : '#FFFFFF'), opacity: minimalScrim(theme.sceneKey) ? theme.dimOpacity : highContrast ? (dark ? 0.78 : 0.28) : dark ? theme.dimOpacity : Math.min(theme.dimOpacity, 0.16) }]} /> : null}
+        {/* Voice is a dedicated ceremonial canvas, not the selected chat scene
+            dimmed: a fully opaque near-black layer replaces the scene/weather/dim
+            stack instead of stacking on top of it. */}
+        {voiceMode ? <View testID="voice-mode-canvas" pointerEvents="none" style={styles.voiceModeTreatment} /> : null}
         <View style={styles.contentArea}>{children}</View>
         {!hideBottomControls && pathname !== '/chat' ? <BottomControls /> : null}
       </ImageBackground>
@@ -73,9 +76,10 @@ function WeatherOverlay({ kind, dark }: { kind: WeatherKind; dark: boolean }) {
 const styles = StyleSheet.create({
   container: { flex: 1, minHeight: 0, backgroundColor: '#0D1322' }, bgImage: { flex: 1, minHeight: 0 }, contentArea: { flex: 1, minHeight: 0 },
   darkDimOverlay: { ...StyleSheet.absoluteFill, backgroundColor: '#07101D' },
-  // Voice keeps the selected environment visible underneath a near-obsidian
-  // treatment, preserving the dark immersive contract without breaking custom backgrounds.
-  voiceModeTreatment: { ...StyleSheet.absoluteFill, backgroundColor: '#05070A', opacity: 0.18 },
+  // Voice Mode is a dedicated ceremonial canvas: pure black regardless of the
+  // captain's selected chat scene, matching the approved brand reference
+  // rather than a dimmed version of whatever background chat is using.
+  voiceModeTreatment: { ...StyleSheet.absoluteFill, backgroundColor: '#000000' },
   weather: { ...StyleSheet.absoluteFill },
   clouds: { backgroundColor: 'rgba(35, 45, 58, 0.18)' }, storm: { backgroundColor: 'rgba(18, 20, 38, 0.38)' },
   rain: { position: 'absolute', width: 1, height: 34, backgroundColor: 'rgba(180, 211, 225, 0.16)', transform: [{ rotate: '12deg' }] },
