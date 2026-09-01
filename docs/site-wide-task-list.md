@@ -31,7 +31,7 @@ This task list converts the findings in [`site-wide-audit.md`](site-wide-audit.m
 
 ### SEC-AUTH — replace the shipped shared-token boundary
 
-**Evidence.** SEC-01: `frontend/src/api/client.ts` and `frontend/src/realtime/socket.ts` ship `magistrate-device-token-12345`; `gateway/app/auth.py` accepts that default through a header or query parameter; `gateway/app/main.py` allows wildcard CORS. TST-01 confirms the only negative gateway authorization test covers `/api/v1/health`.
+**Evidence (historical, remediated).** SEC-01 documented the shared device-token boundary and wildcard CORS. The active beta now uses server-issued opaque sessions, bearer headers, first-frame WebSocket authentication, scoped routes, and revocation. TST-01's expanded authorization coverage is in `gateway/tests/test_auth_boundary.py`.
 
 **Boundary.** Own identity issuance/verification, authorization scopes, credential lifecycle, CORS policy, client credential transport, and endpoint-family authorization tests. Do not absorb OAuth callback transaction integrity (`SEC-OAUTH`), backend Channels authentication (`SEC-WS`), encryption-at-rest (`SEC-SECRETS`), or general response UX (`REL-HTTP`). PRs #4 and #5 both edit `frontend/src/api/client.ts` and `gateway/app/main.py`; start implementation only after rebasing onto both, or explicitly revalidate after each merge.
 
@@ -40,7 +40,7 @@ This task list converts the findings in [`site-wide-audit.md`](site-wide-audit.m
 **Verification commands.** Run:
 
 ```sh
-rg -n "magistrate-device-token-12345|DEVICE_TOKEN|allow_origins=\[\"\*\"\]|token=" frontend gateway
+rg -n "DEVICE_TOKEN|allow_origins=\[\"\*\"\]|token=" frontend gateway
 cd gateway && PYTHONPATH=. uv run pytest -q
 cd frontend && npx tsc --noEmit
 ```

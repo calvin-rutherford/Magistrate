@@ -1,0 +1,106 @@
+name: Frontend
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend.yml'
+
+defaults:
+  run:
+    working-directory: frontend
+
+jobs:
+  typecheck:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      # expo-env.d.ts and .expo/types are generated and git-ignored, so a fresh
+      # checkout has neither. Generating them here keeps CI's view of the types
+      # identical to a developer's, instead of only checking the narrower
+      # fresh-clone subset.
+      - run: npm run typegen
+      - run: npm run typecheck
+      - name: Assert the run left no generated files behind
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo 'Working tree is dirty after typecheck:'
+            git status --porcelain
+            exit 1
+          fi
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - name: Assert the run left no generated files behind
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo 'Working tree is dirty after lint:'
+            git status --porcelain
+            exit 1
+          fi
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Report the Chrome the puppeteer suites will drive
+        run: google-chrome --version
+      - name: Run the complete hermetic frontend suite
+        run: npm test
+      - name: Assert the run left no generated files behind
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo 'Working tree is dirty after the test suite:'
+            git status --porcelain
+            exit 1
+          fi
+
+  export:
+    name: Web export
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx expo export --platform web
+      - name: Assert the run left no generated files behind
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo 'Working tree is dirty after the web export:'
+            git status --porcelain
+            exit 1
+          fi

@@ -1,0 +1,32 @@
+{
+  "workspaces": [
+    {
+      "workspace_id": "w4",
+      "label": "firstmate",
+      "agent_status": "idle"
+    },
+    {
+      "workspace_id": "w22",
+      "label": "deployed diagnosis worker",
+      "agent_status": "working"
+    }
+  ],
+  "agents": [
+    {
+      "workspace_id": "w4",
+      "tab_id": "w4:t1",
+      "pane_id": "w4:p1",
+      "terminal_title_stripped": "Chat regression fix",
+      "agent": "claude",
+      "agent_status": "idle"
+    },
+    {
+      "workspace_id": "w22",
+      "tab_id": "w22:t2",
+      "pane_id": "w22:p2",
+      "terminal_title_stripped": "π - Magistrate",
+      "agent": "pi",
+      "agent_status": "working"
+    }
+  ]
+}

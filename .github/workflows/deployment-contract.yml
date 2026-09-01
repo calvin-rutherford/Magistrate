@@ -1,0 +1,33 @@
+name: Deployment contracts
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/deploy_magistrate.sh'
+      - 'scripts/test_deploy_magistrate.sh'
+      - 'scripts/test_deployment_workflow.sh'
+      - 'scripts/smoke_magistrate.sh'
+      - '.github/workflows/deploy-demo.yml'
+      - '.github/workflows/deployment-contract.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/deploy_magistrate.sh'
+      - 'scripts/test_deploy_magistrate.sh'
+      - 'scripts/test_deployment_workflow.sh'
+      - 'scripts/smoke_magistrate.sh'
+      - '.github/workflows/deploy-demo.yml'
+      - '.github/workflows/deployment-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  safeguards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify demo workflow is manual-only
+        run: bash scripts/test_deployment_workflow.sh
+      - name: Exercise clean fast-forward and refusal safeguards
+        run: bash scripts/test_deploy_magistrate.sh

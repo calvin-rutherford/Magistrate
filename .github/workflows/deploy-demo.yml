@@ -1,0 +1,91 @@
+name: Deploy demo
+
+on:
+  # Automatic demo redeployment is intentionally disabled. In particular, a
+  # merge or any other push to main must never start an SSH deployment.
+  # Deploy only after a deliberate manual dispatch with the confirmation gate
+  # below, while the repository deployment secret contract remains unchanged.
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Confirm this deliberate demo deployment'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: magistrate-demo-deploy
+  cancel-in-progress: false
+
+env:
+  DEPLOY_DIR: /home/spectre/firstmate/projects/Magistrate-deploy
+  SERVICE: magistrate-gateway.service
+
+jobs:
+  deploy:
+    if: ${{ inputs.confirm == true }}
+    name: Update demo host
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check repository deployment credentials
+        env:
+          DEPLOY_HOST: ${{ secrets.MAGISTRATE_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.MAGISTRATE_DEPLOY_USER }}
+          DEPLOY_KEY: ${{ secrets.MAGISTRATE_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.MAGISTRATE_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_KEY KNOWN_HOSTS; do
+            if [[ -z "${!value}" ]]; then
+              case "$value" in
+                DEPLOY_HOST) secret_name=MAGISTRATE_DEPLOY_HOST ;;
+                DEPLOY_USER) secret_name=MAGISTRATE_DEPLOY_USER ;;
+                DEPLOY_KEY) secret_name=MAGISTRATE_DEPLOY_SSH_KEY ;;
+                KNOWN_HOSTS) secret_name=MAGISTRATE_DEPLOY_KNOWN_HOSTS ;;
+              esac
+              echo "missing repository Actions secret: $secret_name" >&2
+              echo "Configure the deployment secrets documented in docs/deployment.md, or use the manual recovery path." >&2
+              exit 1
+            fi
+          done
+
+      - name: Install the dedicated deployment SSH key
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.MAGISTRATE_DEPLOY_SSH_KEY }}
+
+      - name: Pin the demo host key
+        env:
+          KNOWN_HOSTS: ${{ secrets.MAGISTRATE_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Fast-forward, build, restart, and poll local readiness
+        env:
+          DEPLOY_HOST: ${{ secrets.MAGISTRATE_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.MAGISTRATE_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -p "${{ vars.MAGISTRATE_DEPLOY_PORT || '22' }}" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "MAGISTRATE_DEPLOY_DIR='$DEPLOY_DIR' MAGISTRATE_SERVICE='$SERVICE' '$DEPLOY_DIR/scripts/deploy_magistrate.sh'"
+
+      # This job is intentionally secret-free: authenticated session issuance
+      # belongs only to the trusted deployment-host smoke script.
+      - name: Verify unauthenticated demo reachability
+        env:
+          DEPLOY_HOST: ${{ secrets.MAGISTRATE_DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 15 "http://$DEPLOY_HOST:8000/" >/dev/null
+          # The health endpoint is authenticated; a 401 still proves the
+          # restarted backend is serving rather than a stale proxy response.
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "http://$DEPLOY_HOST:8000/api/v1/health")"
+          case "$status" in 2??|401|403) ;; *) echo "demo health check returned HTTP $status" >&2; exit 1 ;; esac

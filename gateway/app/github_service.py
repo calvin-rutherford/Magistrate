@@ -1,11 +1,13 @@
 import asyncio
 import csv
+import io
 import json
 import os
 import re
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -59,7 +61,30 @@ class GitHubService:
         text = " ".join(text.split())
         return (text[:237] + "...") if len(text) > 240 else (text or title)
 
+    @staticmethod
+    def _timestamp(value: str) -> Optional[str]:
+        value = (value or '').strip()
+        if not value or value.lower() in {'no', 'none', 'unknown'}:
+            return None
+        relative = re.fullmatch(r'(\d+)([mhd]) ago', value.lower())
+        if relative:
+            amount = int(relative.group(1))
+            delta = {'m': timedelta(minutes=amount), 'h': timedelta(hours=amount), 'd': timedelta(days=amount)}[relative.group(2)]
+            return (datetime.now(timezone.utc) - delta).isoformat().replace('+00:00', 'Z')
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
     def _normalize_row(self, row: List[str]) -> Dict[str, Any]:
+        # gh-axi's table renderer can leave quotes inside a quoted PR body
+        # unescaped. Re-anchor the stable trailing timestamp/URL columns so body
+        # punctuation cannot shift authoritative merge fields.
+        if len(row) > 10:
+            row = row[:6] + [','.join(row[6:-3])] + row[-3:]
         number, title, state, author, draft, review, body, created, merged_at, url = (row + [""] * 10)[:10]
         review_status = review.upper().replace(" ", "_") if review and review != "none" else "NONE"
         state = state.upper()
@@ -70,8 +95,8 @@ class GitHubService:
             "state": state, "is_draft": is_draft, "mergeable": "UNKNOWN",
             "review_status": review_status,
             "checks": {"status": "UNKNOWN", "passed": 0, "failed": 0, "pending": 0, "summary": "Open details for checks"},
-            "reviews": [], "created_at": created or None, "updated_at": None,
-            "merged_at": merged_at if merged_at.lower() not in {"", "no", "none", "unknown"} else None,
+            "reviews": [], "created_at": self._timestamp(created), "updated_at": None,
+            "merged_at": self._timestamp(merged_at),
             "summary": self._summary(body, title),
             "body": body or "", "requires_attention": state == "OPEN" and not is_draft and review_status != "APPROVED",
             "url": url,
@@ -82,11 +107,10 @@ class GitHubService:
         if not marker:
             return []
         rows: List[Dict[str, Any]] = []
-        for line in output[marker.end():].splitlines():
-            if not line.startswith("  ") or line.lstrip().startswith("Run `"):
-                break
-            parsed = next(csv.reader([line.strip()]))
-            if parsed and parsed[0].isdigit():
+        table = output[marker.end():].split('\nhelp[', 1)[0]
+        for parsed in csv.reader(io.StringIO(table), skipinitialspace=True):
+            if parsed and parsed[0].strip().isdigit():
+                parsed[0] = parsed[0].strip()
                 rows.append(self._normalize_row(parsed))
         return rows
 
@@ -125,6 +149,18 @@ class GitHubService:
             start = (page - 1) * per_page
             value = {"items": all_prs[start:start + per_page], "page": page, "per_page": per_page,
                      "has_more": len(all_prs) > start + per_page, "cached": False}
+            self._cache[key] = _CacheEntry(time.monotonic() + self.cache_ttl, value)
+            return value
+
+    async def get_merged_pull_requests(self, limit: int = 20, refresh: bool = False) -> List[Dict[str, Any]]:
+        limit = min(50, max(1, limit))
+        key = f'merged:{limit}'
+        async with self._lock:
+            cached = self._cache.get(key)
+            if cached and cached.expires_at > time.monotonic() and not refresh:
+                return cached.value
+            output = await self._run('pr', 'list', '--state', 'merged', '--limit', str(limit), '--fields', 'body,createdAt,mergedAt,url')
+            value = [item for item in self._parse_list(output) if item.get('merged_at')]
             self._cache[key] = _CacheEntry(time.monotonic() + self.cache_ttl, value)
             return value
 

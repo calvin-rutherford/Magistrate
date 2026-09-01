@@ -1,13 +1,22 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import { GlassSurface } from '../src/components/GlassSurface';
 import { useRouter } from 'expo-router';
+import { fetchHealth, HealthInfo } from '../src/api/client';
 
 export default function StatusScreen() {
   const router = useRouter();
-  const [latency, setLatency] = useState<number>(18);
-  const [tailscaleStatus, setTailscaleStatus] = useState<string>('CONNECTED (100.84.181.23)');
+  const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    setError(null);
+    try { setHealth(await fetchHealth()); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Gateway status could not be loaded.'); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const gatewayStatus = error ? 'UNAVAILABLE' : health?.status === 'healthy' ? 'HEALTHY' : health?.status?.toUpperCase() || 'CONNECTING';
+  const herdrStatus = health?.herdr_socket_connected ? 'CONNECTED' : health ? 'UNAVAILABLE' : 'UNKNOWN';
 
   return (
     <EnvironmentBackground>
@@ -26,47 +35,36 @@ export default function StatusScreen() {
       <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 110 }}>
         {/* GATEWAY SERVER TELEMETRY */}
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>MELKEZIC GATEWAY TELEMETRY</Text>
+          <Text style={styles.sectionTitle}>GATEWAY TELEMETRY</Text>
         </View>
 
         <GlassSurface variant="card" style={styles.card}>
+          {error && <Text style={styles.errorText}>{error}</Text>}
           <View style={styles.metricRow}>
             <Text style={styles.metricLabel}>GATEWAY CONNECTION</Text>
-            <Text style={styles.metricValue}>HEALTHY ✓</Text>
+            <Text style={styles.metricValue}>{gatewayStatus}</Text>
           </View>
           <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>SERVER LATENCY</Text>
-            <Text style={styles.metricValue}>{latency} ms</Text>
+            <Text style={styles.metricLabel}>HERDR SOCKET</Text>
+            <Text style={styles.metricValue}>{herdrStatus}</Text>
           </View>
           <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>TAILSCALE NETWORK</Text>
-            <Text style={styles.metricValue}>{tailscaleStatus}</Text>
+            <Text style={styles.metricLabel}>SERVICE</Text>
+            <Text style={styles.metricValue}>{health?.service || 'Unavailable'}</Text>
           </View>
           <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>CONNECTED PEERS</Text>
-            <Text style={styles.metricValue}>melkezic • spectre-iphone</Text>
+            <Text style={styles.metricLabel}>HERDR VERSION</Text>
+            {/* Null whenever the gateway did not observe a live snapshot; a
+                placeholder build number here would be an invented metric. */}
+            <Text testID="status-herdr-version" style={styles.metricValue}>{health?.herdr_version || 'Not reported'}</Text>
           </View>
+          {health?.degraded_sources?.length ? <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>UNAVAILABLE SOURCES</Text>
+            <Text testID="status-degraded-sources" style={styles.metricValue}>{health.degraded_sources.join(', ').toUpperCase()}</Text>
+          </View> : null}
         </GlassSurface>
 
-        {/* AGENT MODEL API QUOTAS (QUOTA AXI) */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>LLM MODEL API QUOTAS (QUOTA AXI)</Text>
-        </View>
-
-        <GlassSurface variant="card" style={styles.card}>
-          <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>CLAUDE 3.7 SONNET</Text>
-            <Text style={styles.metricValue}>84% CAPACITY</Text>
-          </View>
-          <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>GPT-4O / CODEX</Text>
-            <Text style={styles.metricValue}>92% CAPACITY</Text>
-          </View>
-          <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>HERDR LOCAL WORKERS</Text>
-            <Text style={styles.metricValue}>UNLIMITED (LOCAL)</Text>
-          </View>
-        </GlassSurface>
+        <TouchableOpacity onPress={load} accessibilityRole="button" accessibilityLabel="Refresh system status"><Text style={styles.refreshText}>REFRESH LIVE STATUS</Text></TouchableOpacity>
       </ScrollView>
     </EnvironmentBackground>
   );
@@ -91,4 +89,6 @@ const styles = StyleSheet.create({
   metricRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
   metricLabel: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.65)' },
   metricValue: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: '#FFFFFF' }
+  ,errorText: { color: '#FCA5A5', fontSize: 12, marginBottom: 10 },
+  refreshText: { color: '#72F5B1', fontFamily: 'monospace', fontSize: 10, textAlign: 'center', marginTop: 18 }
 });

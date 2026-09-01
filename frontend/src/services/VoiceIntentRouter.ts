@@ -16,7 +16,7 @@ export class VoiceIntentRouter {
         intent: 'firstmate_command',
         targetPath: '/chat',
         requiresHighImpactConfirmation: true,
-        confirmationMessage: `HIGH IMPACT ACTION: Firstmate requests confirmation to "${text}". Confirm?`,
+        confirmationMessage: `HIGH IMPACT ACTION: Magistrate requests confirmation to "${text}". Confirm?`,
         payloadText: text
       };
     }

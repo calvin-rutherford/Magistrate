@@ -19,6 +19,9 @@ dependencies = [
 [project.scripts]
 magistrate-gateway = "magistrate_gateway:main"
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"

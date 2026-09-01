@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
+import os
 
 class ProviderAdapter(ABC):
     def __init__(self, client_id: str = '', client_secret: str = '', redirect_uri: str = ''):
@@ -10,6 +11,22 @@ class ProviderAdapter(ABC):
     @abstractmethod
     def provider_name(self) -> str:
         pass
+
+    def is_configured(self) -> bool:
+        """Whether an operator supplied real OAuth client configuration."""
+        return bool(self.client_id and self.client_secret)
+
+    def unavailable_reason(self) -> str:
+        return 'OAuth is not configured for this provider.'
+
+    def is_deferred(self) -> bool:
+        """Whether this provider is intentionally out of scope for this release.
+
+        A deferred provider can never be connected: it has no credential path at
+        all, so the UI must show it as visibly unavailable rather than offering a
+        connect action that cannot succeed.
+        """
+        return False
 
     @abstractmethod
     def default_scopes(self) -> List[str]:

@@ -3,7 +3,8 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } 
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
-import { fetchGitHubPRs, GitHubPR } from '../../src/api/client';
+import { fetchAgents, fetchGitHubPRs, fetchUnifiedAttention, GitHubPR } from '../../src/api/client';
+import { summarizeAgents } from '../../src/services/AgentStatus';
 import { useRouter } from 'expo-router';
 
 export default function PRsScreen() {
@@ -14,6 +15,8 @@ export default function PRsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
+  const [activeAgentsCount, setActiveAgentsCount] = useState(0);
+  const [attentionCount, setAttentionCount] = useState(0);
 
   const loadPRs = async (nextPage = 1, refresh = false) => {
     setLoading(true);
@@ -32,11 +35,15 @@ export default function PRsScreen() {
 
   useEffect(() => {
     loadPRs(1);
+    Promise.allSettled([fetchAgents(), fetchUnifiedAttention()]).then(([agentsResult, attentionResult]) => {
+      if (agentsResult.status === 'fulfilled') setActiveAgentsCount(summarizeAgents(agentsResult.value).activeCount);
+      if (attentionResult.status === 'fulfilled') setAttentionCount(attentionResult.value.filter(item => item.requires_action !== false).length);
+    });
   }, []);
 
   const handleNavigate = (route: string) => {
     if (route === 'prs') return;
-    router.push('/' + route as any);
+    router.push((route === 'index' ? '/' : '/' + route) as any);
   };
 
   return (
@@ -102,8 +109,8 @@ export default function PRsScreen() {
         visible={showDrawer}
         onClose={() => setShowDrawer(false)}
         onNavigate={handleNavigate}
-        activeAgentsCount={1}
-        attentionCount={0}
+        activeAgentsCount={activeAgentsCount}
+        attentionCount={attentionCount}
         prsCount={prs.length}
       />
     </EnvironmentBackground>

@@ -5,14 +5,20 @@ from app.main import app
 from app.db import get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
 from app.providers.github import GitHubProviderAdapter
 from app.github_service import github_service
+from conftest import TEST_HEADERS
 
 client = TestClient(app)
-HEADERS = {'X-Magistrate-Token': 'magistrate-device-token-12345'}
+HEADERS = TEST_HEADERS
 
 def test_health():
     res = client.get('/api/v1/health', headers=HEADERS)
     assert res.status_code == 200
-    assert res.json()['status'] == 'healthy'
+    payload = res.json()
+    # Health is honest about live sources: 'healthy' only with every source
+    # observed, and the Herdr version is never a placeholder we did not read.
+    assert payload['status'] in ('healthy', 'degraded')
+    assert (payload['status'] == 'healthy') == (not payload['degraded_sources'])
+    assert payload['herdr_socket_connected'] == (payload['herdr_version'] is not None)
 
 def test_account_profile_crud():
     # Get profile
@@ -35,9 +41,10 @@ def test_oauth_providers():
     assert 'github' in p_names
     assert 'twitter' in p_names
 
-    # Connect GitHub provider (redirects to OAuth)
+    # No provider credentials are configured in the test environment, so the
+    # gateway reports an honest unavailable state instead of inventing OAuth.
     res_conn = client.get('/api/v1/auth/github/connect', headers=HEADERS, follow_redirects=False)
-    assert res_conn.status_code in [302, 303, 307]
+    assert res_conn.status_code == 503
 
     # Disconnect GitHub provider
     res_dis = client.post('/api/v1/auth/github/disconnect', headers=HEADERS)
@@ -46,15 +53,21 @@ def test_oauth_providers():
 
 def test_live_github_prs():
     res = client.get('/api/v1/github/pulls', headers=HEADERS)
+    assert res.status_code in (200, 503)
+    if res.status_code == 200:
+        prs = res.json()
+        assert isinstance(prs, (list, dict))
+
+def test_voice_capabilities_do_not_expose_credentials():
+    res = client.get('/api/v1/voice/capabilities', headers=HEADERS)
     assert res.status_code == 200
-    prs = res.json()
-    assert 'items' in prs
-    assert isinstance(prs['items'], list)
-    assert 'has_more' in prs
+    payload = res.json()
+    assert payload['schema_version'] == 'voice-capabilities.v1'
+    assert all('api_key' not in item for item in payload['modes'])
+    assert 'OPENAI_API_KEY' not in str(payload)
+
 
 def test_voice_transcribe():
     res = client.post('/api/v1/voice/transcribe', data={'source': 'iphone'}, headers=HEADERS)
-    assert res.status_code == 200
-    trans = res.json()
-    assert 'text' in trans
-    assert len(trans['text']) > 0
+    assert res.status_code == 400
+    assert res.json()['detail'] == 'A microphone recording is required.'

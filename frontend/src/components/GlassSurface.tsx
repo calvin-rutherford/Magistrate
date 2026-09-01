@@ -1,15 +1,17 @@
 import React from 'react';
 import { View, StyleSheet, StyleProp, ViewStyle, Platform } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { GlassTokens } from '../theme/glass';
 
 let BlurViewComponent: any = View;
 try {
+  // Resolved lazily: expo-blur has no web implementation, so a static import
+  // would break the web bundle.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const ExpoBlur = require('expo-blur');
   if (ExpoBlur && ExpoBlur.BlurView) {
     BlurViewComponent = ExpoBlur.BlurView;
   }
-} catch (e) {
+} catch {
   BlurViewComponent = View;
 }
 

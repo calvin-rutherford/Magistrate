@@ -10,6 +10,6 @@ test('backgrounds are bundled and weather is explicitly configured', () => {
   assert.doesNotMatch(read('src/services/environmentTheme.ts'), /images\.unsplash\.com/);
 });
 test('voice metering uses recorder data, never randomized amplitude', () => {
-  const adapter = read('src/input/VoiceInputAdapter.ts'); assert.match(adapter, /status\.metering/); assert.doesNotMatch(adapter, /Math\.random/);
+  const adapter = read('src/input/VoiceInputAdapter.ts'); assert.match(adapter, /(status|recorderState)\.metering/); assert.doesNotMatch(adapter, /Math\.random/);
   assert.match(read('src/services/SpeechActivityAdapter.ts'), /gate/);
 });

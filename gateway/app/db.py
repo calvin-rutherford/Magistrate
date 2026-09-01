@@ -1,36 +1,326 @@
 import os
 import sqlite3
-import json
 import base64
 import time
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Callable, Dict, Any, List, Optional, Tuple
 from cryptography.fernet import Fernet
+from cryptography.fernet import InvalidToken
 
-DB_PATH = os.getenv('MAGISTRATE_DB_PATH', '/home/spectre/Magistrate/gateway/magistrate.db')
-SECRET_KEY = os.getenv('MAGISTRATE_SECRET_KEY', 'magistrate_super_secret_fernet_key_32bytes_len=')
+# Deployments must provide an absolute path outside the checkout so upgrades
+# cannot replace or strand the operator's SQLite state. Development and tests
+# get a worktree-local default; production init_db() fails closed if the path
+# was omitted.
+_environment_at_import = os.getenv('MAGISTRATE_ENV', '').strip().lower()
+_configured_db_path = os.getenv('MAGISTRATE_DB_PATH', '').strip()
+DEFAULT_CIPHERTEXT_VERSION = 'v1'
+DEVELOPMENT_MODES = frozenset({'dev', 'development', 'test', 'testing'})
+DB_PATH = _configured_db_path
+if not DB_PATH and _environment_at_import in DEVELOPMENT_MODES:
+    DB_PATH = str(Path(__file__).resolve().parents[1] / 'magistrate.db')
+LEGACY_MIGRATION_FLAG = 'MAGISTRATE_ALLOW_LEGACY_MIGRATION'
+ROTATION_FLAG = 'MAGISTRATE_KEY_ROTATION_ENABLED'
+MAX_ROTATION_ROWS = 1_000
+
+
+class SecretConfigurationError(RuntimeError):
+    """Raised when credential encryption is not safely configured."""
+
+
+class SecretDecryptionError(RuntimeError):
+    """Raised when an encrypted credential cannot be authenticated."""
+
+
+class SecretMigrationError(RuntimeError):
+    """Raised when an explicitly requested legacy migration cannot proceed."""
+
+
+class SecretRotationError(RuntimeError):
+    """Raised when a bounded credential rotation cannot proceed."""
+
+
+@dataclass(frozen=True)
+class _SecretSettings:
+    key_material: str
+    fernet: Fernet
+    version: str
+    previous_fernet: Optional[Fernet]
+    previous_version: Optional[str]
+    rotation_enabled: bool
+
+
+_EPHEMERAL_TEST_KEY = Fernet.generate_key().decode('ascii')
+
+
+def _is_truthy(value: Optional[str]) -> bool:
+    return (value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _environment() -> str:
+    return os.getenv('MAGISTRATE_ENV', '').strip().lower()
+
+
+def _validate_version(value: str, setting_name: str) -> str:
+    version = value.strip()
+    if not version.startswith('v') or not version[1:].isdigit() or int(version[1:]) < 1:
+        raise SecretConfigurationError(f'{setting_name} must be a positive version such as v1')
+    return version
+
+
+def _fernet_from_key(key_material: str, setting_name: str) -> Fernet:
+    key = key_material
+    # Fernet.generate_key() produces a 44-character URL-safe base64 key. Do
+    # not normalize, pad, truncate, or otherwise make weak configuration work.
+    if len(key) != 44 or any(char.isspace() for char in key):
+        raise SecretConfigurationError(f'{setting_name} must be a generated Fernet key')
+    try:
+        return Fernet(key.encode('ascii'))
+    except (UnicodeEncodeError, ValueError, TypeError) as exc:
+        raise SecretConfigurationError(f'{setting_name} must be a generated Fernet key') from exc
+
+
+def _load_secret_settings() -> _SecretSettings:
+    environment = _environment()
+    key_material = os.getenv('MAGISTRATE_SECRET_KEY', '')
+    if not key_material:
+        if environment in DEVELOPMENT_MODES:
+            key_material = _EPHEMERAL_TEST_KEY
+        else:
+            raise SecretConfigurationError(
+                'MAGISTRATE_SECRET_KEY is required outside explicit development/test mode'
+            )
+    current_version = _validate_version(
+        os.getenv('MAGISTRATE_SECRET_KEY_VERSION', DEFAULT_CIPHERTEXT_VERSION),
+        'MAGISTRATE_SECRET_KEY_VERSION',
+    )
+    current_fernet = _fernet_from_key(key_material, 'MAGISTRATE_SECRET_KEY')
+
+    previous_key = os.getenv('MAGISTRATE_PREVIOUS_SECRET_KEY', '')
+    previous_version = os.getenv('MAGISTRATE_PREVIOUS_SECRET_KEY_VERSION', '') or None
+    previous_fernet = None
+    if previous_key or previous_version:
+        if not previous_key or not previous_version:
+            raise SecretConfigurationError(
+                'MAGISTRATE_PREVIOUS_SECRET_KEY and MAGISTRATE_PREVIOUS_SECRET_KEY_VERSION must be set together'
+            )
+        previous_version = _validate_version(
+            previous_version, 'MAGISTRATE_PREVIOUS_SECRET_KEY_VERSION'
+        )
+        if previous_version == current_version:
+            raise SecretConfigurationError('previous and current secret versions must differ')
+        previous_fernet = _fernet_from_key(
+            previous_key, 'MAGISTRATE_PREVIOUS_SECRET_KEY'
+        )
+
+    rotation_enabled = _is_truthy(os.getenv(ROTATION_FLAG))
+    if rotation_enabled and previous_fernet is None:
+        raise SecretConfigurationError(
+            f'{ROTATION_FLAG}=true requires a previous secret key and version'
+        )
+
+    return _SecretSettings(
+        key_material=key_material,
+        fernet=current_fernet,
+        version=current_version,
+        previous_fernet=previous_fernet,
+        previous_version=previous_version,
+        rotation_enabled=rotation_enabled,
+    )
+
+
+def validate_secret_configuration() -> None:
+    """Validate the encryption contract at process startup or before persistence."""
+    _load_secret_settings()
+
 
 def _get_fernet() -> Fernet:
-    key_bytes = SECRET_KEY.encode('utf-8')
-    key_b64 = base64.urlsafe_b64encode(key_bytes.ljust(32)[:32])
-    return Fernet(key_b64)
+    return _load_secret_settings().fernet
+
+
+def _encrypt_with(fernet: Fernet, version: str, plain_token: str) -> str:
+    return f'{version}:{fernet.encrypt(plain_token.encode("utf-8")).decode("ascii")}'
+
 
 def encrypt_token(plain_token: str) -> str:
     if not plain_token:
         return ''
-    f = _get_fernet()
-    return f.encrypt(plain_token.encode('utf-8')).decode('utf-8')
+    settings = _load_secret_settings()
+    return _encrypt_with(settings.fernet, settings.version, plain_token)
+
+
+def _split_ciphertext(
+    cipher_token: str, error_type: type[Exception] = SecretDecryptionError
+) -> Tuple[str, str]:
+    if not isinstance(cipher_token, str):
+        raise error_type('Encrypted credential has an invalid format')
+    version, separator, payload = cipher_token.partition(':')
+    if not separator or not payload or not version.startswith('v') or not version[1:].isdigit():
+        raise error_type('Encrypted credential has an invalid format')
+    return version, payload
+
+
+def _decrypt_with(fernet: Fernet, payload: str, error_type: type[Exception]) -> str:
+    try:
+        return fernet.decrypt(payload.encode('ascii')).decode('utf-8')
+    except (InvalidToken, UnicodeDecodeError, UnicodeEncodeError, ValueError, TypeError):
+        raise error_type('Encrypted credential could not be authenticated') from None
+
 
 def decrypt_token(cipher_token: str) -> str:
+    """Decrypt only current, authenticated ciphertext; never return input on failure."""
     if not cipher_token:
         return ''
+    settings = _load_secret_settings()
+    version, payload = _split_ciphertext(cipher_token)
+    if version != settings.version:
+        raise SecretDecryptionError('Encrypted credential uses a non-current key version')
+    return _decrypt_with(settings.fernet, payload, SecretDecryptionError)
+
+
+def _legacy_fernet(legacy_key_material: str) -> Fernet:
+    """Reproduce the pre-versioning derivation only for explicit migration."""
+    if not legacy_key_material or not legacy_key_material.strip():
+        raise SecretMigrationError('An explicit legacy secret is required for migration')
+    key_bytes = legacy_key_material.encode('utf-8')
+    legacy_key = base64.urlsafe_b64encode(key_bytes.ljust(32, b'\0')[:32])
     try:
-        f = _get_fernet()
-        return f.decrypt(cipher_token.encode('utf-8')).decode('utf-8')
-    except Exception:
+        return Fernet(legacy_key)
+    except (ValueError, TypeError) as exc:
+        raise SecretMigrationError('The supplied legacy secret cannot decrypt legacy values') from exc
+
+
+def migrate_legacy_ciphertext(
+    cipher_token: str,
+    *,
+    legacy_key: Optional[str] = None,
+    allow_legacy: bool = False,
+) -> str:
+    """Return a versioned value after an explicitly authorized legacy rewrite."""
+    if not cipher_token:
+        return ''
+    if not (allow_legacy or _is_truthy(os.getenv(LEGACY_MIGRATION_FLAG))):
+        raise SecretMigrationError(
+            f'legacy migration requires {LEGACY_MIGRATION_FLAG}=true or allow_legacy=True'
+        )
+
+    settings = _load_secret_settings()
+    version, payload = (
+        _split_ciphertext(cipher_token, SecretMigrationError)
+        if cipher_token.startswith('v')
+        else ('legacy', cipher_token)
+    )
+    if version != 'legacy':
+        if version != settings.version:
+            raise SecretMigrationError('Only unversioned legacy values may be migrated')
+        _decrypt_with(settings.fernet, payload, SecretMigrationError)
         return cipher_token
 
+    configured_legacy_key = legacy_key or os.getenv('MAGISTRATE_LEGACY_SECRET_KEY', '')
+    plain_token = _decrypt_with(
+        _legacy_fernet(configured_legacy_key), payload, SecretMigrationError
+    )
+    return _encrypt_with(settings.fernet, settings.version, plain_token)
+
+
+def rotate_encrypted_token(cipher_token: str) -> str:
+    """Rewrite one current/previous-version value without accepting plaintext."""
+    if not cipher_token:
+        return ''
+    settings = _load_secret_settings()
+    version, payload = _split_ciphertext(cipher_token, SecretRotationError)
+    if version == settings.version:
+        _decrypt_with(settings.fernet, payload, SecretRotationError)
+        return cipher_token
+    if not settings.rotation_enabled or not settings.previous_fernet or version != settings.previous_version:
+        raise SecretRotationError('Credential is not eligible for the configured key rotation')
+    plain_token = _decrypt_with(settings.previous_fernet, payload, SecretRotationError)
+    return _encrypt_with(settings.fernet, settings.version, plain_token)
+
+
+@dataclass(frozen=True)
+class CredentialRewriteReport:
+    scanned: int
+    rewritten: int
+
+
+def _rewrite_oauth_credentials(
+    transform: Callable[[str], str],
+    *,
+    limit: int = MAX_ROTATION_ROWS,
+    apply: bool = False,
+) -> CredentialRewriteReport:
+    if limit < 1 or limit > MAX_ROTATION_ROWS:
+        raise SecretRotationError(f'limit must be between 1 and {MAX_ROTATION_ROWS}')
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            'SELECT id, access_token_enc, refresh_token_enc FROM oauth_credentials LIMIT ?',
+            (limit + 1,),
+        ).fetchall()
+        if len(rows) > limit:
+            raise SecretRotationError(
+                f'credential rewrite exceeds the bounded limit of {limit} rows'
+            )
+
+        updates = []
+        for credential_id, access_token_enc, refresh_token_enc in rows:
+            new_access = transform(access_token_enc)
+            new_refresh = transform(refresh_token_enc) if refresh_token_enc else refresh_token_enc
+            if new_access != access_token_enc or new_refresh != refresh_token_enc:
+                updates.append((new_access, new_refresh, credential_id))
+
+        if apply:
+            # sqlite rolls this transaction back automatically if the batch
+            # write fails, so a partial rotation cannot be committed.
+            with conn:
+                conn.executemany(
+                    'UPDATE oauth_credentials SET access_token_enc = ?, refresh_token_enc = ? WHERE id = ?',
+                    updates,
+                )
+        else:
+            conn.rollback()
+        return CredentialRewriteReport(scanned=len(rows), rewritten=len(updates))
+    finally:
+        conn.close()
+
+
+def migrate_legacy_oauth_credentials(
+    *,
+    legacy_key: Optional[str] = None,
+    allow_legacy: bool = False,
+    limit: int = MAX_ROTATION_ROWS,
+    apply: bool = False,
+) -> CredentialRewriteReport:
+    return _rewrite_oauth_credentials(
+        lambda value: migrate_legacy_ciphertext(
+            value, legacy_key=legacy_key, allow_legacy=allow_legacy
+        ),
+        limit=limit,
+        apply=apply,
+    )
+
+
+def rotate_oauth_credentials(
+    *,
+    limit: int = MAX_ROTATION_ROWS,
+    apply: bool = False,
+) -> CredentialRewriteReport:
+    return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
+
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    validate_secret_configuration()
+    if not DB_PATH:
+        raise SecretConfigurationError(
+            'MAGISTRATE_DB_PATH is required outside explicit development/test mode'
+        )
+    db_parent = os.path.dirname(DB_PATH)
+    if not db_parent:
+        raise SecretConfigurationError('MAGISTRATE_DB_PATH must name an absolute persistent path')
+    if not os.path.isabs(DB_PATH):
+        raise SecretConfigurationError('MAGISTRATE_DB_PATH must be an absolute persistent path')
+    os.makedirs(db_parent, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -80,6 +370,164 @@ def init_db():
         capability_name TEXT NOT NULL,
         enabled INTEGER DEFAULT 1,
         FOREIGN KEY(connected_account_id) REFERENCES connected_accounts(id)
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS execution_credentials (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        credential_key TEXT NOT NULL,
+        secret_enc TEXT NOT NULL,
+        created_at INTEGER,
+        updated_at INTEGER,
+        UNIQUE(user_id, credential_key),
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS execution_preferences (
+        user_id TEXT PRIMARY KEY,
+        profile_id TEXT,
+        switching_behavior TEXT NOT NULL DEFAULT 'migrate',
+        unavailable_behavior TEXT NOT NULL DEFAULT 'error',
+        updated_at INTEGER,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS gateway_sessions (
+        session_id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked_at INTEGER
+    )
+    ''')
+
+    # Attention actions are a separate authority from notification state.  The
+    # action key binds one live source revision and exact target; outcomes are
+    # retained so retries cannot execute the decision twice.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS attention_action_outcomes (
+        action_key TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        decision_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        source_revision TEXT NOT NULL,
+        status TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )
+    ''')
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(attention_action_outcomes)")}
+    if "item_id" not in columns:
+        cursor.execute("ALTER TABLE attention_action_outcomes ADD COLUMN item_id TEXT NOT NULL DEFAULT ''")
+
+    # The canonical conversation record. Herdr terminal output is an ingestion
+    # adapter into these tables, never the chat database itself; see
+    # app/conversation_store.py and CHAT_ARCHITECTURE_FIX.md. Migrations are
+    # confined to these new canonical tables, so legacy deployment rows remain
+    # untouched.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(user_id, target)
+    )
+    ''')
+
+    # client_message_id is the frontend's submission identity, so the UNIQUE
+    # constraint is what makes a resubmitted prompt reuse its turn instead of
+    # minting a second one.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS conversation_turns (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        client_message_id TEXT,
+        prompt_key TEXT,
+        status TEXT NOT NULL,
+        sequence_index INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(conversation_id, client_message_id),
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+    )
+    ''')
+
+    # `slot` is the upsert key inside a turn ('prompt', 'primary', 'tool:<n>',
+    # 'internal:<n>'). Evolving terminal output for the same turn revises the
+    # row holding that slot; it can never append a second visible message.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+        id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        type TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        text TEXT NOT NULL,
+        visible_in_chat INTEGER NOT NULL,
+        sequence_index INTEGER NOT NULL,
+        revision INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(turn_id, slot),
+        FOREIGN KEY(turn_id) REFERENCES conversation_turns(id),
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+    )
+    ''')
+    # Deployments created before prompt_key/attachment metadata existed gain
+    # them additively; the adapter falls back to visible prompt text when the
+    # former is NULL and existing rows have no attachment references.
+    turn_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_turns)')}
+    if 'prompt_key' not in turn_columns:
+        cursor.execute('ALTER TABLE conversation_turns ADD COLUMN prompt_key TEXT')
+    message_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_messages)')}
+    if 'attachments_json' not in message_columns:
+        cursor.execute("ALTER TABLE conversation_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_turns_conversation ON conversation_turns(conversation_id, sequence_index)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation ON conversation_messages(conversation_id, sequence_index)')
+    # Early preview builds wrote canonical timestamps as epoch seconds. SQLite's
+    # INTEGER already holds milliseconds, so normalize only those unmistakably
+    # second-scale values; the migration is idempotent and touches no legacy
+    # application table.
+    for table in ('conversations', 'conversation_turns', 'conversation_messages'):
+        cursor.execute(
+            f'''UPDATE {table}
+                SET created_at = created_at * 1000, updated_at = updated_at * 1000
+                WHERE created_at > 0 AND created_at < 100000000000'''
+        )
+        cursor.execute(
+            f'''UPDATE {table}
+                SET updated_at = updated_at * 1000
+                WHERE updated_at > 0 AND updated_at < 100000000000'''
+        )
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS attention_action_confirmations (
+        confirmation_hash TEXT PRIMARY KEY,
+        action_key TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER
     )
     ''')
 
@@ -158,9 +606,15 @@ def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # A stored 'connected' row is not by itself evidence of a usable account.
+    # Join the credential so callers can tell a real, unexpired OAuth grant from
+    # a stale row and never present a connected state without one.
     cursor.execute('''
-    SELECT id, provider, provider_user_id, provider_username, status, scopes, updated_at
-    FROM connected_accounts WHERE user_id = ?
+    SELECT a.id, a.provider, a.provider_user_id, a.provider_username, a.status, a.scopes, a.updated_at,
+           c.access_token_enc, c.expires_at
+    FROM connected_accounts a
+    LEFT JOIN oauth_credentials c ON c.connected_account_id = a.id
+    WHERE a.user_id = ?
     ''', (user_id,))
     rows = cursor.fetchall()
     conn.close()
@@ -174,18 +628,29 @@ def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]
             'provider_username': r[3],
             'status': r[4],
             'scopes': r[5].split(',') if r[5] else [],
-            'updated_at': r[6]
+            'updated_at': r[6],
+            'has_credential': bool(r[7]),
+            'credential_expires_at': r[8] if isinstance(r[8], int) else None,
         })
     return result
 
-def upsert_connected_account(user_id: str, provider: str, provider_username: str, status: str = 'connected', scopes: List[str] = [], access_token: str = '') -> Dict[str, Any]:
+def upsert_connected_account(
+    user_id: str,
+    provider: str,
+    provider_username: str,
+    status: str = 'connected',
+    scopes: Optional[List[str]] = None,
+    access_token: str = '',
+    provider_user_id: str = '',
+) -> Dict[str, Any]:
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     now = int(time.time())
 
     account_id = f'{user_id}_{provider}'
-    scopes_str = ','.join(scopes)
+    scopes_str = ','.join(scopes or [])
+    provider_identity = provider_user_id or provider_username
 
     cursor.execute('''
     INSERT INTO connected_accounts (id, user_id, provider, provider_user_id, provider_username, status, scopes, created_at, updated_at)
@@ -195,7 +660,7 @@ def upsert_connected_account(user_id: str, provider: str, provider_username: str
         status=excluded.status,
         scopes=excluded.scopes,
         updated_at=excluded.updated_at
-    ''', (account_id, user_id, provider, provider_username, provider_username, status, scopes_str, now, now))
+    ''', (account_id, user_id, provider, provider_identity, provider_username, status, scopes_str, now, now))
 
     if access_token:
         cred_id = f'cred_{account_id}'
@@ -226,9 +691,101 @@ def disconnect_account(user_id: str, provider: str) -> bool:
     now = int(time.time())
 
     cursor.execute("UPDATE connected_accounts SET status = 'disconnected', updated_at = ? WHERE id = ?", (now, account_id))
+    # A disconnected account must not retain a credential: leaving the row would
+    # let a later listing reconstruct a connected-looking state without consent.
+    cursor.execute('DELETE FROM oauth_credentials WHERE connected_account_id = ?', (account_id,))
     conn.commit()
     conn.close()
     return True
 
+
+def get_execution_credential_status(user_id: str = 'default_user') -> Dict[str, bool]:
+    """Return only credential-presence flags; secret values never leave this module."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            'SELECT credential_key, secret_enc FROM execution_credentials WHERE user_id = ?',
+            (user_id,),
+        ).fetchall()
+        return {key: bool(value) for key, value in rows}
+    finally:
+        conn.close()
+
+
+def save_execution_credential(user_id: str, credential_key: str, secret: str) -> Dict[str, Any]:
+    if not credential_key or not secret:
+        raise ValueError('A provider and credential are required.')
+    init_db()
+    now = int(time.time())
+    encrypted = encrypt_token(secret)
+    credential_id = f'{user_id}_{credential_key}'
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute('''
+        INSERT INTO execution_credentials (id, user_id, credential_key, secret_enc, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, credential_key) DO UPDATE SET secret_enc=excluded.secret_enc, updated_at=excluded.updated_at
+        ''', (credential_id, user_id, credential_key, encrypted, now, now))
+        conn.commit()
+    finally:
+        conn.close()
+    return {'credential_key': credential_key, 'configured': True, 'updated_at': now}
+
+
+def delete_execution_credential(user_id: str, credential_key: str) -> bool:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute('DELETE FROM execution_credentials WHERE user_id = ? AND credential_key = ?', (user_id, credential_key))
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
+def get_execution_preferences(user_id: str = 'default_user') -> Dict[str, Any]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT profile_id, switching_behavior, unavailable_behavior FROM execution_preferences WHERE user_id = ?',
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        'profile_id': row[0] if row else None,
+        'switching_behavior': row[1] if row else 'migrate',
+        'unavailable_behavior': row[2] if row else 'error',
+    }
+
+
+def save_execution_preferences(
+    user_id: str = 'default_user',
+    *,
+    profile_id: Optional[str] = None,
+    switching_behavior: str = 'migrate',
+    unavailable_behavior: str = 'error',
+) -> Dict[str, Any]:
+    if switching_behavior not in {'migrate', 'new-session'}:
+        raise ValueError('Switching behavior must be migrate or new-session.')
+    if unavailable_behavior not in {'error', 'fallback'}:
+        raise ValueError('Unavailable behavior must be error or fallback.')
+    init_db()
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute('''
+        INSERT INTO execution_preferences (user_id, profile_id, switching_behavior, unavailable_behavior, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET profile_id=excluded.profile_id,
+          switching_behavior=excluded.switching_behavior, unavailable_behavior=excluded.unavailable_behavior,
+          updated_at=excluded.updated_at
+        ''', (user_id, profile_id, switching_behavior, unavailable_behavior, now))
+        conn.commit()
+    finally:
+        conn.close()
+    return {'profile_id': profile_id, 'switching_behavior': switching_behavior, 'unavailable_behavior': unavailable_behavior}
+
 init_db()
-print('Database initialized successfully at:', DB_PATH)
