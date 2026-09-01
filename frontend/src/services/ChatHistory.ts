@@ -10,10 +10,10 @@ export type AgentHistoryMessage = {
 
 const markerPattern = /^\s*([›❯•⏺●])\s+(.*)$/;
 // Gerunds are deliberately count-qualified: bare "Running ..." also opens prose.
-const toolPattern = /^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()/i;
+const toolPattern = /^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()/i;
 const transientPattern = /^(?:Working\s*\(|You have \d+ usage|Session renamed\b|Stop hook feedback\b|Tip:|(?:low|medium|high|xhigh|max|ultra)\s+·\s+\/)/i;
 const routingPrefix = /^\[Magistrate execution:[^\]]+\]\s*/i;
-const markerlessToolPattern = /^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()/i;
+const markerlessToolPattern = /^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()/i;
 const lineBreakPattern = /^(?:[-*•‣]|\d+[.)]\s|#)/;
 const ansiPattern = /\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 // Footer/status overlays Herdr catches mid-frame; they can overwrite a message row.
@@ -23,7 +23,8 @@ const harnessArtifactPattern = /^(?:FIRSTMATE_OP\b|WAKE_(?:ACK|DRAIN|REQUIRED)\b
 // excerpt or diff it produced. Both halves are required: a captain may
 // legitimately write "read the release notes" or even "read src/main.py", and
 // those must stay captain turns.
-const toolEnvelopeHeaderPattern = /^(?:edit|read|write|create|delete|remove|move|copy|rename|apply[_ ]?patch|patch|cat|head|tail|sed|awk|grep|rg|find|ls|glob|open|view|diff|touch|mkdir)\b[ \t]+(?:[\w.@~-]*\/[\w.@/-]*|[\w.@-]+\.[A-Za-z0-9]{1,8})(:\d+(?:[-:]\d+)?)?[ \t]*$/i;
+const toolEnvelopeHeaderPattern = /^(?:edit|update|read|write|create|delete|remove|move|copy|rename|apply[_ ]?patch|patch|cat|head|tail|sed|awk|grep|rg|find|ls|glob|open|view|diff|touch|mkdir)\b[ \t]+(?:[\w.@~-]*\/[\w.@/-]*|[\w.@-]+\.[A-Za-z0-9]{1,8})(:\d+(?:[-:]\d+)?)?[ \t]*$/i;
+const toolFunctionCallPattern = /^(?:Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\(\s*(?:[\w.@~-]*\/[\w.@/() -]*|[\w.@-]+\.[A-Za-z0-9]{1,8})\s*\)\s*$/i;
 const numberedExcerptPattern = /(?:^|\n)[ \t]*(?:\.{3}[ \t]*)?[+\-]?[ \t]*\d{1,6}[ \t]{1,12}\S/;
 const diffExcerptPattern = /(?:^|\n)[ \t]*(?:@@[ \t]|[+\-]{3}[ \t]|[+\-][ \t]*\d+[ \t])/;
 // Firstmate drives worker panes by typing control plumbing into them: wake
@@ -34,7 +35,7 @@ const diffExcerptPattern = /(?:^|\n)[ \t]*(?:@@[ \t]|[+\-]{3}[ \t]|[+\-][ \t]*\d
 // turns: tab bars, block-drawing meters, and gauge rows. None is conversation.
 const panelChromePattern = /^(?:[\u2500-\u259F\u2588\s]{3,}|(?:[A-Z][A-Za-z]{1,14}[ \t]{2,}){2,}[A-Z][A-Za-z]{1,14}|\d{1,3}%[ \t](?:used|remaining|left)\b.*)$/;
 const systemNoticePattern = /^(?:⛵\s+[^:]+:|Run bin\/fm-wake-drain\.sh\b|Watcher continuity is extension-owned\b|Firstmate (?:instruction|steers|inbox|launch)\b|FIRSTMATE_(?:OP|WAKE)\b|Report status by appending\b|v\d+ launch-brief:)/i;
-const rawTerminalPattern = /^(?:\$\s|⎿\s|(?:bash|read|edit|write|glob|grep|task|websearch|webfetch)\s*\(|[^\s@]+@[^\s:]+:[^\n]*[$#]\s)/i;
+const rawTerminalPattern = /^(?:\$\s|⎿\s|(?:bash|read|edit|update|write|glob|grep|task|websearch|webfetch)\s*\(|[^\s@]+@[^\s:]+:[^\n]*[$#]\s)/i;
 
 const stripAnsi = (text: string) => text.replace(ansiPattern, '');
 
@@ -63,6 +64,7 @@ export function isRawTerminalArtifact(text: string): boolean {
  */
 export function isToolEnvelope(text: string): boolean {
   const value = stripAnsi(text).replace(/^[\s]+/, '');
+  if (toolFunctionCallPattern.test(value)) return true;
   const breakAt = value.indexOf('\n');
   const header = (breakAt < 0 ? value : value.slice(0, breakAt)).trim();
   const match = header.match(toolEnvelopeHeaderPattern);
@@ -205,11 +207,11 @@ export function isRenderableToolCall(message: Pick<AgentHistoryMessage, 'kind' |
   );
 }
 
-const TOOL_LABELS: Record<string, string> = { bash: 'Bash', read: 'Read', edit: 'Edit', write: 'Write', glob: 'Glob', grep: 'Grep', task: 'Task', websearch: 'WebSearch', webfetch: 'WebFetch' };
+const TOOL_LABELS: Record<string, string> = { bash: 'Bash', read: 'Read', edit: 'Edit', update: 'Update', write: 'Write', glob: 'Glob', grep: 'Grep', task: 'Task', websearch: 'WebSearch', webfetch: 'WebFetch' };
 export function toolCallPreview(text: string): string {
   const value = text.trim().replace(/\s+/g, ' ');
   if (value.startsWith('$')) return 'Bash';
-  const namedTool = value.match(/^(Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\b/i);
+  const namedTool = value.match(/^(Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\b/i);
   // Harnesses spell the same tool 'Edit' and 'edit'; the chip is one label.
   if (namedTool) return TOOL_LABELS[namedTool[1].toLowerCase()] || namedTool[1];
   const activity = value.match(/^(Running|Calling|Reading|Writing|Editing|Exploring|Fetching|Searching|Ran|Called|Searched|Viewed|Created|Updated|Deleted|Downloaded|Committed|Pushed)\b/i);

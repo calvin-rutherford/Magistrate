@@ -172,20 +172,19 @@ downgrade step.
   remain in use for those targets only. They are marked `TRANSITIONAL` in
   `app/(tabs)/chat.tsx`; durable identity for every worker-side turn is what
   would retire that code.
-- **Reply attribution still matches on prompt text.** The adapter pairs a
+- **Initial reply attribution still matches on prompt text.** The adapter pairs a
   snapshot segment with a turn by comparing the submitted prompt (whitespace
   collapsed; `prompt_key` holds the exact text the provider received, including
   any attachment manifest). Matching runs newest-first, so a repeated phrase
-  cannot steal a newer turn's reply and a scrolled window still attributes
-  correctly. Two cases leave a turn with no reply: a prompt whose terminal
-  rendering differs from what was submitted by more than whitespace, and a
-  working agent on an alternate screen, where only the visible viewport is
-  readable and a long reply can push its own prompt row off it. Both **omit**
-  rather than misattribute - the previous architecture had the same requirement,
-  and the 3s poll recovers as soon as the prompt row is readable again. Do not
-  "fix" this by attributing unmatched trailing prose to whichever turn is open:
-  the captain pane has other audiences, and a reply under the wrong prompt is
-  worse than a missing one.
+  cannot steal a newer turn's reply. After that first attribution, a long Claude
+  reply may push its prompt off the alternate-screen viewport; a leading segment
+  can continue only when at least 40 characters of assistant prose overlap the
+  primary reply of exactly one recent turn. No overlap or ambiguous overlap fails
+  closed. A prompt whose terminal rendering differs by more than whitespace, or
+  one that scrolls away before any prose is attributed, still leaves the turn
+  without a reply. Do not "fix" this by attributing unmatched trailing prose to
+  whichever turn is open: the captain pane has other audiences, and a reply under
+  the wrong prompt is worse than a missing one.
 - **`ingest_error` travels with the record.** When the live snapshot cannot be
   read, `GET /conversations/{target}/messages` still returns the canonical
   transcript and reports the failure in `ingest_error` rather than presenting a

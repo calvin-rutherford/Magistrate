@@ -1,0 +1,9 @@
+❯ The app seems tinted. Please dispatch the three presentation fixes.
+
+● Aye, captain — three clear items. Dispatching a focused pass now.
+
+  Update(data/magistrate-composer-float-t5/brief.md)
+
+● 1. Remove the unintended tint.
+  2. Float the composer.
+  3. Make the drawer header transparent.

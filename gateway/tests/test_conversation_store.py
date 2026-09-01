@@ -482,12 +482,16 @@ def test_voice_moves_record_the_shared_captain_turn(monkeypatch):
 
 
 # --- Real captured Herdr snapshots ---------------------------------------------
-# tests/fixtures/*.ansi are live `HerdrClient.read_agent_output(..., 'ansi')`
-# captures taken read-only from running panes on 2026-08-31. They carry the exact
-# shapes a hand-written history array does not: Pi boxing a tool-envelope body
-# like a user turn, a Claude composer framed by rules, mid-frame status overlays,
-# and prose hard-wrapped at the real pane width. Recapture with the command in
-# docs/chat-evidence-package.md rather than editing them by hand.
+# tests/fixtures/live-*.ansi are live
+# `HerdrClient.read_agent_output(..., 'ansi')` captures taken read-only from
+# running panes on 2026-08-31. They carry the exact shapes a hand-written history
+# array does not: Pi boxing a tool-envelope body like a user turn, Claude's
+# prompt scrolling off its alternate-screen viewport, unmarked tool summaries,
+# mid-frame status overlays, and real hard wrapping. The small
+# production-claude-update-leak fixture preserves the exact offending row and
+# surrounding prose recovered from the production canonical record/session
+# after that viewport had already scrolled away. Recapture live fixtures with
+# the command in docs/chat-evidence-package.md rather than editing them by hand.
 FIXTURES = Path(__file__).parent / 'fixtures'
 
 
@@ -538,3 +542,73 @@ def test_a_real_reply_growing_between_polls_stays_one_message():
     assert replies[0]['text'] == reply
     assert replies[0]['revision'] == 3
     assert [item['text'] for item in messages if item['type'] == 'tool'] == ['Ran']
+
+
+def test_live_long_reply_keeps_upserting_after_its_prompt_scrolls_off_viewport():
+    """Five read-only captures from the production Claude captain pane.
+
+    The prompt is present through snapshot 3, then Claude's alternate screen
+    pushes it away while the same assistant blocks continue growing in snapshots
+    4 and 5. The adapter must use observed prose continuity, not guess that any
+    unmatched output belongs to the latest open turn.
+    """
+    fixtures = [f'live-claude-growing-0{index}-{suffix}.ansi' for index, suffix in (
+        (1, 'opening'), (2, 'tool'), (3, 'before-scroll'),
+        (4, 'after-scroll'), (5, 'complete'),
+    )]
+    first_rows = typed_rows(fixtures[0])
+    prompt = next(row['text'] for row in first_rows if row['role'] == 'user')
+    turn = store.record_prompt(USER, TARGET, 'u-live-growing', prompt)
+
+    for fixture in fixtures:
+        store.ingest_terminal_rows(USER, TARGET, typed_rows(fixture))
+
+    final_rows = typed_rows(fixtures[-1])
+    final_reply = store.join_primary_text([
+        row['text'] for row in final_rows
+        if row['role'] == 'assistant' and row['kind'] == 'conversation'
+    ])
+    messages = store.list_messages(USER, TARGET)['messages']
+    replies = [item for item in messages if item['role'] == 'assistant' and item['type'] == 'conversation']
+    assert [(item['turn_id'], item['text'], item['revision']) for item in replies] == [
+        (turn['turn_id'], final_reply, 5),
+    ]
+    assert [item['text'] for item in messages if item['type'] == 'tool'] == ['Read']
+    assert 'Read 1 file' not in replies[0]['text']
+
+
+def test_promptless_prose_without_unique_continuity_still_fails_closed():
+    first = store.record_prompt(USER, TARGET, 'u-anchor-1', 'first prompt')
+    second = store.record_prompt(USER, TARGET, 'u-anchor-2', 'second prompt')
+    shared = 'A deliberately substantial opening shared by two different assistant turns.'
+    store.record_primary_reply(USER, TARGET, first['turn_id'], shared)
+    store.record_primary_reply(USER, TARGET, second['turn_id'], shared)
+
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('assistant', 'conversation', shared + ' This continuation has no visible prompt.'),
+    ))
+    replies = [item for item in store.list_messages(USER, TARGET)['messages'] if item['role'] == 'assistant']
+    assert [(item['turn_id'], item['text'], item['revision']) for item in replies] == [
+        (first['turn_id'], shared, 1), (second['turn_id'], shared, 1),
+    ]
+
+
+def test_production_update_invocation_is_tool_activity_not_visible_prose():
+    parsed = typed_rows('production-claude-update-leak.ansi')
+    assert [(row['role'], row['kind']) for row in parsed] == [
+        ('user', 'conversation'), ('assistant', 'conversation'),
+        ('assistant', 'tool'), ('assistant', 'conversation'),
+    ]
+    prompt = next(row['text'] for row in parsed if row['role'] == 'user')
+    store.record_prompt(USER, TARGET, 'u-update-tool', prompt)
+
+    store.ingest_terminal_rows(USER, TARGET, parsed)
+
+    messages = store.list_messages(USER, TARGET)['messages']
+    [reply] = [item for item in messages if item['role'] == 'assistant' and item['type'] == 'conversation']
+    assert reply['text'] == (
+        'Aye, captain — three clear items. Dispatching a focused pass now.\n\n'
+        '1. Remove the unintended tint.\n2. Float the composer.\n3. Make the drawer header transparent.'
+    )
+    assert 'Update(' not in reply['text']
+    assert [item['text'] for item in messages if item['type'] == 'tool'] == ['Update']

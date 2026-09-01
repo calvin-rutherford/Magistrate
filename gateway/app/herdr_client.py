@@ -17,7 +17,7 @@ _TOOL_SUMMARY = re.compile(
     r'^(?:Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b'
     r'|Background command\b|Pushed\b|Committed\b|SessionStart\b'
     r'|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b'
-    r'|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
+    r'|(?:Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
     re.IGNORECASE,
 )
 _TRANSIENT_SUMMARY = re.compile(
@@ -42,7 +42,7 @@ def _human_agent_name(value: Any, identifiers: set[str]) -> Optional[str]:
     return candidate
 _ROUTING_PREFIX = re.compile(r'^\[Magistrate execution:[^\]]+\]\s*', re.IGNORECASE)
 _MARKERLESS_TOOL = re.compile(
-    r'^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
+    r'^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()',
     re.IGNORECASE,
 )
 _LINE_BREAK = re.compile(r'^(?:[-*•‣]|\d+[.)]\s|#)')
@@ -79,13 +79,18 @@ _SYSTEM_NOTICE = re.compile(
 # those must stay captain turns. Mirrors isToolEnvelope in
 # frontend/src/services/ChatHistory.ts.
 _TOOL_ENVELOPE_HEADER = re.compile(
-    r'^(?:edit|read|write|create|delete|remove|move|copy|rename|apply[_ ]?patch|patch|cat|head|tail|sed|awk|grep|rg|find|ls|glob|open|view|diff|touch|mkdir)'
+    r'^(?:edit|update|read|write|create|delete|remove|move|copy|rename|apply[_ ]?patch|patch|cat|head|tail|sed|awk|grep|rg|find|ls|glob|open|view|diff|touch|mkdir)'
     r'\b[ \t]+(?:[\w.@~-]*/[\w.@/-]*|[\w.@-]+\.[A-Za-z0-9]{1,8})(:\d+(?:[-:]\d+)?)?[ \t]*$',
+    re.IGNORECASE,
+)
+_TOOL_FUNCTION_CALL = re.compile(
+    r'^(?:Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\('
+    r'\s*(?:[\w.@~-]*/[\w.@/() -]*|[\w.@-]+\.[A-Za-z0-9]{1,8})\s*\)\s*$',
     re.IGNORECASE,
 )
 _NUMBERED_EXCERPT = re.compile(r'(?:^|\n)[ \t]*(?:\.{3}[ \t]*)?[+\-]?[ \t]*\d{1,6}[ \t]{1,12}\S')
 _DIFF_EXCERPT = re.compile(r'(?:^|\n)[ \t]*(?:@@[ \t]|[+\-]{3}[ \t]|[+\-][ \t]*\d+[ \t])')
-_RAW_TERMINAL = re.compile(r'^(?:\$\s|⎿\s|(?:bash|read|edit|write|glob|grep|task|websearch|webfetch)\s*\(|[^\s@]+@[^\s:]+:[^\n]*[$#]\s)', re.IGNORECASE)
+_RAW_TERMINAL = re.compile(r'^(?:\$\s|⎿\s|(?:bash|read|edit|update|write|glob|grep|task|websearch|webfetch)\s*\(|[^\s@]+@[^\s:]+:[^\n]*[$#]\s)', re.IGNORECASE)
 
 
 def unwrap_terminal_text(text: str) -> str:
@@ -117,6 +122,8 @@ def _is_harness_artifact(text: str) -> bool:
 def _is_tool_envelope(text: str) -> bool:
     """A harness tool envelope, which Pi boxes exactly like a user turn."""
     value = _ANSI.sub('', text).lstrip()
+    if _TOOL_FUNCTION_CALL.match(value):
+        return True
     header, _, body = value.partition('\n')
     match = _TOOL_ENVELOPE_HEADER.match(header.strip())
     if not match:
@@ -292,7 +299,7 @@ def _is_renderable_tool_call(text: str) -> bool:
 
 
 _TOOL_LABELS = {
-    'bash': 'Bash', 'read': 'Read', 'edit': 'Edit', 'write': 'Write', 'glob': 'Glob',
+    'bash': 'Bash', 'read': 'Read', 'edit': 'Edit', 'update': 'Update', 'write': 'Write', 'glob': 'Glob',
     'grep': 'Grep', 'task': 'Task', 'websearch': 'WebSearch', 'webfetch': 'WebFetch',
 }
 _ACTIVITY_VERBS = re.compile(
@@ -311,7 +318,7 @@ def tool_call_preview(text: str) -> str:
     value = re.sub(r'\s+', ' ', text.strip())
     if value.startswith('$'):
         return 'Bash'
-    named = re.match(r'^(Bash|Read|Edit|Write|Glob|Grep|Task|WebSearch|WebFetch)\b', value, re.IGNORECASE)
+    named = re.match(r'^(Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\b', value, re.IGNORECASE)
     if named:
         return _TOOL_LABELS.get(named.group(1).lower(), named.group(1))
     activity = _ACTIVITY_VERBS.match(value)
