@@ -1682,6 +1682,89 @@ test('chat preserves a distinguishable environment canvas in light and dark mode
   await page.close();
 });
 
+async function samplePixel(page) {
+  const screenshot = PNG.sync.read(await page.screenshot({ type: 'png' }));
+  const offset = (350 * screenshot.width + 10) * 4;
+  return { r: screenshot.data[offset], g: screenshot.data[offset + 1], b: screenshot.data[offset + 2] };
+}
+async function computedOpacity(page, testId) {
+  return page.evaluate(id => {
+    const element = document.querySelector(`[data-testid="${id}"]`);
+    return element ? Number(getComputedStyle(element).opacity) : null;
+  }, testId);
+}
+function assertSamePixel(actual, expected, message) {
+  const close = Math.abs(actual.r - expected.r) <= 2 && Math.abs(actual.g - expected.g) <= 2 && Math.abs(actual.b - expected.b) <= 2;
+  assert.ok(close, `${message}: expected rgb(${expected.r},${expected.g},${expected.b}), got rgb(${actual.r},${actual.g},${actual.b})`);
+}
+async function waitCleared(page, testId) {
+  await page.waitForFunction(id => Number(getComputedStyle(document.querySelector(`[data-testid="${id}"]`)).opacity) < 0.01, {}, testId);
+}
+async function assertCleared(page, testId, message) {
+  assert.ok((await computedOpacity(page, testId)) < 0.01, message);
+}
+
+test('closed Settings never re-tints the canvas, and the drawer dim clears fully once its owner closes', async () => {
+  // A highly saturated, distinctive custom color: any full-screen dark wash
+  // left mounted after Settings/drawer close would visibly shift this pixel,
+  // even a wash too subtle for the loose green/red thresholds used above.
+  const page = await openChat({ width: 900, height: 700 }, true, '', URL, 0, false, true, 'light');
+  const customSvg = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#ff2ec4"/></svg>');
+  await page.evaluate(uri => {
+    localStorage.setItem('magistrate.chat.background', 'custom');
+    localStorage.setItem('magistrate.chat.custom-background', uri);
+    // Headless Chrome reports Notification.permission as 'default' on this
+    // origin, so without this the web push permission banner (zIndex 101)
+    // renders over the header mid-test and steals the Settings/drawer clicks.
+    localStorage.setItem('magistrate.notifications.web-permission-asked', 'true');
+  }, customSvg);
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: HISTORY_READY_TIMEOUT });
+  await page.waitForFunction(() => {
+    const image = document.querySelector('[data-testid="environment-background"] img');
+    return image?.complete && image.naturalWidth > 0;
+  }, { timeout: 10_000 });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="environment-background"] > div')).opacity) >= 0.999, { timeout: 10_000 });
+
+  const baseline = await samplePixel(page);
+  assert.ok(baseline.r > 200 && baseline.g < 80 && baseline.b > 150, `baseline pixel should be the saturated custom color, got rgb(${baseline.r},${baseline.g},${baseline.b})`);
+  await assertCleared(page, 'settings-scrim', 'settings scrim must start fully transparent');
+
+  // normal chat -> settings open -> Done -> normal chat
+  await openSettingsSheet(page);
+  assert.ok((await computedOpacity(page, 'settings-scrim')) > 0.9, 'settings scrim should be visible while Settings is open');
+  await page.click('[data-testid="settings-close"]');
+  await waitCleared(page, 'settings-scrim');
+  await assertCleared(page, 'settings-scrim', 'settings scrim must fully clear after Done');
+  assertSamePixel(await samplePixel(page), baseline, 'closing Settings must restore the exact rendered brightness');
+
+  // normal chat -> drawer -> settings -> Done
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  assert.ok((await computedOpacity(page, 'chat-dim')) > 0, 'drawer dim should be visible while the drawer is open');
+  await page.click('[data-testid="settings-open"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
+  await page.click('[data-testid="settings-close"]');
+  await waitCleared(page, 'settings-scrim');
+  await assertCleared(page, 'settings-scrim', 'settings scrim must fully clear after Done reached via the drawer');
+  await assertCleared(page, 'chat-dim', 'drawer dim must stay cleared once the drawer closed on the way into Settings');
+  assertSamePixel(await samplePixel(page), baseline, 'drawer -> Settings -> Done must restore the exact rendered brightness');
+
+  // reload normal chat
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: HISTORY_READY_TIMEOUT });
+  await page.waitForFunction(() => {
+    const image = document.querySelector('[data-testid="environment-background"] img');
+    return image?.complete && image.naturalWidth > 0;
+  }, { timeout: 10_000 });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="environment-background"] > div')).opacity) >= 0.999, { timeout: 10_000 });
+  await assertCleared(page, 'settings-scrim', 'settings scrim must start cleared after reload');
+  assertSamePixel(await samplePixel(page), baseline, 'reloading normal chat must restore the exact rendered brightness');
+  await page.close();
+});
+
 test('chat surface exposes accessible roles and labels for the composer and drawer', async () => {
   const page = await openChat({ width: 900, height: 700 });
   const accessibility = await page.evaluate(() => ({

@@ -49,6 +49,20 @@ _MARKERLESS_TOOL = re.compile(
 _LINE_BREAK = re.compile(r'^(?:[-*•‣]|\d+[.)]\s|#)')
 _ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))')
 _ANSI_BACKGROUND = re.compile(r'\x1b\[48;5;(\d+)m')
+# Pi paints boxed content (a user turn, or a system notice sharing the same
+# box convention) in this specific foreground color. It is a second,
+# independent structural marker for "this row is inside a Pi box" - a
+# terminal capture that catches a box mid-redraw can lose the background
+# fill escape on some or all of that box's rows (the same class of mid-frame
+# capture race already documented for the composer and status overlays)
+# without losing this foreground marker, since the two escapes are emitted
+# separately. Without this fallback, a background-less boxed row is
+# indistinguishable from plain assistant prose and silently merges into it -
+# this is the exact mechanism behind the production cross-role duplication
+# defect (a submitted prompt's box loses its background paint in one
+# capture, so the prompt's text is folded into the preceding assistant
+# reply). Prompt-echo/submission-marker evidence, not text similarity.
+_BOXED_FOREGROUND = re.compile(r'\x1b\[38;5;188m')
 _ANSI_ITALIC = re.compile(r'\x1b\[(?:[^m;]*;)*3(?:;[^m]*)?m')
 # Footer/status overlays herdr captures mid-frame; they can land on an indented
 # row directly under a message, so they are dropped wherever they appear.
@@ -69,6 +83,7 @@ _HARNESS_ARTIFACT = re.compile(
 # renders its panel chrome inside the same background boxes Pi uses for user
 # turns: tab bars, block-drawing meters, and gauge rows. None is conversation.
 _PANEL_CHROME = re.compile(r'^(?:[\u2500-\u259F\u2588\s]{3,}|(?:[A-Z][A-Za-z]{1,14}[ \t]{2,}){2,}[A-Z][A-Za-z]{1,14}|\d{1,3}%[ \t](?:used|remaining|left)\b.*)$')
+_AUDIENCE_CONTROL = re.compile(r'^(?:\[fm-[^]]+\]|⛵\s+[^:]+:)', re.IGNORECASE)
 _SYSTEM_NOTICE = re.compile(
     r'^(?:⛵\s+[^:]+:|Run bin/fm-wake-drain\.sh\b|Watcher continuity is extension-owned\b'
     r'|Firstmate (?:instruction|steers|inbox|launch)\b|FIRSTMATE_(?:OP|WAKE)\b|Report status by appending\b|v\d+ launch-brief:)',
@@ -111,7 +126,7 @@ def unwrap_terminal_text(text: str) -> str:
 
 def _is_harness_artifact(text: str) -> bool:
     value = _ANSI.sub('', text).strip()
-    if not value or _TERMINAL_CHROME.search(value) or _TRANSIENT_SUMMARY.match(value) or _HARNESS_ARTIFACT.match(value) or _SYSTEM_NOTICE.match(value) or _PANEL_CHROME.match(value) or _ROUTING_PREFIX.match(value):
+    if not value or _TERMINAL_CHROME.search(value) or _TRANSIENT_SUMMARY.match(value) or _HARNESS_ARTIFACT.match(value) or _AUDIENCE_CONTROL.match(value) or _SYSTEM_NOTICE.match(value) or _PANEL_CHROME.match(value) or _ROUTING_PREFIX.match(value):
         return True
     try:
         envelope = json.loads(value)
@@ -148,18 +163,33 @@ def _parse_pi_ansi_history(output: str) -> List[Dict[str, str]]:
     index = 0
     while index < len(lines):
         backgrounds = _ANSI_BACKGROUND.findall(lines[index])
-        if backgrounds:
+        # A row missing its background fill but still carrying Pi's boxed
+        # foreground marker is a degraded box, not plain prose - see
+        # _BOXED_FOREGROUND. `box_key` distinguishes a real background run
+        # (scoped to that exact color, as before) from a marker-only
+        # fallback run, so an adjacent box of a genuinely different color is
+        # never merged into this one.
+        box_key = backgrounds[-1] if backgrounds else ('fg188' if _BOXED_FOREGROUND.search(lines[index]) else None)
+        if box_key is not None:
             finish_assistant()
-            background = backgrounds[-1]
             run: List[str] = []
             while index < len(lines):
                 matches = _ANSI_BACKGROUND.findall(lines[index])
-                if not matches or matches[-1] != background:
+                current_key = matches[-1] if matches else ('fg188' if _BOXED_FOREGROUND.search(lines[index]) else None)
+                if current_key != box_key:
                     break
                 run.append(_ANSI.sub('', lines[index]).rstrip())
                 index += 1
             text = unwrap_terminal_text('\n'.join(run))
-            if not text or _is_harness_artifact(text):
+            if not text:
+                continue
+            if _is_harness_artifact(text):
+                # Firstmate control plumbing can share Pi's user box. Keep its
+                # audience boundary without exposing it as conversation; the
+                # canonical adapter uses this user-role control to close the
+                # preceding captain turn.
+                if _AUDIENCE_CONTROL.match(text):
+                    messages.append({'role': 'user', 'kind': 'control', 'text': text})
                 continue
             if _MARKERLESS_TOOL.match(text) or _is_tool_envelope(text) or re.match(r'^(?:(?:edit|read|write|bash|grep|find|ls)\s*\n|[+\- ]\s*\d+\s|@@\s)', text, re.IGNORECASE):
                 messages.append({'role': 'assistant', 'kind': 'tool', 'text': text})
