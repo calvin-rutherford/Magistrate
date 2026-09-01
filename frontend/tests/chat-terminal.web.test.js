@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
+const { PNG } = require('pngjs');
 const { launchBrowser, startWebServer } = require('./helpers/web-server');
 
 let server;
@@ -1543,6 +1544,44 @@ test('gateway error and cancellation fixtures render truthful states', async () 
   await failed.waitForSelector('[data-testid^="message-failed-"]');
   assert.match(await failed.$eval('[data-testid^="message-failed-"]', element => element.innerText), /Not sent/);
   await failed.close();
+});
+
+test('chat preserves a distinguishable environment canvas in light and dark mode', async () => {
+  const page = await openChat({ width: 900, height: 700 }, true, '', URL, 0, false, true, 'light');
+  const customSvg = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#11d34a"/></svg>');
+  await page.evaluate(uri => {
+    localStorage.setItem('magistrate.chat.background', 'custom');
+    localStorage.setItem('magistrate.chat.custom-background', uri);
+  }, customSvg);
+  for (const mode of ['light', 'dark']) {
+    await page.evaluate(value => localStorage.setItem('magistrate.chat.theme-mode', value), mode);
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: HISTORY_READY_TIMEOUT });
+    await page.waitForFunction(() => {
+      const image = document.querySelector('[data-testid="environment-background"] img');
+      return image?.complete && image.naturalWidth > 0;
+    }, { timeout: 10_000 });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="environment-background"] > div')).opacity) >= 0.99, { timeout: 10_000 });
+    const canvas = await page.$eval('[data-testid="branded-chat-shell"]', element => {
+      const style = getComputedStyle(element);
+      return {
+        shellBackground: style.backgroundColor,
+        dimOverlay: Boolean(document.querySelector('[data-testid="environment-dim-overlay"]')),
+        imageBackground: [...document.querySelectorAll('div')].map(item => getComputedStyle(item).backgroundImage).find(value => value.includes('data:image/svg+xml')) || '',
+      };
+    });
+    assert.equal(canvas.shellBackground, 'rgba(0, 0, 0, 0)');
+    assert.equal(canvas.dimOverlay, false, `chat must not mount a blanket environment overlay in ${mode} mode`);
+    assert.match(canvas.imageBackground, /data:image\/svg\+xml/);
+    const screenshot = PNG.sync.read(await page.screenshot({ type: 'png' }));
+    const pixel = (screenshot.data[(350 * screenshot.width + 10) * 4]);
+    const green = screenshot.data[(350 * screenshot.width + 10) * 4 + 1];
+    // A solid, highly distinctive rendered pixel must remain green in both
+    // modes; a blanket theme wash would move it toward white, gray, or black.
+    assert.ok(pixel < 40 && green > 80, `${mode} canvas pixel should retain the custom environment color, got rgb(${pixel},${green},${screenshot.data[(350 * screenshot.width + 10) * 4 + 2]})`);
+  }
+  await page.close();
 });
 
 test('chat surface exposes accessible roles and labels for the composer and drawer', async () => {

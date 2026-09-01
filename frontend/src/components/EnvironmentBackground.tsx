@@ -17,7 +17,7 @@ function minimalScrim(sceneKey: string): string | null {
   return null;
 }
 
-export function EnvironmentBackground({ children, hideBottomControls = false, voiceMode = false }: { children: React.ReactNode; hideBottomControls?: boolean; voiceMode?: boolean }) {
+export function EnvironmentBackground({ children, hideBottomControls = false, voiceMode = false, preserveCanvas = false }: { children: React.ReactNode; hideBottomControls?: boolean; voiceMode?: boolean; preserveCanvas?: boolean }) {
   const router = useRouter(); const pathname = usePathname();
   const [, setBackgroundRevision] = React.useState(0);
   const [weather, setWeather] = React.useState<WeatherKind>('clear');
@@ -52,11 +52,11 @@ export function EnvironmentBackground({ children, hideBottomControls = false, vo
     onMoveShouldSetPanResponder: (_, gesture) => pathname !== '/chat' && gesture.dx > 50 && Math.abs(gesture.dy) < 40,
     onPanResponderRelease: (_, gesture) => { if (gesture.dx > 60) router.back(); },
   }));
-  return <View style={styles.container} {...panResponder.panHandlers}>
+  return <View testID="environment-background" style={styles.container} {...panResponder.panHandlers}>
     <Animated.View style={[styles.container, { opacity: fade }]}>
       <ImageBackground source={theme.sceneImage} style={styles.bgImage} resizeMode="cover">
-        <WeatherOverlay kind={theme.weather} dark={dark} />
-        <View style={[styles.darkDimOverlay, { backgroundColor: minimalScrim(theme.sceneKey) || (dark ? '#07101D' : '#FFFFFF'), opacity: minimalScrim(theme.sceneKey) ? theme.dimOpacity : voiceMode ? 0.58 : highContrast ? (dark ? 0.78 : 0.28) : dark ? theme.dimOpacity : Math.min(theme.dimOpacity, 0.16) }]} />
+        {!preserveCanvas ? <WeatherOverlay kind={theme.weather} dark={dark} /> : null}
+        {!preserveCanvas ? <View testID="environment-dim-overlay" style={[styles.darkDimOverlay, { backgroundColor: minimalScrim(theme.sceneKey) || (dark ? '#07101D' : '#FFFFFF'), opacity: minimalScrim(theme.sceneKey) ? theme.dimOpacity : voiceMode ? 0.58 : highContrast ? (dark ? 0.78 : 0.28) : dark ? theme.dimOpacity : Math.min(theme.dimOpacity, 0.16) }]} /> : null}
         {voiceMode ? <View pointerEvents="none" style={styles.voiceModeTreatment} /> : null}
         <View style={styles.contentArea}>{children}</View>
         {!hideBottomControls && pathname !== '/chat' ? <BottomControls /> : null}
