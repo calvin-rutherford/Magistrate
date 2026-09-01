@@ -112,7 +112,7 @@ test('messages render in the gateway sequence, not in delivery order', () => {
   assert.deepEqual(rows.map(row => row.text), ['The prompt.', 'The reply.']);
 });
 
-test('a canonical-first sync replaces stale cache rows and overlays only an unacknowledged send', () => {
+test('an authoritative canonical sync replaces stale cache rows and overlays only an unacknowledged send', () => {
   const existing: ConversationMessage[] = [
     { id: 'u-old', role: 'user', text: 'stale cached text', source: 'text', sentAt: 123, audience: 'captain', delivery: 'sent', canonicalId: 'cm_x', sequenceIndex: 0 },
     { id: 'poisoned-duplicate', role: 'assistant', text: 'A duplicate from the terminal era.', source: 'text', audience: 'primary', canonicalId: 'cm_poison', sequenceIndex: 999 },

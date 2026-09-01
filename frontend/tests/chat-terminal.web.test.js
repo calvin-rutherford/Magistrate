@@ -118,6 +118,8 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     let historyRequests = 0;
     let agentHistoryRequests = 0;
     let attentionRequests = 0;
+    window.__canonicalOnline = !historyScenario?.canonicalFailure;
+    window.__setCanonicalOnline = value => { window.__canonicalOnline = Boolean(value); };
     window.__magistrateApiCalls = [];
     window.__attentionRequests = () => attentionRequests;
     window.fetch = (resource, options) => {
@@ -165,6 +167,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       }
       if (url.includes('/api/v1/conversations/captain/messages')) {
         window.__canonicalReads = (window.__canonicalReads || 0) + 1;
+        if (historyScenario?.canonicalFailure && !window.__canonicalOnline) return Promise.reject(new TypeError('Gateway conversation request failed.'));
         window.__historyRequests = [...(window.__historyRequests || []), url];
         if (promptSent && !historyScenario?.manual) { applyTurnPhase(); postPromptHistoryRequests += 1; }
         const payload = JSON.stringify({ schema_version: 'conversation.v1', target: 'captain', messages: canonicalMessages() });
@@ -309,9 +312,9 @@ test('chat starts at the measured latest content and preserves older-message rea
     return element.scrollHeight > element.clientHeight + 48;
   });
   const fixedControls = () => page.evaluate(() => {
-    const logo = document.querySelector('[data-testid="brand-drawer-toggle"]').getBoundingClientRect();
-    const composer = document.querySelector('[data-testid="captain-prompt"]').closest('[class]')?.getBoundingClientRect();
-    return { logo: { x: logo.x, y: logo.y }, composer: composer ? { x: composer.x, y: composer.y } : null };
+    const header = document.querySelector('[data-testid="chat-header"]').getBoundingClientRect();
+    const composer = document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect();
+    return { header: { top: header.top, bottom: header.bottom }, composer: { top: composer.top, bottom: composer.bottom } };
   });
   const fixedBefore = await fixedControls();
 
@@ -329,18 +332,17 @@ test('chat starts at the measured latest content and preserves older-message rea
   assert.ok(typography && Number.parseFloat(typography.fontSize) >= 17);
   assert.ok(typography && Number.parseFloat(typography.lineHeight) >= 26);
 
-  // Opening the thread still has an auto-position to the end in flight, and it
-  // can land after a single synthetic scroll and snap the reader back down.
-  // Keep scrolling up until the reading position actually holds, the way a
-  // person would, instead of assuming one event wins the race.
-  await page.waitForFunction(() => {
-    const element = document.querySelector('[data-testid="chat-history"]');
-    element.scrollTop = 0;
-    element.dispatchEvent(new Event('scroll', { bubbles: true }));
-    return Boolean(document.querySelector('[data-testid="jump-to-latest"]'));
-  }, { polling: 120 });
+  // Exercise the browser's real wheel path. Assigning scrollTop proves only
+  // that an element can be mutated; wheel input proves the bounded transcript
+  // is the page's actual vertical scroll owner.
+  await page.hover('[data-testid="chat-history"]');
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.mouse.wheel({ deltaY: -420 });
+    await new Promise(resolve => setTimeout(resolve, 80));
+  }
+  await page.waitForFunction(bottom => document.querySelector('[data-testid="chat-history"]').scrollTop < bottom - 120, {}, position.scrollTop);
   position = await metrics();
-  assert.ok(position.scrollTop + position.clientHeight < position.scrollHeight - 2, 'user scroll should leave the viewport above the end');
+  assert.ok(position.scrollTop + position.clientHeight < position.scrollHeight - 120, 'real wheel input should move substantially above the end');
   assert.deepEqual(await fixedControls(), fixedBefore, 'logo and composer must remain detached from history scrolling');
   assert.equal((await page.$eval('[data-testid="jump-to-latest"]', element => element.innerText)).trim(), '↓');
   // The floating controls now share one adaptive glass treatment so they stay
@@ -391,31 +393,80 @@ test('floating chat controls stay pressable and leave the final message clear', 
   await page.waitForFunction(() => document.querySelectorAll('[data-testid^="user-message-floating-"]').length === 10);
   await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
   await page.waitForSelector('[data-testid="jump-to-latest"]');
+  const topClearance = await page.evaluate(() => {
+    const header = document.querySelector('[data-testid="chat-header"]').getBoundingClientRect();
+    const first = document.querySelector('[data-testid="user-message-floating-0"]').getBoundingClientRect();
+    return first.top - header.bottom;
+  });
+  assert.ok(topClearance >= 10, `first message needs measured header clearance, got ${topClearance}px`);
 
   await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
   const controls = await page.evaluate(() => {
     const history = document.querySelector('[data-testid="chat-history"]');
-    const logo = document.querySelector('[data-testid="brand-drawer-toggle"]');
-    const composer = document.querySelector('[data-testid="captain-prompt"]');
-    const last = document.querySelector('[data-testid="user-message-floating-18"]');
+    const header = document.querySelector('[data-testid="chat-header"]');
+    const composer = document.querySelector('[data-testid="composer-dock"]');
+    const replies = history.querySelectorAll('[data-testid="agent-message"]');
+    const last = replies[replies.length - 1];
+    const headerRect = header.getBoundingClientRect();
     const composerRect = composer.getBoundingClientRect();
     const lastRect = last.getBoundingClientRect();
+    const content = history.firstElementChild;
     return {
-      logoVisible: (() => { const rect = logo.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= innerHeight; })(),
+      headerVisible: headerRect.top >= 0 && headerRect.bottom <= innerHeight,
       composerVisible: composerRect.top >= 0 && composerRect.bottom <= innerHeight,
       lastClear: lastRect.bottom <= composerRect.top,
-      bottomInset: history.scrollHeight - history.clientHeight,
+      bottomPadding: Number.parseFloat(getComputedStyle(content).paddingBottom),
+      composerHeight: composerRect.height,
     };
   });
-  assert.equal(controls.logoVisible, true);
+  assert.equal(controls.headerVisible, true);
   assert.equal(controls.composerVisible, true);
   assert.equal(controls.lastClear, true, 'the final message must scroll clear of the floating composer');
-  assert.ok(controls.bottomInset > 0, 'history needs an inset for the detached composer');
+  assert.ok(controls.bottomPadding >= controls.composerHeight + 10, `history inset ${controls.bottomPadding} must derive from the measured ${controls.composerHeight}px composer`);
 
   await page.click('[data-testid="brand-drawer-toggle"]');
-  await page.waitForSelector('[data-testid="magistrate-drawer"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.click('[data-testid="drawer-close"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) < 0.05);
   await page.focus('[data-testid="captain-prompt"]');
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'captain-prompt');
+  await page.close();
+});
+
+test('measured composer growth updates the transcript inset and keeps the final message clear', async () => {
+  const seedTurns = Array.from({ length: 10 }, (_, index) => ({
+    clientMessageId: `growth-${index}`, text: `composer growth prompt ${index}`, reply: `composer growth response ${index}`,
+  }));
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="agent-message"]').length === 10);
+  const measure = () => page.evaluate(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    const dock = document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect();
+    const content = history.firstElementChild;
+    const replies = history.querySelectorAll('[data-testid="agent-message"]');
+    const last = replies[replies.length - 1].getBoundingClientRect();
+    return { dockHeight: dock.height, dockTop: dock.top, paddingBottom: Number.parseFloat(getComputedStyle(content).paddingBottom), lastBottom: last.bottom };
+  });
+  const before = await measure();
+
+  await page.click('[data-testid="attachment-menu-button"]');
+  const chooserPromise = page.waitForFileChooser();
+  await page.click('[data-testid="attachment-option-files"]');
+  const chooser = await chooserPromise;
+  await chooser.accept([path.join(process.cwd(), 'package.json')]);
+  await page.waitForFunction(height => document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect().height > height + 40, {}, before.dockHeight);
+  const grown = await measure();
+  assert.ok(grown.paddingBottom >= grown.dockHeight + 10, `grown inset ${grown.paddingBottom} must include measured dock ${grown.dockHeight}`);
+  assert.ok(grown.paddingBottom - before.paddingBottom >= grown.dockHeight - before.dockHeight - 2, 'transcript inset must grow with the composer rather than stay fixed');
+
+  await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await page.waitForFunction(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    const replies = history.querySelectorAll('[data-testid="agent-message"]');
+    return replies[replies.length - 1].getBoundingClientRect().bottom <= document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect().top;
+  });
+  const settled = await measure();
+  assert.ok(settled.lastBottom <= settled.dockTop, 'the last message must remain fully above the grown composer');
   await page.close();
 });
 
@@ -433,15 +484,42 @@ test('drawer Settings and Account remain pinned above a long scrolling list', as
     const rect = document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect();
     return { id, top: rect.top, bottom: rect.bottom, height: rect.height };
   }));
-  await page.$eval('[data-testid="drawer-scroll"]', element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await page.hover('[data-testid="drawer-scroll"]');
+  await page.mouse.wheel({ deltaY: 1200 });
+  await page.mouse.wheel({ deltaY: 1200 });
+  await page.waitForFunction(() => document.querySelector('[data-testid="drawer-scroll"]').scrollTop > 300);
   const after = await page.evaluate(() => ['drawer-settings-control', 'settings-open'].map(id => {
     const rect = document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect();
     return { id, top: rect.top, bottom: rect.bottom, height: rect.height, visible: rect.top >= 0 && rect.bottom <= innerHeight };
   }));
-  assert.deepEqual(after.map(item => ({ id: item.id, height: item.height })), before.map(item => ({ id: item.id, height: item.height })));
+  assert.ok(after.every((item, index) => Math.abs(item.top - before[index].top) < 1 && Math.abs(item.bottom - before[index].bottom) < 1), 'drawer footer must not move with its internal scroller');
   assert.ok(after.every(item => item.visible), 'drawer footer controls must remain visible');
   await page.click('[data-testid="drawer-settings-control"]');
-  await page.waitForSelector('[data-testid="settings-sheet"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
+  await page.waitForFunction(() => Math.abs(document.querySelector('[data-testid="settings-sheet"]').getBoundingClientRect().top - innerHeight * 0.1) < 2);
+  await page.$eval('[data-testid="settings-scroll"]', element => {
+    const content = element.firstElementChild || element;
+    for (let index = 0; index < 30; index += 1) {
+      const row = document.createElement('div'); row.textContent = `long settings item ${index}`; row.style.height = '48px'; content.appendChild(row);
+    }
+  });
+  const settingsBefore = await page.evaluate(() => {
+    const sheet = document.querySelector('[data-testid="settings-sheet"]').getBoundingClientRect();
+    const header = document.querySelector('[data-testid="settings-header"]').getBoundingClientRect();
+    const done = document.querySelector('[data-testid="settings-close"]').getBoundingClientRect();
+    return { sheetTop: sheet.top, headerTop: header.top, doneTop: done.top };
+  });
+  await page.hover('[data-testid="settings-scroll"]');
+  await page.mouse.wheel({ deltaY: 1400 });
+  await page.mouse.wheel({ deltaY: 1400 });
+  await page.waitForFunction(() => document.querySelector('[data-testid="settings-scroll"]').scrollTop > 300);
+  const settingsAfter = await page.evaluate(() => {
+    const sheet = document.querySelector('[data-testid="settings-sheet"]').getBoundingClientRect();
+    const header = document.querySelector('[data-testid="settings-header"]').getBoundingClientRect();
+    const done = document.querySelector('[data-testid="settings-close"]').getBoundingClientRect();
+    return { sheetTop: sheet.top, headerTop: header.top, doneTop: done.top };
+  });
+  assert.ok(Object.keys(settingsBefore).every(key => Math.abs(settingsAfter[key] - settingsBefore[key]) < 2), `Settings sheet, header, and Done must remain fixed while content scrolls: ${JSON.stringify({ settingsBefore, settingsAfter })}`);
   await page.close();
 });
 
@@ -503,7 +581,7 @@ test('open chat refreshes a newly arriving attention item without a page reload'
   await page.close();
 });
 
-test('drawer starts collapsed, expands downward, and preserves conversation history', async () => {
+test('drawer starts collapsed, overlays independently, and preserves conversation history', async () => {
   const page = await openChat({ width: 1100, height: 760 });
   await submit(page, 'keep this message');
   assert.equal(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity), '0');
@@ -512,7 +590,7 @@ test('drawer starts collapsed, expands downward, and preserves conversation hist
   await page.evaluate(() => document.querySelector('[data-testid="drawer-section-attention"]').click());
   await page.waitForSelector('[data-testid="drawer-panel-attention"]');
   assert.match(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /keep this message/);
-  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.click('[data-testid="drawer-close"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) < 0.05);
   assert.match(await page.$eval('[data-testid="chat-history"]', element => element.innerText), /keep this message/);
   await page.close();
@@ -540,47 +618,74 @@ test('drawer navigation is one icon system at a comfortable hit target', async (
   await page.close();
 });
 
-test('mobile drawer slides chat aside, swipes closed, and composer focus is stable', async () => {
-  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
-  const before = await page.$eval('[data-testid="branded-chat-shell"]', element => ({ left: element.getBoundingClientRect().left, width: element.getBoundingClientRect().width }));
-  await page.click('[data-testid="brand-drawer-toggle"]');
-  await page.waitForFunction(left => document.querySelector('[data-testid="branded-chat-shell"]').getBoundingClientRect().left > left + 100, {}, before.left);
-  const drawer = await page.$eval('[data-testid="magistrate-drawer"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, height: rect.height }; });
+test('mobile drawer overlays without moving chat and touch scrolling still works after close', async () => {
+  const seedTurns = Array.from({ length: 14 }, (_, index) => ({ clientMessageId: `mobile-${index}`, text: `mobile prompt ${index}`, reply: `mobile response ${index}` }));
+  const page = await openChat({ width: 390, height: 844, isMobile: true, hasTouch: true }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="agent-message"]').length === 14);
+  const shellBefore = await page.$eval('[data-testid="branded-chat-shell"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }; });
+  const fixedBefore = await page.evaluate(() => {
+    const header = document.querySelector('[data-testid="chat-header"]').getBoundingClientRect();
+    const composer = document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect();
+    return { headerTop: header.top, composerBottom: composer.bottom };
+  });
+  const bottom = await page.$eval('[data-testid="chat-history"]', element => element.scrollTop);
+  const toggle = await page.$eval('[data-testid="brand-drawer-toggle"]', element => { const rect = element.getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; });
+  await page.touchscreen.tap(toggle.x, toggle.y);
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  const shellOpen = await page.$eval('[data-testid="branded-chat-shell"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }; });
+  assert.deepEqual(shellOpen, shellBefore, 'an overlay drawer must not translate or scale the chat viewport');
+
+  const drawer = await page.$eval('[data-testid="magistrate-drawer"]', element => { const rect = element.getBoundingClientRect(); return { right: rect.right, top: rect.top, height: rect.height }; });
   const client = await page.createCDPSession();
-  const start = { x: drawer.right - 20, y: drawer.top + drawer.height / 2 };
-  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] });
-  for (let step = 1; step <= 8; step += 1) {
-    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x - step * 28, y: start.y }] });
-  }
+  const closeStart = { x: drawer.right - 20, y: drawer.top + drawer.height / 2 };
+  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [closeStart] });
+  for (let step = 1; step <= 8; step += 1) await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: closeStart.x - step * 28, y: closeStart.y }] });
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) < 0.05);
-  // The drawer fade and the chat shell slide-back are separate springs, so wait
-  // for the shell to actually settle before measuring it.
-  await page.waitForFunction(left => Math.abs(document.querySelector('[data-testid="branded-chat-shell"]').getBoundingClientRect().left - left) < 2, {}, before.left);
+
+  const history = await page.$eval('[data-testid="chat-history"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }; });
+  const scrollStart = { x: history.left + history.width / 2, y: history.top + history.height * 0.38 };
+  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [scrollStart] });
+  for (let step = 1; step <= 7; step += 1) await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: scrollStart.x, y: scrollStart.y + step * 45 }] });
+  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForFunction(start => document.querySelector('[data-testid="chat-history"]').scrollTop < start - 100, {}, bottom);
+  const fixedAfter = await page.evaluate(() => {
+    const header = document.querySelector('[data-testid="chat-header"]').getBoundingClientRect();
+    const composer = document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect();
+    return { headerTop: header.top, composerBottom: composer.bottom, documentScroll: document.scrollingElement.scrollTop, documentOverflow: document.scrollingElement.scrollHeight - document.scrollingElement.clientHeight };
+  });
+  assert.deepEqual({ headerTop: fixedAfter.headerTop, composerBottom: fixedAfter.composerBottom }, fixedBefore, 'floating chrome must not move with touch scrolling');
+  assert.equal(fixedAfter.documentScroll, 0, 'the outer document must not scroll');
+  assert.ok(fixedAfter.documentOverflow <= 1, `the application viewport must stay bounded, overflow=${fixedAfter.documentOverflow}`);
   await page.focus('[data-testid="captain-prompt"]');
   await page.keyboard.type('status please');
   assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'status please');
-  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => getComputedStyle(element).fontSize), '16px');
-  const after = await page.$eval('[data-testid="branded-chat-shell"]', element => ({ left: element.getBoundingClientRect().left, width: element.getBoundingClientRect().width }));
-  assert.ok(Math.abs(after.left - before.left) < 2);
-  assert.ok(Math.abs(after.width - before.width) < 2);
   await page.close();
 });
 
-// Regression for a viewport jump right after navigating into Chat: mobile
-// browsers hand the page a visualViewport that can be a few px shorter than
-// window.innerHeight immediately after a navigation (the address bar is
-// still animating), with no keyboard open. The chat canvas used to snapshot
-// that mismatch unconditionally on mount and pin an explicit height, which
-// then snapped back once a later resize/paint corrected it - a visible jump
-// before the screen ever settled. It must only pin a height once the visual
-// viewport is genuinely smaller than the window (a real on-screen keyboard).
-test('entering chat with a momentarily short visualViewport (no keyboard) does not pin a stale canvas height', async () => {
-  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true }, false, '', URL, 4);
-  const height = await page.$eval('[data-testid="branded-chat-shell"]', element => element.style.height);
-  assert.equal(height, '', 'the canvas must not pin an explicit height when no keyboard is open');
-  const rect = await page.$eval('[data-testid="branded-chat-shell"]', element => element.getBoundingClientRect().height);
-  assert.ok(rect > 647, `the canvas should retain the settled layout height, got ${rect}`);
+// The CSS dynamic viewport is the sole authority. A transient visualViewport
+// report must never become a second pixel-height owner on the chat canvas.
+test('mobile chat inherits one dynamic application viewport without an inline visualViewport height', async () => {
+  const page = await openChat({ width: 390, height: 844, isMobile: true, hasTouch: true }, false, '', URL, 4);
+  const dimensions = await page.evaluate(() => {
+    const shell = document.querySelector('[data-testid="branded-chat-shell"]');
+    const root = document.getElementById('root');
+    return {
+      inlineHeight: shell.style.height,
+      htmlHeight: document.documentElement.getBoundingClientRect().height,
+      rootHeight: root.getBoundingClientRect().height,
+      shellHeight: shell.getBoundingClientRect().height,
+      viewport: innerHeight,
+      bodyOverflow: getComputedStyle(document.body).overflow,
+      viewportPolicy: document.querySelector('meta[name="viewport"]')?.getAttribute('content'),
+    };
+  });
+  assert.equal(dimensions.inlineHeight, '', 'the canvas must not snapshot visualViewport pixels');
+  assert.ok(Math.abs(dimensions.htmlHeight - dimensions.viewport) < 1);
+  assert.ok(Math.abs(dimensions.rootHeight - dimensions.viewport) < 1);
+  assert.ok(Math.abs(dimensions.shellHeight - dimensions.viewport) < 1);
+  assert.equal(dimensions.bodyOverflow, 'hidden');
+  assert.match(dimensions.viewportPolicy || '', /interactive-widget=resizes-content/, 'the browser keyboard must resize the one CSS viewport rather than create a JS pixel-height owner');
   await page.close();
 });
 
@@ -637,39 +742,6 @@ test('navigating into chat from another screen preserves the viewport scale and 
   const after = await page.evaluate(() => ({ scale: window.visualViewport.scale, innerWidth: window.innerWidth, innerHeight: window.innerHeight }));
 
   assert.deepEqual(after, before, 'navigating into chat must not change the viewport scale or size');
-  await page.close();
-});
-
-test('right swipe on the chat screen opens the mobile drawer', async () => {
-  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
-  assert.equal(await page.$eval('[data-testid="magistrate-drawer"]', element => getComputedStyle(element).opacity), '0');
-  const shell = await page.$eval('[data-testid="branded-chat-shell"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, height: rect.height }; });
-  const client = await page.createCDPSession();
-  const start = { x: shell.left + 40, y: shell.top + shell.height / 2 };
-  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] });
-  for (let step = 1; step <= 8; step += 1) {
-    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x + step * 28, y: start.y }] });
-  }
-  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  await page.close();
-});
-
-test('right swipe from the focused composer opens the drawer without losing input state', async () => {
-  const page = await openChat({ width: 390, height: 667, isMobile: true, hasTouch: true });
-  await page.focus('[data-testid="captain-prompt"]');
-  await page.keyboard.type('preserve focused draft');
-  const composer = await page.$eval('[data-testid="captain-prompt"]', element => { const rect = element.getBoundingClientRect(); return { left: rect.left, top: rect.top, height: rect.height }; });
-  const client = await page.createCDPSession();
-  const start = { x: composer.left + 20, y: composer.top + composer.height / 2 };
-  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] });
-  for (let step = 1; step <= 8; step += 1) {
-    await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: start.x + step * 28, y: start.y }] });
-  }
-  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
-  assert.equal(await page.$eval('[data-testid="captain-prompt"]', element => element.value), 'preserve focused draft');
-  assert.equal(await page.evaluate(() => location.pathname), '/chat', 'swipe must not trigger browser back navigation');
   await page.close();
 });
 
@@ -1020,6 +1092,7 @@ async function openSettingsSheet(page) {
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   await page.click('[data-testid="settings-open"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="settings-sheet"]')).opacity) > 0.95);
+  await page.waitForFunction(() => Math.abs(document.querySelector('[data-testid="settings-sheet"]').getBoundingClientRect().top - innerHeight * 0.1) < 2);
 }
 
 async function clickInSheet(page, selector) {
@@ -1047,10 +1120,10 @@ test('the agent response is appended to the conversation once the gateway replie
   await page.close();
 });
 
-test('canonical-first hydration replaces a stale cache, keeps only unacknowledged sends, and uses gateway time', async () => {
+test('a healthy canonical refresh replaces a stale cache, keeps only unacknowledged sends, and uses gateway time', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [
-    { id: 'u-stale', role: 'user', kind: 'conversation', text: 'stale local text', source: 'text', audience: 'captain', delivery: 'sent', sentAt: 123, canonicalId: 'cm_0_u', canonicalRevision: 1, sequenceIndex: 0 },
-    { id: 'cm-poison', role: 'assistant', kind: 'conversation', text: 'cache-only reply must disappear', source: 'text', audience: 'primary', sentAt: 124, canonicalId: 'cm_poison', canonicalRevision: 1, sequenceIndex: 999 },
+    { id: 'u-stale', role: 'user', kind: 'conversation', text: 'stale local text', source: 'text', audience: 'captain', delivery: 'sent', sentAt: 1755000000000, canonicalId: 'cm_0_u', canonicalRevision: 1, turnId: 'ct_stale', sequenceIndex: 0 },
+    { id: 'cm-poison', role: 'assistant', kind: 'conversation', text: 'cache-only reply must disappear', source: 'text', audience: 'primary', sentAt: 1755000000100, canonicalId: 'cm_poison', canonicalRevision: 1, turnId: 'ct_poison', sequenceIndex: 999 },
     { id: 'u-unacknowledged', role: 'user', kind: 'conversation', text: 'still sending locally', source: 'text', audience: 'captain', delivery: 'sending', sentAt: 1760000000123 },
   ], false, {
     manual: true,
@@ -1073,6 +1146,36 @@ test('canonical-first hydration replaces a stale cache, keeps only unacknowledge
   assert.equal(persisted[0].id, 'u-stale', 'client_message_id still joins the optimistic bubble to the canonical row');
   assert.equal(persisted[0].sentAt, 1756000000000, 'gateway millisecond time replaces the optimistic/cache timestamp');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.chat.messages.v2.captain')), null, 'the terminal-era array is invalidated, not merged');
+  await page.close();
+});
+
+test('a failed canonical refresh keeps the trusted cache visible and recovery replaces it authoritatively', async () => {
+  const page = await openChat({ width: 390, height: 844, isMobile: true, hasTouch: true }, false, '', URL, 0, false, false, 'light', [
+    { id: 'u-cache', role: 'user', kind: 'conversation', text: 'trusted cached prompt', source: 'text', audience: 'captain', delivery: 'sent', progress: 'complete', sentAt: 1756000000100, canonicalId: 'cm_cache_u', canonicalRevision: 2, turnId: 'ct_cache', sequenceIndex: 0 },
+    { id: 'cm_cache_a', role: 'assistant', kind: 'conversation', text: 'trusted cached response', source: 'text', audience: 'primary', progress: 'complete', sentAt: 1756000000200, canonicalId: 'cm_cache_a', canonicalRevision: 2, turnId: 'ct_cache', sequenceIndex: 999 },
+    { id: 'u-offline-pending', role: 'user', kind: 'conversation', text: 'genuine pending send', source: 'text', audience: 'captain', delivery: 'sending', progress: 'working', sentAt: 1756000000300 },
+  ], false, {
+    manual: true,
+    canonicalFailure: true,
+    seedTurns: [{ clientMessageId: 'u-authority', text: 'gateway authoritative prompt', reply: 'gateway authoritative response' }],
+  });
+  let history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /trusted cached prompt/);
+  assert.match(history, /trusted cached response/);
+  assert.match(history, /genuine pending send/);
+  assert.doesNotMatch(history, /gateway authoritative/);
+  assert.match(await page.$eval('[data-testid="conversation-stale-state"]', element => element.innerText), /showing saved conversation.*reconnecting/i);
+
+  await page.evaluate(() => window.__setCanonicalOnline(true));
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]')?.innerText.includes('gateway authoritative response'), { timeout: 10_000 });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="conversation-stale-state"]'));
+  history = await page.$eval('[data-testid="chat-history"]', element => element.innerText);
+  assert.match(history, /gateway authoritative prompt/);
+  assert.match(history, /gateway authoritative response/);
+  assert.match(history, /genuine pending send/, 'a real unacknowledged send remains an overlay');
+  assert.doesNotMatch(history, /trusted cached prompt|trusted cached response/, 'Gateway success must prune cache-only rows');
+  const persisted = await cachedCanonicalMessages(page);
+  assert.deepEqual(persisted.map(message => message.text), ['gateway authoritative prompt', 'gateway authoritative response']);
   await page.close();
 });
 

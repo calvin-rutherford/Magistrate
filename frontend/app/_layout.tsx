@@ -103,7 +103,7 @@ export default function RootLayout() {
     }
   };
 
-  const viewportHead = Platform.OS === 'web' ? <Head><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" /></Head> : null;
+  const viewportHead = Platform.OS === 'web' ? <Head><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" /></Head> : null;
 
   if (session.status !== 'authenticated') {
     const checking = session.status === 'checking';
@@ -166,7 +166,7 @@ export default function RootLayout() {
 }
 
 const styles = StyleSheet.create({
-  appRoot: { flex: 1, minHeight: '100vh' as any, width: '100%' },
+  appRoot: { flex: 1, minHeight: 0, width: '100%', overflow: 'hidden' },
   sessionOverlay: { ...StyleSheet.absoluteFill, zIndex: 20, backgroundColor: '#101820', justifyContent: 'center', alignItems: 'center', padding: 24 },
   sessionCard: { width: '100%', maxWidth: 420, padding: 24, borderRadius: 18, backgroundColor: '#1c2933' },
   sessionTitle: { color: '#fff', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1, marginBottom: 12 },

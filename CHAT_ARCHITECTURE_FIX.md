@@ -103,15 +103,20 @@ and sequence index — no text matching, timestamp comparison, optimistic
 counting, prompt-boundary inference, or replay reconciliation. A delayed poll or
 socket revision cannot roll a newer rendered revision backwards.
 
-Opening captain chat reads the gateway first and replaces the canonical cache
-wholesale. It then overlays only local `sending`/`failed` rows whose
-`client_message_id` is absent from that response. The history exposes
-`aria-busy=true` until those rows have committed, giving scroll anchoring and
-browser checks a deterministic hydration boundary. An upward reader scroll
-cancels every queued latest-position operation, including a pending measurement
-retry, so asynchronous canonical rendering cannot pull the captain back down.
-The prompt endpoint writes its turn and user row before awaiting Herdr, so an
-accepted prompt is already readable even while assistant ingestion is pending.
+Opening captain chat restores the last strictly validated canonical snapshot
+and genuine local `sending`/`failed` rows immediately, then reads Gateway. A
+successful full list remains authoritative: it prunes/replaces cache-only rows
+while monotonic revision checks keep a delayed lower revision from rolling a
+newer row backwards. A transient network failure leaves the saved snapshot
+visible under an explicit stale/reconnecting state; the next successful poll
+replaces it. The cache never creates a turn, never accepts terminal-era rows,
+and is not an authority. The history exposes `aria-busy=true` until initial
+recovery settles, giving scroll anchoring and browser checks a deterministic
+boundary. An upward reader scroll cancels every queued latest-position
+operation, including a pending measurement retry, so asynchronous rendering
+cannot pull the captain back down. The prompt endpoint writes its turn and user
+row before awaiting Herdr, so an accepted prompt is already readable even while
+assistant ingestion is pending.
 
 Voice Mode shares the same record: `POST /api/v1/voice/moves` records a completed
 move as a canonical turn, so chat and voice are one transcript rather than two
@@ -121,8 +126,9 @@ Attachments obey the same authority boundary. The user row stores only bounded,
 validated metadata (`upload_id`, stable id, safe name, MIME type, size, and the
 authenticated `/api/v1/uploads/{id}` reference) in `attachments_json`. Bytes stay
 in the private upload store introduced by PR #55; no blob, filesystem path, or
-client-claimed metadata enters the transcript. A reload therefore renders the
-same attachment without depending on local cache state.
+client-claimed metadata enters the transcript. A healthy reload therefore
+renders the same attachment from Gateway; the validated cache is only a
+transient reconnect display.
 
 ## What was removed or simplified
 
@@ -136,10 +142,12 @@ same attachment without depending on local cache state.
 - Captain persistence is now two explicitly non-authoritative maps:
   `magistrate.chat.canonical.v1.captain` is keyed by canonical message id, and
   `magistrate.chat.pending.v1.captain` is keyed by `client_message_id` and holds
-  only genuinely unacknowledged sends. The old v1/v2 captain arrays are
-  **deleted, not migrated**: they were hydrated before the server read and could
-  race a newer record back out of the UI. Worker targets retain their
-  transitional `magistrate.chat.messages.v2.<target>` cache.
+  only genuinely unacknowledged sends. The canonical map is restored only after
+  strict identity/revision/sequence validation and is replaced by the next
+  successful full list. The old v1/v2 captain arrays are **deleted, not
+  migrated** because they have no trustworthy canonical identity. Worker
+  targets retain their transitional `magistrate.chat.messages.v2.<target>`
+  cache.
 
 ## Production migration
 

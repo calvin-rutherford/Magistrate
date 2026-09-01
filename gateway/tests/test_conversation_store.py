@@ -85,6 +85,21 @@ def test_canonical_timestamps_keep_gateway_millisecond_precision(monkeypatch):
     assert message['created_at'] == 1_756_000_000_456
 
 
+def test_schema_reinitialization_preserves_canonical_rows_across_restart():
+    turn = store.record_prompt(USER, TARGET, 'u-restart', 'keep this after restart')
+    store.record_primary_reply(USER, TARGET, turn['turn_id'], 'The persisted reply.')
+    before = store.list_messages(USER, TARGET)['messages']
+
+    # Gateway startup calls init_db() again against the same external SQLite
+    # path. Its additive schema initialization must never reset the record.
+    db.init_db()
+
+    after = store.list_messages(USER, TARGET)['messages']
+    assert [(row['id'], row['turn_id'], row['text'], row['revision']) for row in after] == [
+        (row['id'], row['turn_id'], row['text'], row['revision']) for row in before
+    ]
+
+
 def test_an_edited_resubmission_replaces_its_own_text_and_keeps_one_turn():
     """An edit reuses the submission id, so it must correct the turn, not add one."""
     first = store.record_prompt(USER, TARGET, 'u-edit', 'redeploy the demo once the chat fix lands')

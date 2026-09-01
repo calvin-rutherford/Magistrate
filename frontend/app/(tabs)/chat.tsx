@@ -3,7 +3,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Image, ImageSourcePropType, KeyboardAvoidingView, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, Image, ImageSourcePropType, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
@@ -19,7 +19,7 @@ import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
-import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, loadPendingConversationMessages, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, saveVoiceCaptureBehavior, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, TIME_IMAGES, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl, validatedWebUrl } from '../../src/utils/externalLinks';
@@ -40,6 +40,8 @@ type QueuedPrompt = { id: string; messageId: string; text: string; attachments: 
 type ActivePrompt = { token: number; messageId: string; text: string; controller: AbortController; turnId?: string };
 type DrawerSection = 'attention' | 'fleet' | 'activity' | 'projects' | 'connections' | null;
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
+type ConversationSyncState = { status: 'loading' | 'fresh' | 'stale'; cachedRows: number; error?: string };
+const FLOATING_CHROME_GAP = 12;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 const isDarkTheme = (scheme: string | null | undefined) => scheme !== 'light';
 const optionId = (harness: string, model: string) => `${harness}-${model}`.replace(/[^A-Za-z0-9_-]/g, '-');
@@ -383,8 +385,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [headerHeight, setHeaderHeight] = useState(0);
+  const [composerHeight, setComposerHeight] = useState(0);
+  const [conversationSync, setConversationSync] = useState<ConversationSyncState>({ status: canonicalTarget ? 'loading' : 'fresh', cachedRows: 0 });
   const pendingAttachmentsByMessageRef = useRef(new Map<string, ComposerAttachment[]>());
-  const [webViewportHeight, setWebViewportHeight] = useState<number | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const holdActiveRef = useRef(false);
@@ -515,6 +519,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (postPromptPollTimerRef.current) clearTimeout(postPromptPollTimerRef.current);
     postPromptPollTimerRef.current = null;
     setSendError(null); setIsThinking(false);
+    if (canonicalTarget) setConversationSync({ status: 'loading', cachedRows: 0 });
     // The captain thread is shared with Voice Mode (see ConversationSession),
     // so switching back to it keeps whatever it already holds in memory for
     // this session; other targets start each visit with a clean thread.
@@ -527,28 +532,42 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     };
     const existingIds = new Set(getConversationMessages(target).map(message => message.id));
     getConversationMessages(target).forEach(rememberOptimistic);
-    const hydration = canonicalTarget
-      ? loadPendingConversationMessages(target)
+    const captainHydration = canonicalTarget
+      ? loadCachedCaptainConversation(target)
+      : Promise.resolve({ canonical: [] as ConversationMessage[], pending: [] as ConversationMessage[] });
+    const workerHydration = canonicalTarget
+      ? Promise.resolve([] as ConversationMessage[])
       : hydrateConversationMessages(target).then(hydrated => {
         hydrated.forEach(message => { if (!existingIds.has(message.id)) rememberOptimistic(message); });
         return hydrated;
       });
-    // The canonical record is the transcript, so opening the captain thread is
-    // a plain read: no scrollback seeding, no identity bookkeeping, no replay
-    // suppression. Worker panes still seed from terminal scrollback below.
+    // Restore the last strictly validated snapshot before touching the network.
+    // It is a reconnect display only: the next successful full list remains
+    // authoritative and prunes rows the Gateway no longer returns.
     const loadCanonicalConversation = async (): Promise<void> => {
+      const cached = await captainHydration;
+      if (request !== historyRequestRef.current) return;
+      const current = getConversationMessages(target);
+      const inMemoryCanonical = current.filter(message => Boolean(message.canonicalId));
+      const canonical = (inMemoryCanonical.length ? inMemoryCanonical : cached.canonical)
+        .sort((left, right) => (left.sequenceIndex || 0) - (right.sequenceIndex || 0));
+      const restoredIds = new Set(canonical.map(message => message.id));
+      const pending = new Map<string, ConversationMessage>();
+      [...current, ...cached.pending].forEach(message => {
+        if (!message.canonicalId && message.role === 'user' && (message.delivery === 'sending' || message.delivery === 'failed') && !restoredIds.has(message.id)) pending.set(message.id, message);
+      });
+      const restored = [...canonical, ...pending.values()];
+      if (!sameRenderedTranscript(current, restored)) resetConversationMessages(target, restored);
+      setConversationSync({ status: 'loading', cachedRows: canonical.length });
       try {
-        // Fetch the authority before considering any local state. Only pending
-        // client_message_ids are then overlaid; cached canonical rows never
-        // participate in hydration or row-by-row reconciliation.
         const result = await fetchCanonicalConversation(target);
-        const pending = await hydration;
         if (request !== historyRequestRef.current) return;
-        applyCanonicalMessages(result.messages, { replace: true, pending });
+        applyCanonicalMessages(result.messages, { replace: true, pending: [...pending.values()] });
+        setConversationSync({ status: 'fresh', cachedRows: 0 });
         setHistoryBefore(null);
       } catch (error) {
         if (request !== historyRequestRef.current) return;
-        setSendError(errorText(error, 'The conversation could not be loaded.'));
+        setConversationSync({ status: 'stale', cachedRows: canonical.length, error: errorText(error, 'The conversation could not be loaded.') });
       }
     };
     // Seed known-message keys from recent Herdr scrollback so the live poll
@@ -558,7 +577,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       try {
         // Hydrate optimistic messages before seeding server identities so a
         // delayed reload cannot leave an unreconciled duplicate count.
-        await hydration;
+        await workerHydration;
         const result = await fetchAgentHistory(target);
         if (request !== historyRequestRef.current) return;
         // A working agent can briefly leave an empty terminal snapshot (redraw
@@ -586,7 +605,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         // poll remains the recovery path and will discover the eventual reply.
       }
     };
-    void Promise.allSettled([hydration, canonicalTarget ? loadCanonicalConversation() : loadHistory(0)]).then(() => {
+    void (canonicalTarget ? loadCanonicalConversation() : loadHistory(0)).finally(() => {
       if (request === historyRequestRef.current) markHistoryReady();
     });
     return () => {
@@ -602,32 +621,6 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       markHistoryReady(false);
     };
   }, [target]);
-
-  // Mobile web keyboards resize the visual viewport, not the layout viewport.
-  // Track it so only this chat canvas shrinks to stay above the keyboard while
-  // the drawer/header keep their normal layout instead of the whole page
-  // reflowing and pushing everything upward. Only pin an explicit height once
-  // the visual viewport is actually smaller than the window (keyboard open) -
-  // pinning it unconditionally on every mount froze a snapshot that could
-  // differ from window.innerHeight right after navigating in (the mobile
-  // browser's address bar is still animating), producing a visible viewport
-  // jump before the keyboard ever appeared.
-  useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined' || !window.visualViewport) return;
-    const viewport = window.visualViewport;
-    // Do not sample visualViewport during the route transition. Mobile browsers
-    // can report a transient address-bar shortfall before the first settled
-    // paint; treating that as a keyboard would pin the canvas to a stale height.
-    // Subsequent resize events are the reliable keyboard signal.
-    const update = () => {
-      // Ignore transient browser/Expo values that are not a usable viewport;
-      // accepting one can collapse the entire composer during route auth.
-      const height = viewport.height;
-      setWebViewportHeight(height > 100 && height < window.innerHeight - 1 ? height : null);
-    };
-    viewport.addEventListener('resize', update);
-    return () => viewport.removeEventListener('resize', update);
-  }, []);
 
   useEffect(() => {
     if (!isRecording) return;
@@ -741,6 +734,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     historyContentMeasuredRef.current = true;
     requestLatestScroll();
   };
+  const handleHeaderLayout = (event: LayoutChangeEvent) => {
+    const next = Math.ceil(event.nativeEvent.layout.height);
+    setHeaderHeight(current => Math.abs(current - next) > 1 ? next : current);
+  };
+  const handleComposerLayout = (event: LayoutChangeEvent) => {
+    const next = Math.ceil(event.nativeEvent.layout.height);
+    setComposerHeight(current => Math.abs(current - next) > 1 ? next : current);
+  };
   const handleHistoryScrollBeginDrag = () => {
     // A captain who starts reading older content has expressed an intentional
     // position; do not override it when an asynchronous render catches up.
@@ -838,8 +839,16 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     return true;
   };
   const syncCanonicalConversation = async (): Promise<boolean> => {
-    const result = await fetchCanonicalConversation(target);
-    return applyCanonicalMessages(result.messages, { replace: true });
+    try {
+      const result = await fetchCanonicalConversation(target);
+      const answered = applyCanonicalMessages(result.messages, { replace: true });
+      setConversationSync(current => current.status === 'fresh' ? current : { status: 'fresh', cachedRows: 0 });
+      return answered;
+    } catch (error) {
+      const cachedRows = getConversationMessages(target).filter(message => Boolean(message.canonicalId)).length;
+      setConversationSync({ status: 'stale', cachedRows, error: errorText(error, 'The conversation could not be refreshed.') });
+      throw error;
+    }
   };
   // Herdr ids hash terminal content (see gateway/app/herdr_client.py), and that
   // content mutates while a reply renders, reflows, or scrolls its head out of
@@ -1087,38 +1096,41 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // The resting Magi surface belongs to an empty conversation only, and only
   // once the read that would populate it has settled - otherwise the greeting
   // flashes over history that is about to arrive.
-  const showEmptyState = transcript.length === 0 && !isThinking && hydratedHistoryTarget === target;
+  const showEmptyState = transcript.length === 0 && !isThinking && hydratedHistoryTarget === target && (!canonicalTarget || conversationSync.status !== 'stale');
   const spectral = dark ? brand.cyan : brand.violet;
 
-  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.28)' : 'rgba(255,255,255,0.30)' }, webViewportHeight ? { height: webViewportHeight } : null]}>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={styles.chatHistoryContent} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
+  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.28)' : 'rgba(255,255,255,0.30)' }]}>
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
       {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
       {isThinking ? <WorkingState dark={dark} muted={muted} operations={activeOperations} /> : null}
     </ScrollView>
     <EdgeScrims dark={dark} />
     <EmptyStateMagi dark={dark} visible={showEmptyState} greeting={greeting} active={isThinking || isRecording} />
-    <View style={styles.topBar} pointerEvents="box-none">
-      <GlassCircleButton dark={dark} testID="brand-drawer-toggle" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread captain attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityHint="Opens navigation and attention details" accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} badge={unreadAttentionCount > 0}>
-        <MenuIcon size={ICON_SIZE} color={text} />
-      </GlassCircleButton>
-      <IdentityControl dark={dark} selection={modelSelection} open={modelMenuOpen} onToggle={() => { setModelMenuOpen(value => !value); setAttachmentMenuOpen(false); }} />
-      {/* One contextual control. Magistrate has no "new conversation" endpoint -
-          the captain thread is a single canonical record - so the resting action
-          is Voice Mode, and it becomes the active spectral Stop while Magi works. */}
-      <GlassCircleButton dark={dark} testID="chat-primary-action" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : 'Open Voice Mode'} onPress={() => isThinking ? void stopPendingResponse() : router.push('/voice' as any)}>
-        {isThinking ? <StopIcon size={ICON_SIZE} color={spectral} /> : <SoundwaveIcon size={ICON_SIZE} color={text} />}
-      </GlassCircleButton>
+    <View testID="chat-header" style={styles.headerDock} pointerEvents="box-none" onLayout={handleHeaderLayout}>
+      <View style={styles.topBar} pointerEvents="box-none">
+        <GlassCircleButton dark={dark} testID="brand-drawer-toggle" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread captain attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityHint="Opens navigation and attention details" accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} badge={unreadAttentionCount > 0}>
+          <MenuIcon size={ICON_SIZE} color={text} />
+        </GlassCircleButton>
+        <IdentityControl dark={dark} selection={modelSelection} open={modelMenuOpen} onToggle={() => { setModelMenuOpen(value => !value); setAttachmentMenuOpen(false); }} />
+        {/* One contextual control. Magistrate has no "new conversation" endpoint -
+            the captain thread is a single canonical record - so the resting action
+            is Voice Mode, and it becomes the active spectral Stop while Magi works. */}
+        <GlassCircleButton dark={dark} testID="chat-primary-action" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : 'Open Voice Mode'} onPress={() => isThinking ? void stopPendingResponse() : router.push('/voice' as any)}>
+          {isThinking ? <StopIcon size={ICON_SIZE} color={spectral} /> : <SoundwaveIcon size={ICON_SIZE} color={text} />}
+        </GlassCircleButton>
+      </View>
+      {canonicalTarget && conversationSync.status === 'stale' ? <View testID="conversation-stale-state" accessibilityRole="alert" style={[styles.staleConversation, { backgroundColor: glassFill(dark, 'surface'), borderColor: glassEdge(dark) }, blurStyle(18)]}><Text style={[styles.staleConversationText, { color: conversationSync.cachedRows ? muted : brand.attention }]}>{conversationSync.cachedRows ? 'Connection interrupted · showing saved conversation while reconnecting.' : 'Conversation unavailable · reconnecting.'}</Text></View> : null}
     </View>
-    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={jumpToLatest}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
-    {copiedMessageId ? <Text testID="message-copied" accessibilityLiveRegion="polite" style={styles.copiedLabel}>Copied</Text> : null}
-    {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
+    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={jumpToLatest}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
+    {copiedMessageId ? <Text testID="message-copied" accessibilityLiveRegion="polite" style={[styles.copiedLabel, { bottom: composerHeight + 52 }]}>Copied</Text> : null}
+    {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
       {activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Edit your message" onPress={editMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Edit</Text></TouchableOpacity> : null}
       <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Copy ${activeMessage?.role === 'assistant' ? 'assistant response' : 'your message'}`} onPress={() => void copyMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Copy</Text></TouchableOpacity>
       {activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" onPress={selectMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Select text</Text></TouchableOpacity> : null}
       {activeMessage?.role === 'assistant' && activeMessage.runId && activeMessage.regenerateSafe === true ? <TouchableOpacity accessibilityRole="button" accessibilityLabel={activeMessage.progress === 'failed' ? 'Retry response' : 'Regenerate response'} onPress={() => void regenerateMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>{activeMessage.progress === 'failed' ? 'Retry' : 'Regenerate'}</Text></TouchableOpacity> : null}
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close message actions" onPress={() => setMessageActionsId(null)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>×</Text></TouchableOpacity>
     </View> : null}
-    <View style={styles.composerDock} pointerEvents="box-none">
+    <View testID="composer-dock" style={styles.composerDock} pointerEvents="box-none" onLayout={handleComposerLayout}>
     {isRecording ? <View testID="active-voice-surface" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.activeVoiceSurface}><View style={styles.activeVoiceHalo} /><Image source={markActive} style={styles.activeVoiceMark} resizeMode="contain" accessibilityIgnoresInvertColors /><LiveWaveform samples={waveSamples} color={brand.cyan} /></View> : null}
     {attachments.length ? <ScrollView testID="attachment-preview" horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentPreview} contentContainerStyle={styles.attachmentPreviewContent} keyboardShouldPersistTaps="handled">
       {attachments.map(attachment => <View key={attachment.id} testID={`attachment-${attachment.id}`} style={[styles.attachmentChip, { backgroundColor: composerSurface }]}>
@@ -1196,8 +1208,8 @@ function activityDate(value: string) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onOpenSettings, onOpenHome, onOpenAgent, agents, attention, activity, providers, errors, loading }: {
-  open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onOpenSettings: () => void;
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenAgent, agents, attention, activity, providers, errors, loading }: {
+  open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onClose: () => void; onOpenSettings: () => void;
   onOpenHome: () => void; onOpenAgent: (agentId: string) => void;
   agents: AgentInfo[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
 }) {
@@ -1235,6 +1247,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
   const activeWork = fleet.ordered.filter(entry => matches(agentDisplayName(entry.agent))).slice(0, 5);
   return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: dark ? 'rgba(8,11,17,0.96)' : 'rgba(252,253,254,0.97)' }, blurStyle(28), animatedStyle]} {...panHandlers}>
     <View style={styles.drawerFixedHeader}><View style={styles.drawerTitleRow}>
+      <TouchableOpacity testID="drawer-close" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={onClose} activeOpacity={0.7} style={[styles.drawerCloseButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><CloseIcon size={20} color={text} /></TouchableOpacity>
       {searching
         ? <TextInput testID="drawer-search-input" autoFocus accessibilityLabel="Search Magistrate navigation" placeholder="Search" placeholderTextColor={muted} value={query} onChangeText={setQuery} style={[styles.drawerSearchInput, { color: text, borderColor: glassEdge(dark) }]} />
         : <Text testID="drawer-wordmark" accessibilityRole="header" style={[styles.drawerWordmark, { color: text }]}>Magistrate</Text>}
@@ -1348,9 +1361,11 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, exec
   // Grouped rows over a tonal surface, as in a native settings sheet: the
   // grouping comes from the container, not from a border on every control.
   const groupSurface = dark ? 'rgba(30,37,48,0.92)' : 'rgba(238,241,244,0.96)';
-  return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="settings-sheet" style={[styles.settingsSheet, { backgroundColor: dark ? brand.command : '#FFFFFF' }, animatedStyle]}>
+  return <View pointerEvents={open ? 'box-none' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="settings-layer" style={styles.settingsLayer}>
+    <TouchableOpacity testID="settings-scrim" accessibilityRole="button" accessibilityLabel="Close settings" onPress={onClose} activeOpacity={1} style={styles.settingsScrim} />
+    <Animated.View accessibilityViewIsModal testID="settings-sheet" style={[styles.settingsSheet, { backgroundColor: dark ? brand.command : '#FFFFFF' }, animatedStyle]}>
     <View style={[styles.sheetGrabber, { backgroundColor: muted }]} />
-    <View style={styles.settingsHeader}>
+    <View testID="settings-header" style={styles.settingsHeader}>
       <Text accessibilityRole="header" style={[styles.settingsTitle, { color: text }]}>Settings</Text>
       <TouchableOpacity testID="settings-close" accessibilityRole="button" accessibilityLabel="Close settings" onPress={onClose} style={styles.settingsClose}><Text style={[styles.settingsCloseText, { color: dark ? brand.cyan : brand.violet }]}>Done</Text></TouchableOpacity>
     </View>
@@ -1426,7 +1441,8 @@ function SettingsSheet({ open, dark, animatedStyle, health, loading, error, exec
     {error || executionError ? <Text style={styles.settingsError}>{error || executionError}</Text> : null}
     <Text testID="settings-about" style={[styles.settingsAbout, { color: muted }]}>Magistrate · Magi is the interface. Fleet, Attention and the environment system are behind it.</Text>
     </ScrollView>
-  </Animated.View>;
+    </Animated.View>
+  </View>;
 }
 
 export default function ChatScreen() {
@@ -1492,36 +1508,20 @@ export default function ChatScreen() {
     fetchUsage().then(result => setUsage(result.providers)).catch(error => setUsageError(errorText(error, 'Usage data could not be loaded.'))).finally(() => setUsageLoading(false));
   }, [settingsOpen]);
   const drawerAnimatedStyle = useAnimatedStyle(() => ({ opacity: drawerProgress.value, transform: [{ translateX: interpolate(drawerProgress.value, [0, 1], [-(drawerWidth + 70), 0]) }] }), [drawerWidth]);
-  // The chat surface is pushed aside and slightly inset rather than replaced,
-  // so the drawer reads as a layer over the same continuous screen: the current
-  // conversation stays visible, rounded and dimmed behind it (section 11).
-  // The surface is pushed on every breakpoint so the drawer never sits on top
-  // of the control that opens it; only the phone layout also insets and dims it.
-  const chatAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: drawerProgress.value * drawerWidth * (isNarrow ? 0.92 : 1) },
-      { scale: isNarrow ? interpolate(drawerProgress.value, [0, 1], [1, 0.93]) : 1 },
-    ],
-    borderRadius: isNarrow ? interpolate(drawerProgress.value, [0, 1], [0, 26]) : 0,
-  }), [drawerWidth, isNarrow]);
-  const chatDimStyle = useAnimatedStyle(() => ({ opacity: isNarrow ? drawerProgress.value * 0.42 : 0 }), [isNarrow]);
+  // Drawer, chat, and Settings are sibling layers. The drawer translates only
+  // itself; the transcript keeps the same viewport and scroll geometry while a
+  // dismissing scrim makes the independent overlay explicit.
+  const chatDimStyle = useAnimatedStyle(() => ({ opacity: drawerProgress.value * (isNarrow ? 0.42 : 0.18) }), [isNarrow]);
   const settingsAnimatedStyle = useAnimatedStyle(() => ({ opacity: settingsProgress.value, transform: [{ translateY: interpolate(settingsProgress.value, [0, 1], [420, 0]) }] }));
   const swipeToClose = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_, g) => isNarrow && drawerOpen && g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy),
     onPanResponderRelease: (_, g) => { if (g.dx < -55 || g.vx < -0.35) setDrawerOpen(false); },
   }), [drawerOpen, isNarrow]);
-  // Open from a deliberate horizontal swipe anywhere in the chat, including
-  // the detached composer. Vertical movement remains with text selection and
-  // input scrolling; app/_layout.tsx disables browser back-navigation hijack.
-  const swipeToOpen = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_, g) => isNarrow && !drawerOpen && g.dx > 8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
-    onPanResponderRelease: (_, g) => { if (g.dx > 55 || g.vx > 0.35) setDrawerOpen(true); },
-  }), [drawerOpen, isNarrow]);
-  return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page} {...(isNarrow ? swipeToOpen.panHandlers : {})}>
+  return <EnvironmentBackground hideBottomControls><SafeAreaView style={styles.page}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
-      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => { setDrawerOpen(false); if (target) router.push('/chat' as any); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
-      <Animated.View style={[styles.chatStage, chatAnimatedStyle]}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} />
-        <Animated.View pointerEvents={drawerOpen && isNarrow ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
+      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => { setDrawerOpen(false); if (target) router.push('/chat' as any); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
+      <Animated.View style={styles.chatStage}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} />
+        <Animated.View pointerEvents={drawerOpen ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
           <TouchableOpacity testID="drawer-dismiss" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={() => setDrawerOpen(false)} activeOpacity={1} style={styles.chatDimPress} />
         </Animated.View>
       </Animated.View>
@@ -1533,12 +1533,15 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   // The environment owns the canvas: no page padding, no card, no rounded
   // window. Everything above the transcript floats (prompt sections 4 and 5).
-  page: { flex: 1, minWidth: 0, overflow: 'hidden', touchAction: 'pan-y' } as any,
-  chatStage: { flex: 1, minWidth: 0, zIndex: 1, overflow: 'hidden' },
+  page: { flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', touchAction: 'pan-y' } as any,
+  chatStage: { flex: 1, minWidth: 0, minHeight: 0, zIndex: 1, overflow: 'hidden' },
   chatDim: { ...StyleSheet.absoluteFill, backgroundColor: '#05070A', zIndex: 60 }, chatDimPress: { flex: 1 },
-  canvas: { flex: 1, minWidth: 0, position: 'relative', overflow: 'hidden' },
+  canvas: { flex: 1, minWidth: 0, minHeight: 0, position: 'relative', overflow: 'hidden' },
 
-  topBar: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, zIndex: 50, elevation: 20, ...Platform.select({ web: { paddingTop: 'calc(10px + env(safe-area-inset-top, 0px))' as any }, default: { paddingTop: 10 } }) },
+  headerDock: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 50, elevation: 20 },
+  topBar: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, ...Platform.select({ web: { paddingTop: 'calc(10px + env(safe-area-inset-top, 0px))' as any }, default: { paddingTop: 10 } }) },
+  staleConversation: { alignSelf: 'center', maxWidth: 560, marginTop: 8, marginHorizontal: 14, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 14, paddingVertical: 8 },
+  staleConversationText: { fontSize: 12, lineHeight: 17, fontWeight: '600', textAlign: 'center' },
   glassCircle: { width: 46, height: 46, borderRadius: 23, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center', overflow: 'visible' },
   unreadAttentionDot: { position: 'absolute', top: 3, right: 3, width: 9, height: 9, borderRadius: 5, backgroundColor: '#F5C542' },
   identityControl: { flex: 1, minWidth: 0, minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 6 },
@@ -1556,8 +1559,8 @@ const styles = StyleSheet.create({
   emptyStateMark: { width: 54, height: 54 },
   greeting: { maxWidth: 460, fontSize: 34, lineHeight: 42, fontWeight: '400', letterSpacing: -0.6, textAlign: 'center' },
 
-  chatHistory: { flex: 1, minHeight: 0 },
-  chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingTop: 96, paddingHorizontal: 20, paddingBottom: 132, gap: 18 },
+  chatHistory: { flex: 1, minHeight: 0, touchAction: 'pan-y', overscrollBehaviorY: 'contain' } as any,
+  chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingHorizontal: 20, gap: 18 },
   userMessageWrap: { maxWidth: 680, alignSelf: 'flex-end', flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
   userMessage: { flex: 1, paddingVertical: 12, paddingHorizontal: 17, borderRadius: 22, borderWidth: 1 },
   assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'flex-start', gap: 5, paddingVertical: 2, paddingHorizontal: 2 },
@@ -1573,11 +1576,11 @@ const styles = StyleSheet.create({
   sources: { marginTop: 10, gap: 4 }, sourcesTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase' }, sourceRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, minHeight: 38, paddingVertical: 4 }, sourceMarker: { width: 20, fontSize: 12, lineHeight: 18, fontWeight: '800', textAlign: 'center' }, sourceCopy: { flex: 1, minWidth: 0 }, sourceTitle: { fontSize: 12, lineHeight: 17, fontWeight: '700' }, sourceMeta: { fontSize: 10, lineHeight: 14, marginTop: 1 }, sourceQuote: { fontSize: 11, lineHeight: 15, marginTop: 2 },
   messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.62, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
 
-  jumpButton: { position: 'absolute', alignSelf: 'center', bottom: 108, width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderRadius: 999, zIndex: 30, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 16 },
+  jumpButton: { position: 'absolute', alignSelf: 'center', width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderRadius: 999, zIndex: 30, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 16 },
   jumpText: { fontSize: 20, lineHeight: 22, fontWeight: '700' },
   inlineMessageAction: { minWidth: 32, minHeight: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 16 }, inlineMessageActionText: { color: brand.mutedDark, fontSize: 13, letterSpacing: 1, fontWeight: '800' },
-  copiedLabel: { position: 'absolute', right: 20, bottom: 148, color: brand.success, fontSize: 11, fontWeight: '800', zIndex: 31 },
-  messageActions: { position: 'absolute', right: 24, bottom: 108, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 32, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, minHeight: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
+  copiedLabel: { position: 'absolute', right: 20, color: brand.success, fontSize: 11, fontWeight: '800', zIndex: 31 },
+  messageActions: { position: 'absolute', right: 24, flexDirection: 'row', borderRadius: 18, padding: 4, zIndex: 32, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 20, elevation: 8 }, messageAction: { minWidth: 52, minHeight: 40, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 }, messageActionText: { fontSize: 13, fontWeight: '700' },
 
   // The composer genuinely floats on every platform: detached from the bottom
   // edge, inset horizontally, and layered above the transcript.
@@ -1586,12 +1589,12 @@ const styles = StyleSheet.create({
   composerIconButton: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 23, fontWeight: '400' },
   composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, paddingHorizontal: 2, outlineStyle: 'none' as any },
   sendButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: brand.violet }, stopButton: { width: 42, borderRadius: 21, backgroundColor: brand.critical }, stopButtonText: { color: brand.paper, fontSize: 12, fontWeight: '800' }, sendArrow: { color: brand.paper, fontSize: 22, fontWeight: '800' }, disabled: { opacity: 0.55 },
-  composerStatus: { minHeight: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 26, paddingTop: 4 },
+  composerStatus: { minHeight: 20, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 4, paddingHorizontal: 26, paddingTop: 4 },
   editingLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micListeningLabel: { color: brand.cyan, fontSize: 11, fontWeight: '700' }, micTranscribingLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, micReadyLabel: { color: brand.success, fontSize: 11, fontWeight: '700' }, micErrorLabel: { color: brand.critical, fontSize: 11, fontWeight: '700' }, thinkingLabel: { color: brand.mutedDark, fontSize: 11, fontWeight: '700', alignItems: 'center' }, thinkingDots: { fontSize: 16, letterSpacing: 2, fontWeight: '900' }, queuedLabel: { color: brand.violet, fontSize: 11, fontWeight: '700' }, sendError: { color: '#FFB4B2', fontSize: 12, flex: 1, textAlign: 'right' },
 
   attachmentControl: { width: 40, zIndex: 20 }, attachmentMenu: { position: 'absolute', left: -2, bottom: 50, width: 238, borderRadius: 20, padding: 11, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 24, elevation: 14 }, attachmentOption: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 8, paddingVertical: 7, borderRadius: 13 }, attachmentOptionTitle: { fontSize: 14, fontWeight: '700' }, attachmentOptionMeta: { fontSize: 11, marginTop: 2 },
   attachmentPreview: { flexGrow: 0, marginHorizontal: 14, marginBottom: 8, maxHeight: 60 }, attachmentPreviewContent: { gap: 8, paddingHorizontal: 3 }, attachmentChip: { width: 220, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 9, padding: 5, paddingRight: 7, borderRadius: 15 }, attachmentThumbnail: { width: 46, height: 46, borderRadius: 11 }, attachmentFileIcon: { width: 46, height: 46, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, attachmentCopy: { flex: 1, minWidth: 0 }, attachmentName: { fontSize: 12, fontWeight: '700' }, attachmentMeta: { fontSize: 10, marginTop: 3 }, attachmentRemove: { width: 28, height: 38, alignItems: 'center', justifyContent: 'center' }, attachmentRemoveText: { fontSize: 21, lineHeight: 23 },
-  activeVoiceSurface: { position: 'absolute', left: 14, right: 14, bottom: 78, height: 72, borderRadius: 28, backgroundColor: 'rgba(17,23,34,0.96)', borderWidth: 1, borderColor: brand.cyan, overflow: 'hidden', zIndex: 9, alignItems: 'center', justifyContent: 'center' }, activeVoiceHalo: { position: 'absolute', width: 170, height: 170, borderRadius: 85, backgroundColor: 'rgba(36,216,255,0.12)' }, activeVoiceMark: { width: 52, height: 52, zIndex: 2 }, micActiveButton: { borderWidth: 1, borderColor: brand.cyan, borderRadius: 20, backgroundColor: 'rgba(36,216,255,0.12)' },
+  activeVoiceSurface: { height: 72, marginHorizontal: 14, marginBottom: 8, borderRadius: 28, backgroundColor: 'rgba(17,23,34,0.96)', borderWidth: 1, borderColor: brand.cyan, overflow: 'hidden', zIndex: 9, alignItems: 'center', justifyContent: 'center' }, activeVoiceHalo: { position: 'absolute', width: 170, height: 170, borderRadius: 85, backgroundColor: 'rgba(36,216,255,0.12)' }, activeVoiceMark: { width: 52, height: 52, zIndex: 2 }, micActiveButton: { borderWidth: 1, borderColor: brand.cyan, borderRadius: 20, backgroundColor: 'rgba(36,216,255,0.12)' },
   liveWaveform: { position: 'absolute', left: 8, right: 8, bottom: 8, height: 52, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', paddingHorizontal: 14, zIndex: 9 }, liveWaveformBar: { width: 3, borderRadius: 2 },
 
   // Native-feeling sheet: grabber, large rounded top, Done, grouped rows.
@@ -1614,10 +1617,11 @@ const styles = StyleSheet.create({
   drawerDesktop: { left: 0, borderTopRightRadius: 26, borderBottomRightRadius: 26 }, drawerMobile: { left: 0, width: '84%', maxWidth: 360 },
   drawerFixedHeader: { flexShrink: 0, paddingBottom: 10 },
   drawerTitleRow: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  drawerCloseButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   drawerWordmark: { flex: 1, fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 26, lineHeight: 34, fontWeight: '500' },
   drawerSearchInput: { flex: 1, minWidth: 0, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 14, fontSize: 16, outlineStyle: 'none' as any },
   drawerSearchButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
-  drawerScroll: { flex: 1, minHeight: 0 }, drawerScrollContent: { paddingTop: 4, paddingBottom: 18 },
+  drawerScroll: { flex: 1, minHeight: 0, touchAction: 'pan-y', overscrollBehaviorY: 'contain' } as any, drawerScrollContent: { paddingTop: 4, paddingBottom: 18 },
   drawerRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 8, paddingHorizontal: 6, borderRadius: 14 },
   drawerIcon: { width: ICON_SIZE, height: ICON_SIZE, alignItems: 'center', justifyContent: 'center' },
   drawerRowText: { flex: 1, fontSize: 16, fontWeight: '400', textAlign: 'left' },
@@ -1634,12 +1638,14 @@ const styles = StyleSheet.create({
   sectionPanel: { paddingLeft: 44, paddingRight: 4, paddingBottom: 12, gap: 8 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { minHeight: 40, justifyContent: 'center', paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '700', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 },
   fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, renameRow: { flexDirection: 'row', alignItems: 'center', gap: 7 }, renameInput: { flex: 1, minWidth: 0, height: 40, borderWidth: 1, borderColor: 'rgba(142,153,170,0.4)', borderRadius: 10, paddingHorizontal: 10, fontSize: 16, outlineStyle: 'none' as any }, confirmInterruptRow: { flexDirection: 'row', alignItems: 'center', gap: 9 }, confirmInterruptText: { flex: 1, fontSize: 11 }, popoverLink: { fontSize: 10, fontWeight: '800' }, agentActionMessage: { fontSize: 10, lineHeight: 14 },
 
-  settingsSheet: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '90%', maxHeight: '92%', zIndex: 20, borderTopLeftRadius: 30, borderTopRightRadius: 30, paddingTop: 12, paddingHorizontal: 16, shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 34, elevation: 20 },
+  settingsLayer: { ...StyleSheet.absoluteFill, zIndex: 20, justifyContent: 'flex-end' },
+  settingsScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(5,7,10,0.46)' },
+  settingsSheet: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '90%', maxHeight: '92%', borderTopLeftRadius: 30, borderTopRightRadius: 30, paddingTop: 12, paddingHorizontal: 16, shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 34, elevation: 20, overflow: 'hidden' },
   appearanceLoading: { flex: 1 },
   settingsHeader: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
   settingsClose: { minHeight: 44, minWidth: 60, alignItems: 'flex-end', justifyContent: 'center' }, settingsCloseText: { fontSize: 17, fontWeight: '600' },
   settingsTitle: { fontSize: 26, fontWeight: '700', letterSpacing: -0.4 },
-  settingsScroll: { flex: 1 }, settingsScrollContent: { paddingBottom: 40 },
+  settingsScroll: { flex: 1, minHeight: 0, touchAction: 'pan-y', overscrollBehaviorY: 'contain' } as any, settingsScrollContent: { paddingBottom: 40 },
   settingsGroup: { borderRadius: 18, overflow: 'hidden', marginTop: 14 },
   settingsRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 10 },
   settingsRowDivided: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(142,153,170,0.22)' },
