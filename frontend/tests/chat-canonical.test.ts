@@ -164,6 +164,13 @@ test('turn status drives delivery and progress rather than message text', () => 
     canonical({ id: 'cm_w', role: 'user', text: 'working', sequence_index: 0, client_message_id: 'u-w', turn_status: 'awaiting_reply' }),
   ]);
   assert.equal(waiting.progress, 'working', 'an unanswered turn is what keeps the thinking state honest');
+
+  const [streamingUser, streamingReply] = reconcileCanonicalMessages([], [
+    canonical({ id: 'cm_su', role: 'user', text: 'long answer', sequence_index: 0, client_message_id: 'u-s', turn_status: 'streaming' }),
+    canonical({ id: 'cm_sa', role: 'assistant', text: 'A partial answer.', sequence_index: 999, turn_status: 'streaming' }),
+  ]);
+  assert.equal(streamingUser.progress, 'working');
+  assert.equal(streamingReply.progress, 'streaming', 'visible prose is not itself proof of completion');
 });
 
 test('internal, status, and malformed records are never renderable messages', () => {

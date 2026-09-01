@@ -370,7 +370,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [isThinking, setIsThinking] = useState(false);
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [isScrolledUp, setIsScrolledUp] = useState(false);
+  // Sticky follow intent is independent of transient geometry. Content growth
+  // can make yesterday's bottom offset look "up" for one frame; only explicit
+  // reader input may turn this off.
+  const [followLatest, setFollowLatest] = useState(true);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [unreadAttentionCount, setUnreadAttentionCount] = useState(() => notificationManager.getUnreadEvents().length);
   const [historyBefore, setHistoryBefore] = useState<string | null>(null);
@@ -394,10 +397,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const holdActiveRef = useRef(false);
-  const atBottomRef = useRef(true);
-  const lastHistoryOffsetRef = useRef(0);
+  const followLatestRef = useRef(true);
+  const touchHistoryYRef = useRef<number | null>(null);
   const initialHistoryLoadedRef = useRef(false);
-  const initialScrollCancelledRef = useRef(false);
   const historyViewportMeasuredRef = useRef(false);
   const historyContentMeasuredRef = useRef(false);
   const pendingLatestScrollRef = useRef(false);
@@ -438,52 +440,54 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     return count;
   }, [messages]);
 
-  // ScrollView's native content dimensions are only trustworthy after both the
-  // viewport and its rendered content have measured. Keep the request pending
-  // until those callbacks fire rather than guessing a height or using a timer.
+  const cancelLatestScroll = () => {
+    pendingLatestScrollRef.current = false;
+    if (latestScrollFrameRef.current !== null) {
+      cancelAnimationFrame(latestScrollFrameRef.current);
+      latestScrollFrameRef.current = null;
+    }
+    if (finalScrollTimerRef.current) {
+      clearTimeout(finalScrollTimerRef.current);
+      finalScrollTimerRef.current = null;
+    }
+  };
+  const setFollowLatestIntent = (next: boolean) => {
+    followLatestRef.current = next;
+    setFollowLatest(next);
+    if (next) setHasNewMessages(false);
+  };
+  const stopFollowingLatest = () => {
+    setFollowLatestIntent(false);
+    cancelLatestScroll();
+  };
+  // ScrollView's native dimensions are trustworthy only after viewport and
+  // content measurement. Follow intent remains sticky across every render and
+  // revision; geometry never revokes it.
   const requestLatestScroll = (force = false) => {
     if (force) {
-      atBottomRef.current = true;
-      initialScrollCancelledRef.current = false;
-      // A forced jump supersedes a stale frame queued by content growth; it
-      // must not clear the pill's request before the final row is measured.
-      if (latestScrollFrameRef.current !== null) cancelAnimationFrame(latestScrollFrameRef.current);
-      latestScrollFrameRef.current = null;
-    } else if (!initialHistoryLoadedRef.current) {
-      if (atBottomRef.current && !initialScrollCancelledRef.current) pendingLatestScrollRef.current = true;
-      return;
-    } else if (!atBottomRef.current && !pendingLatestScrollRef.current) return;
+      setFollowLatestIntent(true);
+      cancelLatestScroll();
+    }
+    if (!followLatestRef.current) return;
     pendingLatestScrollRef.current = true;
-    if (latestScrollFrameRef.current !== null) return;
+    if (!initialHistoryLoadedRef.current || latestScrollFrameRef.current !== null) return;
     latestScrollFrameRef.current = requestAnimationFrame(() => {
       latestScrollFrameRef.current = null;
-      if (!pendingLatestScrollRef.current || !historyViewportMeasuredRef.current || !historyContentMeasuredRef.current) return;
-      // Content growth can make the previous offset look temporarily above
-      // the end before onContentSizeChange runs. The pending request records
-      // that the captain was at the end when the message arrived.
+      if (!pendingLatestScrollRef.current || !followLatestRef.current
+        || !historyViewportMeasuredRef.current || !historyContentMeasuredRef.current) return;
       pendingLatestScrollRef.current = false;
       scrollRef.current?.scrollToEnd({ animated: false });
-      if (force) {
-        // React Native/Web can measure the final child one paint after the
-        // press. Repeat once against the settled content size.
-        if (finalScrollTimerRef.current) clearTimeout(finalScrollTimerRef.current);
-        finalScrollTimerRef.current = setTimeout(() => {
-          finalScrollTimerRef.current = null;
-          // A real upward scroll after the jump is newer intent than this
-          // one-paint measurement retry and must never be pulled back down.
-          if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: false });
-        }, 50);
-      }
+      // RN Web can commit a Markdown child one paint after content-size change.
+      // Settle every followed update, not only a button press, against the final
+      // measured content. Explicit reader input cancels this timer.
+      if (finalScrollTimerRef.current) clearTimeout(finalScrollTimerRef.current);
+      finalScrollTimerRef.current = setTimeout(() => {
+        finalScrollTimerRef.current = null;
+        if (followLatestRef.current) scrollRef.current?.scrollToEnd({ animated: false });
+      }, 50);
     });
   };
-  const jumpToLatest = () => {
-    setHasNewMessages(false);
-    setIsScrolledUp(false);
-    // Until the native scroll event reports its exact final offset, any
-    // non-bottom event must be treated as movement away from latest.
-    lastHistoryOffsetRef.current = Number.POSITIVE_INFINITY;
-    requestLatestScroll(true);
-  };
+  const jumpToLatest = () => requestLatestScroll(true);
   useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
 
   useEffect(() => {
@@ -494,8 +498,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   useEffect(() => {
     const request = ++historyRequestRef.current;
     initialHistoryLoadedRef.current = false;
-    lastHistoryOffsetRef.current = 0;
-    initialScrollCancelledRef.current = false;
+    touchHistoryYRef.current = null;
+    setFollowLatestIntent(true);
     historyViewportMeasuredRef.current = false;
     historyContentMeasuredRef.current = false;
     pendingLatestScrollRef.current = true;
@@ -707,25 +711,11 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   };
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
-    const movedUp = contentOffset.y < lastHistoryOffsetRef.current - 1;
-    lastHistoryOffsetRef.current = contentOffset.y;
-    atBottomRef.current = atBottom;
-    // Upward movement is newer reader intent even when a browser does not emit
-    // onScrollBeginDrag (keyboard and wheel scrolling on web). Cancel every
-    // queued auto-position operation, not only the final measurement retry.
-    if (!atBottom && movedUp) {
-      pendingLatestScrollRef.current = false;
-      if (latestScrollFrameRef.current !== null) {
-        cancelAnimationFrame(latestScrollFrameRef.current);
-        latestScrollFrameRef.current = null;
-      }
-      if (finalScrollTimerRef.current) {
-        clearTimeout(finalScrollTimerRef.current);
-        finalScrollTimerRef.current = null;
-      }
+    const atAbsoluteBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 2;
+    // Reaching the true end manually is an explicit request to resume following.
+    if (atAbsoluteBottom && !followLatestRef.current) {
+      setFollowLatestIntent(true);
     }
-    setIsScrolledUp(!atBottom); if (atBottom) setHasNewMessages(false);
     if (contentOffset.y < 36) void loadOlderHistory();
   };
   const handleHistoryLayout = () => {
@@ -745,19 +735,25 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     setComposerHeight(current => Math.abs(current - next) > 1 ? next : current);
   };
   const handleHistoryScrollBeginDrag = () => {
-    // A captain who starts reading older content has expressed an intentional
-    // position; do not override it when an asynchronous render catches up.
-    pendingLatestScrollRef.current = false;
-    if (latestScrollFrameRef.current !== null) {
-      cancelAnimationFrame(latestScrollFrameRef.current);
-      latestScrollFrameRef.current = null;
-    }
-    if (finalScrollTimerRef.current) {
-      clearTimeout(finalScrollTimerRef.current);
-      finalScrollTimerRef.current = null;
-    }
-    if (!initialHistoryLoadedRef.current) initialScrollCancelledRef.current = true;
+    // This callback is user input, never a content-size side effect. A drag is
+    // an explicit reader decision; dragging back to the absolute end below can
+    // explicitly resume following.
+    stopFollowingLatest();
   };
+  const handleHistoryWheel = (event: any) => {
+    const deltaY = event?.nativeEvent?.deltaY ?? event?.deltaY ?? 0;
+    if (deltaY < 0) stopFollowingLatest();
+  };
+  const handleHistoryTouchStart = (event: any) => {
+    touchHistoryYRef.current = event?.nativeEvent?.touches?.[0]?.pageY ?? null;
+  };
+  const handleHistoryTouchMove = (event: any) => {
+    const y = event?.nativeEvent?.touches?.[0]?.pageY;
+    const previous = touchHistoryYRef.current;
+    if (typeof y === 'number' && typeof previous === 'number' && y > previous + 2) stopFollowingLatest();
+    if (typeof y === 'number') touchHistoryYRef.current = y;
+  };
+  const handleHistoryTouchEnd = () => { touchHistoryYRef.current = null; };
   const addAttachments = (selected: ComposerAttachment[]) => {
     const normalized = selected.map(item => ({ ...item, status: 'ready' as const }));
     const currentCount = attachments.length;
@@ -798,7 +794,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     } catch (error) { setSendError(errorText(error, 'The file picker could not be opened.')); }
   };
   const appendMessage = (message: ConversationMessage, optimistic = true) => {
-    const wasAtBottom = atBottomRef.current;
+    const shouldFollow = followLatestRef.current;
     const key = historyKey(message);
     if (optimistic) {
       knownKeysRef.current.add(key);
@@ -807,8 +803,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       knownKeysRef.current.add(messageIdentity(message));
     }
     appendConversationMessage(target, message);
-    if (!wasAtBottom) setHasNewMessages(true);
-    if (wasAtBottom) requestLatestScroll();
+    if (!shouldFollow) setHasNewMessages(true);
+    if (shouldFollow) requestLatestScroll();
   };
   /**
    * Apply canonical gateway messages to the transcript.
@@ -826,9 +822,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     const base = pending.length ? [...current, ...pending.filter(message => !currentIds.has(message.id))] : current;
     const next = reconcileCanonicalMessages(base, incoming, { authoritative: replace });
     if (!sameRenderedTranscript(current, next)) {
-      const wasAtBottom = atBottomRef.current;
+      const shouldFollow = followLatestRef.current;
       resetConversationMessages(target, next);
-      if (wasAtBottom) requestLatestScroll(); else setHasNewMessages(true);
+      if (shouldFollow) requestLatestScroll(); else setHasNewMessages(true);
     }
     const active = activePromptRef.current;
     if (!active) return false;
@@ -1104,7 +1100,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // The environment owns the colour of the canvas. A theme tint here would
   // cover the entire scene and stack with EnvironmentBackground's targeted dim.
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={styles.canvas}>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} onTouchStart={handleHistoryTouchStart} onTouchMove={handleHistoryTouchMove} onTouchEnd={handleHistoryTouchEnd} {...(Platform.OS === 'web' ? ({ onWheel: handleHistoryWheel } as any) : {})} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
       {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
       {isThinking ? <WorkingState dark={dark} muted={muted} operations={activeOperations} /> : null}
     </ScrollView>
@@ -1125,7 +1121,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       </View>
       {canonicalTarget && conversationSync.status === 'stale' ? <View testID="conversation-stale-state" accessibilityRole="alert" style={[styles.staleConversation, { backgroundColor: glassFill(dark, 'surface'), borderColor: glassEdge(dark) }, blurStyle(18)]}><Text style={[styles.staleConversationText, { color: conversationSync.cachedRows ? muted : brand.attention }]}>{conversationSync.cachedRows ? 'Connection interrupted · showing saved conversation while reconnecting.' : 'Conversation unavailable · reconnecting.'}</Text></View> : null}
     </View>
-    {(hasNewMessages || isScrolledUp) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={jumpToLatest}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
+    {(hasNewMessages || !followLatest) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={jumpToLatest}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
     {copiedMessageId ? <Text testID="message-copied" accessibilityLiveRegion="polite" style={[styles.copiedLabel, { bottom: composerHeight + 52 }]}>Copied</Text> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
       {activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Edit your message" onPress={editMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Edit</Text></TouchableOpacity> : null}

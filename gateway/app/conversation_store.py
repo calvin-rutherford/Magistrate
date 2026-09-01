@@ -39,7 +39,7 @@ from app.herdr_client import classify_history_rows, tool_call_preview
 CONVERSATION_SCHEMA = 'conversation.v1'
 
 MESSAGE_TYPES = ('conversation', 'tool', 'internal', 'status')
-TURN_STATUSES = ('awaiting_reply', 'answered', 'cancelled', 'failed')
+TURN_STATUSES = ('awaiting_reply', 'streaming', 'answered', 'cancelled', 'failed')
 
 # Slots per turn, which also fixes render order: prompt, tool events, reply.
 _PROMPT_SLOT = 'prompt'
@@ -53,7 +53,9 @@ _PRIMARY_OFFSET = _SLOTS_PER_TURN - 1
 # terminal keeps producing rows.
 MAX_TOOL_EVENTS_PER_TURN = 12
 MAX_INTERNAL_EVENTS_PER_TURN = 8
-MAX_PRIMARY_TEXT = 20_000
+# Primary prose is deliberately not tail-truncated. A local terminal buffer is
+# already bounded; truncating the canonical row again would silently discard a
+# prefix that can no longer be recovered after the viewport slides.
 MAX_MESSAGE_WINDOW = 200
 TURN_MATCH_WINDOW = 40
 # A prompt can scroll off Claude's alternate-screen viewport while its reply is
@@ -65,6 +67,7 @@ _SAFE_UPLOAD_ID = re.compile(r'^[A-Za-z0-9_-]{16,64}$')
 # SQLite is single-writer; the poll, the socket loop, and a prompt can all
 # arrive together, so wait for the lock instead of failing the request.
 _BUSY_TIMEOUT_SECONDS = 5.0
+_TOKEN = re.compile(r'\S+')
 
 
 def _now() -> int:
@@ -226,9 +229,17 @@ def _upsert_message(
             None,
         )
     attachments_changed = attachments_json is not None and existing['attachments_json'] != attachments_json
-    if not force and not _should_replace(existing['text'], text):
+    if not force and message_type == 'conversation':
+        merged = merge_captured_text(existing['text'], text)
+        if merged is None:
+            # Fail closed. A new disjoint window cannot prove whether it is a
+            # continuation, a different audience, or a provider correction;
+            # preserving the captured prefix is safer than replacing it.
+            return None
+        text = merged
+    elif not force and existing['text'] == text:
         return None
-    if force and existing['text'] == text and not attachments_changed:
+    if existing['text'] == text and not attachments_changed:
         return None
     if attachments_json is None:
         conn.execute(
@@ -248,16 +259,120 @@ def _upsert_message(
     )
 
 
-def _should_replace(stored: str, incoming: str) -> bool:
-    """Whether a re-read of the same turn is genuinely newer content.
+def _suffix_prefix_length(left, right) -> int:
+    """Length of the longest suffix of ``left`` equal to a prefix of ``right``.
 
-    Terminal scrollback drops the head of a long reply, so an incoming read that
-    is already contained in the stored text is an older, shorter view of the same
-    message rather than a correction.
+    This is a KMP fold rather than a quadratic suffix scan: a retained terminal
+    window can be large, and every socket/poll read exercises this path.
     """
-    if stored == incoming:
-        return False
-    return incoming not in stored
+    if not left or not right:
+        return 0
+    prefix = [0] * len(right)
+    matched = 0
+    for index in range(1, len(right)):
+        while matched and right[index] != right[matched]:
+            matched = prefix[matched - 1]
+        if right[index] == right[matched]:
+            matched += 1
+        prefix[index] = matched
+    matched = 0
+    for value in left:
+        while matched and (matched == len(right) or value != right[matched]):
+            matched = prefix[matched - 1]
+        if matched < len(right) and value == right[matched]:
+            matched += 1
+    return matched
+
+
+def _token_spans(text: str) -> List[Tuple[str, int, int]]:
+    return [(match.group(0), match.start(), match.end()) for match in _TOKEN.finditer(text)]
+
+
+def _subsequence_index(haystack: List[str], needle: List[str]) -> int:
+    """Find a contiguous token sequence without quadratic window slicing."""
+    if not needle or len(needle) > len(haystack):
+        return -1
+    prefix = [0] * len(needle)
+    matched = 0
+    for index in range(1, len(needle)):
+        while matched and needle[index] != needle[matched]:
+            matched = prefix[matched - 1]
+        if needle[index] == needle[matched]:
+            matched += 1
+        prefix[index] = matched
+    for index, value in enumerate(haystack):
+        while matched and value != needle[matched]:
+            matched = prefix[matched - 1]
+        if value == needle[matched]:
+            matched += 1
+            if matched == len(needle):
+                return index - len(needle) + 1
+    return -1
+
+
+def _substantial_token_overlap(tokens: List[Tuple[str, int, int]], count: int) -> bool:
+    if count >= 2:
+        return True
+    return count == 1 and len(tokens[0][0]) >= REPLY_CONTINUITY_MIN_CHARS
+
+
+def merge_captured_text(stored: str, incoming: str) -> Optional[str]:
+    """Return the lossless union of two views of one logical reply.
+
+    The terminal can first expose ``A B C`` and later only ``B C D``. Exact
+    containment handles ordinary streaming and delayed duplicate reads; token
+    overlap handles hard-wrap/reflow changes while preserving the original
+    formatting; suffix/prefix overlap joins sliding windows in either arrival
+    order. No overlap returns ``None`` instead of guessing or concatenating two
+    possibly duplicated renderings.
+    """
+    stored, incoming = (stored or '').strip(), (incoming or '').strip()
+    if not stored:
+        return incoming or None
+    if not incoming or stored == incoming or incoming in stored:
+        return stored
+    if stored in incoming:
+        return incoming
+
+    stored_flat, incoming_flat = ' '.join(stored.split()), ' '.join(incoming.split())
+    if stored_flat == incoming_flat or incoming_flat in stored_flat:
+        return stored
+    if stored_flat in incoming_flat:
+        return incoming
+
+    old_spans, new_spans = _token_spans(stored), _token_spans(incoming)
+    old_tokens = [item[0] for item in old_spans]
+    new_tokens = [item[0] for item in new_spans]
+    if old_tokens and new_tokens:
+        if _subsequence_index(old_tokens, new_tokens) >= 0:
+            return stored
+        if _subsequence_index(new_tokens, old_tokens) >= 0:
+            return incoming
+
+        append_overlap = _suffix_prefix_length(old_tokens, new_tokens)
+        prepend_overlap = _suffix_prefix_length(new_tokens, old_tokens)
+        append_safe = _substantial_token_overlap(new_spans, append_overlap)
+        prepend_safe = _substantial_token_overlap(old_spans, prepend_overlap)
+        if append_safe and (not prepend_safe or append_overlap >= prepend_overlap):
+            # Start immediately after the overlapping token; this retains the
+            # incoming whitespace/paragraph separator before its first new word.
+            tail = incoming[new_spans[append_overlap - 1][2]:]
+            return stored.rstrip() + tail
+        if prepend_safe:
+            overlap_start = len(new_spans) - prepend_overlap
+            head = incoming[:new_spans[overlap_start][1]]
+            return head + stored.lstrip()
+
+    # A provider can stream through the middle of one long token. Keep this
+    # character fallback conservative; normal prose and the A/B/C adversary use
+    # the safer token path above.
+    append_chars = _suffix_prefix_length(stored, incoming)
+    prepend_chars = _suffix_prefix_length(incoming, stored)
+    if append_chars >= 8 and len(stored[-append_chars:].strip()) >= 4 and append_chars >= prepend_chars:
+        return stored + incoming[append_chars:]
+    if prepend_chars >= 8 and len(incoming[-prepend_chars:].strip()) >= 4:
+        return incoming[:-prepend_chars] + stored
+    return None
 
 
 def record_prompt(
@@ -338,11 +453,13 @@ def record_primary_reply(
         changed = _upsert_message(
             conn, conversation_id=turn['conversation_id'], turn_id=turn_id,
             turn_index=turn['sequence_index'], slot=_PRIMARY_SLOT, offset=_PRIMARY_OFFSET,
-            role='assistant', message_type='conversation', text=text[:MAX_PRIMARY_TEXT],
-            visible=True, source=source, force=True,
+            role='assistant', message_type='conversation', text=text,
+            visible=True, source=source,
         )
-        if changed:
-            _set_turn_status(conn, turn_id, 'answered')
+        # A synchronous provider return is an explicit completion observation,
+        # even when its text is byte-for-byte identical to a streaming row.
+        _set_turn_status(conn, turn_id, 'answered')
+        if changed or turn['status'] != 'answered':
             _touch_conversation(conn, turn['conversation_id'])
         return [changed] if changed else []
 
@@ -407,13 +524,16 @@ def _turn_messages(conn: sqlite3.Connection, turn_id: str, client_message_id: Op
 class _Segment:
     """One prompt row, or a continuity-anchored viewport head, and its activity."""
 
-    __slots__ = ('prompt', 'prose', 'tools', 'internal')
+    __slots__ = ('prompt', 'prose', 'tools', 'internal', 'closed')
 
     def __init__(self, prompt: Optional[str]) -> None:
         self.prompt = prompt
         self.prose: List[str] = []
         self.tools: List[str] = []
         self.internal: List[str] = []
+        # A later user/control boundary proves this response is no longer the
+        # live tail even if the harness status observation is unavailable.
+        self.closed = False
 
     @property
     def has_activity(self) -> bool:
@@ -438,12 +558,16 @@ def build_segments(rows: Iterable[Dict[str, str]]) -> List[_Segment]:
             continue
         if kind == 'control':
             if role == 'user':
+                if current is not None:
+                    current.closed = True
                 current = None
                 saw_user_boundary = True
             elif current is not None:
                 current.internal.append(text)
             continue
         if role == 'user':
+            if current is not None:
+                current.closed = True
             saw_user_boundary = True
             current = _Segment(text)
             segments.append(current)
@@ -465,44 +589,47 @@ def build_segments(rows: Iterable[Dict[str, str]]) -> List[_Segment]:
 
 
 def join_primary_text(blocks: List[str]) -> str:
-    """One primary reply per turn, built from the turn's prose blocks in order.
+    """Build one ordered primary reply from prose separated by tool activity.
 
-    A harness interleaves prose with tool activity, so a turn legitimately has
-    several prose blocks. They are one reply, not several messages: joining them
-    keeps every word the agent said while still rendering exactly one assistant
-    bubble. The result is bounded from the end, because the newest prose is the
-    part a reader needs.
+    Overlapping/repeated blocks are folded exactly once. Truly disjoint blocks
+    are known, from their position inside one prompt-delimited snapshot, to be
+    consecutive prose and are joined with a paragraph boundary. No prefix is
+    dropped to satisfy a second arbitrary size cap.
     """
-    unique: List[str] = []
-    for block in blocks:
-        if not unique or unique[-1] != block:
-            unique.append(block)
-    kept: List[str] = []
-    total = 0
-    for block in reversed(unique):
-        cost = len(block) + (2 if kept else 0)
-        if kept and total + cost > MAX_PRIMARY_TEXT:
-            break
-        kept.append(block)
-        total += cost
-    kept.reverse()
-    return '\n\n'.join(kept)[:MAX_PRIMARY_TEXT]
+    joined = ''
+    for raw in blocks:
+        block = (raw or '').strip()
+        if not block:
+            continue
+        if not joined:
+            joined = block
+            continue
+        merged = merge_captured_text(joined, block)
+        joined = merged if merged is not None else f'{joined}\n\n{block}'
+    return joined
 
 
 def _has_reply_continuity(stored: str, incoming: str) -> bool:
-    """Whether assistant prose is a strong continuation anchor for one turn."""
+    """Whether assistant prose strongly anchors a promptless sliding window."""
     if not stored or not incoming:
         return False
-    if min(len(stored), len(incoming)) >= REPLY_CONTINUITY_MIN_CHARS and (
-        stored in incoming or incoming in stored
+    old_flat, new_flat = ' '.join(stored.split()), ' '.join(incoming.split())
+    if min(len(old_flat), len(new_flat)) >= REPLY_CONTINUITY_MIN_CHARS and (
+        old_flat in new_flat or new_flat in old_flat
     ):
         return True
-    # A newly recognised tool line can disappear from the corrected incoming
-    # prose. The unchanged prose block before/after it is still a valid anchor.
+    if max(
+        _suffix_prefix_length(old_flat, new_flat),
+        _suffix_prefix_length(new_flat, old_flat),
+    ) >= REPLY_CONTINUITY_MIN_CHARS:
+        return True
+    # A newly recognised tool line can disappear from corrected prose. An
+    # unchanged substantial block on either side remains a valid anchor.
     for old_block in stored.split('\n\n'):
         for new_block in incoming.split('\n\n'):
+            old_normalized, new_normalized = ' '.join(old_block.split()), ' '.join(new_block.split())
             shared = 0
-            for old_char, new_char in zip(old_block, new_block):
+            for old_char, new_char in zip(old_normalized, new_normalized):
                 if old_char != new_char:
                     break
                 shared += 1
@@ -579,7 +706,8 @@ def _recent_turns(conn: sqlite3.Connection, conversation_id: str) -> List[sqlite
 
 
 def ingest_terminal_rows(
-    user_id: str, target: str, rows: Iterable[Dict[str, str]],
+    user_id: str, target: str, rows: Iterable[Dict[str, str]], *,
+    response_complete: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """Fold a classified terminal snapshot into the canonical record.
 
@@ -599,8 +727,13 @@ def ingest_terminal_rows(
         turns = _recent_turns(conn, conversation_id)
         if not turns:
             return []
-        for turn, segment in _match_segments_to_turns(turns, build_segments(rows)):
-            changed.extend(_apply_segment(conn, conversation_id, turn, segment))
+        matches = _match_segments_to_turns(turns, build_segments(rows))
+        newest_turn_id = matches[-1][0]['id'] if matches else None
+        for turn, segment in matches:
+            complete = segment.closed or (
+                response_complete is True and turn['id'] == newest_turn_id
+            )
+            changed.extend(_apply_segment(conn, conversation_id, turn, segment, complete=complete))
         if changed:
             _touch_conversation(conn, conversation_id)
     return changed
@@ -608,6 +741,7 @@ def ingest_terminal_rows(
 
 def _apply_segment(
     conn: sqlite3.Connection, conversation_id: str, turn: sqlite3.Row, segment: _Segment,
+    *, complete: bool,
 ) -> List[Dict[str, Any]]:
     changed: List[Dict[str, Any]] = []
     turn_index = turn['sequence_index']
@@ -638,8 +772,14 @@ def _apply_segment(
         )
         if reply:
             changed.append(reply)
-        if turn['status'] == 'awaiting_reply':
+    if segment.has_activity:
+        # Prose/tool activity means the response started, not that it finished.
+        # Only a later user boundary or an observed idle/done harness completes
+        # the live tail. Never downgrade a completed/terminal historical turn.
+        if complete and turn['status'] in ('awaiting_reply', 'streaming'):
             _set_turn_status(conn, turn['id'], 'answered')
+        elif not complete and turn['status'] == 'awaiting_reply':
+            _set_turn_status(conn, turn['id'], 'streaming')
     return changed
 
 

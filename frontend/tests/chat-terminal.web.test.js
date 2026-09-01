@@ -113,6 +113,21 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         close() { this.readyState = FakeWebSocket.CLOSED; this.onclose?.(); }
       }
       window.WebSocket = FakeWebSocket;
+      window.__publishCanonicalPhase = phase => {
+        const record = loadRecord();
+        const turn = record.turns[record.turns.length - 1];
+        if (!turn) return [];
+        Object.assign(turn, phase);
+        if (phase.reply && !Object.prototype.hasOwnProperty.call(phase, 'status')) turn.status = 'streaming';
+        saveRecord(record);
+        const messages = canonicalMessages();
+        const payload = JSON.stringify({ type: 'conversation_messages', target: 'captain', messages });
+        // Deliberately duplicate socket delivery; the poll path will later read
+        // the same record and must converge on the same canonical identity.
+        window.__historySocket?.onmessage?.({ data: payload });
+        window.__historySocket?.onmessage?.({ data: payload });
+        return messages;
+      };
     }
     let uploadCount = 0;
     let historyRequests = 0;
@@ -238,7 +253,10 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         ];
         return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
-      if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([{ id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([
+        { id: 'w4:p1', name: 'Primary conversation', status: 'idle', harness: 'pi', workspace_id: 'w4', workspace_role: 'primary' },
+        { id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex', workspace_id: 'w1', workspace_role: 'worker' },
+      ]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/attention/unified')) {
         attentionRequests += 1;
         const items = simulateLiveUpdates && attentionRequests > 1 ? [{ id: 'attention-live', provider: 'firstmate', title: 'New decision', subtitle: 'Choose next step', status: 'blocked', url: '', requires_action: true }] : [];
@@ -373,10 +391,7 @@ test('chat starts at the measured latest content and preserves older-message rea
     const element = document.querySelector('[data-testid="chat-history"]');
     return element.scrollTop + element.clientHeight >= element.scrollHeight - 2 && !document.querySelector('[data-testid="jump-to-latest"]');
   });
-  await page.evaluate(() => {
-    const element = document.querySelector('[data-testid="chat-history"]');
-    element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true }));
-  });
+  await page.mouse.wheel({ deltaY: -500 });
   await page.waitForSelector('[data-testid="jump-to-latest"]');
   await page.focus('[data-testid="jump-to-latest"]');
   await page.keyboard.press('Enter');
@@ -388,6 +403,66 @@ test('chat starts at the measured latest content and preserves older-message rea
   });
   position = await metrics();
   assert.ok(position.scrollTop + position.clientHeight >= position.scrollHeight - 2, 'new content at the end should stay at the end');
+  await page.close();
+});
+
+test('follow-latest intent survives many canonical revisions until explicit reader input', async () => {
+  const seedTurns = Array.from({ length: 10 }, (_, index) => ({
+    clientMessageId: `revision-${index}`,
+    text: `revision prompt ${index} ${'context '.repeat(8)}`,
+    reply: index === 9 ? 'Reply revision 1. ' + 'opening prose '.repeat(12) : `revision response ${index} ${'answer '.repeat(8)}`,
+    replyRevision: 1,
+    status: index === 9 ? 'streaming' : 'answered',
+  }));
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="agent-message"]').length === 10);
+  const atAbsoluteLatest = () => page.$eval('[data-testid="chat-history"]', element => element.scrollTop + element.clientHeight >= element.scrollHeight - 2);
+  await page.waitForFunction(() => {
+    const element = document.querySelector('[data-testid="chat-history"]');
+    return element.scrollHeight > element.clientHeight + 200 && element.scrollTop + element.clientHeight >= element.scrollHeight - 2;
+  });
+
+  let reply = 'Reply revision 1. ' + 'opening prose '.repeat(12);
+  for (let revision = 2; revision <= 14; revision += 1) {
+    reply += `\n\nReply revision ${revision}. ${'new durable prose '.repeat(8)}`;
+    await page.evaluate(phase => window.__publishCanonicalPhase(phase), { reply, replyRevision: revision, status: 'streaming' });
+    await page.waitForFunction(marker => document.querySelector('[data-testid="chat-history"]').innerText.includes(marker), {}, `Reply revision ${revision}.`);
+    await page.waitForFunction(() => {
+      const element = document.querySelector('[data-testid="chat-history"]');
+      return element.scrollTop + element.clientHeight >= element.scrollHeight - 2;
+    });
+    assert.equal(await atAbsoluteLatest(), true, `revision ${revision} should remain at the absolute latest content`);
+  }
+
+  await page.hover('[data-testid="chat-history"]');
+  await page.mouse.wheel({ deltaY: -650 });
+  await page.waitForFunction(() => Boolean(document.querySelector('[data-testid="jump-to-latest"]')));
+  const readerPosition = await page.$eval('[data-testid="chat-history"]', element => element.scrollTop);
+  for (let revision = 15; revision <= 18; revision += 1) {
+    reply += `\n\nReply revision ${revision}. ${'new durable prose '.repeat(8)}`;
+    await page.evaluate(phase => window.__publishCanonicalPhase(phase), { reply, replyRevision: revision, status: revision === 18 ? 'answered' : 'streaming' });
+    await page.waitForFunction(marker => document.querySelector('[data-testid="chat-history"]').innerText.includes(marker), {}, `Reply revision ${revision}.`);
+  }
+  const preserved = await page.$eval('[data-testid="chat-history"]', element => element.scrollTop);
+  assert.ok(Math.abs(preserved - readerPosition) <= 2, `reader position moved from ${readerPosition} to ${preserved}`);
+
+  await page.click('[data-testid="jump-to-latest"]');
+  await page.waitForFunction(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    const replies = history.querySelectorAll('[data-testid="agent-message"]');
+    const composer = document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect();
+    return history.scrollTop + history.clientHeight >= history.scrollHeight - 2
+      && !document.querySelector('[data-testid="jump-to-latest"]')
+      && replies[replies.length - 1].getBoundingClientRect().bottom <= composer.top;
+  });
+  reply += `\n\nReply revision 19. ${'final durable prose '.repeat(8)}`;
+  await page.evaluate(phase => window.__publishCanonicalPhase(phase), { reply, replyRevision: 19, status: 'answered' });
+  await page.waitForFunction(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    return history.innerText.includes('Reply revision 19.')
+      && history.scrollTop + history.clientHeight >= history.scrollHeight - 2;
+  });
+
   await page.close();
 });
 
@@ -659,6 +734,22 @@ test('mobile drawer overlays without moving chat and touch scrolling still works
   for (let step = 1; step <= 7; step += 1) await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: scrollStart.x, y: scrollStart.y + step * 45 }] });
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await page.waitForFunction(start => document.querySelector('[data-testid="chat-history"]').scrollTop < start - 100, {}, bottom);
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+  await page.waitForFunction(() => {
+    const value = document.querySelector('[data-testid="chat-history"]').scrollTop;
+    const now = performance.now();
+    if (window.__touchStableTop !== value) { window.__touchStableTop = value; window.__touchStableSince = now; }
+    return now - (window.__touchStableSince || now) > 150;
+  }, { polling: 'raf' });
+  const touchReaderPosition = await page.$eval('[data-testid="chat-history"]', element => element.scrollTop);
+  await page.evaluate(() => window.__publishCanonicalPhase({
+    reply: 'mobile response 13\n\nA revision arrived while the reader stayed above the live edge.',
+    replyRevision: 2,
+    status: 'streaming',
+  }));
+  await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]').innerText.includes('A revision arrived while the reader stayed above'));
+  const afterTouchRevision = await page.$eval('[data-testid="chat-history"]', element => element.scrollTop);
+  assert.ok(Math.abs(afterTouchRevision - touchReaderPosition) <= 2, `touch reader position moved from ${touchReaderPosition} to ${afterTouchRevision}`);
   const fixedAfter = await page.evaluate(() => {
     const header = document.querySelector('[data-testid="chat-header"]').getBoundingClientRect();
     const composer = document.querySelector('[data-testid="composer-dock"]').getBoundingClientRect();
@@ -918,8 +1009,12 @@ test('fleet agent opens its conversation, hides tools by default, and settings c
   const page = await openChat({ width: 900, height: 700 });
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await page.waitForSelector('[data-testid="drawer-count-fleet"]');
+  assert.equal((await page.$eval('[data-testid="drawer-count-fleet"]', element => element.innerText)).trim(), '1');
+  assert.equal(await page.$('[data-testid="drawer-work-w4:p1"]'), null, 'primary work must not enter ACTIVE WORK');
   await page.evaluate(() => document.querySelector('[data-testid="drawer-section-fleet"]').click());
   await page.waitForSelector('[data-testid="fleet-agent-w1:p7"]');
+  assert.equal(await page.$('[data-testid="fleet-agent-w4:p1"]'), null, 'primary workspace must not render a Fleet row');
   const fleetName = await page.$eval('[data-testid="fleet-agent-w1:p7"]', element => element.innerText);
   assert.match(fleetName, /Deploy agent/);
   assert.doesNotMatch(fleetName, /w1:p7/, 'Fleet Summary should present the assigned name rather than raw pane diagnostics');

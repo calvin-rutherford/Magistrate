@@ -189,28 +189,43 @@ downgrade step.
   read, `GET /conversations/{target}/messages` still returns the canonical
   transcript and reports the failure in `ingest_error` rather than presenting a
   stale record as current.
-- **A turn is "answered" as soon as any prose is recorded.** Herdr cannot tell us
-  that a harness has finished writing, so the canonical record does not produce
-  the `streaming` progress state; a reply simply keeps being revised. The label
-  itself is still pinned by `frontend/tests/chat-evidence.test.ts` and remains
-  reachable on the worker path.
+- **A turn is `streaming` while the pane is working.** Herdr cannot tell us
+  that a harness has finished writing from prose alone. The adapter moves the
+  turn to `answered` only on an observed idle/done state, an explicit
+  synchronous provider return, or a later user boundary. This keeps reloads and
+  socket/poll delivery honest about an unchanged but still-live reply.
 - **Tool events are labels, not transcripts.** Only the bounded
   `tool_call_preview` label is recorded, because a tool row's raw text is a shell
   command or file excerpt that can carry tokens and paths. The full activity
   stays in the terminal, reachable via `/api/v1/captain/output`.
-- **One primary reply per turn is a join.** A harness interleaves prose with tool
-  activity, so a turn's prose blocks are joined into one message (bounded to
-  20 000 characters, keeping the newest blocks) and render as one assistant
-  bubble. Before this change only the *first* prose block was shown; the rest was
+- **One primary reply per turn is a loss-resistant join.** A harness interleaves
+  prose with tool activity, so a turn's prose blocks are folded into one message
+  and render as one assistant bubble. Exact containment, reflow-normalized
+  containment, and conservative suffix/prefix overlap merge sliding terminal
+  windows without duplicate text; an unsafe disjoint window fails closed rather
+  than replacing the captured prefix. There is no second arbitrary text cap in
+  the gateway; the only remaining bound is Herdr's own retained scrollback.
+  Before this change only the *first* prose block was shown; the rest was
   silently dropped.
 - **The delivered window is bounded to 200 messages.** A full list read is
   authoritative, so a client viewing a very long conversation keeps only the most
   recent 200 canonical records. Older turns remain in the database; paging them
-  back is not implemented.
+  back is not implemented. Canonical ingestion always asks Herdr for its maximum
+  retained line range, rather than applying the worker-pane 400-line default a
+  second time.
 - **Tool chips are standalone rows again.** #67 attached tool previews under the
   reply; canonical tool events are their own records and render in sequence
   between the prompt and the reply, matching how worker threads already show
   them. `magistrate.chat.show-tool-calls` still gates them.
+
+- **The terminal is still an ingestion adapter, not a durable upstream transcript.**
+  Herdr currently exposes mutable ANSI scrollback and pane status, not stable
+  message/session ids for the primary process. The gateway persists every
+  attributed reply before later reads, folds overlapping sliding windows
+  monotonically, and fails closed on an unsafe disjoint read. A prompt that
+  scrolls away before any attributable prose, or a window with no unique overlap,
+  can still remain missing; choosing the latest open turn would be worse because
+  the pane has other audiences.
 
 ## Verifying in the deployed app
 

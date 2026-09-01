@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app import conversation_store as store
 from app import db
-from app.herdr_client import classify_history_rows, parse_agent_history
+from app.herdr_client import HERDR_MAX_READ_LINES, classify_history_rows, parse_agent_history
 from app.main import app
 from conftest import TEST_HEADERS, TEST_SESSION_TOKEN
 
@@ -120,8 +120,8 @@ def test_an_edited_resubmission_replaces_its_own_text_and_keeps_one_turn():
 
 def test_mutable_snapshot_output_revises_one_assistant_message():
     turn = store.record_prompt(USER, TARGET, 'u-2', 'run the tests')
-    growth = ['The tests are running', 'The tests are running and 30 of them have',
-              'The tests are running and all 42 of them pass.']
+    growth = ['The tests are running', 'The tests are running and 30 of them have passed',
+              'The tests are running and 30 of them have passed; all 42 now pass.']
     for text in growth:
         store.ingest_terminal_rows(USER, TARGET, rows(
             ('user', 'conversation', 'run the tests'),
@@ -134,6 +134,23 @@ def test_mutable_snapshot_output_revises_one_assistant_message():
     assert replies[0]['text'] == growth[-1]
     assert replies[0]['revision'] == 3
     assert replies[0]['turn_id'] == turn['turn_id']
+
+
+def test_sliding_reply_windows_merge_without_losing_prefix_or_duplicating_overlap():
+    store.record_prompt(USER, TARGET, 'u-slide', 'stream the alphabet')
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'stream the alphabet'),
+        ('assistant', 'conversation', 'A B C'),
+    ))
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'stream the alphabet'),
+        ('assistant', 'conversation', 'B C D'),
+    ))
+
+    assert visible() == [
+        ('user', 'conversation', 'stream the alphabet'),
+        ('assistant', 'conversation', 'A B C D'),
+    ]
 
 
 def test_a_scrolled_snapshot_cannot_shrink_a_recorded_reply():
@@ -152,6 +169,46 @@ def test_a_scrolled_snapshot_cannot_shrink_a_recorded_reply():
     ]
 
 
+def test_an_unsafe_disjoint_replacement_cannot_erase_the_captured_reply():
+    prompt = 'keep this reply intact'
+    store.record_prompt(USER, TARGET, 'u-unsafe-replacement', prompt)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'The captured prefix must survive a bad re-read.'),
+    ), response_complete=False)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'Unrelated prose with no safe overlap.'),
+    ), response_complete=False)
+
+    [reply] = [item for item in store.list_messages(USER, TARGET)['messages'] if item['role'] == 'assistant']
+    assert reply['text'] == 'The captured prefix must survive a bad re-read.'
+    assert reply['revision'] == 1
+
+
+def test_promptless_sliding_windows_keep_growing_after_the_prompt_leaves_a_long_snapshot():
+    prompt = 'explain every retained line'
+    tokens = [f'token-{index:04d}' for index in range(900)]
+    store.record_prompt(USER, TARGET, 'u-long-window', prompt)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', ' '.join(tokens[:300])),
+    ), response_complete=False)
+
+    # Every later read is a viewport-sized sliding window. The original prompt
+    # is outside the newest 400 terminal rows, but each window has substantial
+    # overlap with the reply already attributed to this exact turn.
+    for start in (150, 300, 450, 600):
+        store.ingest_terminal_rows(USER, TARGET, rows(
+            ('assistant', 'conversation', ' '.join(tokens[start:start + 300])),
+        ), response_complete=False)
+
+    [reply] = [item for item in store.list_messages(USER, TARGET)['messages'] if item['role'] == 'assistant']
+    assert reply['text'] == ' '.join(tokens)
+    assert reply['revision'] == 5
+    assert reply['turn_status'] == 'streaming'
+
+
 def test_repeated_prose_blocks_in_one_turn_stay_one_primary_reply():
     store.record_prompt(USER, TARGET, 'u-4', 'do the work')
     store.ingest_terminal_rows(USER, TARGET, rows(
@@ -163,6 +220,49 @@ def test_repeated_prose_blocks_in_one_turn_stay_one_primary_reply():
 
     replies = [item for item in visible() if item[0] == 'assistant' and item[1] == 'conversation']
     assert replies == [('assistant', 'conversation', 'Starting with the gateway.\n\nDone: the gateway is updated.')]
+
+
+def test_prose_and_repeated_tools_remain_one_ordered_logical_assistant_reply():
+    store.record_prompt(USER, TARGET, 'u-prose-tools', 'work in three stages')
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'work in three stages'),
+        ('assistant', 'conversation', 'Stage one prose.'),
+        ('assistant', 'tool', 'Read gateway/app/main.py'),
+        ('assistant', 'conversation', 'Stage two prose.'),
+        ('assistant', 'tool', 'Bash(pytest -q)'),
+        ('assistant', 'conversation', 'Stage three prose.'),
+    ), response_complete=True)
+
+    messages = store.list_messages(USER, TARGET)['messages']
+    assert [item['text'] for item in messages if item['type'] == 'conversation'] == [
+        'work in three stages',
+        'Stage one prose.\n\nStage two prose.\n\nStage three prose.',
+    ]
+    assert [item['text'] for item in messages if item['type'] == 'tool'] == ['Read', 'Bash']
+    assert all('gateway/app' not in item['text'] and 'pytest' not in item['text'] for item in messages)
+
+
+def test_terminal_reflow_is_idempotent_and_only_new_prose_is_appended():
+    prompt = 'write two paragraphs'
+    store.record_prompt(USER, TARGET, 'u-reflow', prompt)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'Alpha beta gamma delta.\n\nSecond paragraph stays intact.'),
+    ), response_complete=False)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'Alpha beta\ngamma delta. Second paragraph stays intact.'),
+    ), response_complete=False)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'gamma delta.\nSecond paragraph stays intact. Final tail.'),
+    ), response_complete=True)
+
+    [reply] = [item for item in store.list_messages(USER, TARGET)['messages'] if item['role'] == 'assistant']
+    assert ' '.join(reply['text'].split()) == 'Alpha beta gamma delta. Second paragraph stays intact. Final tail.'
+    assert reply['text'].count('Alpha beta') == 1
+    assert reply['text'].count('Second paragraph stays intact.') == 1
+    assert reply['turn_status'] == 'answered'
 
 
 def test_tool_events_are_hidden_bounded_labels_and_never_prose():
@@ -334,6 +434,59 @@ def test_reset_discards_a_poisoned_canonical_record():
     assert visible() == []
 
 
+def test_streaming_status_survives_reload_and_completion_is_not_inferred_from_first_prose():
+    prompt = 'give a growing reply'
+    turn = store.record_prompt(USER, TARGET, 'u-stream-state', prompt)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'The first partial response is deliberately long enough to remain attributed.'),
+    ), response_complete=False)
+
+    before_restart = store.list_messages(USER, TARGET)['messages']
+    [partial] = [item for item in before_restart if item['role'] == 'assistant']
+    assert partial['turn_id'] == turn['turn_id']
+    assert partial['turn_status'] == 'streaming'
+
+    db.init_db()
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('assistant', 'conversation', 'The first partial response is deliberately long enough to remain attributed. The durable tail arrived.'),
+    ), response_complete=False)
+    evolving = store.list_messages(USER, TARGET)['messages']
+    [same_reply] = [item for item in evolving if item['role'] == 'assistant']
+    assert same_reply['id'] == partial['id']
+    assert same_reply['revision'] == partial['revision'] + 1
+    assert same_reply['turn_status'] == 'streaming'
+
+    # Seeing the harness become idle is a separate observation from seeing
+    # prose. Completion updates the turn even when the final text is unchanged.
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('assistant', 'conversation', same_reply['text']),
+    ), response_complete=True)
+    [complete] = [item for item in store.list_messages(USER, TARGET)['messages'] if item['role'] == 'assistant']
+    assert complete['id'] == partial['id']
+    assert complete['text'] == 'The first partial response is deliberately long enough to remain attributed. The durable tail arrived.'
+    assert complete['turn_status'] == 'answered'
+
+
+def test_duplicate_poll_and_socket_snapshots_converge_without_extra_revision():
+    prompt = 'one logical response'
+    store.record_prompt(USER, TARGET, 'u-converge', prompt)
+    snapshot = rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'Stable response identity.'),
+    )
+    first = store.ingest_terminal_rows(USER, TARGET, snapshot, response_complete=False)
+    duplicate_socket = store.ingest_terminal_rows(USER, TARGET, snapshot, response_complete=False)
+    duplicate_poll = store.ingest_terminal_rows(USER, TARGET, snapshot, response_complete=False)
+
+    assert len(first) == 1
+    assert duplicate_socket == []
+    assert duplicate_poll == []
+    [reply] = [item for item in store.list_messages(USER, TARGET)['messages'] if item['role'] == 'assistant']
+    assert reply['revision'] == 1
+    assert reply['turn_status'] == 'streaming'
+
+
 # --- HTTP contract -----------------------------------------------------------
 
 def test_prompt_endpoint_is_idempotent_on_message_id(monkeypatch):
@@ -386,6 +539,7 @@ def test_conversation_endpoint_ingests_the_snapshot_and_returns_canonical_messag
 
     payload = client.get(f'/api/v1/conversations/{TARGET}/messages', headers=TEST_HEADERS).json()
 
+    typed.assert_awaited_once_with(TARGET, lines=HERDR_MAX_READ_LINES)
     assert payload['schema_version'] == store.CONVERSATION_SCHEMA
     assert [(item['role'], item['type'], item['text']) for item in payload['messages']] == [
         ('user', 'conversation', 'summarize the deploy'),
@@ -394,6 +548,35 @@ def test_conversation_endpoint_ingests_the_snapshot_and_returns_canonical_messag
     ]
     assert 'hidden-secret' not in str(payload)
     assert 'Worker-only report' not in str(payload)
+
+
+def test_conversation_endpoint_keeps_prose_streaming_until_herdr_is_observed_idle(monkeypatch):
+    prompt = 'write a complete report'
+    store.record_prompt(USER, TARGET, 'u-http-stream', prompt)
+    status = {'value': 'working'}
+
+    async def typed(target, lines=None):
+        return {
+            'target': target,
+            'agent_status': status['value'],
+            'rows': rows(
+                ('user', 'conversation', prompt),
+                ('assistant', 'conversation', 'A visible response that may still grow.'),
+            ),
+        }
+
+    monkeypatch.setattr('app.main.herdr_client.read_typed_rows', typed)
+    streaming = client.get(f'/api/v1/conversations/{TARGET}/messages', headers=TEST_HEADERS).json()
+    [partial] = [item for item in streaming['messages'] if item['role'] == 'assistant']
+    assert partial['turn_status'] == 'streaming'
+
+    status['value'] = 'idle'
+    completed = client.get(f'/api/v1/conversations/{TARGET}/messages', headers=TEST_HEADERS).json()
+    [final] = [item for item in completed['messages'] if item['role'] == 'assistant']
+    assert final['id'] == partial['id']
+    assert final['revision'] == partial['revision']
+    assert final['text'] == partial['text']
+    assert final['turn_status'] == 'answered'
 
 
 def test_conversation_endpoint_requires_authentication():
@@ -460,6 +643,37 @@ def test_events_stream_delivers_canonical_messages_once_per_revision(monkeypatch
         assert [item['text'] for item in update['messages']] == ['The tests are running and all 42 pass.']
         assert update['messages'][0]['id'] == first['messages'][1]['id']
         assert update['messages'][0]['revision'] == 2
+
+
+def test_events_stream_delivers_same_revision_completion_status(monkeypatch):
+    prompt = 'finish after streaming'
+    store.record_prompt(USER, TARGET, 'u-ws-status', prompt)
+    status = {'value': 'working'}
+
+    async def typed(target, lines=None):
+        return {
+            'target': target,
+            'agent_status': status['value'],
+            'rows': rows(
+                ('user', 'conversation', prompt),
+                ('assistant', 'conversation', 'Final prose already rendered.'),
+            ),
+        }
+
+    monkeypatch.setattr('app.main.herdr_client.read_typed_rows', typed)
+    with client.websocket_connect('/api/v1/events') as websocket:
+        websocket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': TARGET})
+        websocket.receive_json()
+        first = websocket.receive_json()
+        [streaming_reply] = [item for item in first['messages'] if item['role'] == 'assistant']
+        assert streaming_reply['turn_status'] == 'streaming'
+
+        status['value'] = 'idle'
+        completed = websocket.receive_json()
+        [final_reply] = [item for item in completed['messages'] if item['role'] == 'assistant']
+        assert final_reply['id'] == streaming_reply['id']
+        assert final_reply['revision'] == streaming_reply['revision']
+        assert final_reply['turn_status'] == 'answered'
 
 
 def test_voice_moves_record_the_shared_captain_turn(monkeypatch):

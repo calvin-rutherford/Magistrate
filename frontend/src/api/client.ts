@@ -295,6 +295,7 @@ export interface AgentInfo {
   pane_id?: string;
   tab_id?: string;
   workspace_id?: string;
+  workspace_role?: 'primary' | 'worker';
 }
 
 export interface AgentControlResult {
@@ -643,7 +644,12 @@ export async function fetchRuntime() {
 export async function fetchAgents(): Promise<AgentInfo[]> {
   const res = await authorizedFetch(GATEWAY_URL + '/agents', {
   });
-  return checkedJson<AgentInfo[]>(res);
+  const agents = await checkedJson<AgentInfo[]>(res);
+  if (!Array.isArray(agents)) throw new Error('Gateway returned an invalid fleet.');
+  // Gateway derives this role from Herdr's parent workspace label. Keep the
+  // client boundary fail-safe during rolling deploys so primary work never
+  // enters Fleet counts, rows, active work, or navigation.
+  return agents.filter(agent => agent.workspace_role !== 'primary');
 }
 
 export async function fetchFleet() {
@@ -1048,8 +1054,10 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
  * rather than re-deriving a transcript from mutable snapshots. See
  * CHAT_ARCHITECTURE_FIX.md.
  */
-export async function fetchCanonicalConversation(target: string = 'captain', lines: number = CHAT_HISTORY_LINES): Promise<CanonicalConversationResult> {
-  const res = await authorizedFetch(GATEWAY_URL + '/conversations/' + encodeURIComponent(target) + '/messages?lines=' + lines, {
+export async function fetchCanonicalConversation(target: string = 'captain'): Promise<CanonicalConversationResult> {
+  // Canonical ingestion is intentionally not viewport-sized. The gateway asks
+  // Herdr for every retained row so a long reply's prompt/prefix is not lost.
+  const res = await authorizedFetch(GATEWAY_URL + '/conversations/' + encodeURIComponent(target) + '/messages', {
   });
   const data = await checkedJson<Partial<CanonicalConversationResult>>(res);
   if (!Array.isArray(data.messages)) throw new Error('Gateway returned an invalid conversation record.');

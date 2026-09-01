@@ -8,8 +8,9 @@ from typing import Dict, Any, List, Optional
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
 HERDR_MAX_READ_LINES = 2**32 - 1
-# Chat only needs enough recent scrollback to seed live-poll deduplication, not
-# the full retained history - keep the default request small.
+# Worker-pane history keeps a bounded default. Canonical captain ingestion
+# explicitly passes HERDR_MAX_READ_LINES so it can fold a long reply before the
+# terminal buffer slides.
 DEFAULT_HISTORY_LINES = 400
 
 _HISTORY_MARKER = re.compile(r'^\s*([›❯•⏺●])\s+(.*)$')
@@ -461,8 +462,30 @@ class HerdrClient:
         return {'agents': [], 'workspaces': [], 'tabs': [], 'panes': []}
 
     @staticmethod
-    def _format_agents(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _primary_workspace_ids(snapshot: Dict[str, Any]) -> set[str]:
+        """Workspace identities carrying the primary conversation role."""
+        return {
+            workspace_id
+            for workspace in snapshot.get('workspaces', [])
+            for workspace_id in [str(workspace.get('workspace_id') or workspace.get('id') or '').strip()]
+            if workspace_id and str(workspace.get('label') or workspace.get('name') or '').strip().lower()
+            in ('captain', 'firstmate')
+        }
+
+    @classmethod
+    def _workspace_role(cls, agent: Dict[str, Any], primary_workspaces: set[str]) -> str:
+        if str(agent.get('workspace_id') or '') in primary_workspaces:
+            return 'primary'
+        # Older Herdr snapshots may omit workspace objects. Preserve the same
+        # fail-closed legacy identity used by resolve_target rather than
+        # exposing the explicitly named firstmate pane as Fleet work.
+        name = str(agent.get('name') or agent.get('label') or '').strip().lower()
+        return 'primary' if name in ('captain', 'firstmate') or name.endswith(' - firstmate') else 'worker'
+
+    @classmethod
+    def _format_agents(cls, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         formatted_agents = []
+        primary_workspaces = cls._primary_workspace_ids(snapshot)
         for ag in snapshot.get('agents', []):
             raw_status = ag.get('agent_status')
             status = raw_status.get('state') if isinstance(raw_status, dict) else raw_status
@@ -486,12 +509,19 @@ class HerdrClient:
                 'status': status,
                 'pane_id': ag.get('pane_id'),
                 'tab_id': ag.get('tab_id'),
-                'workspace_id': ag.get('workspace_id')
+                'workspace_id': ag.get('workspace_id'),
+                'workspace_role': cls._workspace_role(ag, primary_workspaces),
             })
         return formatted_agents
 
     async def list_agents(self) -> List[Dict[str, Any]]:
+        """Return all live panes for attention/voice and legacy callers."""
         return self._format_agents(await self.get_snapshot())
+
+    async def list_fleet_agents(self) -> List[Dict[str, Any]]:
+        """Return subordinate panes only for the captain-visible Fleet UI."""
+        agents = await self.list_agents()
+        return [agent for agent in agents if agent.get('workspace_role') != 'primary']
 
     async def resolve_target(self, target: str) -> str:
         if target not in ('captain', 'codex', 'firstmate'):
@@ -505,12 +535,7 @@ class HerdrClient:
         # terminal title (every Pi worker can render "π - Magistrate").
         snapshot = await self.get_snapshot()
         agents = self._format_agents(snapshot)
-        captain_workspaces = {
-            str(workspace.get('workspace_id') or workspace.get('id') or '')
-            for workspace in snapshot.get('workspaces', [])
-            if str(workspace.get('label') or workspace.get('name') or '').strip().lower()
-            in ('captain', 'firstmate')
-        }
+        captain_workspaces = self._primary_workspace_ids(snapshot)
         for ag in agents:
             if str(ag.get('workspace_id') or '') in captain_workspaces:
                 return ag.get('pane_id') or ag.get('id')
@@ -594,7 +619,7 @@ class HerdrClient:
         return stdout.decode('utf-8', errors='replace') if stdout else ''
 
     async def read_typed_rows(self, target: str, lines: int = DEFAULT_HISTORY_LINES) -> Dict[str, Any]:
-        """Snapshot rows typed for canonical ingestion, with no message identity.
+        """Snapshot typed rows and the harness state observed after that read.
 
         This is the ingestion adapter's only entry point: the terminal supplies
         typed rows, and app/conversation_store.py decides what they mean for the
@@ -603,7 +628,26 @@ class HerdrClient:
         """
         resolved_target = await self.resolve_target(target)
         output = await self.read_agent_output(resolved_target, lines=lines, output_format='ansi')
-        return {'target': resolved_target, 'rows': classify_history_rows(parse_agent_history(output))}
+        agent_status = 'unknown'
+        try:
+            snapshot = await self.get_snapshot()
+            raw_agent = next(
+                (item for item in snapshot.get('agents', []) if item.get('pane_id') == resolved_target),
+                None,
+            )
+            if raw_agent:
+                raw_status = raw_agent.get('agent_status')
+                if isinstance(raw_status, dict):
+                    raw_status = raw_status.get('state')
+                agent_status = str(raw_status or 'unknown')
+        except Exception:
+            # Unknown fails closed: prose is not proof that a response ended.
+            pass
+        return {
+            'target': resolved_target,
+            'agent_status': agent_status,
+            'rows': classify_history_rows(parse_agent_history(output)),
+        }
 
     async def get_agent_history(
         self, target: str, lines: int = DEFAULT_HISTORY_LINES,

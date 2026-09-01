@@ -124,7 +124,8 @@ const progressFor = (message: CanonicalMessage): ConversationMessage['progress']
   message.turn_status === 'cancelled' ? 'cancelled'
     : message.turn_status === 'failed' ? 'failed'
       : message.turn_status === 'awaiting_reply' && message.role === 'user' ? 'working'
-        : 'complete';
+        : message.turn_status === 'streaming' ? (message.role === 'assistant' ? 'streaming' : 'working')
+          : 'complete';
 
 /**
  * A row this device created that the server has not acknowledged: a send still

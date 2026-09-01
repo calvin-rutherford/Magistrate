@@ -159,7 +159,7 @@ async def stop_notification_reconciler():
 CANONICAL_CONVERSATION_TARGET = 'captain'
 
 
-async def _ingest_target_snapshot(user_id: str, target: str, lines: int = DEFAULT_HISTORY_LINES) -> Optional[str]:
+async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_MAX_READ_LINES) -> Optional[str]:
     """Fold the current terminal snapshot into the canonical record.
 
     This is the only place terminal output enters the conversation. A working
@@ -170,7 +170,18 @@ async def _ingest_target_snapshot(user_id: str, target: str, lines: int = DEFAUL
     """
     try:
         snapshot = await herdr_client.read_typed_rows(target, lines=lines)
-        ingest_terminal_rows(user_id, target, snapshot.get('rows', []))
+        status = str(snapshot.get('agent_status') or '').strip().lower()
+        response_complete: Optional[bool]
+        if status in {'idle', 'done', 'complete', 'completed'}:
+            response_complete = True
+        elif status in {'working', 'blocked'}:
+            response_complete = False
+        else:
+            response_complete = None
+        ingest_terminal_rows(
+            user_id, target, snapshot.get('rows', []),
+            response_complete=response_complete,
+        )
         return None
     except Exception as exc:
         return f'{type(exc).__name__}: {exc}'[:200]
@@ -204,7 +215,7 @@ async def agent_events(websocket: WebSocket):
             return
         target = requested_target if principal is not None and isinstance(requested_target, str) and requested_target else 'captain'
         seen: set[str] = set()
-        revisions: Dict[str, int] = {}
+        revisions: Dict[str, tuple[int, str]] = {}
         await websocket.send_json({'type': 'connected', 'target': target})
         while True:
             try:
@@ -227,10 +238,18 @@ async def agent_events(websocket: WebSocket):
                 # message arrives with the id the client already rendered.
                 await _ingest_target_snapshot(principal.user_id, target)
                 payload = list_conversation_messages(principal.user_id, target)
-                fresh = [item for item in payload['messages'] if revisions.get(item['id']) != item['revision']]
+                fresh = [
+                    item for item in payload['messages']
+                    if revisions.get(item['id']) != (item['revision'], item['turn_status'])
+                ]
                 # Rebuilt rather than accumulated: the delivered window slides,
                 # so this stays bounded by the window instead of by session age.
-                revisions = {item['id']: item['revision'] for item in payload['messages']}
+                # Turn status participates because idle can complete an unchanged
+                # final prose row and clients must observe that transition.
+                revisions = {
+                    item['id']: (item['revision'], item['turn_status'])
+                    for item in payload['messages']
+                }
                 if fresh:
                     await websocket.send_json({
                         'type': 'conversation_messages', 'schema_version': CONVERSATION_SCHEMA,
@@ -886,7 +905,10 @@ async def remove_execution_credential(credential_key: str, principal: Principal 
 
 @app.get('/api/v1/agents')
 async def list_agents(principal: Principal = Depends(require_scope('read'))):
-    agents, fleet = await asyncio.gather(herdr_client.list_agents(), fm_client.get_snapshot())
+    # /agents is the captain-visible Fleet surface. Attention and Voice call
+    # list_agents() directly because they still need the primary identity for
+    # routing/awareness; do the structural exclusion at this boundary only.
+    agents, fleet = await asyncio.gather(herdr_client.list_fleet_agents(), fm_client.get_snapshot())
     return fm_client.apply_agent_display_names(agents, fleet)
 
 @app.get('/api/v1/fleet')
@@ -1027,11 +1049,12 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
 @app.get('/api/v1/conversations/{target}/messages')
 async def get_conversation_messages(
     target: str,
-    lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
     limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
     principal: Principal = Depends(require_scope('read')),
 ):
-    ingest_error = await _ingest_target_snapshot(principal.user_id, target, lines=lines)
+    # Canonical ingestion always asks for every row Herdr still retains. A
+    # caller-controlled viewport limit cannot be allowed to erase context.
+    ingest_error = await _ingest_target_snapshot(principal.user_id, target)
     # The record is still authoritative when the live snapshot could not be
     # read; the failure travels with it rather than being presented as success.
     return {**list_conversation_messages(principal.user_id, target, limit=limit), 'ingest_error': ingest_error}
