@@ -1538,7 +1538,7 @@ const styles = StyleSheet.create({
   chatDim: { ...StyleSheet.absoluteFill, backgroundColor: '#05070A', zIndex: 60 }, chatDimPress: { flex: 1 },
   canvas: { flex: 1, minWidth: 0, position: 'relative', overflow: 'hidden' },
 
-  topBar: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, zIndex: 40, elevation: 20, ...Platform.select({ web: { paddingTop: 'calc(10px + env(safe-area-inset-top, 0px))' as any }, default: { paddingTop: 10 } }) },
+  topBar: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, zIndex: 50, elevation: 20, ...Platform.select({ web: { paddingTop: 'calc(10px + env(safe-area-inset-top, 0px))' as any }, default: { paddingTop: 10 } }) },
   glassCircle: { width: 46, height: 46, borderRadius: 23, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center', overflow: 'visible' },
   unreadAttentionDot: { position: 'absolute', top: 3, right: 3, width: 9, height: 9, borderRadius: 5, backgroundColor: '#F5C542' },
   identityControl: { flex: 1, minWidth: 0, minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 6 },
@@ -1581,7 +1581,7 @@ const styles = StyleSheet.create({
 
   // The composer genuinely floats on every platform: detached from the bottom
   // edge, inset horizontally, and layered above the transcript.
-  composerDock: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 35, ...Platform.select({ web: { paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))' as any }, default: { paddingBottom: 14 } }) },
+  composerDock: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 50, ...Platform.select({ web: { paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))' as any }, default: { paddingBottom: 14 } }) },
   composer: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 60, borderRadius: 30, paddingHorizontal: 10, paddingVertical: 7, marginHorizontal: 14, maxWidth: 720, alignSelf: 'center', width: '100%', zIndex: 20, elevation: 12, borderWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 22, shadowOffset: { width: 0, height: 6 } },
   composerIconButton: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' }, composerIconText: { fontSize: 23, fontWeight: '400' },
   composerInput: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: 8, paddingHorizontal: 2, outlineStyle: 'none' as any },
