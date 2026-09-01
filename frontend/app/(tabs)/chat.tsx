@@ -353,7 +353,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const dark = isDarkTheme(useChatColorScheme());
   const text = dark ? '#F4F5F7' : brand.ink;
   const muted = dark ? brand.mutedDark : brand.mutedLight;
-  const composerSurface = dark ? 'rgba(17,23,34,0.98)' : 'rgba(255,255,255,0.98)';
+  // The composer is floating chrome, not a bottom sheet: keep the same adaptive
+  // glass fill as the drawer button and header controls.
+  const composerSurface = glassFill(dark);
   const messages = useConversationMessages(target);
   // The captain thread is the conversation the gateway records canonically.
   // Worker panes are observation surfaces with no submitted turns, so they keep
@@ -1099,7 +1101,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const showEmptyState = transcript.length === 0 && !isThinking && hydratedHistoryTarget === target && (!canonicalTarget || conversationSync.status !== 'stale');
   const spectral = dark ? brand.cyan : brand.violet;
 
-  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={[styles.canvas, { backgroundColor: dark ? 'rgba(10,14,20,0.28)' : 'rgba(255,255,255,0.30)' }]}>
+  // The environment owns the colour of the canvas. A theme tint here would
+  // cover the entire scene and stack with EnvironmentBackground's targeted dim.
+  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={styles.canvas}>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
       {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
       {isThinking ? <WorkingState dark={dark} muted={muted} operations={activeOperations} /> : null}
@@ -1139,7 +1143,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         <TouchableOpacity testID={`remove-${attachment.id}`} accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => { setAttachments(current => current.filter(item => item.id !== attachment.id)); setSendError(null); }} style={styles.attachmentRemove}><Text style={[styles.attachmentRemoveText, { color: muted }]}>×</Text></TouchableOpacity>
       </View>)}
     </ScrollView> : null}
-    <View style={[styles.composer, { backgroundColor: composerSurface, borderColor: glassEdge(dark) }, blurStyle(24)]}>
+    <View testID="composer-surface" style={[styles.composer, { backgroundColor: composerSurface, borderColor: glassEdge(dark) }, blurStyle(24)]}>
       <View style={styles.attachmentControl}>
         <TouchableOpacity testID="attachment-menu-button" accessibilityRole="button" accessibilityLabel={attachmentMenuOpen ? 'Close attachment menu' : 'Add attachment'} accessibilityState={{ expanded: attachmentMenuOpen }} onPress={() => { setAttachmentMenuOpen(value => !value); setModelMenuOpen(false); }} style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: attachmentMenuOpen ? spectral : muted }]}>＋</Text></TouchableOpacity>
         {attachmentMenuOpen ? <View testID="attachment-menu" accessibilityViewIsModal style={[styles.attachmentMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
@@ -1245,8 +1249,8 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
   // Ongoing work replaces a conventional chat list: these are the things
   // currently working for the captain, not a server dashboard.
   const activeWork = fleet.ordered.filter(entry => matches(agentDisplayName(entry.agent))).slice(0, 5);
-  return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: dark ? 'rgba(8,11,17,0.96)' : 'rgba(252,253,254,0.97)' }, blurStyle(28), animatedStyle]} {...panHandlers}>
-    <View style={styles.drawerFixedHeader}><View style={styles.drawerTitleRow}>
+  return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: glassFill(dark, 'surface') }, blurStyle(28), animatedStyle]} {...panHandlers}>
+    <View testID="drawer-header" style={[styles.drawerFixedHeader, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}><View style={styles.drawerTitleRow}>
       <TouchableOpacity testID="drawer-close" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={onClose} activeOpacity={0.7} style={[styles.drawerCloseButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><CloseIcon size={20} color={text} /></TouchableOpacity>
       {searching
         ? <TextInput testID="drawer-search-input" autoFocus accessibilityLabel="Search Magistrate navigation" placeholder="Search" placeholderTextColor={muted} value={query} onChangeText={setQuery} style={[styles.drawerSearchInput, { color: text, borderColor: glassEdge(dark) }]} />
@@ -1615,7 +1619,7 @@ const styles = StyleSheet.create({
   // Drawer: sparse rows, one icon system, pinned footer, no cards.
   drawer: { position: 'absolute', top: 0, bottom: 0, width: 310, zIndex: 10, paddingHorizontal: 14, ...Platform.select({ web: { paddingTop: 'calc(14px + env(safe-area-inset-top, 0px))' as any }, default: { paddingTop: 14 } }), overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.34, shadowRadius: 32, elevation: 14 },
   drawerDesktop: { left: 0, borderTopRightRadius: 26, borderBottomRightRadius: 26 }, drawerMobile: { left: 0, width: '84%', maxWidth: 360 },
-  drawerFixedHeader: { flexShrink: 0, paddingBottom: 10 },
+  drawerFixedHeader: { flexShrink: 0, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 10, borderRadius: 26, borderWidth: StyleSheet.hairlineWidth },
   drawerTitleRow: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 10 },
   drawerCloseButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   drawerWordmark: { flex: 1, fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 26, lineHeight: 34, fontWeight: '500' },

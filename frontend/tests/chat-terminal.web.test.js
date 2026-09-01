@@ -348,6 +348,16 @@ test('chat starts at the measured latest content and preserves older-message rea
   // The floating controls now share one adaptive glass treatment so they stay
   // legible over an arbitrary environment; what matters is that the control is
   // still a filled, comfortably sized target rather than one pinned tone.
+  const composerStyle = await page.$eval('[data-testid="composer-surface"]', element => ({ background: getComputedStyle(element).backgroundColor, borderRadius: getComputedStyle(element).borderRadius }));
+  assert.match(composerStyle.background, /rgba\(255, 255, 255, 0\.66\)|rgba\(12, 17, 26, 0\.52\)/);
+  assert.equal(composerStyle.borderRadius, '30px');
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  const drawerHeaderStyle = await page.$eval('[data-testid="drawer-header"]', element => ({ background: getComputedStyle(element).backgroundColor, borderRadius: getComputedStyle(element).borderRadius }));
+  assert.match(drawerHeaderStyle.background, /rgba\(255, 255, 255, 0\.66\)|rgba\(12, 17, 26, 0\.52\)/);
+  assert.equal(drawerHeaderStyle.borderRadius, '26px');
+  await page.click('[data-testid="drawer-close"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) < 0.05);
   const jumpStyle = await page.$eval('[data-testid="jump-to-latest"]', element => ({ background: getComputedStyle(element).backgroundColor, width: getComputedStyle(element).width }));
   const jumpAlpha = Number((jumpStyle.background.match(/rgba?\([^)]*?([\d.]+)\)$/) || [])[1] ?? 1);
   assert.ok(jumpAlpha >= 0.5, `the jump control needs an opaque-enough backing, got ${jumpStyle.background}`);
@@ -879,16 +889,16 @@ test('settings default to system theme and automatic background, then persist ex
   assert.ok(await page.$('[data-testid="background-option-minimal-light"]'), 'Minimal Light is an offered environment');
   assert.ok(await page.$('[data-testid="settings-custom-background-upload"]'), 'uploading a background is a first-class control');
   await page.click('[data-testid="theme-option-dark"]');
-  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('10, 14, 20'));
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor === 'rgba(0, 0, 0, 0)');
   await page.close();
 
   const refreshed = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, true, 'dark');
   await openSettingsSheet(refreshed);
   await refreshed.click('[data-testid="settings-theme"]');
   assert.equal(await refreshed.$eval('[data-testid="theme-option-dark"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
-  // The environment owns the canvas now, so the shell carries a light
-  // theme-reactive tint instead of an opaque panel.
-  assert.match(await refreshed.$eval('[data-testid="branded-chat-shell"]', element => getComputedStyle(element).backgroundColor), /rgba\(10, 14, 20, 0\.28\)/);
+  // The environment owns the canvas; the chat shell must not add a blanket
+  // theme tint over it.
+  assert.equal(await refreshed.$eval('[data-testid="branded-chat-shell"]', element => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
   await refreshed.close();
 });
 
@@ -897,10 +907,10 @@ test('system theme follows the OS palette without retaining a stale light surfac
   await openSettingsSheet(page);
   await page.click('[data-testid="settings-theme"]');
   await page.click('[data-testid="theme-option-system"]');
-  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('10, 14, 20'));
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor === 'rgba(0, 0, 0, 0)');
   assert.equal(await page.$eval('[data-testid="theme-option-system"]', element => getComputedStyle(element).backgroundColor), 'rgb(36, 216, 255)');
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
-  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor.includes('255, 255, 255'));
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="branded-chat-shell"]')).backgroundColor === 'rgba(0, 0, 0, 0)');
   await page.close();
 });
 
