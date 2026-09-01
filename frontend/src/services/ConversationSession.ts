@@ -92,6 +92,74 @@ const discardLegacyStorage = (target: string, includeV2 = false) => {
   const prefixes = includeV2 ? LEGACY_STORAGE_PREFIXES : LEGACY_STORAGE_PREFIXES.slice(0, 1);
   void Promise.all(prefixes.map(prefix => AsyncStorage.removeItem(storageKey(prefix, target)))).catch(() => {});
 };
+const normalizeCachedAttachments = (raw: unknown, canonical: boolean): ConversationAttachment[] | undefined => {
+  if (!Array.isArray(raw)) return undefined;
+  const attachments = raw.slice(0, 10).flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    if (typeof value.name !== 'string' || !value.name || value.name.length > 160
+      || typeof value.mediaType !== 'string' || !value.mediaType || value.mediaType.length > 128
+      || (value.size !== undefined && (typeof value.size !== 'number' || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > 25 * 1024 * 1024))) return [];
+    const status = ATTACHMENT_STATES.has(String(value.status)) ? value.status as ConversationAttachment['status'] : undefined;
+    const uploadId = typeof value.uploadId === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(value.uploadId) ? value.uploadId : undefined;
+    const url = uploadId && value.url === `/api/v1/uploads/${uploadId}` ? value.url as string : undefined;
+    if (canonical && (status !== 'attached' || !uploadId || !url)) return [];
+    return [{ name: value.name, mediaType: value.mediaType, size: value.size as number | undefined, status, uploadId, url }];
+  });
+  return attachments.length ? attachments : undefined;
+};
+const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): ConversationMessage | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.canonicalId !== 'string' || value.canonicalId !== cacheKey || !value.canonicalId || value.canonicalId.length > 128
+    || typeof value.id !== 'string' || !value.id || value.id.length > 160
+    || (value.role !== 'user' && value.role !== 'assistant')
+    || (value.role === 'assistant' && value.id !== value.canonicalId)
+    || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 20_000
+    || (value.kind !== 'conversation' && value.kind !== 'tool')
+    || (value.kind === 'tool' && value.role !== 'assistant')
+    || typeof value.sequenceIndex !== 'number' || !Number.isSafeInteger(value.sequenceIndex) || value.sequenceIndex < 0
+    || typeof value.canonicalRevision !== 'number' || !Number.isSafeInteger(value.canonicalRevision) || value.canonicalRevision < 1
+    || typeof value.turnId !== 'string' || !value.turnId || value.turnId.length > 128
+    || typeof value.sentAt !== 'number' || !Number.isSafeInteger(value.sentAt) || value.sentAt < 1_000_000_000_000) return null;
+  const progress = ['queued', 'working', 'streaming', 'complete', 'failed', 'cancelled'].includes(String(value.progress)) ? value.progress as ConversationProgress : undefined;
+  const delivery = value.role === 'user' && ['sent', 'failed', 'cancelled'].includes(String(value.delivery)) ? value.delivery as ConversationMessage['delivery'] : undefined;
+  return {
+    id: value.id,
+    role: value.role,
+    text: value.text,
+    sentAt: value.sentAt,
+    source: value.source === 'voice' ? 'voice' : 'text',
+    kind: value.kind,
+    attachments: normalizeCachedAttachments(value.attachments, true),
+    progress,
+    audience: value.role === 'user' ? 'captain' : 'primary',
+    delivery,
+    canonicalId: value.canonicalId,
+    canonicalRevision: value.canonicalRevision,
+    turnId: value.turnId,
+    sequenceIndex: value.sequenceIndex,
+  };
+};
+const normalizeCachedPendingMessage = (raw: unknown, cacheKey: string): ConversationMessage | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.id !== 'string' || value.id !== cacheKey || !/^(?:u-|voice-u-)[A-Za-z0-9_-]*$/.test(value.id)
+    || value.role !== 'user' || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 20_000
+    || value.canonicalId !== undefined || (value.delivery !== 'sending' && value.delivery !== 'failed')) return null;
+  return {
+    id: value.id,
+    role: 'user',
+    text: value.text,
+    sentAt: typeof value.sentAt === 'number' && Number.isSafeInteger(value.sentAt) && value.sentAt >= 0 ? value.sentAt : undefined,
+    source: value.source === 'voice' ? 'voice' : 'text',
+    kind: 'conversation',
+    attachments: normalizeCachedAttachments(value.attachments, false),
+    progress: value.delivery === 'failed' ? 'failed' : value.progress === 'queued' ? 'queued' : 'working',
+    audience: 'captain',
+    delivery: value.delivery,
+  };
+};
 const persist = (target: string, messages: ConversationMessage[]) => {
   const previous = writesByTarget.get(target) || Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
@@ -115,27 +183,37 @@ const persist = (target: string, messages: ConversationMessage[]) => {
 };
 
 /**
- * Read only genuine unacknowledged submissions. The canonical cache is never
- * hydrated into the live captain thread: Gateway is read first and replaces it.
+ * The last locally observed canonical snapshot is a startup/reconnect cache,
+ * never a second authority. It is restored before the network read so a
+ * transient outage cannot turn a known conversation into an empty screen; a
+ * successful Gateway list read still prunes/replaces it authoritatively.
+ *
+ * Both maps are parsed fail-closed. In particular, only typed canonical rows
+ * with durable identity/revision/sequence metadata can enter the trusted
+ * snapshot, and terminal-era arrays are still deleted rather than migrated.
  */
-export async function loadPendingConversationMessages(target: string): Promise<ConversationMessage[]> {
-  if (target !== CAPTAIN_TARGET) return [];
+export async function loadCachedCaptainConversation(target: string): Promise<{ canonical: ConversationMessage[]; pending: ConversationMessage[] }> {
+  if (target !== CAPTAIN_TARGET) return { canonical: [], pending: [] };
   try {
     await writesByTarget.get(target)?.catch(() => {});
-    const raw = await AsyncStorage.getItem(storageKey(PENDING_CACHE_PREFIX, target));
+    const [canonicalRaw, pendingRaw] = await Promise.all([
+      AsyncStorage.getItem(storageKey(CANONICAL_CACHE_PREFIX, target)),
+      AsyncStorage.getItem(storageKey(PENDING_CACHE_PREFIX, target)),
+    ]);
     discardLegacyStorage(target, true);
-    if (!raw) return [];
-    const payload = JSON.parse(raw) as unknown;
-    if (!payload || typeof payload !== 'object') return [];
-    const values = Object.values((payload as { messages?: unknown }).messages || {});
-    return values.filter((item): item is ConversationMessage => {
-      if (!item || typeof item !== 'object') return false;
-      const value = item as Partial<ConversationMessage>;
-      return typeof value.id === 'string' && /^(?:u-|voice-u-)[A-Za-z0-9_-]*$/.test(value.id)
-        && value.role === 'user' && typeof value.text === 'string'
-        && !value.canonicalId && (value.delivery === 'sending' || value.delivery === 'failed');
-    }).map(item => ({ ...item, source: item.source === 'voice' ? 'voice' : 'text', audience: 'captain' }));
-  } catch { return []; }
+    const canonicalPayload = canonicalRaw ? JSON.parse(canonicalRaw) as Record<string, unknown> : null;
+    const pendingPayload = pendingRaw ? JSON.parse(pendingRaw) as Record<string, unknown> : null;
+    const canonicalMap = canonicalPayload?.schema_version === 'conversation-cache.v1' && canonicalPayload.messages && typeof canonicalPayload.messages === 'object'
+      ? canonicalPayload.messages as Record<string, unknown> : {};
+    const pendingMap = pendingPayload?.schema_version === 'conversation-pending.v1' && pendingPayload.messages && typeof pendingPayload.messages === 'object'
+      ? pendingPayload.messages as Record<string, unknown> : {};
+    const canonical = Object.entries(canonicalMap)
+      .flatMap(([key, value]) => { const normalized = normalizeCachedCanonicalMessage(value, key); return normalized ? [normalized] : []; })
+      .sort((left, right) => (left.sequenceIndex as number) - (right.sequenceIndex as number));
+    const pending = Object.entries(pendingMap)
+      .flatMap(([key, value]) => { const normalized = normalizeCachedPendingMessage(value, key); return normalized ? [normalized] : []; });
+    return { canonical, pending };
+  } catch { return { canonical: [], pending: [] }; }
 }
 
 export async function hydrateConversationMessages(target: string): Promise<ConversationMessage[]> {

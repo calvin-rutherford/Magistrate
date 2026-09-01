@@ -8,12 +8,24 @@
   --font-serif: Georgia, 'Times New Roman', serif;
 }
 
-html, body, #root, #root > div {
-  height: 100%;
+/* The dynamic viewport is the sole web viewport authority. Every application
+ * wrapper inherits that box; none owns a second vh measurement. Individual
+ * screens then expose their own bounded scrollers inside this non-scrolling
+ * document. */
+html {
   height: 100dvh;
   width: 100%;
   margin: 0;
   padding: 0;
   overflow: hidden;
-  touch-action: manipulation;
+  overscroll-behavior: none;
+}
+
+body, #root, #root > div {
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
 }
