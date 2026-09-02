@@ -29,11 +29,36 @@ def test_firstmate_agent_names_prefer_matched_task_title_and_keep_unmatched_herd
     assert mapped[1]['display_name_source'] == 'herdr'
 
 
+def test_firstmate_runtime_mapping_uses_only_observed_records_and_fails_closed():
+    agents = [
+        {'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'worker', 'harness': 'herdr-harness', 'model': 'observed-model'},
+        {'id': 'w1:p2', 'pane_id': 'w1:p2', 'name': 'missing-runtime'},
+    ]
+    snapshot = {'tasks': [
+        {'endpoint': {'target': 'default:w1:p1'}, 'harness': 'spawn-harness'},
+        {'endpoint': {'target': 'default:w1:p2'}},
+    ]}
+
+    mapped = FirstmateClient.apply_agent_display_names(agents, snapshot)
+
+    assert mapped[0]['harness'] == 'spawn-harness'
+    assert mapped[0]['model'] == 'observed-model'
+    assert mapped[0]['runtime_sources'] == {'harness': 'firstmate', 'model': 'herdr'}
+    assert mapped[1]['harness'] is None
+    assert mapped[1]['model'] is None
+    assert mapped[1]['runtime_sources'] == {'harness': None, 'model': None}
+
+
 def test_firstmate_agent_name_mapping_never_fabricates_missing_identity():
     agents = [{'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'w1:p1'}]
     snapshot = {'tasks': [{'endpoint': {'target': 'default:w1:p1'}, 'backlog': {}}]}
     assert FirstmateClient.apply_agent_display_names(agents, snapshot) == [
-        {'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'w1:p1', 'display_name_source': 'herdr'}
+        {
+            'id': 'w1:p1', 'pane_id': 'w1:p1', 'name': 'w1:p1',
+            'harness': None, 'model': None,
+            'runtime_sources': {'harness': None, 'model': None},
+            'display_name_source': 'herdr',
+        }
     ]
 
 

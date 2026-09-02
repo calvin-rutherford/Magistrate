@@ -291,6 +291,8 @@ export interface AgentInfo {
   id: string;
   name: string | null;
   harness?: string | null;
+  model?: string | null;
+  runtime_sources?: { harness?: 'firstmate' | 'herdr' | null; model?: 'firstmate' | 'herdr' | null };
   status?: 'idle' | 'working' | 'blocked' | 'done' | 'unknown' | string | null;
   pane_id?: string;
   tab_id?: string;
@@ -422,8 +424,16 @@ export interface ExecutionCapabilities {
   routing?: { selection_supported: boolean; migration_supported: boolean; mode: string };
 }
 
+export interface RoutingPreference {
+  default: { profile_id: string; harness: string | null; model: string | null; provider?: string | null; variant?: string | null } | null;
+  applies_to: ('new' | 'restarted')[];
+  delivery: { status: string; automatic: boolean; consumer: string; seam: string; message: string };
+}
+
 export interface ExecutionSettings {
   profile_id: string | null;
+  routing_profile_id: string | null;
+  routing_preference?: RoutingPreference;
   switching_behavior: 'migrate' | 'new-session';
   unavailable_behavior: 'error' | 'fallback';
   migration_supported: boolean;
@@ -650,6 +660,33 @@ export async function fetchAgents(): Promise<AgentInfo[]> {
   // client boundary fail-safe during rolling deploys so primary work never
   // enters Fleet counts, rows, active work, or navigation.
   return agents.filter(agent => agent.workspace_role !== 'primary');
+}
+
+export interface AgentMigration {
+  request_id: string;
+  agent_id: string;
+  idempotency_key: string;
+  target: { profile_id: string; harness: string; model: string };
+  status: 'requested' | 'relaunching' | 'running-on-new' | 'failed';
+  context: {
+    task_id?: string | null; worktree?: string | null; branch?: string | null;
+    brief?: string | null; progress?: unknown; preservation_plan: string[]; not_preserved: string[];
+  };
+  execution: { mode: 'operator-terminal'; automatic: false; message: string };
+  error?: string | null;
+}
+
+export async function requestAgentMigration(agentId: string, profileId: string, idempotencyKey: string): Promise<AgentMigration> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/agents/${encodeURIComponent(agentId)}/migration-requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: profileId, idempotency_key: idempotencyKey, confirmed: true })
+  });
+  return checkedJson<AgentMigration>(res);
+}
+
+export async function fetchAgentMigration(agentId: string, requestId: string): Promise<AgentMigration> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/agents/${encodeURIComponent(agentId)}/migration-requests/${encodeURIComponent(requestId)}`);
+  return checkedJson<AgentMigration>(res);
 }
 
 export async function fetchFleet() {
@@ -908,15 +945,16 @@ export async function fetchExecutionSettings(): Promise<ExecutionSettings> {
   });
   const data = await checkedJson<unknown>(res);
   if (!data || typeof data !== 'object' || !['migrate', 'new-session'].includes((data as any).switching_behavior) || !['error', 'fallback'].includes((data as any).unavailable_behavior) || !('profile_id' in data)) throw new Error('Gateway returned invalid execution settings.');
-  return data as ExecutionSettings;
+  return { ...(data as ExecutionSettings), routing_profile_id: (data as any).routing_profile_id ?? null };
 }
 
-export async function updateExecutionSettings(update: Partial<Pick<ExecutionSettings, 'profile_id' | 'switching_behavior' | 'unavailable_behavior'>>): Promise<ExecutionSettings> {
+export async function updateExecutionSettings(update: Partial<Pick<ExecutionSettings, 'profile_id' | 'routing_profile_id' | 'switching_behavior' | 'unavailable_behavior'>>): Promise<ExecutionSettings> {
   const res = await authorizedFetch(GATEWAY_URL + '/execution/settings', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(update)
   });
-  return checkedJson<ExecutionSettings>(res);
+  const data = await checkedJson<ExecutionSettings>(res);
+  return { ...data, routing_profile_id: data.routing_profile_id ?? null };
 }
 
 export async function saveExecutionCredential(credentialKey: string, credential: string): Promise<{ credential_key: string; configured: boolean }> {

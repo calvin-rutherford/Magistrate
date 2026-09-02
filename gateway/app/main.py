@@ -19,7 +19,8 @@ from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
 from app.contracts import (UniversalInputContract, ExecutionSettingsContract, ExecutionCredentialContract, GestureInputContract,
                            NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
-                           AttentionActionExecuteContract,
+                           AttentionActionExecuteContract, RoutingPreferenceContract,
+                           AgentMigrationRequestContract, AgentMigrationTransitionContract,
                            RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
@@ -28,7 +29,8 @@ from app.conversation_store import (CONVERSATION_SCHEMA, MAX_MESSAGE_WINDOW, ing
                                     record_prompt, reset_conversation, set_turn_status, turn_messages)
 from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
                     disconnect_account, get_execution_preferences, get_execution_credential_status,
-                    save_execution_preferences, save_execution_credential, delete_execution_credential)
+                    save_execution_preferences, save_execution_credential, delete_execution_credential,
+                    create_agent_migration, get_agent_migration, get_agent_migration_by_idempotency, transition_agent_migration)
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
 from app.attention_service import attention_service
@@ -850,10 +852,31 @@ async def get_execution_capability_inventory(principal: Principal = Depends(requ
         raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
 
 
+def _routing_delivery(preference: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    selected = None
+    if preference.get('routing_profile_id'):
+        try:
+            selected = profile_selection(preference['routing_profile_id'], user_id)
+        except (RuntimeError, ValueError):
+            # A removed inventory entry does not erase the durable preference,
+            # and it must not be reconstructed from a similar-looking model.
+            selected = {'profile_id': preference['routing_profile_id'], 'harness': None, 'model': None, 'provider': None, 'variant': None}
+    return {
+        'default': selected,
+        'applies_to': ['new', 'restarted'],
+        'delivery': {
+            'status': 'pending-firstmate-integration', 'automatic': False,
+            'consumer': 'firstmate', 'seam': 'GET /api/v1/execution/routing-preference',
+            'message': 'Preference is persisted, but Firstmate does not consume it automatically yet.',
+        },
+    }
+
+
 @app.get('/api/v1/execution/settings')
 async def get_execution_settings(principal: Principal = Depends(require_scope('account'))):
-    return {**get_execution_preferences(principal.user_id), 'migration_supported': False,
-            'credential_storage': 'encrypted', 'credentials': [
+    preference = get_execution_preferences(principal.user_id)
+    return {**preference, 'routing_preference': _routing_delivery(preference, principal.user_id),
+            'migration_supported': False, 'credential_storage': 'encrypted', 'credentials': [
                 {'credential_key': key, 'configured': configured}
                 for key, configured in get_execution_credential_status(principal.user_id).items()
             ]}
@@ -863,6 +886,7 @@ async def get_execution_settings(principal: Principal = Depends(require_scope('a
 async def put_execution_settings(contract: ExecutionSettingsContract, principal: Principal = Depends(require_scope('account'))):
     current = get_execution_preferences(principal.user_id)
     profile_id = contract.profile_id if 'profile_id' in contract.model_fields_set else current['profile_id']
+    routing_profile_id = contract.routing_profile_id if 'routing_profile_id' in contract.model_fields_set else current['routing_profile_id']
     switching = contract.switching_behavior or current['switching_behavior']
     unavailable = contract.unavailable_behavior or current['unavailable_behavior']
     if profile_id and 'profile_id' in contract.model_fields_set:
@@ -877,8 +901,45 @@ async def put_execution_settings(contract: ExecutionSettingsContract, principal:
             raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {**save_execution_preferences(principal.user_id, profile_id=profile_id, switching_behavior=switching, unavailable_behavior=unavailable),
-            'migration_supported': False}
+    if routing_profile_id and 'routing_profile_id' in contract.model_fields_set:
+        try:
+            profile_selection(routing_profile_id, principal.user_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    saved = save_execution_preferences(principal.user_id, profile_id=profile_id, routing_profile_id=routing_profile_id,
+                                       switching_behavior=switching, unavailable_behavior=unavailable)
+    return {**saved, 'routing_preference': _routing_delivery(saved, principal.user_id), 'migration_supported': False}
+
+
+@app.get('/api/v1/execution/routing-preference')
+async def get_spawn_routing_preference(principal: Principal = Depends(require_scope('account'))):
+    preference = get_execution_preferences(principal.user_id)
+    return _routing_delivery(preference, principal.user_id)
+
+
+@app.put('/api/v1/execution/routing-preference')
+async def put_spawn_routing_preference(contract: RoutingPreferenceContract, principal: Principal = Depends(require_scope('account'))):
+    supplied_harness = 'harness' in contract.model_fields_set
+    supplied_model = 'model' in contract.model_fields_set
+    if not supplied_harness or not supplied_model or bool(contract.harness) != bool(contract.model):
+        raise HTTPException(status_code=422, detail='A default harness and model must be supplied together; use null for both to clear.')
+    current = get_execution_preferences(principal.user_id)
+    selection = None
+    if contract.harness and contract.model:
+        try:
+            selection = validate_execution_selection(contract.harness, contract.model, user_id=principal.user_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    saved = save_execution_preferences(
+        principal.user_id, profile_id=current['profile_id'],
+        routing_profile_id=selection['profile_id'] if selection else None,
+        switching_behavior=current['switching_behavior'], unavailable_behavior=current['unavailable_behavior'],
+    )
+    return _routing_delivery(saved, principal.user_id)
 
 
 @app.put('/api/v1/execution/credentials/{credential_key:path}')
@@ -914,6 +975,57 @@ async def list_agents(principal: Principal = Depends(require_scope('read'))):
 @app.get('/api/v1/fleet')
 async def get_fleet(principal: Principal = Depends(require_scope('read'))):
     return await fm_client.get_snapshot()
+
+
+@app.post('/api/v1/agents/{agent_id}/migration-requests')
+async def request_agent_migration(agent_id: str, contract: AgentMigrationRequestContract, principal: Principal = Depends(require_scope('command'))):
+    existing = get_agent_migration_by_idempotency(principal.user_id, contract.idempotency_key)
+    if existing:
+        if existing['agent_id'] != agent_id or existing['target']['profile_id'] != contract.profile_id:
+            raise HTTPException(status_code=409, detail='That idempotency key was already used for a different migration request.')
+        return existing
+    try:
+        target = profile_selection(contract.profile_id, principal.user_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    agents, fleet = await asyncio.gather(herdr_client.list_agents(), fm_client.get_snapshot())
+    observed_agents = fm_client.apply_agent_display_names(agents, fleet)
+    agent = next((item for item in observed_agents if item.get('id') == agent_id or item.get('pane_id') == agent_id), None)
+    if not agent or agent.get('workspace_role') == 'primary':
+        raise HTTPException(status_code=404, detail='The running worker agent is no longer available.')
+    if str(agent.get('status') or '').lower() not in {'working', 'running', 'active', 'executing'}:
+        raise HTTPException(status_code=409, detail='Migration is available only for a currently running agent.')
+    context = fm_client.migration_context(str(agent.get('pane_id') or agent_id), fleet)
+    context['current_runtime'] = {'harness': agent.get('harness'), 'model': agent.get('model')}
+    try:
+        return create_agent_migration(principal.user_id, agent_id, contract.idempotency_key, target, context)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get('/api/v1/agents/{agent_id}/migration-requests/{request_id}')
+async def inspect_agent_migration(agent_id: str, request_id: str, principal: Principal = Depends(require_scope('read'))):
+    migration = get_agent_migration(principal.user_id, request_id)
+    if not migration or migration['agent_id'] != agent_id:
+        raise HTTPException(status_code=404, detail='Migration request not found.')
+    return migration
+
+
+@app.post('/api/v1/agents/{agent_id}/migration-requests/{request_id}/operator-transition')
+async def report_agent_migration_transition(agent_id: str, request_id: str, contract: AgentMigrationTransitionContract, principal: Principal = Depends(require_scope('command'))):
+    migration = get_agent_migration(principal.user_id, request_id)
+    if not migration or migration['agent_id'] != agent_id:
+        raise HTTPException(status_code=404, detail='Migration request not found.')
+    if migration['idempotency_key'] != contract.idempotency_key:
+        raise HTTPException(status_code=409, detail='The transition does not match this migration idempotency key.')
+    try:
+        return transition_agent_migration(principal.user_id, request_id, contract.state, contract.evidence)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 @app.get('/api/v1/attention')
 async def get_attention(principal: Principal = Depends(require_scope('read'))):

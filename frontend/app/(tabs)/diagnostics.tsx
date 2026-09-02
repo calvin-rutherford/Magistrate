@@ -103,7 +103,7 @@ export default function HomeScreen() {
           <Text style={styles.statusBadgeText}>{displayAgentStatus(displayStatus)}</Text>
           </View>
         </View>
-        {agent.harness ? <Text style={styles.harnessText}>Harness: {agent.harness}</Text> : null}
+        <Text testID={`agent-runtime-${agent.id}`} style={styles.harnessText}>Harness: {agent.harness || 'unknown'} · Model: {agent.model || 'unknown'}</Text>
         {agent.pane_id ? <Text selectable style={styles.harnessText}>Pane ID: {agent.pane_id}</Text> : null}
         {agent.tab_id ? <Text selectable style={styles.harnessText}>Tab ID: {agent.tab_id}</Text> : null}
         <Text style={styles.agentLinkText}>OPEN AGENT CHAT →</Text>

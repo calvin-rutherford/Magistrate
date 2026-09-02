@@ -62,14 +62,8 @@ class FirstmateClient:
             }
 
     @staticmethod
-    def apply_agent_display_names(herdr_agents: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Prefer Firstmate's task identity while preserving Herdr as fallback.
-
-        Fleet task endpoints use a qualified target such as ``default:w1D:p2``;
-        Herdr exposes the pane as ``w1D:p2``. Only a real endpoint match may
-        rename an agent, and no synthetic/demo identity is introduced.
-        """
-        names_by_target: Dict[str, str] = {}
+    def _tasks_by_target(snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        tasks: Dict[str, Dict[str, Any]] = {}
         for task in snapshot.get('tasks', []):
             if not isinstance(task, dict):
                 continue
@@ -79,24 +73,73 @@ class FirstmateClient:
                 continue
             if target.startswith('default:'):
                 target = target[len('default:'):]
-            backlog = task.get('backlog') if isinstance(task.get('backlog'), dict) else {}
-            name = None
-            for candidate in (task.get('worker_label'), task.get('label'), backlog.get('title')):
-                name = _task_display_name(candidate, target)
-                if name:
-                    break
-            if name:
-                names_by_target[target] = name
+            tasks[target] = task
+        return tasks
 
+    @staticmethod
+    def apply_agent_display_names(herdr_agents: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Join only observed Firstmate task identity and runtime metadata.
+
+        The spawning record wins when it carries a harness/model. Missing fields
+        remain ``None``; a selectable Gateway profile is never evidence of what
+        a live process is actually running.
+        """
+        tasks_by_target = FirstmateClient._tasks_by_target(snapshot)
         result = []
         for agent in herdr_agents:
             target = str(agent.get('pane_id') or agent.get('id') or '')
-            assigned_name = names_by_target.get(target)
+            task = tasks_by_target.get(target)
+            backlog = task.get('backlog') if task and isinstance(task.get('backlog'), dict) else {}
+            assigned_name = None
+            if task:
+                for candidate in (task.get('worker_label'), task.get('label'), backlog.get('title')):
+                    assigned_name = _task_display_name(candidate, target)
+                    if assigned_name:
+                        break
+            task_harness = task.get('harness').strip() if task and isinstance(task.get('harness'), str) and task.get('harness').strip() else None
+            task_model = task.get('model').strip() if task and isinstance(task.get('model'), str) and task.get('model').strip() else None
+            herdr_harness = agent.get('harness').strip() if isinstance(agent.get('harness'), str) and agent.get('harness').strip() else None
+            herdr_model = agent.get('model').strip() if isinstance(agent.get('model'), str) and agent.get('model').strip() else None
+            harness = task_harness or herdr_harness
+            model = task_model or herdr_model
             result.append({
                 **agent,
+                'harness': harness,
+                'model': model,
+                'runtime_sources': {
+                    'harness': 'firstmate' if task_harness else ('herdr' if herdr_harness else None),
+                    'model': 'firstmate' if task_model else ('herdr' if herdr_model else None),
+                },
                 **({'name': assigned_name, 'display_name_source': 'firstmate'} if assigned_name else {'display_name_source': 'herdr'}),
             })
         return result
+
+    @staticmethod
+    def migration_context(agent_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """Describe real Firstmate context available to an operator relaunch."""
+        task = FirstmateClient._tasks_by_target(snapshot).get(agent_id)
+        if not task:
+            return {
+                'task_id': None, 'worktree': None, 'brief': None, 'progress': None,
+                'preservation_plan': ['worktree', 'branch', 'brief', 'progress'],
+                'not_preserved': ['in-flight turn'],
+            }
+        paths = task.get('paths') if isinstance(task.get('paths'), dict) else {}
+        worktree = paths.get('worktree') if isinstance(paths.get('worktree'), dict) else {}
+        backlog = task.get('backlog') if isinstance(task.get('backlog'), dict) else {}
+        status_log = paths.get('status_log') if isinstance(paths.get('status_log'), dict) else {}
+        return {
+            'task_id': task.get('id'),
+            'worktree': worktree.get('path') if worktree.get('present') is True else None,
+            # Firstmate's snapshot exposes the durable brief and status record,
+            # but not the checked-out branch name. The terminal operator must
+            # verify/reuse that branch from the observed worktree.
+            'branch': None,
+            'brief': backlog.get('body_excerpt') or backlog.get('title'),
+            'progress': status_log.get('last_event') or task.get('current_state'),
+            'preservation_plan': ['worktree', 'branch', 'brief', 'progress'],
+            'not_preserved': ['in-flight turn'],
+        }
 
     async def get_attention_items(self, herdr_agents: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         snapshot = await self.get_snapshot()
