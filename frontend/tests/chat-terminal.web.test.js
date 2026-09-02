@@ -367,9 +367,16 @@ test('chat starts at the measured latest content and preserves older-message rea
   // The floating controls now share one adaptive glass treatment so they stay
   // legible over an arbitrary environment; what matters is that the control is
   // still a filled, comfortably sized target rather than one pinned tone.
-  const composerStyle = await page.$eval('[data-testid="composer-surface"]', element => ({ background: getComputedStyle(element).backgroundColor, borderRadius: getComputedStyle(element).borderRadius }));
-  assert.match(composerStyle.background, /rgba\(255, 255, 255, 0\.66\)|rgba\(12, 17, 26, 0\.52\)/);
-  assert.equal(composerStyle.borderRadius, '30px');
+  const chromeStyles = await page.evaluate(() => ['chat-header', 'composer-surface'].map(testId => {
+    const style = getComputedStyle(document.querySelector(`[data-testid="${testId}"]`));
+    return { testId, background: style.backgroundColor, image: style.backgroundImage };
+  }));
+  assert.deepEqual(chromeStyles, [
+    { testId: 'chat-header', background: 'rgba(0, 0, 0, 0)', image: 'none' },
+    { testId: 'composer-surface', background: 'rgba(0, 0, 0, 0)', image: 'none' },
+  ], 'header and composer must not paint a background over transcript text');
+  assert.equal((await page.$$('[data-testid="chat-top-scrim"], [data-testid="chat-bottom-scrim"]')).length, 0);
+  assert.equal(await page.$eval('[data-testid="composer-surface"]', element => getComputedStyle(element).borderRadius), '30px');
   await page.click('[data-testid="brand-drawer-toggle"]');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
   const drawerHeaderStyle = await page.$eval('[data-testid="drawer-header"]', element => ({ background: getComputedStyle(element).backgroundColor, borderRadius: getComputedStyle(element).borderRadius }));
