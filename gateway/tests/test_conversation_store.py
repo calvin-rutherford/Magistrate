@@ -713,6 +713,100 @@ def typed_rows(fixture: str):
     return classify_history_rows(parse_agent_history((FIXTURES / fixture).read_text()))
 
 
+CURRENT_PI_FOOTER = typed_rows('production-pi-footer-no-ch-current.ansi')[0]
+OLD_PI_FOOTER = {
+    'role': 'assistant', 'kind': 'control',
+    'text': '↑130k ↓14k R4.8M CH99.1% $3.461 (sub) 31.7%/272k (auto) (openai-codex) gpt-5.6-sol • medium',
+}
+
+
+@pytest.mark.parametrize(('activity', 'expected_reply'), [
+    ([
+        ('assistant', 'conversation', 'Reply before footer.'),
+        ('assistant', 'control', CURRENT_PI_FOOTER['text']),
+    ], 'Reply before footer.'),
+    ([
+        ('assistant', 'control', CURRENT_PI_FOOTER['text']),
+        ('assistant', 'conversation', 'Reply after footer.'),
+    ], 'Reply after footer.'),
+    ([
+        ('assistant', 'conversation', 'Opening prose.'),
+        ('assistant', 'tool', 'Running 2 commands'),
+        ('assistant', 'conversation', 'Closing prose.'),
+        ('assistant', 'control', CURRENT_PI_FOOTER['text']),
+    ], 'Opening prose.\n\nClosing prose.'),
+])
+def test_pi_footer_orderings_preserve_prose_once_and_never_render_metadata(activity, expected_reply):
+    prompt = 'exercise footer ordering'
+    store.record_prompt(USER, TARGET, 'u-footer-order', prompt)
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt), *activity,
+    ), response_complete=True)
+
+    messages = store.list_messages(USER, TARGET)['messages']
+    replies = [item for item in messages if item['role'] == 'assistant' and item['type'] == 'conversation']
+    assert [item['text'] for item in replies] == [expected_reply]
+    assert not any('↑' in item['text'] or 'gpt-5.6' in item['text'] for item in messages)
+
+
+def test_streaming_footer_updates_keep_one_reply_identity_and_revision_sequence():
+    prompt = 'stream around changing footer counters'
+    turn = store.record_prompt(USER, TARGET, 'u-footer-stream', prompt)
+    for reply, footer in (
+        ('A legitimate partial response.', CURRENT_PI_FOOTER),
+        ('A legitimate partial response. Final sentence.', OLD_PI_FOOTER),
+    ):
+        store.ingest_terminal_rows(USER, TARGET, rows(
+            ('user', 'conversation', prompt),
+            ('assistant', 'conversation', reply),
+            ('assistant', 'control', footer['text']),
+        ), response_complete=False)
+
+    [reply] = [item for item in store.list_messages(USER, TARGET)['messages'] if item['role'] == 'assistant']
+    assert reply['turn_id'] == turn['turn_id']
+    assert reply['text'] == 'A legitimate partial response. Final sentence.'
+    assert reply['revision'] == 2
+    assert reply['turn_status'] == 'streaming'
+
+
+def test_structural_footer_cleanup_removes_only_poison_and_reingests_real_prose():
+    prompt = 'recover this turn'
+    turn = store.record_prompt(USER, TARGET, 'u-footer-repair', prompt)
+    store.record_primary_reply(
+        USER, TARGET, turn['turn_id'], 'legacy placeholder', source='terminal',
+    )
+    # Model a row persisted by the pre-fix writer. The current synchronous and
+    # terminal write boundaries both reject this footer before insertion.
+    with sqlite3.connect(db.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE conversation_messages SET text = ? WHERE turn_id = ? AND slot = 'primary'",
+            (CURRENT_PI_FOOTER['text'], turn['turn_id']),
+        )
+
+    # Ingestion first removes the metadata-only legacy primary, then uses the
+    # corrected typed snapshot through the normal prompt/segment path.
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', prompt),
+        ('assistant', 'control', CURRENT_PI_FOOTER['text']),
+        ('assistant', 'conversation', 'The recovered conversational response.'),
+    ), response_complete=True)
+    assert visible() == [
+        ('user', 'conversation', prompt),
+        ('assistant', 'conversation', 'The recovered conversational response.'),
+    ]
+
+
+def test_structural_footer_cleanup_does_not_delete_legitimate_model_prose():
+    turn = store.record_prompt(USER, TARGET, 'u-footer-prose', 'discuss the model')
+    prose = 'GPT-5.6 used automatic mode; the request cost was $3.002.'
+    store.record_primary_reply(USER, TARGET, turn['turn_id'], prose, source='terminal')
+
+    assert visible() == [
+        ('user', 'conversation', 'discuss the model'),
+        ('assistant', 'conversation', prose),
+    ]
+
+
 def test_a_real_pi_pane_snapshot_adds_nothing_to_a_conversation_it_does_not_belong_to():
     """The live leak class: Pi boxes a file excerpt exactly like a user turn."""
     rows = typed_rows('live-pi-pane.ansi')

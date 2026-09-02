@@ -1,7 +1,13 @@
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from app.herdr_client import HERDR_MAX_READ_LINES, HerdrClient, parse_agent_history
+from app.herdr_client import (
+    HERDR_MAX_READ_LINES, HerdrClient, classify_history_rows,
+    is_pi_status_footer, parse_agent_history,
+)
+
+FIXTURES = Path(__file__).parent / 'fixtures'
 
 
 @pytest.mark.asyncio
@@ -340,6 +346,49 @@ def test_a_harness_usage_overlay_is_not_conversation():
     assert parse_agent_history(output) == [
         {'role': 'user', 'kind': 'conversation', 'text': 'redeploy the demo once the chat fix lands'},
         {'role': 'assistant', 'kind': 'conversation', 'text': 'Aye captain, queued behind the chat fix.'},
+    ]
+
+
+def test_current_and_historical_pi_status_footers_are_control_not_conversation():
+    current_raw = (FIXTURES / 'production-pi-footer-no-ch-current.ansi').read_text()
+    current = classify_history_rows(parse_agent_history(current_raw))
+    old = '↑130k ↓14k R4.8M CH99.1% $3.461 (sub) 31.7%/272k (auto) (openai-codex) gpt-5.6-sol • medium'
+
+    assert current == [{
+        'role': 'assistant', 'kind': 'control',
+        'text': '↑200k ↓12k R5.6M $3.002 (sub) 34.9%/272k (auto) gpt-5.6-s',
+    }]
+    assert is_pi_status_footer(current[0]['text'])
+    assert is_pi_status_footer(old)
+    # Every structural field is required. Legitimate prose that happens to
+    # discuss a model, cost, context, or automatic mode remains prose.
+    for prose in (
+        'GPT-5.6 cost $3.002 for this request.',
+        'Usage rose ↑200k while the model was in auto mode.',
+        'The 34.9% context figure leaves plenty of capacity.',
+    ):
+        assert not is_pi_status_footer(prose)
+
+
+def test_a_boxed_pi_footer_does_not_steal_the_following_assistant_reply():
+    reset = '\x1b[0m'
+    box = '\x1b[48;5;59m'
+    footer = (FIXTURES / 'production-pi-footer-no-ch-current.ansi').read_text()
+    output = '\r\n'.join([
+        f'{reset}{box} captain prompt {reset}', '', footer,
+        ' The legitimate assistant response remains visible.',
+    ])
+
+    assert classify_history_rows(parse_agent_history(output)) == [
+        {'role': 'user', 'kind': 'conversation', 'text': 'captain prompt'},
+        {
+            'role': 'assistant', 'kind': 'control',
+            'text': '↑200k ↓12k R5.6M $3.002 (sub) 34.9%/272k (auto) gpt-5.6-s',
+        },
+        {
+            'role': 'assistant', 'kind': 'conversation',
+            'text': 'The legitimate assistant response remains visible.',
+        },
     ]
 
 

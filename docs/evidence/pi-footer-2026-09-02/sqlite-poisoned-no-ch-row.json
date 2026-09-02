@@ -1,0 +1,17 @@
+[
+  {
+    "id": "cm_0b0b11ba0258c69589f1",
+    "turn_id": "ct_7433245986856ac6",
+    "role": "assistant",
+    "type": "conversation",
+    "slot": "primary",
+    "text": "↑200k ↓12k R5.6M $3.002 (sub) 34.9%/272k (auto)  gpt-5.6-s",
+    "visible_in_chat": 1,
+    "sequence_index": 23999,
+    "revision": 1,
+    "source": "terminal",
+    "client_message_id": "u-1788311815427-o0zetad0",
+    "prompt_key": "Scratch that",
+    "status": "answered"
+  }
+]

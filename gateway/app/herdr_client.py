@@ -64,6 +64,20 @@ _ANSI_BACKGROUND = re.compile(r'\x1b\[48;5;(\d+)m')
 # reply). Prompt-echo/submission-marker evidence, not text similarity.
 _BOXED_FOREGROUND = re.compile(r'\x1b\[38;5;188m')
 _ANSI_ITALIC = re.compile(r'\x1b\[(?:[^m;]*;)*3(?:;[^m]*)?m')
+_PI_METRIC = r'\d+(?:\.\d+)?[kKmMgGtT]?'
+# Pi telemetry footers have no prose grammar: the whole row is an ordered set
+# of token counters, request/runtime, optional historical CH utilization,
+# subscription cost, context capacity, mode, and harness/model identity. Keep
+# every component anchored so ordinary prose mentioning a model or cost cannot
+# be swallowed. Current Pi omitted CH; older releases included it.
+_PI_STATUS_FOOTER = re.compile(
+    rf'^\s*↑\s*{_PI_METRIC}\s+↓\s*{_PI_METRIC}\s+R\s*{_PI_METRIC}\s+'
+    rf'(?:CH\s*\d+(?:\.\d+)?%\s+)?\$\s*\d+(?:\.\d+)?\s+\(sub\)\s+'
+    rf'\d+(?:\.\d+)?%\s*/\s*{_PI_METRIC}\s+\((?:auto|manual)\)\s+'
+    r'(?:\([A-Za-z0-9._-]+\)\s+)?(?:gpt|claude|codex|gemini|pi)[A-Za-z0-9._-]*'
+    r'(?:\s*[•·]\s*(?:low|medium|high|xhigh|max|ultra))?\s*$',
+    re.IGNORECASE,
+)
 # Footer/status overlays herdr captures mid-frame; they can land on an indented
 # row directly under a message, so they are dropped wherever they appear.
 _TERMINAL_CHROME = re.compile(
@@ -124,9 +138,14 @@ def unwrap_terminal_text(text: str) -> str:
     return re.sub(r'\n{2,}', '\n\n', '\n'.join(blocks)).strip()
 
 
+def is_pi_status_footer(text: str) -> bool:
+    """Whether ``text`` is one complete structural Pi telemetry footer."""
+    return bool(_PI_STATUS_FOOTER.fullmatch(_ANSI.sub('', text).strip()))
+
+
 def _is_harness_artifact(text: str) -> bool:
     value = _ANSI.sub('', text).strip()
-    if not value or _TERMINAL_CHROME.search(value) or _TRANSIENT_SUMMARY.match(value) or _HARNESS_ARTIFACT.match(value) or _AUDIENCE_CONTROL.match(value) or _SYSTEM_NOTICE.match(value) or _PANEL_CHROME.match(value) or _ROUTING_PREFIX.match(value):
+    if not value or is_pi_status_footer(value) or _TERMINAL_CHROME.search(value) or _TRANSIENT_SUMMARY.match(value) or _HARNESS_ARTIFACT.match(value) or _AUDIENCE_CONTROL.match(value) or _SYSTEM_NOTICE.match(value) or _PANEL_CHROME.match(value) or _ROUTING_PREFIX.match(value):
         return True
     try:
         envelope = json.loads(value)
@@ -183,6 +202,13 @@ def _parse_pi_ansi_history(output: str) -> List[Dict[str, str]]:
             text = unwrap_terminal_text('\n'.join(run))
             if not text:
                 continue
+            if is_pi_status_footer(text):
+                # A redraw can paint the footer with the same box as a user
+                # turn. It is agent-side control noise, not a new audience
+                # boundary; preserving that distinction keeps following prose
+                # attached to the real prompt.
+                messages.append({'role': 'assistant', 'kind': 'control', 'text': text})
+                continue
             if _is_harness_artifact(text):
                 # Firstmate control plumbing can share Pi's user box. Keep its
                 # audience boundary without exposing it as conversation; the
@@ -209,6 +235,10 @@ def _parse_pi_ansi_history(output: str) -> List[Dict[str, str]]:
         if not text.strip():
             if assistant_lines and assistant_lines[-1] != '':
                 assistant_lines.append('')
+            continue
+        if is_pi_status_footer(text):
+            finish_assistant()
+            messages.append({'role': 'assistant', 'kind': 'control', 'text': text.strip()})
             continue
         if _is_harness_artifact(text):
             finish_assistant()
