@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AgentHistoryMessage, filterAgentHistory, isHarnessArtifact, isRawTerminalArtifact, isRenderableToolCall, parseAgentHistory, sanitizeAgentHistory, sanitizeTerminalHistory, toolCallPreview } from '../src/services/ChatHistory';
+import { AgentHistoryMessage, filterAgentHistory, isHarnessArtifact, isPiStatusFooter, isRawTerminalArtifact, isRenderableToolCall, parseAgentHistory, sanitizeAgentHistory, sanitizeTerminalHistory, toolCallPreview } from '../src/services/ChatHistory';
 
 const history: AgentHistoryMessage[] = [
   { role: 'user', kind: 'conversation', text: 'Please inspect the fleet.' },
@@ -207,6 +207,34 @@ test('a captain turn that merely names a file stays a captain turn', () => {
     { role: 'user', kind: 'conversation', text: 'check gateway/app/db.py and tell me what it does' },
     { role: 'assistant', kind: 'conversation', text: 'Here is what it does.' },
   ]);
+});
+
+test('current and historical Pi telemetry footers are agent-side control rows', () => {
+  const reset = '\x1b[0m';
+  const box = '\x1b[48;5;59m';
+  const current = '↑200k ↓12k R5.6M $3.002 (sub) 34.9%/272k (auto) gpt-5.6-s';
+  const old = '↑130k ↓14k R4.8M CH99.1% $3.461 (sub) 31.7%/272k (auto) (openai-codex) gpt-5.6-sol • medium';
+  const output = [
+    `${reset}${box} captain prompt ${reset}`,
+    '',
+    `${reset}${box} ↑200k ↓12k R5.6M $3.002 (sub) ${reset}`,
+    `${reset}${box} 34.9%/272k (auto) gpt-5.6-s ${reset}`,
+    '',
+    ' The legitimate assistant response remains visible.',
+  ].join('\r\n');
+
+  assert.deepEqual(sanitizeTerminalHistory(parseAgentHistory(output)), [
+    { role: 'user', kind: 'conversation', text: 'captain prompt' },
+    { role: 'assistant', kind: 'control', text: current },
+    { role: 'assistant', kind: 'conversation', text: 'The legitimate assistant response remains visible.' },
+  ]);
+  assert.equal(isPiStatusFooter(current), true);
+  assert.equal(isPiStatusFooter(old), true);
+  for (const prose of [
+    'GPT-5.6 cost $3.002 for this request.',
+    'Usage rose ↑200k while the model was in auto mode.',
+    'The 34.9% context figure leaves plenty of capacity.',
+  ]) assert.equal(isPiStatusFooter(prose), false);
 });
 
 test('a spinner row and a truncated cwd row are not agent prose', () => {

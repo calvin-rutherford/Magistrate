@@ -34,7 +34,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app import db
-from app.herdr_client import classify_history_rows, tool_call_preview
+from app.herdr_client import classify_history_rows, is_pi_status_footer, tool_call_preview
 
 CONVERSATION_SCHEMA = 'conversation.v1'
 
@@ -463,7 +463,7 @@ def record_primary_reply(
 ) -> List[Dict[str, Any]]:
     """Record a reply the provider returned synchronously for a known turn."""
     text = (text or '').strip()
-    if not text:
+    if not text or is_pi_status_footer(text):
         return []
     with _session() as conn:
         turn = conn.execute('SELECT * FROM conversation_turns WHERE id = ?', (turn_id,)).fetchone()
@@ -757,6 +757,30 @@ def _match_segments_to_turns(
     return matched
 
 
+def _remove_structural_pi_footer_poison(
+    conn: sqlite3.Connection, conversation_id: str,
+) -> int:
+    """Delete only terminal replies proven to be complete Pi telemetry rows.
+
+    This repairs canonical rows written before the no-CH footer grammar existed.
+    It deliberately does not search for similar text, trim mixed prose, or
+    rewrite non-terminal sources. A retained corrected snapshot may then
+    reconstruct a real reply through the normal segment-matching path.
+    """
+    candidates = conn.execute(
+        '''SELECT id, text FROM conversation_messages
+           WHERE conversation_id = ? AND role = 'assistant'
+             AND type = 'conversation' AND slot = ? AND source = 'terminal' ''',
+        (conversation_id, _PRIMARY_SLOT),
+    ).fetchall()
+    poisoned = [row['id'] for row in candidates if is_pi_status_footer(row['text'])]
+    if not poisoned:
+        return 0
+    conn.executemany('DELETE FROM conversation_messages WHERE id = ?', [(item,) for item in poisoned])
+    _touch_conversation(conn, conversation_id)
+    return len(poisoned)
+
+
 def _recent_turns(conn: sqlite3.Connection, conversation_id: str) -> List[sqlite3.Row]:
     """Turns the adapter may still write to.
 
@@ -797,6 +821,7 @@ def ingest_terminal_rows(
     changed: List[Dict[str, Any]] = []
     with _session() as conn:
         conversation_id = _ensure_conversation(conn, user_id, target)
+        _remove_structural_pi_footer_poison(conn, conversation_id)
         turns = _recent_turns(conn, conversation_id)
         if not turns:
             return []
@@ -877,6 +902,7 @@ def list_messages(
     placeholders = ', '.join('?' for _ in types)
     with _session() as conn:
         conversation_id = _ensure_conversation(conn, user_id, target)
+        _remove_structural_pi_footer_poison(conn, conversation_id)
         rows = conn.execute(
             f'''SELECT m.*, t.client_message_id AS client_message_id, t.status AS turn_status
                 FROM conversation_messages m

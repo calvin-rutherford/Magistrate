@@ -1,0 +1,18 @@
+[
+  {
+    "id": "ct_0c8ef93cb46556dc",
+    "conversation_id": "cv_3f9ce656c9a6dea7",
+    "client_message_id": "pi-footer-live-1788313923",
+    "prompt_key": "Hello",
+    "status": "awaiting_reply",
+    "sequence_index": 25,
+    "created_at": 1788313923331,
+    "updated_at": 1788313923331,
+    "prompt_message_id": "cm_0746b4fbd5b8d3d9be0a",
+    "prompt_text": "Hello",
+    "reply_message_id": null,
+    "reply_text": null,
+    "reply_revision": null,
+    "reply_source": null
+  }
+]

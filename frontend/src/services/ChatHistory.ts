@@ -16,6 +16,17 @@ const routingPrefix = /^\[Magistrate execution:[^\]]+\]\s*/i;
 const markerlessToolPattern = /^(?:\$\s|⎿\s|Ran\b|Called\b|Explored\b|Searched\b|Read\b|Viewed\b|Edited\b|Added\b|Updated\b|Wrote\b|Applied\b|Waited\b|Interacted\b|Deleted\b|Removed\b|Created\b|Listed\b|Fetched\b|Downloaded\b|Background command\b|Pushed\b|Committed\b|SessionStart\b|(?:Running|Calling|Reading|Writing|Editing|Exploring|Fetching)\s+\d+\b|Searching for \d+\b|(?:Bash|Read|Edit|Update|Write|Glob|Grep|Task|WebSearch|WebFetch)\s*\()/i;
 const lineBreakPattern = /^(?:[-*•‣]|\d+[.)]\s|#)/;
 const ansiPattern = /\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
+// Pi telemetry is an anchored grammar, not a model-name heuristic: token
+// counters + request/runtime + optional historical CH + subscription cost +
+// context capacity + mode + harness/model suffix. Current Pi omitted CH.
+const piMetric = String.raw`\d+(?:\.\d+)?[kKmMgGtT]?`;
+const piStatusFooterPattern = new RegExp(
+  String.raw`^\s*↑\s*${piMetric}\s+↓\s*${piMetric}\s+R\s*${piMetric}\s+` +
+  String.raw`(?:CH\s*\d+(?:\.\d+)?%\s+)?\$\s*\d+(?:\.\d+)?\s+\(sub\)\s+` +
+  String.raw`\d+(?:\.\d+)?%\s*\/\s*${piMetric}\s+\((?:auto|manual)\)\s+` +
+  String.raw`(?:\([A-Za-z0-9._-]+\)\s+)?(?:gpt|claude|codex|gemini|pi)[A-Za-z0-9._-]*(?:\s*[•·]\s*(?:low|medium|high|xhigh|max|ultra))?\s*$`,
+  'i',
+);
 // Footer/status overlays Herdr catches mid-frame; they can overwrite a message row.
 const chromePattern = /\(ctrl\+(?:End|Home)\)|Jump to bottom|Update installed · Restart|⏵⏵|⏸\s|auto mode on ·|esc to interrupt|ctrl\+\w+ to |of your (?:usage|limit)\b/i;
 const harnessArtifactPattern = /^(?:FIRSTMATE_OP\b|WAKE_(?:ACK|DRAIN|REQUIRED)\b|Planning\b|Clarifying\b|Initiating\b|Inspecting\b|Identifying\b|Verifying\b|Queuing\b|Error:\s|Took \d|Command exited with code\b|\(no output\)|\.\.\. \(\d+ earlier lines|help\[\d+\]:|\/calm\b|calm(?:ing)?(?: animation| status)?\b|edit\s*$|(?:pane|tab|workspace)(?:_id)?\s*[:=]|(?:(?:model|provider|harness)|(?:thread|session|trace|run|request|conversation|message)[ _-]?id)\s*[:=]|your usage\b|window=[^\s]+|worktree=\/|~\/[^\s]+ \(|[⠀-⣿]|[↑↓]\S.*\bCH\d|─{3,})/i;
@@ -73,10 +84,14 @@ export function isToolEnvelope(text: string): boolean {
   return Boolean(match[1]) || numberedExcerptPattern.test(body) || diffExcerptPattern.test(body);
 }
 
+export function isPiStatusFooter(text: string): boolean {
+  return piStatusFooterPattern.test(stripAnsi(text).trim());
+}
+
 export function isHarnessArtifact(text: string): boolean {
   const value = stripAnsi(text).trim();
   if (!value) return true;
-  if (chromePattern.test(value) || transientPattern.test(value) || harnessArtifactPattern.test(value) || systemNoticePattern.test(value) || panelChromePattern.test(value) || routingPrefix.test(value)) return true;
+  if (isPiStatusFooter(value) || chromePattern.test(value) || transientPattern.test(value) || harnessArtifactPattern.test(value) || systemNoticePattern.test(value) || panelChromePattern.test(value) || routingPrefix.test(value)) return true;
   try {
     const envelope = JSON.parse(value) as unknown;
     if (envelope && typeof envelope === 'object' && !Array.isArray(envelope)) {
@@ -169,7 +184,12 @@ function parsePiAnsiHistory(output: string): AgentHistoryMessage[] {
         run.push(stripAnsi(lines[index]).trimEnd()); index += 1;
       }
       const text = unwrapTerminalText(run.join('\n'));
-      if (!text || isHarnessArtifact(text)) continue;
+      if (!text) continue;
+      // Mid-redraw Pi can paint this status line in a user-coloured box. It is
+      // agent-side control noise, not an audience boundary, so following prose
+      // remains attached to the actual captain prompt.
+      if (isPiStatusFooter(text)) { messages.push({ role: 'assistant', kind: 'control', text }); continue; }
+      if (isHarnessArtifact(text)) continue;
       if (markerlessToolPattern.test(text) || isToolEnvelope(text) || /^(?:(?:edit|read|write|bash|grep|find|ls)\s*\n|[+\- ]\s*\d+\s|@@\s)/i.test(text)) messages.push({ role: 'assistant', kind: 'tool', text });
       // A background box is the only role signal Pi gives, and it wraps tool
       // envelopes and harness chrome as well as user turns. An unrecognised box
@@ -183,6 +203,7 @@ function parsePiAnsiHistory(output: string): AgentHistoryMessage[] {
     // assistant response nor a tool call and must terminate any prose block.
     if (/\x1b\[(?:[^m;]*;)*3(?:;[^m]*)?m/.test(rawLine)) { finishAssistant(); continue; }
     if (!text.trim()) { if (assistantLines.length && assistantLines[assistantLines.length - 1] !== '') assistantLines.push(''); continue; }
+    if (isPiStatusFooter(text)) { finishAssistant(); messages.push({ role: 'assistant', kind: 'control', text: text.trim() }); continue; }
     if (isHarnessArtifact(text)) { finishAssistant(); continue; }
     assistantLines.push(text);
   }
