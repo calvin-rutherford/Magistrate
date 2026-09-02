@@ -99,6 +99,131 @@ def test_execution_settings_persist_defaults_and_clear_selection(monkeypatch):
     assert response.json()['switching_behavior'] == 'new-session'
 
 
+def test_new_agent_routing_preference_round_trips_and_rejects_invalid_selection(monkeypatch):
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
+
+    saved = client.put('/api/v1/execution/routing-preference', headers=HEADERS, json={
+        'harness': 'codex', 'model': 'gpt-5',
+    })
+    assert saved.status_code == 200
+    assert saved.json()['default'] == {
+        'profile_id': 'codex:gpt-5', 'harness': 'codex', 'model': 'gpt-5',
+        'provider': 'unknown', 'variant': 'gpt-5',
+    }
+    assert saved.json()['applies_to'] == ['new', 'restarted']
+    assert saved.json()['delivery']['automatic'] is False
+    assert saved.json()['delivery']['status'] == 'pending-firstmate-integration'
+
+    reloaded = client.get('/api/v1/execution/routing-preference', headers=HEADERS)
+    assert reloaded.status_code == 200
+    assert reloaded.json() == saved.json()
+
+    invalid_model = client.put('/api/v1/execution/routing-preference', headers=HEADERS, json={
+        'harness': 'codex', 'model': 'invented-model',
+    })
+    assert invalid_model.status_code == 422
+    assert client.get('/api/v1/execution/routing-preference', headers=HEADERS).json() == saved.json()
+
+    incomplete = client.put('/api/v1/execution/routing-preference', headers=HEADERS, json={'harness': 'codex'})
+    assert incomplete.status_code == 422
+
+    cleared = client.put('/api/v1/execution/routing-preference', headers=HEADERS, json={'harness': None, 'model': None})
+    assert cleared.status_code == 200
+    assert cleared.json()['default'] is None
+
+
+def test_agent_migration_is_confirmed_durable_and_idempotent(monkeypatch):
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
+    monkeypatch.setattr(main_module.herdr_client, 'list_agents', AsyncMock(return_value=[{
+        'id': 'w1:p7', 'pane_id': 'w1:p7', 'name': 'worker',
+        'status': 'working', 'harness': 'pi', 'model': 'old-model',
+    }]))
+    monkeypatch.setattr(main_module.fm_client, 'get_snapshot', AsyncMock(return_value={
+        'tasks': [{
+            'id': 'migration-task', 'endpoint': {'target': 'default:w1:p7'}, 'harness': 'pi',
+            'paths': {'worktree': {'present': True, 'path': '/tmp/worktree'}, 'status_log': {'last_event': 'working: tests'}},
+            'backlog': {'title': 'Migrate this worker'},
+        }],
+    }))
+    body = {'profile_id': 'codex:gpt-5', 'idempotency_key': 'migration_retry_0001', 'confirmed': True}
+
+    unconfirmed = client.post('/api/v1/agents/w1:p7/migration-requests', headers=HEADERS, json={**body, 'confirmed': False})
+    assert unconfirmed.status_code == 422
+
+    requested = client.post('/api/v1/agents/w1:p7/migration-requests', headers=HEADERS, json=body)
+    assert requested.status_code == 200
+    migration = requested.json()
+    assert migration['status'] == 'requested'
+    assert migration['target'] == {'profile_id': 'codex:gpt-5', 'harness': 'codex', 'model': 'gpt-5'}
+    assert migration['context']['current_runtime'] == {'harness': 'pi', 'model': 'old-model'}
+    assert migration['context']['worktree'] == '/tmp/worktree'
+    assert migration['context']['branch'] is None
+    assert migration['context']['not_preserved'] == ['in-flight turn']
+    assert migration['execution']['automatic'] is False
+    assert migration['execution']['mode'] == 'operator-terminal'
+
+    duplicate = client.post('/api/v1/agents/w1:p7/migration-requests', headers=HEADERS, json=body)
+    assert duplicate.status_code == 200
+    assert duplicate.json() == migration
+
+    inspected = client.get(
+        f"/api/v1/agents/w1:p7/migration-requests/{migration['request_id']}", headers=HEADERS,
+    )
+    assert inspected.status_code == 200
+    assert inspected.json() == migration
+
+
+def test_agent_migration_transitions_require_terminal_evidence_and_retry_idempotently(monkeypatch):
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
+    monkeypatch.setattr(main_module.herdr_client, 'list_agents', AsyncMock(return_value=[{
+        'id': 'w2:p8', 'pane_id': 'w2:p8', 'name': 'worker', 'status': 'working', 'harness': 'pi', 'model': None,
+    }]))
+    monkeypatch.setattr(main_module.fm_client, 'get_snapshot', AsyncMock(return_value={'tasks': []}))
+    key = 'migration_retry_0002'
+    created = client.post('/api/v1/agents/w2:p8/migration-requests', headers=HEADERS, json={
+        'profile_id': 'codex:gpt-5', 'idempotency_key': key, 'confirmed': True,
+    }).json()
+    endpoint = f"/api/v1/agents/w2:p8/migration-requests/{created['request_id']}/operator-transition"
+
+    no_confirmation = client.post(endpoint, headers=HEADERS, json={
+        'state': 'relaunching', 'idempotency_key': key, 'terminal_confirmed': False, 'evidence': 'operator command',
+    })
+    assert no_confirmation.status_code == 422
+
+    relaunching = client.post(endpoint, headers=HEADERS, json={
+        'state': 'relaunching', 'idempotency_key': key, 'terminal_confirmed': True, 'evidence': 'operator started relaunch',
+    })
+    assert relaunching.status_code == 200
+    assert relaunching.json()['status'] == 'relaunching'
+    assert client.post(endpoint, headers=HEADERS, json={
+        'state': 'relaunching', 'idempotency_key': key, 'terminal_confirmed': True, 'evidence': 'duplicate report',
+    }).json() == relaunching.json()
+
+    failed = client.post(endpoint, headers=HEADERS, json={
+        'state': 'failed', 'idempotency_key': key, 'terminal_confirmed': True, 'evidence': 'runtime exited before attach',
+    })
+    assert failed.status_code == 200
+    assert failed.json()['status'] == 'failed'
+    assert failed.json()['error'] == 'runtime exited before attach'
+
+    retrying = client.post(endpoint, headers=HEADERS, json={
+        'state': 'relaunching', 'idempotency_key': key, 'terminal_confirmed': True, 'evidence': 'operator retried same request',
+    })
+    assert retrying.status_code == 200
+    assert retrying.json()['status'] == 'relaunching'
+    assert retrying.json()['error'] is None
+
+    running = client.post(endpoint, headers=HEADERS, json={
+        'state': 'running-on-new', 'idempotency_key': key, 'terminal_confirmed': True, 'evidence': 'new pane observed on codex/gpt-5',
+    })
+    assert running.status_code == 200
+    assert running.json()['status'] == 'running-on-new'
+    invalid_retry = client.post(endpoint, headers=HEADERS, json={
+        'state': 'relaunching', 'idempotency_key': key, 'terminal_confirmed': True, 'evidence': 'must not reopen success',
+    })
+    assert invalid_retry.status_code == 409
+
+
 def test_execution_credential_is_encrypted_and_changes_profile_auth(monkeypatch):
     configured = inventory()
     configured['harnesses'][0]['provider'] = 'openai-codex'

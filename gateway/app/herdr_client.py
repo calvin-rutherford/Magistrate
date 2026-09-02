@@ -535,7 +535,10 @@ class HerdrClient:
             formatted_agents.append({
                 'id': agent_id,
                 'name': display_name,
-                'harness': ag.get('agent') or ag.get('harness'),
+                'harness': next((value.strip() for value in (ag.get('agent'), ag.get('harness')) if isinstance(value, str) and value.strip()), None),
+                # Herdr may report the concrete model on the live agent row;
+                # absence is meaningful and must remain unknown to clients.
+                'model': next((value.strip() for value in (ag.get('model'),) if isinstance(value, str) and value.strip()), None),
                 'status': status,
                 'pane_id': ag.get('pane_id'),
                 'tab_id': ag.get('tab_id'),

@@ -24,8 +24,27 @@ class UniversalInputContract(BaseModel):
 
 class ExecutionSettingsContract(BaseModel):
     profile_id: Optional[str] = Field(default=None, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    routing_profile_id: Optional[str] = Field(default=None, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
     switching_behavior: Optional[Literal['migrate', 'new-session']] = None
     unavailable_behavior: Optional[Literal['error', 'fallback']] = None
+
+
+class RoutingPreferenceContract(BaseModel):
+    harness: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    model: Optional[str] = Field(default=None, min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+
+
+class AgentMigrationRequestContract(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
+    confirmed: Literal[True]
+
+
+class AgentMigrationTransitionContract(BaseModel):
+    state: Literal['relaunching', 'running-on-new', 'failed']
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
+    terminal_confirmed: Literal[True]
+    evidence: str = Field(min_length=1, max_length=2000)
 
 class ExecutionCredentialContract(BaseModel):
     credential: str = Field(min_length=1, max_length=10000)

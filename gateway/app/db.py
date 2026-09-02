@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import base64
+import hashlib
+import json
 import time
 from pathlib import Path
 from dataclasses import dataclass
@@ -390,10 +392,36 @@ def init_db():
     CREATE TABLE IF NOT EXISTS execution_preferences (
         user_id TEXT PRIMARY KEY,
         profile_id TEXT,
+        routing_profile_id TEXT,
         switching_behavior TEXT NOT NULL DEFAULT 'migrate',
         unavailable_behavior TEXT NOT NULL DEFAULT 'error',
         updated_at INTEGER,
         FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+    execution_preference_columns = {row[1] for row in cursor.execute("PRAGMA table_info(execution_preferences)")}
+    if 'routing_profile_id' not in execution_preference_columns:
+        cursor.execute('ALTER TABLE execution_preferences ADD COLUMN routing_profile_id TEXT')
+
+    # Magistrate cannot currently relaunch Firstmate workers. Requests are
+    # durable hand-offs to that integration seam; only terminal-observed
+    # transitions may advance them, so a 200 never implies runtime success.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS agent_migration_requests (
+        request_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        target_profile_id TEXT NOT NULL,
+        target_harness TEXT NOT NULL,
+        target_model TEXT NOT NULL,
+        status TEXT NOT NULL,
+        context_json TEXT NOT NULL,
+        evidence TEXT,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(user_id, idempotency_key)
     )
     ''')
 
@@ -749,15 +777,16 @@ def get_execution_preferences(user_id: str = 'default_user') -> Dict[str, Any]:
     conn = sqlite3.connect(DB_PATH)
     try:
         row = conn.execute(
-            'SELECT profile_id, switching_behavior, unavailable_behavior FROM execution_preferences WHERE user_id = ?',
+            'SELECT profile_id, routing_profile_id, switching_behavior, unavailable_behavior FROM execution_preferences WHERE user_id = ?',
             (user_id,),
         ).fetchone()
     finally:
         conn.close()
     return {
         'profile_id': row[0] if row else None,
-        'switching_behavior': row[1] if row else 'migrate',
-        'unavailable_behavior': row[2] if row else 'error',
+        'routing_profile_id': row[1] if row else None,
+        'switching_behavior': row[2] if row else 'migrate',
+        'unavailable_behavior': row[3] if row else 'error',
     }
 
 
@@ -765,6 +794,7 @@ def save_execution_preferences(
     user_id: str = 'default_user',
     *,
     profile_id: Optional[str] = None,
+    routing_profile_id: Optional[str] = None,
     switching_behavior: str = 'migrate',
     unavailable_behavior: str = 'error',
 ) -> Dict[str, Any]:
@@ -777,15 +807,114 @@ def save_execution_preferences(
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute('''
-        INSERT INTO execution_preferences (user_id, profile_id, switching_behavior, unavailable_behavior, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO execution_preferences (user_id, profile_id, routing_profile_id, switching_behavior, unavailable_behavior, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET profile_id=excluded.profile_id,
+          routing_profile_id=excluded.routing_profile_id,
           switching_behavior=excluded.switching_behavior, unavailable_behavior=excluded.unavailable_behavior,
           updated_at=excluded.updated_at
-        ''', (user_id, profile_id, switching_behavior, unavailable_behavior, now))
+        ''', (user_id, profile_id, routing_profile_id, switching_behavior, unavailable_behavior, now))
         conn.commit()
     finally:
         conn.close()
-    return {'profile_id': profile_id, 'switching_behavior': switching_behavior, 'unavailable_behavior': unavailable_behavior}
+    return {'profile_id': profile_id, 'routing_profile_id': routing_profile_id, 'switching_behavior': switching_behavior, 'unavailable_behavior': unavailable_behavior}
+
+
+def _migration_row(row: sqlite3.Row | tuple) -> Dict[str, Any]:
+    return {
+        'request_id': row[0], 'agent_id': row[1], 'idempotency_key': row[2],
+        'target': {'profile_id': row[3], 'harness': row[4], 'model': row[5]},
+        'status': row[6], 'context': json.loads(row[7]), 'evidence': row[8],
+        'error': row[9], 'created_at': row[10], 'updated_at': row[11],
+        'execution': {
+            'mode': 'operator-terminal', 'automatic': False,
+            'message': 'Gateway relaunch is unavailable; confirm and execute this request in the Firstmate terminal.',
+        },
+    }
+
+
+def get_agent_migration(user_id: str, request_id: str) -> Optional[Dict[str, Any]]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute('''
+            SELECT request_id, agent_id, idempotency_key, target_profile_id, target_harness,
+                   target_model, status, context_json, evidence, error, created_at, updated_at
+            FROM agent_migration_requests WHERE user_id = ? AND request_id = ?
+        ''', (user_id, request_id)).fetchone()
+        return _migration_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_agent_migration_by_idempotency(user_id: str, idempotency_key: str) -> Optional[Dict[str, Any]]:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute('''
+            SELECT request_id, agent_id, idempotency_key, target_profile_id, target_harness,
+                   target_model, status, context_json, evidence, error, created_at, updated_at
+            FROM agent_migration_requests WHERE user_id = ? AND idempotency_key = ?
+        ''', (user_id, idempotency_key)).fetchone()
+        return _migration_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def create_agent_migration(
+    user_id: str, agent_id: str, idempotency_key: str, target: Dict[str, str], context: Dict[str, Any]
+) -> Dict[str, Any]:
+    init_db()
+    request_id = 'migration_' + hashlib.sha256(f'{user_id}\0{idempotency_key}'.encode()).hexdigest()[:20]
+    now = int(time.time())
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        existing = get_agent_migration_by_idempotency(user_id, idempotency_key)
+        if existing:
+            if existing['agent_id'] != agent_id or existing['target']['profile_id'] != target['profile_id']:
+                raise ValueError('That idempotency key was already used for a different migration request.')
+            return existing
+        with conn:
+            conn.execute('''
+                INSERT INTO agent_migration_requests
+                  (request_id, user_id, agent_id, idempotency_key, target_profile_id, target_harness,
+                   target_model, status, context_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?)
+            ''', (request_id, user_id, agent_id, idempotency_key, target['profile_id'],
+                  target['harness'], target['model'], json.dumps(context), now, now))
+        return get_agent_migration(user_id, request_id)  # type: ignore[return-value]
+    finally:
+        conn.close()
+
+
+def transition_agent_migration(
+    user_id: str, request_id: str, state: str, evidence: str
+) -> Dict[str, Any]:
+    current = get_agent_migration(user_id, request_id)
+    if not current:
+        raise LookupError('Migration request not found.')
+    if current['status'] == state:
+        return current
+    allowed = {
+        'requested': {'relaunching', 'failed'},
+        'relaunching': {'running-on-new', 'failed'},
+        'failed': {'relaunching'},
+        'running-on-new': set(),
+    }
+    if state not in allowed.get(current['status'], set()):
+        raise ValueError(f"Migration cannot move from {current['status']} to {state}.")
+    now = int(time.time())
+    error = evidence if state == 'failed' else None
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        with conn:
+            conn.execute('''
+                UPDATE agent_migration_requests SET status = ?, evidence = ?, error = ?, updated_at = ?
+                WHERE user_id = ? AND request_id = ?
+            ''', (state, evidence, error, now, user_id, request_id))
+    finally:
+        conn.close()
+    return get_agent_migration(user_id, request_id)  # type: ignore[return-value]
+
 
 init_db()

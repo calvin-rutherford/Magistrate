@@ -351,7 +351,7 @@ function AgentPreview({ agent, status, selected, onOpen }: { agent: AgentInfo; s
   return <GlassSurface variant="card" style={[styles.panelCard, selected ? styles.selectedCard : undefined]}>
     <TouchableOpacity testID={`agent-card-${agent.id}`} accessibilityRole="button" accessibilityLabel={`Chat with ${agentDisplayName(agent)}`} onPress={() => onOpen(agent.id)} activeOpacity={0.85}>
       <View style={styles.agentHeader}><Text style={styles.agentName}>{agentDisplayName(agent)}</Text><Text style={styles.agentStatus}>{displayAgentStatus(status as any)}</Text></View>
-      {agent.harness ? <Text style={styles.muted}>Harness: {agent.harness}</Text> : null}
+      <Text style={styles.muted}>Harness: {agent.harness || 'unknown'} · Model: {agent.model || 'unknown'}</Text>
       <Text style={styles.agentTargetHint}>OPEN CHAT TARGET →</Text>
     </TouchableOpacity>
     <Text style={styles.controlsLabel}>AGENT CONTROLS</Text>

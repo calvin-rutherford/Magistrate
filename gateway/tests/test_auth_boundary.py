@@ -135,6 +135,9 @@ def test_missing_or_query_only_credentials_are_rejected():
     ('POST', '/api/v1/captain/prompt', {'text': 'status'}),
     ('GET', '/api/v1/agents', None),
     ('GET', '/api/v1/execution/settings', None),
+    ('GET', '/api/v1/execution/routing-preference', None),
+    ('PUT', '/api/v1/execution/routing-preference', {'harness': None, 'model': None}),
+    ('POST', '/api/v1/agents/w1:p1/migration-requests', {'profile_id': 'codex:gpt-5', 'idempotency_key': 'auth-test-1234', 'confirmed': True}),
 ])
 def test_every_sensitive_route_family_requires_authentication(method, path, payload):
     response = client.request(method, path, json=payload)

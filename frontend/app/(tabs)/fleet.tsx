@@ -42,7 +42,7 @@ export default function FleetScreen() {
           agents.map((ag) => (
             <View key={ag.id} style={styles.card}>
               <Text style={styles.cardTitle}>{agentDisplayName(ag)}</Text>
-              <Text style={styles.cardDetail}>Harness: {ag.harness || 'Unavailable'} | Status: {String(ag.status || 'unknown').toUpperCase()}</Text>
+              <Text style={styles.cardDetail}>Harness: {ag.harness || 'unknown'} | Model: {ag.model || 'unknown'} | Status: {String(ag.status || 'unknown').toUpperCase()}</Text>
             </View>
           ))
         )}
