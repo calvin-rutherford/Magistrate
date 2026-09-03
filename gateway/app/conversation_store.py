@@ -25,6 +25,7 @@ terminal row has no audience and must fail closed rather than become chat.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -34,6 +35,16 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app import db
+from app.contracts import (
+    MagiAssistantBlockRemoveEvent,
+    MagiAssistantBlockUpsertEvent,
+    MagiAssistantCancelledEvent,
+    MagiAssistantCompletedEvent,
+    MagiAssistantFailedEvent,
+    MagiAssistantStartedEvent,
+    MagiResponseV1,
+    magi_response_plain_text,
+)
 from app.herdr_client import classify_history_rows, is_pi_status_footer, tool_call_preview
 
 CONVERSATION_SCHEMA = 'conversation.v1'
@@ -68,6 +79,10 @@ _SAFE_UPLOAD_ID = re.compile(r'^[A-Za-z0-9_-]{16,64}$')
 # arrive together, so wait for the lock instead of failing the request.
 _BUSY_TIMEOUT_SECONDS = 5.0
 _TOKEN = re.compile(r'\S+')
+
+
+class MagiEventConflict(ValueError):
+    """A valid event conflicts with durable turn identity or ordering."""
 
 
 def _now() -> int:
@@ -136,7 +151,7 @@ def _decode_attachments(value: str) -> List[Dict[str, Any]]:
 
 
 def _public_message(row: sqlite3.Row, client_message_id: Optional[str]) -> Dict[str, Any]:
-    return {
+    message = {
         'id': row['id'],
         'turn_id': row['turn_id'],
         'client_message_id': client_message_id,
@@ -151,6 +166,57 @@ def _public_message(row: sqlite3.Row, client_message_id: Optional[str]) -> Dict[
         'created_at': row['created_at'],
         'updated_at': row['updated_at'],
     }
+    if row['role'] == 'assistant' and row['type'] == 'conversation':
+        structured = None
+        if row['content_source'] == 'structured' and row['structured_content_json']:
+            try:
+                structured = MagiResponseV1.model_validate_json(row['structured_content_json'])
+            except (TypeError, ValueError):
+                # Database/cache corruption cannot turn unknown JSON into a
+                # render instruction. The already-bounded plain text remains a
+                # safe legacy fallback.
+                structured = None
+        if structured is None:
+            message['content_source'] = 'terminal-fallback'
+        else:
+            message['content_source'] = 'structured'
+            message['structured_content'] = structured.model_dump(mode='json')
+            message['structured_revision'] = row['structured_revision']
+    return message
+
+
+def _new_message_id(conn: sqlite3.Connection) -> str:
+    while True:
+        message_id = 'cm_' + secrets.token_hex(10)
+        used = conn.execute(
+            '''SELECT 1 FROM conversation_messages WHERE id = ?
+               UNION ALL
+               SELECT 1 FROM conversation_turns WHERE assistant_message_id = ?
+               LIMIT 1''',
+            (message_id, message_id),
+        ).fetchone()
+        if used is None:
+            return message_id
+
+
+def _reserve_assistant_message_id(conn: sqlite3.Connection, turn_id: str) -> str:
+    turn = conn.execute(
+        'SELECT assistant_message_id FROM conversation_turns WHERE id = ?', (turn_id,),
+    ).fetchone()
+    if turn is None:
+        raise LookupError('Conversation turn not found.')
+    if turn['assistant_message_id']:
+        return turn['assistant_message_id']
+    primary = conn.execute(
+        'SELECT id FROM conversation_messages WHERE turn_id = ? AND slot = ?',
+        (turn_id, _PRIMARY_SLOT),
+    ).fetchone()
+    message_id = primary['id'] if primary else _new_message_id(conn)
+    conn.execute(
+        'UPDATE conversation_turns SET assistant_message_id = ?, updated_at = ? WHERE id = ?',
+        (message_id, _now(), turn_id),
+    )
+    return message_id
 
 
 def ensure_conversation(user_id: str, target: str) -> str:
@@ -222,7 +288,10 @@ def _upsert_message(
     attachment_records = _attachment_records(attachments)
     attachments_json = json.dumps(attachment_records, separators=(',', ':'), sort_keys=True) if attachment_records is not None else None
     if existing is None:
-        message_id = 'cm_' + secrets.token_hex(10)
+        message_id = (
+            _reserve_assistant_message_id(conn, turn_id)
+            if slot == _PRIMARY_SLOT else _new_message_id(conn)
+        )
         conn.execute(
             '''INSERT INTO conversation_messages
                (id, turn_id, conversation_id, role, type, slot, text, visible_in_chat,
@@ -236,6 +305,11 @@ def _upsert_message(
             conn.execute('SELECT * FROM conversation_messages WHERE id = ?', (message_id,)).fetchone(),
             None,
         )
+    # Semantic content is authoritative once accepted. Terminal snapshots and
+    # late synchronous text may still arrive, but they can no longer revise the
+    # primary row's document or its plain-text projection.
+    if slot == _PRIMARY_SLOT and existing['content_source'] == 'structured':
+        return None
     attachments_changed = attachments_json is not None and existing['attachments_json'] != attachments_json
     if not force and message_type == 'conversation':
         if structurally_bounded:
@@ -426,16 +500,19 @@ def record_prompt(
             now = _now()
             turn_id = 'ct_' + secrets.token_hex(8)
             turn_index = _next_turn_index(conn, conversation_id)
+            assistant_message_id = _new_message_id(conn)
             conn.execute(
                 '''INSERT INTO conversation_turns
-                   (id, conversation_id, client_message_id, prompt_key, status, sequence_index, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 'awaiting_reply', ?, ?, ?)''',
+                   (id, conversation_id, client_message_id, prompt_key, assistant_message_id,
+                    status, sequence_index, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'awaiting_reply', ?, ?, ?)''',
                 (turn_id, conversation_id, client_message_id,
                  prompt_match_key(submitted_text if submitted_text is not None else text),
-                 turn_index, now, now),
+                 assistant_message_id, turn_index, now, now),
             )
         else:
             turn_id, turn_index = turn['id'], turn['sequence_index']
+            assistant_message_id = _reserve_assistant_message_id(conn, turn_id)
             # An edited resubmission keeps its turn but replaces both the text
             # chat shows and the key the terminal adapter matches against.
             conn.execute(
@@ -453,7 +530,8 @@ def record_prompt(
         )
         _touch_conversation(conn, conversation_id)
         return {
-            'conversation_id': conversation_id, 'turn_id': turn_id, 'created': created,
+            'conversation_id': conversation_id, 'turn_id': turn_id,
+            'assistant_message_id': assistant_message_id, 'created': created,
             'messages': _turn_messages(conn, turn_id, client_message_id),
         }
 
@@ -473,6 +551,12 @@ def record_primary_reply(
         # the turn or appear beside the stopped partial response.
         if turn is None or turn['status'] in ('cancelled', 'failed'):
             return []
+        primary = conn.execute(
+            'SELECT content_source FROM conversation_messages WHERE turn_id = ? AND slot = ?',
+            (turn_id, _PRIMARY_SLOT),
+        ).fetchone()
+        if primary is not None and primary['content_source'] == 'structured':
+            return []
         changed = _upsert_message(
             conn, conversation_id=turn['conversation_id'], turn_id=turn_id,
             turn_index=turn['sequence_index'], slot=_PRIMARY_SLOT, offset=_PRIMARY_OFFSET,
@@ -485,6 +569,221 @@ def record_primary_reply(
         if changed or turn['status'] != 'answered':
             _touch_conversation(conn, turn['conversation_id'])
         return [changed] if changed else []
+
+
+def _canonical_event_hash(event: Any) -> str:
+    encoded = json.dumps(
+        event.model_dump(mode='json'), ensure_ascii=False, separators=(',', ':'), sort_keys=True,
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _stored_structured_response(row: Optional[sqlite3.Row]) -> Optional[MagiResponseV1]:
+    if row is None or row['content_source'] != 'structured' or not row['structured_content_json']:
+        return None
+    try:
+        return MagiResponseV1.model_validate_json(row['structured_content_json'])
+    except (TypeError, ValueError) as exc:
+        raise MagiEventConflict('The stored structured response is invalid and cannot be revised.') from exc
+
+
+def _upsert_structured_primary(
+    conn: sqlite3.Connection, *, turn: sqlite3.Row, message_id: str,
+    response: MagiResponseV1, event_revision: int,
+) -> Dict[str, Any]:
+    """Make a validated semantic document the authoritative primary reply."""
+    existing = conn.execute(
+        'SELECT * FROM conversation_messages WHERE turn_id = ? AND slot = ?',
+        (turn['id'], _PRIMARY_SLOT),
+    ).fetchone()
+    text = magi_response_plain_text(response)
+    document = json.dumps(
+        response.model_dump(mode='json'), ensure_ascii=False, separators=(',', ':'), sort_keys=True,
+    )
+    now = _now()
+    if existing is None:
+        conn.execute(
+            '''INSERT INTO conversation_messages
+               (id, turn_id, conversation_id, role, type, slot, text, visible_in_chat,
+                sequence_index, revision, source, attachments_json, content_source,
+                structured_content_json, structured_revision, created_at, updated_at)
+               VALUES (?, ?, ?, 'assistant', 'conversation', ?, ?, 1, ?, 1,
+                       'magi-event', '[]', 'structured', ?, ?, ?, ?)''',
+            (message_id, turn['id'], turn['conversation_id'], _PRIMARY_SLOT, text,
+             _sequence_for(turn['sequence_index'], _PRIMARY_OFFSET), document,
+             event_revision, now, now),
+        )
+    else:
+        if existing['id'] != message_id:
+            raise MagiEventConflict('The event message id does not match this turn.')
+        conn.execute(
+            '''UPDATE conversation_messages
+               SET role = 'assistant', type = 'conversation', text = ?, visible_in_chat = 1,
+                   source = 'magi-event', content_source = 'structured',
+                   structured_content_json = ?, structured_revision = ?,
+                   revision = revision + 1, updated_at = ?
+               WHERE id = ?''',
+            (text, document, event_revision, now, message_id),
+        )
+    return _public_message(
+        conn.execute('SELECT * FROM conversation_messages WHERE id = ?', (message_id,)).fetchone(),
+        None,
+    )
+
+
+def _magi_event_result(
+    conn: sqlite3.Connection, event: Any, status: str, changed: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    turn = conn.execute(
+        'SELECT status FROM conversation_turns WHERE id = ?', (event.turn_id,),
+    ).fetchone()
+    if changed is None:
+        primary = conn.execute(
+            'SELECT * FROM conversation_messages WHERE turn_id = ? AND slot = ?',
+            (event.turn_id, _PRIMARY_SLOT),
+        ).fetchone()
+        changed = _public_message(primary, None) if primary is not None else None
+    return {
+        'status': status,
+        'event_id': event.event_id,
+        'event_type': event.event_type,
+        'turn_id': event.turn_id,
+        'message_id': event.message_id,
+        'revision': event.revision,
+        'turn_status': turn['status'] if turn else None,
+        'message': changed,
+    }
+
+
+def apply_magi_event(user_id: str, target: str, event: Any) -> Dict[str, Any]:
+    """Apply one validated ``magi.event.v1`` event transactionally.
+
+    Event ids and per-turn revisions are durable. The first event must be
+    ``assistant.started`` revision 1; every later event is exactly the next
+    revision. New block ids append, while an existing id updates only its
+    current index. Deletion happens solely through ``assistant.block.remove``.
+    A full completion document is authoritative and freezes the semantic stream.
+    """
+    payload_hash = _canonical_event_hash(event)
+    with _session() as conn:
+        # Serialize revision checks with the write they authorize. Polling and a
+        # producer retry can otherwise both observe the same latest revision.
+        conn.execute('BEGIN IMMEDIATE')
+        turn = conn.execute(
+            '''SELECT t.*, c.user_id AS owner_user_id, c.target AS target
+               FROM conversation_turns t
+               JOIN conversations c ON c.id = t.conversation_id
+               WHERE t.id = ? AND c.user_id = ? AND c.target = ?''',
+            (event.turn_id, user_id, target),
+        ).fetchone()
+        if turn is None:
+            raise LookupError('Conversation turn not found.')
+        reserved_message_id = _reserve_assistant_message_id(conn, event.turn_id)
+        if event.message_id != reserved_message_id:
+            raise MagiEventConflict('The event message id does not match this turn.')
+
+        duplicate = conn.execute(
+            'SELECT * FROM magi_response_events WHERE event_id = ?', (event.event_id,),
+        ).fetchone()
+        if duplicate is not None:
+            if (
+                duplicate['turn_id'] != event.turn_id
+                or duplicate['message_id'] != event.message_id
+                or duplicate['payload_sha256'] != payload_hash
+            ):
+                raise MagiEventConflict('That event id was already used for different content.')
+            return _magi_event_result(conn, event, 'duplicate')
+
+        latest = conn.execute(
+            '''SELECT * FROM magi_response_events
+               WHERE turn_id = ? ORDER BY revision DESC LIMIT 1''',
+            (event.turn_id,),
+        ).fetchone()
+        expected_revision = 1 if latest is None else latest['revision'] + 1
+        if event.revision != expected_revision:
+            if event.revision < expected_revision:
+                raise MagiEventConflict('That event revision was already accepted for this turn.')
+            raise MagiEventConflict(f'Expected event revision {expected_revision}.')
+        if latest is None:
+            if not isinstance(event, MagiAssistantStartedEvent):
+                raise MagiEventConflict('The first event must be assistant.started revision 1.')
+        else:
+            if isinstance(event, MagiAssistantStartedEvent):
+                raise MagiEventConflict('assistant.started may appear only once.')
+            if latest['event_type'] in {
+                'assistant.completed', 'assistant.failed', 'assistant.cancelled',
+            }:
+                raise MagiEventConflict('The structured response stream is already terminal.')
+        if turn['status'] in ('cancelled', 'failed'):
+            raise MagiEventConflict('The conversation turn is already terminal.')
+
+        primary = conn.execute(
+            'SELECT * FROM conversation_messages WHERE turn_id = ? AND slot = ?',
+            (event.turn_id, _PRIMARY_SLOT),
+        ).fetchone()
+        current_response = _stored_structured_response(primary)
+        changed = None
+        next_status = 'streaming'
+
+        if isinstance(event, MagiAssistantBlockUpsertEvent):
+            blocks = list(current_response.blocks) if current_response else []
+            existing_index = next(
+                (index for index, block in enumerate(blocks) if block.block_id == event.block.block_id),
+                None,
+            )
+            if existing_index is None:
+                if event.block_index != len(blocks):
+                    raise MagiEventConflict('A new block must append at the next explicit index.')
+                blocks.append(event.block)
+            else:
+                if event.block_index != existing_index:
+                    raise MagiEventConflict('An existing block may update only at its stable index.')
+                blocks[existing_index] = event.block
+            response = MagiResponseV1(
+                schema_version='magi.response.v1', blocks=blocks,
+                actions=list(current_response.actions) if current_response else [],
+            )
+            changed = _upsert_structured_primary(
+                conn, turn=turn, message_id=event.message_id,
+                response=response, event_revision=event.revision,
+            )
+        elif isinstance(event, MagiAssistantBlockRemoveEvent):
+            if current_response is None:
+                raise MagiEventConflict('There is no structured block to remove.')
+            blocks = [block for block in current_response.blocks if block.block_id != event.block_id]
+            if len(blocks) == len(current_response.blocks):
+                raise MagiEventConflict('The requested structured block does not exist.')
+            if not blocks:
+                raise MagiEventConflict('A correction cannot remove the final response block.')
+            response = MagiResponseV1(
+                schema_version='magi.response.v1', blocks=blocks,
+                actions=list(current_response.actions),
+            )
+            changed = _upsert_structured_primary(
+                conn, turn=turn, message_id=event.message_id,
+                response=response, event_revision=event.revision,
+            )
+        elif isinstance(event, MagiAssistantCompletedEvent):
+            changed = _upsert_structured_primary(
+                conn, turn=turn, message_id=event.message_id,
+                response=event.response, event_revision=event.revision,
+            )
+            next_status = 'answered'
+        elif isinstance(event, MagiAssistantFailedEvent):
+            next_status = 'failed'
+        elif isinstance(event, MagiAssistantCancelledEvent):
+            next_status = 'cancelled'
+
+        _set_turn_status(conn, event.turn_id, next_status)
+        conn.execute(
+            '''INSERT INTO magi_response_events
+               (event_id, turn_id, message_id, revision, event_type, payload_sha256, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (event.event_id, event.turn_id, event.message_id, event.revision,
+             event.event_type, payload_hash, _now()),
+        )
+        _touch_conversation(conn, turn['conversation_id'])
+        return _magi_event_result(conn, event, 'applied', changed)
 
 
 def _set_turn_status(conn: sqlite3.Connection, turn_id: str, status: str) -> None:
@@ -849,6 +1148,13 @@ def _apply_segment(
     *, complete: bool, structurally_bounded: bool = False,
     observation_complete: bool = False,
 ) -> List[Dict[str, Any]]:
+    # An accepted semantic lifecycle owns this turn from assistant.started
+    # onward. Snapshot rows remain available in Herdr, but are fallback only and
+    # must not race the structured stream's content or terminal outcome.
+    if conn.execute(
+        'SELECT 1 FROM magi_response_events WHERE turn_id = ? LIMIT 1', (turn['id'],),
+    ).fetchone():
+        return []
     changed: List[Dict[str, Any]] = []
     turn_index = turn['sequence_index']
     for index, raw in enumerate(segment.tools[:MAX_TOOL_EVENTS_PER_TURN]):
@@ -936,6 +1242,11 @@ def reset_conversation(user_id: str, target: str) -> Dict[str, Any]:
     """
     with _session() as conn:
         conversation_id = _ensure_conversation(conn, user_id, target)
+        conn.execute(
+            '''DELETE FROM magi_response_events
+               WHERE turn_id IN (SELECT id FROM conversation_turns WHERE conversation_id = ?)''',
+            (conversation_id,),
+        )
         conn.execute('DELETE FROM conversation_messages WHERE conversation_id = ?', (conversation_id,))
         conn.execute('DELETE FROM conversation_turns WHERE conversation_id = ?', (conversation_id,))
         _touch_conversation(conn, conversation_id)

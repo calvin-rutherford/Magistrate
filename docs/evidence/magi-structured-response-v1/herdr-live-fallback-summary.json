@@ -1,0 +1,13 @@
+{
+  "resolved_target": "w4:p1",
+  "agent_status": "idle",
+  "typed_rows": 95,
+  "eligible_prompt_prose_segments": 2,
+  "prompt_sha256_prefix": "402a8374adecdcdb",
+  "reply_sha256_prefix": "e014d58c8af892cb",
+  "reply_chars": 4622,
+  "changed_records": 13,
+  "assistant_id_reserved": true,
+  "content_source": "terminal-fallback",
+  "structured_content_present": false
+}

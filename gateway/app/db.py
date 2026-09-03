@@ -486,6 +486,7 @@ def init_db():
         conversation_id TEXT NOT NULL,
         client_message_id TEXT,
         prompt_key TEXT,
+        assistant_message_id TEXT,
         status TEXT NOT NULL,
         sequence_index INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
@@ -512,6 +513,9 @@ def init_db():
         revision INTEGER NOT NULL,
         source TEXT NOT NULL,
         attachments_json TEXT NOT NULL DEFAULT '[]',
+        content_source TEXT NOT NULL DEFAULT 'terminal-fallback',
+        structured_content_json TEXT,
+        structured_revision INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(turn_id, slot),
@@ -525,11 +529,54 @@ def init_db():
     turn_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_turns)')}
     if 'prompt_key' not in turn_columns:
         cursor.execute('ALTER TABLE conversation_turns ADD COLUMN prompt_key TEXT')
+    if 'assistant_message_id' not in turn_columns:
+        cursor.execute('ALTER TABLE conversation_turns ADD COLUMN assistant_message_id TEXT')
     message_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_messages)')}
     if 'attachments_json' not in message_columns:
         cursor.execute("ALTER TABLE conversation_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+    if 'content_source' not in message_columns:
+        cursor.execute("ALTER TABLE conversation_messages ADD COLUMN content_source TEXT NOT NULL DEFAULT 'terminal-fallback'")
+    if 'structured_content_json' not in message_columns:
+        cursor.execute('ALTER TABLE conversation_messages ADD COLUMN structured_content_json TEXT')
+    if 'structured_revision' not in message_columns:
+        cursor.execute('ALTER TABLE conversation_messages ADD COLUMN structured_revision INTEGER')
+    # Existing primary rows already have the identity later semantic events
+    # must use. Turns with no reply reserve one when they are next submitted.
+    cursor.execute('''
+        UPDATE conversation_turns
+        SET assistant_message_id = (
+            SELECT id FROM conversation_messages
+            WHERE conversation_messages.turn_id = conversation_turns.id
+              AND conversation_messages.slot = 'primary'
+        )
+        WHERE assistant_message_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM conversation_messages
+            WHERE conversation_messages.turn_id = conversation_turns.id
+              AND conversation_messages.slot = 'primary'
+          )
+    ''')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_assistant_message ON conversation_turns(assistant_message_id) WHERE assistant_message_id IS NOT NULL')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_turns_conversation ON conversation_turns(conversation_id, sequence_index)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation ON conversation_messages(conversation_id, sequence_index)')
+
+    # Accepted semantic lifecycle events form the durable ordering/idempotency
+    # ledger. Their documents live additively on the canonical assistant row;
+    # raw terminal text and every legacy table remain untouched.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_response_events (
+        event_id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(turn_id, revision),
+        FOREIGN KEY(turn_id) REFERENCES conversation_turns(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_response_events_turn ON magi_response_events(turn_id, revision)')
     # Early preview builds wrote canonical timestamps as epoch seconds. SQLite's
     # INTEGER already holds milliseconds, so normalize only those unmistakably
     # second-scale values; the migration is idempotent and touches no legacy

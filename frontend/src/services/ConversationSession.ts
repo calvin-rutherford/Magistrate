@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useSyncExternalStore } from 'react';
+import { MAGI_MAX_FALLBACK_TEXT_CHARS, MagiResponseV1, normalizeMagiResponse } from './MagiResponse';
 
 export interface ConversationAttachment {
   name: string;
@@ -65,6 +66,11 @@ export interface ConversationMessage {
   canonicalRevision?: number;
   turnId?: string;
   sequenceIndex?: number;
+  /** Validated semantic document; absent means render the canonical text fallback. */
+  structuredContent?: MagiResponseV1;
+  contentSource?: 'structured' | 'terminal-fallback';
+  /** Monotonic producer revision, separate from the canonical row revision. */
+  structuredRevision?: number;
 }
 
 // The active thread is kept in memory for reactive rendering and mirrored as
@@ -111,11 +117,20 @@ const normalizeCachedAttachments = (raw: unknown, canonical: boolean): Conversat
 const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): ConversationMessage | null => {
   if (!raw || typeof raw !== 'object') return null;
   const value = raw as Record<string, unknown>;
+  const assistantConversation = value.role === 'assistant' && value.kind === 'conversation';
+  const validStructuredRevision = typeof value.structuredRevision === 'number'
+    && Number.isSafeInteger(value.structuredRevision) && value.structuredRevision >= 1;
+  const structuredContent = assistantConversation && value.contentSource === 'structured' && validStructuredRevision
+    ? normalizeMagiResponse(value.structuredContent) : null;
+  // Invalid/unknown structured JSON still retains a bounded plain-text
+  // fallback. Other cache rows keep the smaller historical bound.
+  const maxText = assistantConversation
+    ? MAGI_MAX_FALLBACK_TEXT_CHARS : value.role === 'user' ? 100_000 : 20_000;
   if (typeof value.canonicalId !== 'string' || value.canonicalId !== cacheKey || !value.canonicalId || value.canonicalId.length > 128
     || typeof value.id !== 'string' || !value.id || value.id.length > 160
     || (value.role !== 'user' && value.role !== 'assistant')
     || (value.role === 'assistant' && value.id !== value.canonicalId)
-    || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 20_000
+    || typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText
     || (value.kind !== 'conversation' && value.kind !== 'tool')
     || (value.kind === 'tool' && value.role !== 'assistant')
     || typeof value.sequenceIndex !== 'number' || !Number.isSafeInteger(value.sequenceIndex) || value.sequenceIndex < 0
@@ -124,6 +139,7 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     || typeof value.sentAt !== 'number' || !Number.isSafeInteger(value.sentAt) || value.sentAt < 1_000_000_000_000) return null;
   const progress = ['queued', 'working', 'streaming', 'complete', 'failed', 'cancelled'].includes(String(value.progress)) ? value.progress as ConversationProgress : undefined;
   const delivery = value.role === 'user' && ['sent', 'failed', 'cancelled'].includes(String(value.delivery)) ? value.delivery as ConversationMessage['delivery'] : undefined;
+  const structuredRevision = structuredContent ? value.structuredRevision as number : undefined;
   return {
     id: value.id,
     role: value.role,
@@ -139,6 +155,9 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     canonicalRevision: value.canonicalRevision,
     turnId: value.turnId,
     sequenceIndex: value.sequenceIndex,
+    structuredContent: structuredContent || undefined,
+    contentSource: structuredContent ? 'structured' : assistantConversation ? 'terminal-fallback' : undefined,
+    structuredRevision,
   };
 };
 const normalizeCachedPendingMessage = (raw: unknown, cacheKey: string): ConversationMessage | null => {
@@ -268,7 +287,7 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       const thinkingSummary = value.thinkingSummary && typeof value.thinkingSummary === 'object' ? (() => { const candidate = value.thinkingSummary as Record<string, unknown>; return typeof candidate.provider === 'string' && typeof candidate.text === 'string' ? { provider: candidate.provider.slice(0, 48), text: candidate.text.slice(0, 280) } : undefined; })() : undefined;
       const progress = ['queued', 'working', 'streaming', 'complete', 'failed', 'cancelled'].includes(String(value.progress)) ? value.progress as ConversationMessage['progress'] : undefined;
       const role = value.role as 'user' | 'assistant';
-      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: value.kind === 'tool' ? 'tool' : 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined } as ConversationMessage;
+      return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: value.kind === 'tool' ? 'tool' : 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined, structuredContent: undefined, contentSource: undefined, structuredRevision: undefined } as ConversationMessage;
     });
     const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
     const currentById = new Map(current.map(message => [message.id, message]));
@@ -319,7 +338,7 @@ export function updateConversationMessage(target: string, id: string, text: stri
   updateConversationMessageState(target, id, { text, sentAt });
 }
 
-export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience' | 'canonicalId' | 'canonicalRevision' | 'turnId' | 'sequenceIndex'>>) {
+export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience' | 'canonicalId' | 'canonicalRevision' | 'turnId' | 'sequenceIndex' | 'structuredContent' | 'contentSource' | 'structuredRevision'>>) {
   const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
   const next = current.map(message => message.id === id ? { ...message, ...update } : message);
   messagesByTarget.set(target, next); persist(target, next); emit(target);
