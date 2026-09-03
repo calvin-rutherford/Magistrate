@@ -15,6 +15,7 @@
  * the same message the server recorded rather than matched on its text.
  */
 import { ConversationAttachment, ConversationMessage } from './ConversationSession';
+import { MAGI_MAX_FALLBACK_TEXT_CHARS, MagiResponseV1, normalizeMagiResponse } from './MagiResponse';
 
 export const CANONICAL_MESSAGE_TYPES = ['conversation', 'tool', 'internal', 'status'] as const;
 export type CanonicalMessageType = (typeof CANONICAL_MESSAGE_TYPES)[number];
@@ -38,6 +39,9 @@ export interface CanonicalMessage {
   /** Gateway-authored Unix epoch milliseconds. */
   created_at?: number;
   turn_status?: string;
+  content_source?: 'structured' | 'terminal-fallback';
+  structured_content?: MagiResponseV1;
+  structured_revision?: number;
 }
 
 export interface CanonicalConversation {
@@ -81,8 +85,17 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
   if (typeof value.id !== 'string' || !value.id || value.id.length > 128) return null;
   if (value.role !== 'user' && value.role !== 'assistant') return null;
   if (!isCanonicalType(value.type) || !RENDERABLE_TYPES.has(value.type)) return null;
-  if (typeof value.text !== 'string' || !value.text.trim()) return null;
-  if (typeof value.sequence_index !== 'number' || !Number.isFinite(value.sequence_index)) return null;
+  const structuredRevision = typeof value.structured_revision === 'number'
+    && Number.isSafeInteger(value.structured_revision) && value.structured_revision >= 1
+    ? value.structured_revision : undefined;
+  const structuredContent = value.role === 'assistant' && value.type === 'conversation'
+    && value.content_source === 'structured' && structuredRevision
+    ? normalizeMagiResponse(value.structured_content) : null;
+  const maxText = value.role === 'assistant' && value.type === 'conversation'
+    ? MAGI_MAX_FALLBACK_TEXT_CHARS : value.role === 'user' ? 100_000 : 20_000;
+  if (typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText) return null;
+  if (typeof value.sequence_index !== 'number' || !Number.isSafeInteger(value.sequence_index) || value.sequence_index < 0) return null;
+  if (value.turn_id !== undefined && (typeof value.turn_id !== 'string' || !value.turn_id || value.turn_id.length > 128)) return null;
   return {
     id: value.id,
     turn_id: typeof value.turn_id === 'string' ? value.turn_id : undefined,
@@ -97,6 +110,9 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     attachments: normalizeCanonicalAttachments(value.attachments),
     created_at: typeof value.created_at === 'number' && Number.isSafeInteger(value.created_at) && value.created_at >= 1_000_000_000_000 ? value.created_at : undefined,
     turn_status: typeof value.turn_status === 'string' ? value.turn_status : undefined,
+    content_source: structuredContent ? 'structured' : value.role === 'assistant' && value.type === 'conversation' ? 'terminal-fallback' : undefined,
+    structured_content: structuredContent || undefined,
+    structured_revision: structuredContent ? structuredRevision : undefined,
   };
 }
 
@@ -165,6 +181,9 @@ function mergeRow(previous: ConversationMessage | undefined, message: CanonicalM
     canonicalRevision: message.revision ?? previous?.canonicalRevision,
     turnId: message.turn_id,
     sequenceIndex: message.sequence_index,
+    structuredContent: message.structured_content,
+    contentSource: message.content_source,
+    structuredRevision: message.structured_revision,
   };
 }
 
@@ -216,6 +235,9 @@ export function sameRenderedTranscript(left: ConversationMessage[], right: Conve
       && row.sentAt === other.sentAt
       && row.canonicalId === other.canonicalId
       && row.canonicalRevision === other.canonicalRevision
-      && row.sequenceIndex === other.sequenceIndex;
+      && row.sequenceIndex === other.sequenceIndex
+      && row.contentSource === other.contentSource
+      && row.structuredRevision === other.structuredRevision
+      && JSON.stringify(row.structuredContent) === JSON.stringify(other.structuredContent);
   });
 }

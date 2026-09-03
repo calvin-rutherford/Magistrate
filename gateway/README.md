@@ -11,6 +11,19 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 `v1`. Do not commit either value. `MAGISTRATE_ENV=development` or
 `MAGISTRATE_ENV=test` permits an in-memory ephemeral key for local-only use.
 
+## Magi structured response API
+
+`POST /api/v1/conversations/captain/events` accepts the strict,
+authenticated `magi.event.v1` lifecycle and writes a validated
+`magi.response.v1` document into the existing canonical conversation. It
+requires `command` scope, stable ids reserved by the prompt response, contiguous
+revisions, and a declared body no larger than 256 KiB. It is additive: without
+a semantic producer, the existing terminal-derived text path is unchanged.
+Unknown/unsafe JSON never becomes render instructions. See
+[`../docs/magi-structured-response-v1.md`](../docs/magi-structured-response-v1.md)
+for schemas, sequencing, rollout, and the explicit upstream adapter still
+required in Firstmate/Herdr.
+
 ## Attention action API
 
 `GET /api/v1/attention/unified` may return an `attention-action.v1` `action`

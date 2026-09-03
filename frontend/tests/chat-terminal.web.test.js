@@ -68,7 +68,16 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         const base = { turn_id: turnId, turn_status: turn.status, revision: 1, created_at: turn.createdAt };
         messages.push({ ...base, id: `cm_${turn.index}_u`, client_message_id: turn.clientMessageId, role: 'user', type: 'conversation', text: turn.text, visible_in_chat: true, sequence_index: turn.index * 1000, source: turn.source || 'text', attachments: turn.attachments || [] });
         (turn.tools || []).forEach((tool, position) => messages.push({ ...base, id: `cm_${turn.index}_t${position}`, role: 'assistant', type: 'tool', text: tool, visible_in_chat: false, sequence_index: turn.index * 1000 + 1 + position }));
-        if (turn.reply) messages.push({ ...base, id: `cm_${turn.index}_a`, role: 'assistant', type: 'conversation', text: turn.reply, visible_in_chat: true, sequence_index: turn.index * 1000 + 999, revision: turn.replyRevision || 1 });
+        if (turn.reply) messages.push({
+          ...base, id: `cm_${turn.index}_a`, role: 'assistant', type: 'conversation',
+          text: turn.reply, visible_in_chat: true, sequence_index: turn.index * 1000 + 999,
+          revision: turn.replyRevision || 1,
+          ...(turn.structuredContent ? {
+            source: 'magi-event', content_source: 'structured',
+            structured_content: turn.structuredContent,
+            structured_revision: turn.structuredRevision || 1,
+          } : {}),
+        });
       });
       return [...messages, ...(historyScenario?.extras || [])];
     };
@@ -313,6 +322,83 @@ test('chat starts genuinely empty with one branded logo and a minimal composer',
   await new Promise(resolve => setTimeout(resolve, 3200));
   assert.equal(await page.evaluate(() => window.__magistrateApiCalls.filter(call => call.url.includes('/captain/prompt')).length), 0);
   assert.equal((await page.$$('[data-testid="model-menu-button"]')).length, 1);
+  await page.close();
+});
+
+test('validated structured responses render native blocks while mixed and malformed rows fall back safely', async () => {
+  const paragraph = label => `${label} ${'This continuation is intentionally long enough to extend the response beyond a phone viewport. '.repeat(7)}`;
+  const structured = {
+    schema_version: 'magi.response.v1',
+    blocks: [
+      { type: 'heading', block_id: 'section-one', level: 1, content: [{ type: 'text', text: 'Section one' }] },
+      { type: 'paragraph', block_id: 'section-one-copy', content: [{ type: 'text', text: paragraph('First section.') }] },
+      { type: 'heading', block_id: 'section-two', level: 2, content: [{ type: 'strong', text: 'Section two' }] },
+      { type: 'list', block_id: 'section-two-list', style: 'ordered', items: [[{ type: 'text', text: 'Validate the document.' }], [{ type: 'emphasis', text: 'Render native components.' }]] },
+      { type: 'heading', block_id: 'section-three', level: 2, content: [{ type: 'text', text: 'Section three' }] },
+      { type: 'paragraph', block_id: 'section-three-copy', content: [{ type: 'text', text: '<b>Literal text stays text.</b> ' }, { type: 'link', text: 'Safe link', url: 'https://example.com/read' }] },
+      { type: 'heading', block_id: 'section-four', level: 3, content: [{ type: 'text', text: 'Section four draft' }] },
+      { type: 'paragraph', block_id: 'section-four-copy', content: [{ type: 'inline_code', text: 'magi.response.v1' }, { type: 'text', text: paragraph(' Fourth section.') }] },
+      { type: 'heading', block_id: 'section-five', level: 4, content: [{ type: 'text', text: 'Section five' }] },
+      { type: 'code', block_id: 'sample-code', language: 'typescript', code: 'const rendered = "native";' },
+      { type: 'quote', block_id: 'closing-quote', content: [{ type: 'text', text: 'The document closes with a bounded quote.' }] },
+      { type: 'divider', block_id: 'closing-divider' },
+    ],
+    // Reserved action data is deliberately not promoted into a control.
+    actions: [{ type: 'open_url', action_id: 'reserved-action', label: 'Do not render this action', url: 'https://example.com/action' }],
+  };
+  const seedTurns = [
+    { clientMessageId: 'mixed-legacy', text: 'Legacy response', reply: '## Legacy heading\n\nLegacy **Markdown** remains on the hardened fallback renderer.' },
+    {
+      clientMessageId: 'mixed-invalid', text: 'Unsupported response', reply: 'Safe fallback for unsupported structured content.',
+      structuredContent: { schema_version: 'magi.response.v1', blocks: [{ type: 'widget', block_id: 'unsafe', component: 'AdminPanel' }], actions: [] },
+      structuredRevision: 2,
+    },
+    {
+      clientMessageId: 'mixed-structured', text: 'Structured response',
+      reply: '# RAW FALLBACK SENTINEL MUST NOT RENDER', structuredContent: structured,
+      structuredRevision: 2, replyRevision: 1, status: 'streaming',
+    },
+  ];
+  const page = await openChat({ width: 390, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
+  await page.waitForSelector('[data-testid="assistant-structured-cm_2_a"]');
+  await page.waitForSelector('[data-testid="assistant-markdown-cm_0_a"]');
+  await page.waitForSelector('[data-testid="assistant-markdown-cm_1_a"]');
+
+  assert.equal((await page.$$('[data-testid="agent-message"]')).length, 3, 'mixed history keeps one row per canonical message');
+  assert.equal((await page.$$('[data-testid^="structured-block-"]')).length, structured.blocks.length);
+  const structuredText = await page.$eval('[data-testid="assistant-structured-cm_2_a"]', element => element.innerText);
+  assert.match(structuredText, /Section one/);
+  assert.match(structuredText, /Section five/);
+  assert.match(structuredText, /<b>Literal text stays text\.<\/b>/);
+  assert.doesNotMatch(structuredText, /RAW FALLBACK SENTINEL|Do not render this action/);
+  assert.equal((await page.$$('[data-testid="assistant-structured-cm_2_a"] b')).length, 0, 'inline text is never interpreted as HTML');
+  assert.equal((await page.$$('[data-testid="assistant-structured-cm_2_a"] [role="link"]')).length, 1);
+  assert.equal((await page.$$('[data-testid="structured-block-sample-code"]')).length, 1);
+  assert.match(await page.$eval('[data-testid="assistant-markdown-cm_0_a"]', element => element.innerText), /Legacy heading/);
+  assert.match(await page.$eval('[data-testid="assistant-markdown-cm_1_a"]', element => element.innerText), /Safe fallback for unsupported/);
+
+  const overflow = await page.$eval('[data-testid="chat-history"]', element => ({ scrollHeight: element.scrollHeight, clientHeight: element.clientHeight }));
+  assert.ok(overflow.scrollHeight > overflow.clientHeight + 300, 'the five-section response must continue beyond the phone viewport');
+
+  const updated = JSON.parse(JSON.stringify(structured));
+  updated.blocks.find(block => block.block_id === 'section-four').content = [{ type: 'text', text: 'Section four updated in place' }];
+  await page.evaluate(response => window.__publishCanonicalPhase({
+    structuredContent: response, structuredRevision: 3, replyRevision: 2, status: 'answered',
+    reply: 'A different raw fallback still must not render',
+  }), updated);
+  await page.waitForFunction(() => document.querySelector('[data-testid="assistant-structured-cm_2_a"]')?.innerText.includes('Section four updated in place'));
+  assert.equal((await page.$$('[data-testid="agent-message"]')).length, 3, 'duplicate socket events and a revision update must not append a row');
+  assert.equal((await page.$eval('[data-testid="assistant-structured-cm_2_a"]', element => element.innerText)).includes('Section four draft'), false);
+
+  await page.$eval('[data-testid="chat-history"]', element => { element.scrollTop = 0; });
+  await page.hover('[data-testid="chat-history"]');
+  await page.mouse.wheel({ deltaY: 4000 });
+  await page.waitForFunction(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    return history.scrollTop > 300;
+  });
+  const finalBlock = await page.$eval('[data-testid="structured-block-closing-divider"]', element => element.getBoundingClientRect().top);
+  assert.ok(Number.isFinite(finalBlock));
   await page.close();
 });
 

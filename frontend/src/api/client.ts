@@ -335,6 +335,8 @@ export interface CanonicalConversationResult {
   schema_version?: string;
   target: string;
   conversation_id?: string;
+  /** Reserved stable assistant identity for semantic response producers. */
+  assistant_message_id?: string;
   messages: CanonicalMessage[];
 }
 

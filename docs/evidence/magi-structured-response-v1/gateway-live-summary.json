@@ -1,0 +1,37 @@
+{
+  "schema_version": "conversation.v1",
+  "target": "captain",
+  "conversation_id": "cv_3f3e77d081fc3b65",
+  "turn_id": "ct_e07187c7ad074fdd",
+  "ingest_error": null,
+  "accepted_events": [
+    {
+      "event_id": "evt_live_1",
+      "event_type": "assistant.started",
+      "revision": 1
+    },
+    {
+      "event_id": "evt_live_2",
+      "event_type": "assistant.completed",
+      "revision": 2
+    }
+  ],
+  "assistant": {
+    "id": "cm_835fb1bdfe1126505200",
+    "matches_reserved_message_id": true,
+    "canonical_revision": 1,
+    "content_source": "structured",
+    "structured_revision": 2,
+    "turn_status": "answered",
+    "block_types": [
+      "heading",
+      "paragraph",
+      "list",
+      "code",
+      "quote",
+      "divider"
+    ],
+    "plain_text_fallback_present": true,
+    "reserved_action_rendered": false
+  }
+}

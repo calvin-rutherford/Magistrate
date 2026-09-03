@@ -227,11 +227,26 @@ downgrade step.
   can still remain missing; choosing the latest open turn would be worse because
   the pane has other audiences.
 
+## Structured responses remain additive
+
+A validated `magi.event.v1` stream can now attach a canonical
+`magi.response.v1` document to the same primary reply slot. The turn reserves
+its assistant message id when the prompt is recorded; block updates revise that
+one row, and completion makes the structured document authoritative. From the
+first accepted semantic event onward, terminal ingestion is disabled for that
+turn, while turns with no semantic producer continue through every terminal
+firewall above unchanged. The app independently validates the document and
+renders its closed block allowlist with native components; unknown JSON falls
+back to canonical text and is never inferred from Markdown. See
+[`docs/magi-structured-response-v1.md`](docs/magi-structured-response-v1.md) for
+the event lifecycle, security bounds, and the pending upstream producer seam.
+
 ## Verifying in the deployed app
 
 1. Restart the gateway so `init_db()` creates the new tables, then confirm:
    `sqlite3 "$MAGISTRATE_DB_PATH" '.tables'` lists `conversations`,
-   `conversation_turns`, `conversation_messages`.
+   `conversation_turns`, `conversation_messages`, and
+   `magi_response_events`.
 2. Open Chat. It starts empty on the first load after the fix — terminal-era
    local arrays are discarded and the canonical record has no turns yet.
 3. Send one message. Expect exactly one captain bubble and, when the agent

@@ -21,10 +21,12 @@ from app.contracts import (UniversalInputContract, ExecutionSettingsContract, Ex
                            NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
                            AttentionActionExecuteContract, RoutingPreferenceContract,
                            AgentMigrationRequestContract, AgentMigrationTransitionContract,
+                           MagiEventContract, MAGI_MAX_RESPONSE_BYTES,
                            RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
-from app.conversation_store import (CONVERSATION_SCHEMA, MAX_MESSAGE_WINDOW, ingest_terminal_rows,
+from app.conversation_store import (CONVERSATION_SCHEMA, MAX_MESSAGE_WINDOW, MagiEventConflict,
+                                    apply_magi_event, ingest_terminal_rows,
                                     list_messages as list_conversation_messages, record_primary_reply,
                                     record_prompt, reset_conversation, set_turn_status, turn_messages)
 from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
@@ -104,10 +106,19 @@ async def enforce_bounded_request_size(request: Request, call_next):
         length = int(content_length) if content_length is not None else 0
     except ValueError:
         return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
+    if length < 0:
+        return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
     if request.url.path == '/api/v1/uploads' and length > MAX_UPLOAD_REQUEST_BYTES:
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
     if request.url.path == '/api/v1/captain/prompt' and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
+    structured_event_path = request.method == 'POST' and re.fullmatch(r'/api/v1/conversations/[^/]+/events', request.url.path)
+    if structured_event_path and content_length is None:
+        # Semantic events are small JSON records, never streaming uploads. A
+        # declared size makes the transport bound effective before JSON parse.
+        return JSONResponse({'detail': 'A structured response event size is required.'}, status_code=411)
+    if structured_event_path and length > MAGI_MAX_RESPONSE_BYTES:
+        return JSONResponse({'detail': 'The structured response event is too large.'}, status_code=413)
     return await call_next(request)
 
 herdr_client = HerdrClient()
@@ -838,6 +849,7 @@ async def create_voice_move(request: VoiceMoveRequest, principal: Principal = De
                     'target': CANONICAL_CONVERSATION_TARGET,
                     'conversation_id': turn['conversation_id'],
                     'turn_id': turn['turn_id'],
+                    'assistant_message_id': turn['assistant_message_id'],
                     'messages': turn_messages(turn['turn_id']),
                 },
             }
@@ -1151,6 +1163,7 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
             'target': contract.target,
             'conversation_id': turn['conversation_id'],
             'turn_id': turn['turn_id'],
+            'assistant_message_id': turn['assistant_message_id'],
             'messages': turn_messages(turn['turn_id']),
         },
     }
@@ -1170,6 +1183,25 @@ async def get_conversation_messages(
     # The record is still authoritative when the live snapshot could not be
     # read; the failure travels with it rather than being presented as success.
     return {**list_conversation_messages(principal.user_id, target, limit=limit), 'ingest_error': ingest_error}
+
+
+@app.post('/api/v1/conversations/{target}/events')
+async def post_magi_response_event(
+    target: str,
+    event: MagiEventContract,
+    principal: Principal = Depends(require_scope('command')),
+):
+    """Accept one authenticated, strictly validated semantic response event."""
+    if target != CANONICAL_CONVERSATION_TARGET:
+        raise HTTPException(status_code=422, detail='Structured response events are supported only for captain chat.')
+    try:
+        return apply_magi_event(principal.user_id, target, event)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MagiEventConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post('/api/v1/conversations/{target}/reset')
