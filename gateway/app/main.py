@@ -170,6 +170,10 @@ async def stop_notification_reconciler():
 # contain autonomous and Firstmate-authored turns with no Magistrate submission
 # id, so they keep reading terminal history until every turn has durable identity.
 CANONICAL_CONVERSATION_TARGET = 'captain'
+# Keep a strong reference while a disconnected request's producer finishes.
+# The set is intentionally process-local: it is recovery for an in-flight POST,
+# not a claim of durable producer ownership across a Gateway restart.
+_detached_prompt_tasks: set[asyncio.Task[Any]] = set()
 
 
 async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_MAX_READ_LINES) -> Optional[str]:
@@ -198,6 +202,50 @@ async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_
         return None
     except Exception as exc:
         return f'{type(exc).__name__}: {exc}'[:200]
+
+
+def _record_prompt_result(user_id: str, target: str, client_message_id: str, turn_id: str, result: Any) -> None:
+    """Persist the provider outcome independently of the HTTP response.
+
+    The prompt row is durable before Herdr is called. Keeping this small result
+    fold separate lets an interrupted POST finish its provider task without
+    asking a later client to guess the assistant identity from terminal text.
+    """
+    if not isinstance(result, dict) or result.get('status') == 'error' or result.get('error'):
+        set_turn_status(user_id, target, client_message_id, 'failed')
+        return
+    response = result.get('response')
+    if isinstance(response, str) and response.strip():
+        record_primary_reply(user_id, target, turn_id, response)
+
+
+async def _finish_detached_prompt(
+    user_id: str, target: str, client_message_id: str, turn_id: str, provider_task: 'asyncio.Task[Any]',
+) -> None:
+    """Finish a provider call after the browser has interrupted its POST.
+
+    ``asyncio.shield`` keeps the producer task alive when the request scope is
+    cancelled. This is best-effort process-local recovery; a producer that only
+    exposes mutable terminal output still depends on the normal canonical poll.
+    """
+    try:
+        result = await provider_task
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        set_turn_status(user_id, target, client_message_id, 'failed')
+        return
+    _record_prompt_result(user_id, target, client_message_id, turn_id, result)
+
+
+def _schedule_detached_prompt(
+    user_id: str, target: str, client_message_id: str, turn_id: str, provider_task: 'asyncio.Task[Any]',
+) -> None:
+    task = asyncio.create_task(_finish_detached_prompt(
+        user_id, target, client_message_id, turn_id, provider_task,
+    ))
+    _detached_prompt_tasks.add(task)
+    task.add_done_callback(_detached_prompt_tasks.discard)
 
 
 @app.websocket('/api/v1/events')
@@ -1145,16 +1193,25 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
         principal.user_id, contract.target, client_message_id, contract.text or '',
         source='text', submitted_text=prompt_text, attachments=stored_uploads,
     )
-    result = await herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
-    if result.get('status') == 'error':
+    # A browser refresh can cancel this request while Herdr is still producing
+    # the answer. Shield the producer and finish the canonical slot in a
+    # process-local task instead of losing a synchronous completion at the POST
+    # boundary. The normal snapshot poll remains the fallback for terminal-only
+    # producers.
+    provider_task = asyncio.create_task(
+        herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
+    )
+    try:
+        result = await asyncio.shield(provider_task)
+    except asyncio.CancelledError:
+        _schedule_detached_prompt(
+            principal.user_id, contract.target, client_message_id, turn['turn_id'], provider_task,
+        )
+        raise
+    except Exception:
         set_turn_status(principal.user_id, contract.target, client_message_id, 'failed')
-    else:
-        response = result.get('response')
-        if isinstance(response, str) and response.strip():
-            # A harness that answers synchronously is recorded here, so the
-            # reply has canonical identity from the start and the poll that
-            # later re-reads the same turn revises it instead of adding a row.
-            record_primary_reply(principal.user_id, contract.target, turn['turn_id'], response)
+        raise
+    _record_prompt_result(principal.user_id, contract.target, client_message_id, turn['turn_id'], result)
     return {
         **result,
         'message_id': client_message_id,

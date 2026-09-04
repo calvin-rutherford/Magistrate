@@ -4,6 +4,7 @@ Every case here is a duplicate or leak class the old architecture produced by
 treating a mutable Herdr snapshot as the chat database.
 """
 from pathlib import Path
+import asyncio
 import sqlite3
 from unittest.mock import AsyncMock
 
@@ -12,8 +13,10 @@ from fastapi.testclient import TestClient
 
 from app import conversation_store as store
 from app import db
+from app.auth import Principal
+from app.contracts import UniversalInputContract
 from app.herdr_client import HERDR_MAX_READ_LINES, classify_history_rows, parse_agent_history
-from app.main import app
+from app.main import app, send_captain_prompt
 from conftest import TEST_HEADERS, TEST_SESSION_TOKEN
 
 client = TestClient(app)
@@ -513,6 +516,43 @@ def test_prompt_endpoint_records_a_synchronous_reply_canonically(monkeypatch):
     assert [(item['role'], item['text']) for item in response['conversation']['messages']] == [
         ('user', 'status please'), ('assistant', 'Understood.'),
     ]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_prompt_finishes_one_canonical_assistant_row_without_resubmission(monkeypatch):
+    provider_started = asyncio.Event()
+    provider_release = asyncio.Event()
+    provider_calls = 0
+
+    async def provider_result(*args, **kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        provider_started.set()
+        await provider_release.wait()
+        return {'status': 'submitted', 'response': 'The report finished after the browser reconnected.'}
+
+    monkeypatch.setattr('app.main.herdr_client.prompt_agent', provider_result)
+    principal = Principal(USER, frozenset({'command', 'read'}), 'test-session', 4102444800)
+    request = asyncio.create_task(send_captain_prompt(
+        UniversalInputContract(text='finish the report', message_id='u-interrupted-post'), principal,
+    ))
+    await provider_started.wait()
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    # This is the browser-refresh boundary: the POST is gone, but the shielded
+    # producer completes once and writes its reserved assistant slot.
+    provider_release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    messages = store.list_messages(USER, TARGET)['messages']
+    assert provider_calls == 1
+    assert [(item['role'], item['text']) for item in messages] == [
+        ('user', 'finish the report'),
+        ('assistant', 'The report finished after the browser reconnected.'),
+    ]
+    assert len({item['turn_id'] for item in messages}) == 1
 
 
 def test_prompt_endpoint_marks_a_rejected_turn_failed(monkeypatch):
