@@ -385,9 +385,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [conversationSync, setConversationSync] = useState<ConversationSyncState>({ status: canonicalTarget ? 'loading' : 'fresh', cachedRows: 0 });
   const pendingAttachmentsByMessageRef = useRef(new Map<string, ComposerAttachment[]>());
   const scrollRef = useRef<ScrollView>(null);
+  const composerDockRef = useRef<View>(null);
   const inputRef = useRef<TextInput>(null);
   const holdActiveRef = useRef(false);
   const followLatestRef = useRef(true);
+  const explicitReaderInputRef = useRef(false);
+  const readerMovedAwayRef = useRef(false);
   const touchHistoryYRef = useRef<number | null>(null);
   const initialHistoryLoadedRef = useRef(false);
   const historyViewportMeasuredRef = useRef(false);
@@ -451,6 +454,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (next) setHasNewMessages(false);
   };
   const stopFollowingLatest = () => {
+    explicitReaderInputRef.current = true;
+    readerMovedAwayRef.current = false;
     setFollowLatestIntent(false);
     cancelLatestScroll();
   };
@@ -494,6 +499,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // revision; geometry never revokes it.
   const requestLatestScroll = (force = false) => {
     if (force) {
+      explicitReaderInputRef.current = false;
+      readerMovedAwayRef.current = false;
       setFollowLatestIntent(true);
       cancelLatestScroll();
       setLatestScrollPending(true);
@@ -734,16 +741,37 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   };
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const previousOffsetY = latestScrollMetricsRef.current.offsetY;
+    const wasFollowing = followLatestRef.current;
+    const isPendingScroll = pendingLatestScrollRef.current;
     latestScrollMetricsRef.current = {
       offsetY: contentOffset.y,
       contentHeight: contentSize.height,
       viewportHeight: layoutMeasurement.height,
     };
     const atAbsoluteBottom = measuredAtLatestEnd();
-    // A scroll event is the acknowledgement boundary: intent is not enough.
+    // A native scrollbar drag does not reliably emit onScrollBeginDrag or a
+    // React mouse-down event. While no programmatic jump is pending, a
+    // substantial backwards movement is therefore the remaining explicit
+    // reader-input signal. Do this after capturing the new metrics so a
+    // content-size update cannot cancel sticky following while it settles.
+    if (wasFollowing && !isPendingScroll && contentOffset.y < previousOffsetY - 2) {
+      stopFollowingLatest();
+      readerMovedAwayRef.current = true;
+    } else if (!atAbsoluteBottom && !followLatestRef.current) {
+      readerMovedAwayRef.current = true;
+    }
     if (atAbsoluteBottom) {
       if (pendingLatestScrollRef.current) completeLatestScroll();
-      if (!followLatestRef.current) setFollowLatestIntent(true);
+      // Do not let a stale bottom event undo a keyboard/wheel gesture that
+      // stopped following before the browser moved the scroll node. Resume
+      // only after that reader has actually moved away, or on a fresh bottom
+      // event that was not preceded by explicit reader input.
+      if (!followLatestRef.current && (!explicitReaderInputRef.current || readerMovedAwayRef.current)) {
+        explicitReaderInputRef.current = false;
+        readerMovedAwayRef.current = false;
+        setFollowLatestIntent(true);
+      }
     }
     if (contentOffset.y < 36) void loadOlderHistory();
   };
@@ -766,6 +794,23 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     const next = Math.ceil(event.nativeEvent.layout.height);
     setComposerHeight(current => Math.abs(current - next) > 1 ? next : current);
   };
+  // RN Web can resize children inside the absolutely positioned dock without
+  // delivering a fresh Yoga onLayout event. Observe the actual dock as well so
+  // the transcript inset follows attachment previews, voice UI, and status rows
+  // instead of retaining the previous height for one render (or indefinitely).
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof ResizeObserver === 'undefined') return;
+    const dock = composerDockRef.current as unknown as HTMLElement | null;
+    if (!dock?.getBoundingClientRect) return;
+    const update = () => {
+      const next = Math.ceil(dock.getBoundingClientRect().height);
+      setComposerHeight(current => Math.abs(current - next) > 1 ? next : current);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, []);
   const handleHistoryScrollBeginDrag = () => {
     // This callback is user input, never a content-size side effect. A drag is
     // an explicit reader decision; dragging back to the absolute end below can
@@ -1192,7 +1237,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       {activeMessage?.role === 'assistant' && activeMessage.runId && activeMessage.regenerateSafe === true ? <TouchableOpacity accessibilityRole="button" accessibilityLabel={activeMessage.progress === 'failed' ? 'Retry response' : 'Regenerate response'} onPress={() => void regenerateMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>{activeMessage.progress === 'failed' ? 'Retry' : 'Regenerate'}</Text></TouchableOpacity> : null}
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close message actions" onPress={() => setMessageActionsId(null)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>×</Text></TouchableOpacity>
     </View> : null}
-    <View testID="composer-dock" style={styles.composerDock} pointerEvents="box-none" onLayout={handleComposerLayout}>
+    <View ref={composerDockRef} testID="composer-dock" style={styles.composerDock} pointerEvents="box-none" onLayout={handleComposerLayout}>
     {isRecording ? <View testID="active-voice-surface" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.activeVoiceSurface}><View style={styles.activeVoiceHalo} /><Image source={markActive} style={styles.activeVoiceMark} resizeMode="contain" accessibilityIgnoresInvertColors /><LiveWaveform samples={waveSamples} color={brand.cyan} /></View> : null}
     {attachments.length ? <ScrollView testID="attachment-preview" horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentPreview} contentContainerStyle={styles.attachmentPreviewContent} keyboardShouldPersistTaps="handled">
       {attachments.map(attachment => <View key={attachment.id} testID={`attachment-${attachment.id}`} style={[styles.attachmentChip, { backgroundColor: composerSurface }]}>
