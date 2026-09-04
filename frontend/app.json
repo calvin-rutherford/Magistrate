@@ -60,6 +60,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "aedf2c07-8f71-4e31-9e6e-7968f30479b1"
+      }
+    },
+    "owner": "melkezics-team"
   }
 }
