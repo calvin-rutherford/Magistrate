@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
 const { PNG } = require('pngjs');
-const { launchBrowser, startWebServer } = require('./helpers/web-server');
+const { launchBrowser, startWebServer, clickRendered } = require('./helpers/web-server');
 
 let server;
 let browser;
@@ -557,6 +557,83 @@ test('follow-latest intent survives many canonical revisions until explicit read
       && history.scrollTop + history.clientHeight >= history.scrollHeight - 2;
   });
 
+  await page.close();
+});
+
+test('jump recovery handles delayed fallback and structured growth plus keyboard and scrollbar input', async () => {
+  const longText = label => `${label} ${'This intentionally long response exercises measured transcript geometry. '.repeat(18)}`;
+  const structured = {
+    schema_version: 'magi.response.v1',
+    blocks: [{ type: 'paragraph', block_id: 'delayed-growth', content: [{ type: 'text', text: longText('Structured content') }] }],
+    actions: [],
+  };
+  const seedTurns = Array.from({ length: 10 }, (_, index) => ({
+    clientMessageId: `jump-input-${index}`,
+    text: `jump input prompt ${index} ${'context '.repeat(8)}`,
+    reply: index === 9 ? longText('Structured response') : longText(`Fallback response ${index}`),
+    ...(index === 9 ? { structuredContent: structured, structuredRevision: 1 } : {}),
+  }));
+  const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, { manual: true, seedTurns });
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="agent-message"]').length === 10);
+  await page.waitForFunction(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    return history.scrollHeight > history.clientHeight + 300 && history.scrollTop + history.clientHeight >= history.scrollHeight - 2;
+  });
+  const atBottom = () => page.$eval('[data-testid="chat-history"]', element => element.scrollTop + element.clientHeight >= element.scrollHeight - 2);
+
+  await page.hover('[data-testid="chat-history"]');
+  await page.mouse.wheel({ deltaY: -10_000 });
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+  await clickRendered(page, '[data-testid="jump-to-latest"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="jump-to-latest"]') && (() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    return history.scrollTop + history.clientHeight >= history.scrollHeight - 2;
+  })());
+  assert.equal(await atBottom(), true);
+
+  // PageUp is a reader gesture even when the browser sends it to the document
+  // rather than RN Web's ScrollView node.
+  await page.evaluate(() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    history.setAttribute('tabindex', '0');
+    history.focus();
+  });
+  await page.keyboard.press('PageUp');
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+
+  // A scrollbar drag does not consistently emit onScrollBeginDrag in RN Web;
+  // the gutter pointer-down must still cancel following.
+  await clickRendered(page, '[data-testid="jump-to-latest"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="jump-to-latest"]'));
+  const historyRect = await page.$eval('[data-testid="chat-history"]', element => {
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+  });
+  await page.mouse.move(historyRect.right - 2, historyRect.bottom - 80);
+  await page.mouse.down();
+  await page.mouse.move(historyRect.right - 2, historyRect.top + 20, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForSelector('[data-testid="jump-to-latest"]');
+
+  // Content can commit long after the click (especially a structured block).
+  // Both fallback and structured rows grow past the old 50ms settling window;
+  // recovery must keep retrying and end at the new physical bottom.
+  // The preceding scrollbar gesture can leave Chrome's native scrollbar hit
+  // target active for one turn; invoke the already-tested button handler while
+  // keeping the gesture itself real.
+  await page.evaluate(() => document.querySelector('[data-testid="jump-to-latest"]')?.click());
+  await page.waitForFunction(() => !document.querySelector('[data-testid="jump-to-latest"]'));
+  await page.evaluate(() => setTimeout(() => {
+    for (const selector of ['[data-testid="assistant-markdown-cm_0_a"]', '[data-testid="assistant-structured-cm_9_a"]']) {
+      const row = document.querySelector(selector);
+      if (row) row.style.paddingBottom = '420px';
+    }
+  }, 180));
+  await new Promise(resolve => setTimeout(resolve, 360));
+  await page.waitForFunction(() => (() => {
+    const history = document.querySelector('[data-testid="chat-history"]');
+    return history.scrollTop + history.clientHeight >= history.scrollHeight - 2;
+  })() && !document.querySelector('[data-testid="jump-to-latest"]'));
   await page.close();
 });
 
