@@ -18,8 +18,10 @@
         "NSPhotoLibraryUsageDescription": "Magistrate allows uploading profile photos.",
         "NSCameraUsageDescription": "Magistrate allows taking profile photos.",
         "UIBackgroundModes": [
+          "remote-notification",
           "remote-notification"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
