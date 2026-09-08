@@ -20,7 +20,7 @@ Focused observed behavior includes a 430×820 mobile viewport showing exactly `M
 
 `cd frontend && npx expo-doctor` reports **19/21 checks passed** and exactly two failures:
 
-1. `Check for legacy global CLI installed locally`: the existing `eas-cli` development dependency.
+1. `Check for legacy global CLI installed locally`: use the supported `npx eas-cli@23.0.0` invocation; EAS CLI is not a project dependency.
 2. `Check that packages match versions required by installed Expo SDK`: six existing patch mismatches — `@expo/ui` 57.0.15 vs 57.0.17, `expo` 57.0.19 vs 57.0.21, `expo-glass-effect` 57.0.1 vs 57.0.2, `expo-image-picker` 57.0.15 vs 57.0.16, `expo-notifications` 57.0.16 vs 57.0.17, and `expo-router` 57.0.18 vs 57.0.20.
 
 These are not introduced by this slice: `git diff --exit-code ce5db24 -- frontend/package.json frontend/package-lock.json` returned 0. They remain visible baseline debt rather than being suppressed or folded into this correctness-focused change.
