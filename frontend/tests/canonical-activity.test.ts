@@ -212,7 +212,7 @@ test('working state and decision routing use only canonical identities', () => {
     'component-local progress without a Gateway identity cannot activate lifecycle UI');
 });
 
-test('snapshot and replay retention stays bounded while preserving focus and recent revisions', () => {
+test('snapshot and replay retention preserves full focus capacity and recent revisions', () => {
   const makeRows = (start: number, count: number) => Array.from({ length: count }, (_, offset) => {
     const sequence = start + offset;
     return record({
@@ -220,59 +220,97 @@ test('snapshot and replay retention stays bounded while preserving focus and rec
       kind: 'worker.message', state: 'completed', summary: `Completed operation ${sequence}.`,
     });
   });
-  const active = record({ id: 'ca_active_old', sequence: 1, delivery_sequence: 1 });
-  const pending = record({
-    id: 'ca_pending_old', sequence: 2, delivery_sequence: 2,
-    kind: 'decision.requested', state: 'awaiting-user', decision_key: 'release/channel',
-  });
+  const focus = Array.from({ length: 2_000 }, (_, index) => index < 1_000
+    ? record({
+      id: `ca_active_${index}`, sequence: index + 1, delivery_sequence: index + 1,
+      task_id: `task-${index}`, objective_id: `obj-${index}`,
+    })
+    : record({
+      id: `ca_pending_${index}`, sequence: index + 1, delivery_sequence: index + 1,
+      kind: 'decision.requested', state: 'awaiting-user', task_id: `task-${index - 1_000}`,
+      decision_key: `decision-${index}`, objective_id: `obj-${index - 1_000}`,
+    }));
+  const active = focus[0];
+  const pending = focus[1_000];
 
   setCanonicalActivityPrincipal('activity-snapshot-volume');
-  for (const [start, before] of [[3, 403], [203, 203], [403, null]] as const) {
-    const rows = makeRows(start, 200);
-    assert.ok(ingestCanonicalActivitySnapshot({
-      schema_version: 'activity.v1', records: rows, focus_records: [active, pending],
-      focus_truncated: false, snapshot_cursor: 602, latest_sequence: 602,
-      next_before: before, has_more: before !== null,
-      summary: { active_objectives: 1, operation_count: 600, pending_decisions: 1 },
-    }));
-  }
-  assert.equal(getCanonicalActivityRecords().length, 400);
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [], focus_records: focus,
+    focus_truncated: false, snapshot_cursor: 2_000, latest_sequence: 2_000,
+    next_before: null, has_more: false,
+    summary: { active_objectives: 1_000, operation_count: 0, pending_decisions: 1_000 },
+  }));
+  assert.equal(getCanonicalActivityRecords().length, 2_000);
   assert.ok(getCanonicalActivityRecords().some(item => item.id === active.id));
   assert.ok(getCanonicalActivityRecords().some(item => item.id === pending.id));
   assert.deepEqual(getCanonicalActivitySnapshot().summary, {
-    activeObjectives: 1, operationCount: 600, pendingDecisions: 1,
+    activeObjectives: 1_000, operationCount: 0, pendingDecisions: 1_000,
   });
 
   setCanonicalActivityPrincipal('activity-replay-volume');
-  const replayRows = [active, pending, ...makeRows(3, 448)];
-  for (let offset = 0; offset < replayRows.length; offset += 200) {
-    const batch = replayRows.slice(offset, offset + 200);
-    const nextCursor = offset + batch.length;
+  for (let offset = 0; offset < focus.length; offset += 200) {
+    const batch = focus.slice(offset, offset + 200);
+    const nextCursor = offset + 200;
     assert.ok(ingestCanonicalActivityPage({
-      ...page(batch, nextCursor, 450),
-      ...(nextCursor === 450 ? {
-        summary: { active_objectives: 1, operation_count: 448, pending_decisions: 1 },
+      ...page(batch, nextCursor, 2_000),
+      ...(nextCursor === 2_000 ? {
+        summary: { active_objectives: 1_000, operation_count: 0, pending_decisions: 1_000 },
       } : {}),
     }));
   }
-  assert.equal(getCanonicalActivityRecords().length, 400);
-  assert.ok(getCanonicalActivityRecords().some(item => item.id === active.id));
-  assert.ok(getCanonicalActivityRecords().some(item => item.id === pending.id));
+  const completed = makeRows(2_001, 500).map(row => ({
+    ...row, task_id: 'task-0', objective_id: 'obj-0',
+  }));
+  for (let offset = 0; offset < completed.length; offset += 100) {
+    const batch = completed.slice(offset, offset + 100);
+    assert.ok(ingestCanonicalActivityPage(page(batch, 2_100 + offset, 2_500)));
+  }
+  assert.equal(getCanonicalActivityRecords().length, 2_400);
 
   assert.ok(ingestCanonicalActivityPage({
     ...page([record({
-      id: pending.id, sequence: pending.sequence, delivery_sequence: 451, revision: 2,
-      kind: 'decision.resolved', state: 'resolved', decision_key: 'release/channel',
+      id: pending.id, sequence: pending.sequence, delivery_sequence: 2_501, revision: 2,
+      kind: 'decision.resolved', state: 'resolved', task_id: pending.task_id,
+      decision_key: pending.decision_key, objective_id: pending.objective_id,
       summary: 'Release channel selected.',
-    })], 451),
-    summary: { active_objectives: 1, operation_count: 448, pending_decisions: 0 },
+    })], 2_501),
+    summary: { active_objectives: 1_000, operation_count: 500, pending_decisions: 999 },
   }));
   const revised = getCanonicalActivityRecords().find(item => item.id === pending.id);
-  assert.deepEqual([revised?.state, revised?.revision, revised?.deliverySequence], ['resolved', 2, 451]);
-  assert.equal(getCanonicalActivityRecords().length, 400);
+  assert.deepEqual([revised?.state, revised?.revision, revised?.deliverySequence], ['resolved', 2, 2_501]);
+  assert.equal(getCanonicalActivityRecords().length, 2_399);
   assert.deepEqual(getCanonicalActivitySnapshot().summary, {
-    activeObjectives: 1, operationCount: 448, pendingDecisions: 0,
+    activeObjectives: 1_000, operationCount: 500, pendingDecisions: 999,
   });
+});
+
+test('snapshot pagination reveals complete older pages and stops at retained history capacity', () => {
+  setCanonicalActivityPrincipal('activity-pagination-capacity');
+  const active = record({ id: 'ca_page_active', sequence: 1, delivery_sequence: 1 });
+  const snapshotPage = (start: number, nextBefore: number) => ({
+    schema_version: 'activity.v1', records: Array.from({ length: 100 }, (_, offset) => {
+      const sequence = start + offset;
+      return record({
+        id: `ca_page_${sequence}`, sequence, delivery_sequence: sequence,
+        kind: 'worker.message', state: 'completed', summary: `Historical operation ${sequence}.`,
+      });
+    }),
+    focus_records: [active], focus_truncated: false, snapshot_cursor: 500,
+    latest_sequence: 500, next_before: nextBefore, has_more: true,
+    summary: { active_objectives: 1, operation_count: 0, pending_decisions: 0 },
+  });
+
+  let applied = ingestCanonicalActivitySnapshot(snapshotPage(401, 401));
+  assert.deepEqual([applied?.hasMore, applied?.nextBefore], [true, 401]);
+  for (const [start, nextBefore] of [[301, 301], [201, 201], [101, 101]] as const) {
+    const beforeCount = getCanonicalActivityRecords().length;
+    applied = ingestCanonicalActivitySnapshot(snapshotPage(start, nextBefore), true);
+    assert.ok(applied);
+    assert.equal(getCanonicalActivityRecords().length, beforeCount + 100);
+    assert.ok(getCanonicalActivityRecords().some(item => item.id === `ca_page_${start}`));
+  }
+  assert.equal(getCanonicalActivityRecords().length, 401);
+  assert.deepEqual([applied?.hasMore, applied?.nextBefore], [false, undefined]);
 });
 
 test('safe references and more than ten ordered activity rows survive bounded catch-up', () => {

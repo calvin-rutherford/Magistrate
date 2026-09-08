@@ -94,8 +94,9 @@ const RECORD_KEYS = new Set([
 ]);
 const CACHE_PREFIX = 'magistrate.activity.canonical.v1.';
 const CACHE_SCHEMA = 'activity-cache.v1';
-const MAX_ACTIVITY_RECORDS = 400;
-const MAX_FOCUS_RECORDS = 200;
+const MAX_RECENT_ACTIVITY_RECORDS = 400;
+const MAX_FOCUS_RECORDS = 2_000;
+const MAX_ACTIVITY_RECORDS = MAX_FOCUS_RECORDS + MAX_RECENT_ACTIVITY_RECORDS;
 const EMPTY_SUMMARY: CanonicalActivitySummary = {
   activeObjectives: 0, operationCount: 0, pendingDecisions: 0,
 };
@@ -282,24 +283,29 @@ let published: CanonicalActivitySnapshot = {
 const storageKey = (principal: string): string => `${CACHE_PREFIX}${encodeURIComponent(principal)}`;
 const sortedRecords = (): CanonicalActivityRecord[] =>
   [...records.values()].sort((left, right) => left.sequence - right.sequence);
+const isFocusRecord = (activity: CanonicalActivityRecord): boolean => (
+  (activity.kind === 'objective.started' || activity.kind === 'objective.progress'
+    || activity.kind === 'decision.requested')
+  && (activity.state === 'active' || activity.state === 'awaiting-user')
+);
 const retainedRecords = (
   source: ReadonlyMap<string, CanonicalActivityRecord>,
-): CanonicalActivityRecord[] => {
+): CanonicalActivityRecord[] | null => {
   const ordered = [...source.values()].sort((left, right) => left.sequence - right.sequence);
-  const focus = ordered.filter(activity => (
-    (activity.kind === 'objective.started' || activity.kind === 'objective.progress'
-      || activity.kind === 'decision.requested')
-    && (activity.state === 'active' || activity.state === 'awaiting-user')
-  )).slice(-MAX_FOCUS_RECORDS);
+  const focus = ordered.filter(isFocusRecord);
+  if (focus.length > MAX_FOCUS_RECORDS) return null;
   const focusedIds = new Set(focus.map(activity => activity.id));
   const recent = ordered.filter(activity => !focusedIds.has(activity.id))
     .sort((left, right) => right.deliverySequence - left.deliverySequence)
-    .slice(0, MAX_ACTIVITY_RECORDS - focus.length);
+    .slice(0, MAX_RECENT_ACTIVITY_RECORDS);
   return [...focus, ...recent].sort((left, right) => left.sequence - right.sequence);
 };
-const replaceRecords = (source: ReadonlyMap<string, CanonicalActivityRecord>): void => {
+const replaceRecords = (source: ReadonlyMap<string, CanonicalActivityRecord>): boolean => {
+  const retained = retainedRecords(source);
+  if (!retained) return false;
   records.clear();
-  retainedRecords(source).forEach(activity => records.set(activity.id, activity));
+  retained.forEach(activity => records.set(activity.id, activity));
+  return true;
 };
 const publish = (): void => {
   published = {
@@ -398,7 +404,7 @@ export async function hydrateCanonicalActivity(): Promise<boolean> {
       sequences.add(activity.sequence);
     }
     if (principalId !== owner) return false;
-    replaceRecords(staged);
+    if (!replaceRecords(staged)) throw new Error('activity cache exceeds focus capacity');
     deliveryCursor = payload.cursor as number;
     summaryCursor = payload.summary_cursor as number;
     summary = {
@@ -508,7 +514,7 @@ export function ingestCanonicalActivityPage(raw: unknown): boolean {
     if (sequences.has(activity.sequence)) return false;
     sequences.add(activity.sequence);
   }
-  replaceRecords(staged);
+  if (!replaceRecords(staged)) return false;
   deliveryCursor = Math.max(deliveryCursor, page.next_cursor);
   if (wireSummary && (page.latest_cursor as number) >= summaryCursor) {
     summaryCursor = page.latest_cursor as number;
@@ -532,25 +538,30 @@ export interface CanonicalActivitySnapshotPage {
   snapshotCursor: number;
 }
 
-export function ingestCanonicalActivitySnapshot(raw: unknown): CanonicalActivitySnapshotPage | null {
+export function ingestCanonicalActivitySnapshot(
+  raw: unknown, requireCompletePage = false,
+): CanonicalActivitySnapshotPage | null {
   if (!principalId || !raw || typeof raw !== 'object') return null;
   const value = raw as Record<string, unknown>;
   const wireSummary = value.summary as Record<string, unknown> | undefined;
   if (value.schema_version !== ACTIVITY_SCHEMA || !Array.isArray(value.records)
     || !Array.isArray(value.focus_records) || value.records.length > 200
-    || value.focus_records.length > 200 || typeof value.focus_truncated !== 'boolean'
+    || value.focus_records.length > MAX_FOCUS_RECORDS || value.focus_truncated !== false
     || !safeInteger(value.snapshot_cursor) || !safeInteger(value.latest_sequence)
     || (value.next_before !== null && value.next_before !== undefined && !safeInteger(value.next_before, 1))
-    || typeof value.has_more !== 'boolean' || !wireSummary
+    || typeof value.has_more !== 'boolean' || (value.has_more && !safeInteger(value.next_before, 1))
+    || !wireSummary
     || !safeInteger(wireSummary.active_objectives)
     || !safeInteger(wireSummary.operation_count)
     || !safeInteger(wireSummary.pending_decisions)) return null;
-  const normalized = [...value.records, ...value.focus_records].map(normalizeCanonicalActivityRecord);
-  if (normalized.some(record => record === null)) return null;
-  const delivered = normalized as CanonicalActivityRecord[];
+  const normalizedRecords = value.records.map(normalizeCanonicalActivityRecord);
+  const normalizedFocus = value.focus_records.map(normalizeCanonicalActivityRecord);
+  if ([...normalizedRecords, ...normalizedFocus].some(record => record === null)) return null;
+  const pageRecords = normalizedRecords as CanonicalActivityRecord[];
+  const delivered = [...pageRecords, ...normalizedFocus as CanonicalActivityRecord[]];
   const staged = new Map(records);
   const authoritativeAtCursor = (value.snapshot_cursor as number) >= deliveryCursor;
-  if (authoritativeAtCursor && value.focus_truncated === false) {
+  if (authoritativeAtCursor) {
     const represented = new Set(delivered.map(activity => activity.id));
     for (const [id, activity] of staged) {
       const isRecoverableFocus = (activity.kind === 'objective.started'
@@ -577,7 +588,12 @@ export function ingestCanonicalActivitySnapshot(raw: unknown): CanonicalActivity
     if (owner && owner !== activity.id) return null;
     sequences.set(activity.sequence, activity.id);
   }
-  replaceRecords(staged);
+  const retained = retainedRecords(staged);
+  if (!retained) return null;
+  const retainedIds = new Set(retained.map(activity => activity.id));
+  if (requireCompletePage && pageRecords.some(activity => !retainedIds.has(activity.id))) return null;
+  records.clear();
+  retained.forEach(activity => records.set(activity.id, activity));
   deliveryCursor = Math.max(deliveryCursor, value.snapshot_cursor as number);
   if ((value.snapshot_cursor as number) >= summaryCursor) {
     summaryCursor = value.snapshot_cursor as number;
@@ -591,9 +607,13 @@ export function ingestCanonicalActivitySnapshot(raw: unknown): CanonicalActivity
   snapshotBaseline = true;
   publish();
   persist();
+  const remainingHistoryCapacity = MAX_RECENT_ACTIVITY_RECORDS
+    - retained.filter(activity => !isFocusRecord(activity)).length;
+  const canLoadAnotherPage = value.has_more && pageRecords.length > 0
+    && remainingHistoryCapacity >= pageRecords.length;
   return {
-    nextBefore: value.next_before as number | undefined,
-    hasMore: value.has_more,
+    nextBefore: canLoadAnotherPage ? value.next_before as number : undefined,
+    hasMore: canLoadAnotherPage,
     snapshotCursor: value.snapshot_cursor as number,
   };
 }

@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote
 
 from app.activity_store import (
+    MAX_ACTIVITY_FOCUS_RECORDS,
     MAX_ACTIVITY_SUMMARY_CHARS,
     MAX_SAFE_INTEGER,
     SourceEventConflict,
@@ -1050,7 +1051,10 @@ class FirstmateActivityAdapter:
             if not isinstance(decision_rows, list) or len(decision_rows) > 100:
                 raise SourceUnavailable('Firstmate returned an invalid keyed-decision projection.')
             decision_count += len(decision_rows)
-            if decision_count > MAX_SNAPSHOT_DECISIONS:
+            if (
+                decision_count > MAX_SNAPSHOT_DECISIONS
+                or len(tasks) + decision_count > MAX_ACTIVITY_FOCUS_RECORDS
+            ):
                 raise SourceUnavailable('Firstmate returned an oversized keyed-decision projection.')
             valid_decisions: List[Tuple[str, str]] = []
             seen_decision_keys: set[str] = set()

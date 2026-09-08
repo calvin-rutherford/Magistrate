@@ -52,6 +52,7 @@ _ACTIVITY_KIND_STATES = {
     'worker.final': frozenset({'completed'}),
 }
 MAX_ACTIVITY_PAGE = 200
+MAX_ACTIVITY_FOCUS_RECORDS = 2_000
 MAX_ACTIVITY_SUMMARY_CHARS = 600
 MAX_ACTIVITY_TITLE_CHARS = 240
 MAX_SOURCE_PAYLOAD_BYTES = 8 * 1024
@@ -904,7 +905,7 @@ def snapshot_activity(
                     OR (r.kind = 'decision.requested' AND r.state = 'awaiting-user')
                )
                ORDER BY r.sequence_index DESC LIMIT ?''',
-            (user_id, MAX_ACTIVITY_PAGE + 1),
+            (user_id, MAX_ACTIVITY_FOCUS_RECORDS + 1),
         ).fetchall()
         summary = _activity_summary(conn, user_id)
 
@@ -917,8 +918,8 @@ def snapshot_activity(
     return {
         'schema_version': ACTIVITY_SCHEMA,
         'records': [deliver(row) for row in page],
-        'focus_records': [deliver(row) for row in focus_rows[:MAX_ACTIVITY_PAGE]],
-        'focus_truncated': len(focus_rows) > MAX_ACTIVITY_PAGE,
+        'focus_records': [deliver(row) for row in focus_rows[:MAX_ACTIVITY_FOCUS_RECORDS]],
+        'focus_truncated': len(focus_rows) > MAX_ACTIVITY_FOCUS_RECORDS,
         'snapshot_cursor': snapshot_cursor,
         'latest_sequence': latest_sequence,
         'next_before': page[-1]['sequence_index'] if len(rows) > limit and page else None,

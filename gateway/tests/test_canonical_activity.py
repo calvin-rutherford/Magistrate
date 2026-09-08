@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.activity_store import (
-    SourceEventConflict, list_activity, reconcile_snapshot, source_diagnostics,
+    MAX_ACTIVITY_FOCUS_RECORDS, SourceEventConflict, list_activity,
+    reconcile_snapshot, snapshot_activity, source_diagnostics,
 )
 from app.auth import issue_session
 from app.firstmate_activity import FirstmateActivityAdapter
@@ -487,6 +488,44 @@ def test_snapshot_reconciliation_never_regresses_or_reuses_an_observation_identi
             'activity-invalid-time-owner', 'test:snapshot-invalid', observed_at=-1,
             snapshot_sha256='a' * 64, records=[], open_decision_keys=[],
         )
+
+
+def test_snapshot_recovers_every_accepted_active_objective_and_pending_decision():
+    user = 'activity-focus-capacity-owner'
+    candidates = []
+    open_decisions = []
+    for index in range(1_000):
+        task_id = f'focus-task-{index}'
+        objective_id = f'obj_focus_{index}'
+        common = {
+            'importance': 'routine', 'title': f'Focus task {index}',
+            'source_event_id': None, 'task_id': task_id, 'objective_id': objective_id,
+            'run_id': f'run_focus_{index}', 'project': None, 'occurred_at': None, 'refs': [],
+        }
+        candidates.append({
+            **common, 'record_key': f'objective:{index}', 'kind': 'objective.progress',
+            'state': 'active', 'summary': 'Active objective.', 'decision_key': None,
+            'source_payload_sha256': hashlib.sha256(f'objective:{index}'.encode()).hexdigest(),
+        })
+        decision_key = f'decision-{index}'
+        candidates.append({
+            **common, 'record_key': f'decision:{index}', 'kind': 'decision.requested',
+            'state': 'awaiting-user', 'importance': 'attention', 'summary': 'Choose an option.',
+            'decision_key': decision_key,
+            'source_payload_sha256': hashlib.sha256(f'decision:{index}'.encode()).hexdigest(),
+        })
+        open_decisions.append(f'{task_id}\0{decision_key}')
+    reconcile_snapshot(
+        user, 'firstmate:main', observed_at=2_000, snapshot_sha256='a' * 64,
+        records=candidates, open_decision_keys=open_decisions,
+    )
+
+    projection = snapshot_activity(user, limit=1)
+    assert len(projection['focus_records']) == MAX_ACTIVITY_FOCUS_RECORDS
+    assert projection['focus_truncated'] is False
+    assert projection['summary'] == {
+        'active_objectives': 1_000, 'operation_count': 0, 'pending_decisions': 1_000,
+    }
 
 
 @pytest.mark.asyncio

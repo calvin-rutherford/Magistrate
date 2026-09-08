@@ -1034,7 +1034,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     try {
       const snapshot = await fetchCanonicalActivitySnapshot(activityBefore, 100, false);
       if (owner !== getConversationPrincipal()) return;
-      const applied = ingestCanonicalActivitySnapshot(snapshot);
+      const applied = ingestCanonicalActivitySnapshot(snapshot, true);
       if (!applied) throw new Error('Gateway returned an invalid activity page.');
       setActivityBefore(applied.nextBefore);
       setActivityHasMore(applied.hasMore);
