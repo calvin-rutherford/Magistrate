@@ -49,6 +49,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let postPromptHistoryRequests = 0;
+    let activitySnapshotRequests = 0;
 
     // A stand-in for the gateway's canonical conversation record (see
     // gateway/app/conversation_store.py). It lives in its own storage key so it
@@ -280,7 +281,12 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       ]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/activity/snapshot')) {
         if (historyScenario?.activityFailure) return Promise.reject(new TypeError('Gateway activity request failed.'));
-        const supplied = historyScenario?.activitySnapshot;
+        activitySnapshotRequests += 1;
+        if (historyScenario?.activityPageFailureOnce && activitySnapshotRequests === 2) {
+          return Promise.reject(new TypeError('Gateway activity page request failed.'));
+        }
+        const supplied = activitySnapshotRequests > 1 && historyScenario?.activityOlderSnapshot
+          ? historyScenario.activityOlderSnapshot : historyScenario?.activitySnapshot;
         const payload = supplied || {
           schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
           snapshot_cursor: 0, latest_sequence: 0, next_before: null, has_more: false,
@@ -1160,6 +1166,61 @@ test('canonical lifecycle drives a tappable bounded activity surface with more t
   await page.waitForSelector('[data-testid="canonical-activity-surface"]');
   assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 13);
   assert.match(await page.$eval('[data-testid="canonical-activity-surface"]', element => element.innerText), /Completed/);
+  await page.close();
+});
+
+test('failed activity pagination leaves the visible window unchanged before retry', async () => {
+  const activityRecord = sequence => ({
+    id: `ca-page-${sequence}`, sequence, delivery_sequence: sequence, revision: 1,
+    kind: 'worker.message', state: 'completed', importance: 'routine',
+    title: `Operation ${sequence}`, summary: `Confirmed operation ${sequence}.`, summary_truncated: false,
+    task_id: 'page-task', decision_key: null, objective_id: 'obj-page', run_id: 'run-page',
+    project: 'Magistrate', occurred_at: null, observed_at: 1788840000000, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null },
+  });
+  const initial = [activityRecord(101)];
+  const older = Array.from({ length: 100 }, (_, index) => activityRecord(index + 1));
+  const summary = { active_objectives: 0, operation_count: 0, pending_decisions: 0 };
+  const page = await openChat({ width: 430, height: 820 }, false, '', URL, 0, false, false, 'light', [], false, {
+    activityPageFailureOnce: true,
+    activitySnapshot: {
+      schema_version: 'activity.v1', records: initial, focus_records: [], focus_truncated: false,
+      snapshot_cursor: 101, latest_sequence: 101, next_before: 101, has_more: true,
+      summary, reconciliation: 'available', sources: [],
+    },
+    activityOlderSnapshot: {
+      schema_version: 'activity.v1', records: older, focus_records: [], focus_truncated: false,
+      snapshot_cursor: 101, latest_sequence: 101, next_before: null, has_more: false,
+      summary, reconciliation: 'not-requested', sources: [],
+    },
+  });
+  await clickRendered(page, '[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await clickRendered(page, '[data-testid="drawer-section-activity"]');
+  await page.waitForSelector('[data-testid="open-canonical-activity"]');
+  await clickRendered(page, '[data-testid="open-canonical-activity"]');
+  await page.waitForSelector('[data-testid="canonical-activity-surface"]');
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 1);
+
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')].some(element => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return rect.width > 0 && rect.height > 0 && !!hit && (hit === element || element.contains(hit));
+  }));
+  await clickRendered(page, '[data-testid="load-more-canonical-activity"]');
+  await page.waitForSelector('[data-testid="activity-recovery-banner"]');
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 1);
+
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')]
+    .some(element => element.getAttribute('aria-disabled') !== 'true' && element.textContent.includes('Show earlier activity')));
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')].some(element => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return rect.width > 0 && rect.height > 0 && !!hit && (hit === element || element.contains(hit));
+  }));
+  await clickRendered(page, '[data-testid="load-more-canonical-activity"]');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="canonical-activity-row-"]').length === 40);
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 40);
   await page.close();
 });
 

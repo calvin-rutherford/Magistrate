@@ -19,7 +19,7 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
-import { canonicalActivityResponseIsDegraded, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
+import { canonicalActivityResponseIsDegraded, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, getCanonicalActivityRecords, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, getConversationPrincipal, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
@@ -1027,19 +1027,22 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     activitySyncRef.current = tracked;
     return tracked;
   };
-  const loadOlderCanonicalActivity = async (): Promise<void> => {
-    if (!canonicalTarget || !activityHasMore || !activityBefore || activityLoadingMore) return;
+  const loadOlderCanonicalActivity = async (): Promise<boolean> => {
+    if (!canonicalTarget || !activityHasMore || !activityBefore || activityLoadingMore) return false;
     const owner = getConversationPrincipal();
+    const beforeCount = getCanonicalActivityRecords().length;
     setActivityLoadingMore(true);
     try {
       const snapshot = await fetchCanonicalActivitySnapshot(activityBefore, 100, false);
-      if (owner !== getConversationPrincipal()) return;
+      if (owner !== getConversationPrincipal()) return false;
       const applied = ingestCanonicalActivitySnapshot(snapshot, true);
       if (!applied) throw new Error('Gateway returned an invalid activity page.');
       setActivityBefore(applied.nextBefore);
       setActivityHasMore(applied.hasMore);
+      return getCanonicalActivityRecords().length > beforeCount;
     } catch {
       if (owner === getConversationPrincipal()) markCanonicalActivityInterrupted();
+      return false;
     } finally {
       if (owner === getConversationPrincipal()) setActivityLoadingMore(false);
     }

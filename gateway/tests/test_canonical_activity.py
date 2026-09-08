@@ -612,6 +612,28 @@ async def test_snapshot_ignores_pane_derived_runtime_state_but_keeps_keyed_decis
 
 
 @pytest.mark.asyncio
+async def test_snapshot_rejects_record_only_focus_beyond_recovery_capacity(tmp_path):
+    class RecordOnlyFirstmate(EmptyFirstmate):
+        async def get_snapshot(self):
+            snapshot = await super().get_snapshot()
+            snapshot['generated'] = '2026-09-08T04:00:00Z'
+            snapshot['backlog'] = {'records': [
+                {'id': f'backlog-{index}', 'title': f'Backlog {index}', 'state': 'queued'}
+                for index in range(2_000)
+            ]}
+            snapshot['secondmate_landed'] = {'records': [
+                {'id': 'landed-overflow', 'title': 'Landed overflow', 'state': 'queued'},
+            ]}
+            return snapshot
+
+    source = adapter(tmp_path, [], firstmate=RecordOnlyFirstmate())
+    result = await source.reconcile('activity-record-focus-overflow')
+    assert result['status'] == 'degraded'
+    assert {'stream': 'fleet-snapshot', 'code': 'SourceUnavailable'} in result['errors']
+    assert list_activity('activity-record-focus-overflow')['records'] == []
+
+
+@pytest.mark.asyncio
 async def test_outbox_messages_share_snapshot_objective_and_run_causality(tmp_path):
     class RunningFirstmate(EmptyFirstmate):
         async def get_snapshot(self):

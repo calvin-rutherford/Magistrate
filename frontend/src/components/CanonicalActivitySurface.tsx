@@ -50,7 +50,7 @@ export interface CanonicalActivitySurfaceProps {
   loadingMore: boolean;
   refreshing: boolean;
   onClose: () => void;
-  onLoadMore: () => void | Promise<void>;
+  onLoadMore: () => boolean | Promise<boolean>;
   onRefresh: () => void | Promise<void>;
   onOpenDecision: (itemId: string) => void;
 }
@@ -75,8 +75,7 @@ export function CanonicalActivitySurface({
       return;
     }
     if (hasMore) {
-      await onLoadMore();
-      setVisibleCount(count => count + PAGE_SIZE);
+      if (await onLoadMore()) setVisibleCount(count => count + PAGE_SIZE);
     }
   };
 
