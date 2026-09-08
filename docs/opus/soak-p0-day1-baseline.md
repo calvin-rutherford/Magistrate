@@ -51,7 +51,7 @@ This is local software contract evidence, not evidence that the shared Firstmate
 
 ## Pinned runtime compatibility evidence (2026-09-08)
 
-The bounded P6 slice starts from Magistrate `a55fde8f4436de1a862fae90b87de98219a79fba` and pins only `https://github.com/calvin-rutherford/firstmate.git` commit `2af0d17014cb2e244aa441bfe6df16c4f630475b` (tree `146c55db1fd4d9cb2edf38d384b4d2362d2041e3`). At observation time Firstmate PR #3982 remained open at that exact head; Greptile was successful and GitHub reported `mergeStateStatus=UNSTABLE`. No merge authority is claimed. The observed runtime inventory remains Herdr `0.8.2` / protocol `20` and Pi `0.84.4`.
+The bounded P6 slice is [Magistrate PR #91](https://github.com/calvin-rutherford/Magistrate/pull/91), starts from Magistrate `a55fde8f4436de1a862fae90b87de98219a79fba`, and pins only `https://github.com/calvin-rutherford/firstmate.git` commit `2af0d17014cb2e244aa441bfe6df16c4f630475b` (tree `146c55db1fd4d9cb2edf38d384b4d2362d2041e3`). At observation time Firstmate PR #3982 remained open at that exact head; Greptile was successful and GitHub reported `mergeStateStatus=UNSTABLE`. No merge authority is claimed. The observed runtime inventory remains Herdr `0.8.2` / protocol `20` and Pi `0.84.4`.
 
 Local commands completed against a fresh direct immutable fetch:
 

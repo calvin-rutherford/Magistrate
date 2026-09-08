@@ -9,7 +9,7 @@ Run in a fresh worktree. Set the PR URL to this pinned-producer Magistrate PR, n
 ```bash
 set -euo pipefail
 set +x
-export MAGISTRATE_PR_URL='https://github.com/kunchenguid/Magistrate/pull/<PR>'
+export MAGISTRATE_PR_URL='https://github.com/calvin-rutherford/Magistrate/pull/91'
 export CANDIDATE_SHA="$(gh pr view "$MAGISTRATE_PR_URL" --json headRefOid --jq .headRefOid)"
 test "${#CANDIDATE_SHA}" -eq 40
 printf 'SOAK-P0-001 candidate=%s observed_at=%s\n' \
@@ -20,7 +20,7 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 ```
 
-Replace `<PR>` with the final PR number. If its head changes, this is a new candidate and all evidence below restarts.
+PR #91 is the candidate authority. If its head changes, this is a new candidate and all evidence below restarts.
 
 ## 2. Install and activate the reviewed producer
 
