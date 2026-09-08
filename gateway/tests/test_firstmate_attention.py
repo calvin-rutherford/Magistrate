@@ -176,5 +176,65 @@ async def test_recent_activity_includes_and_deduplicates_landed_records(monkeypa
     assert items[0]['url'].endswith('/pull/7')
 
 
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_timeout_is_bounded_and_truthful(tmp_path):
+    script_dir = tmp_path / 'bin'
+    script_dir.mkdir()
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text('#!/bin/sh\nexec sleep 5\n', encoding='utf-8')
+    script.chmod(0o700)
+    result = await FirstmateClient(str(tmp_path), snapshot_timeout=0.05).get_snapshot()
+    assert result['tasks'] == []
+    assert result['available'] is False
+    assert result['error'] == 'Fleet snapshot timed out'
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_output_is_hard_capped(tmp_path):
+    script_dir = tmp_path / 'bin'
+    script_dir.mkdir()
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text('#!/bin/sh\nhead -c 4096 /dev/zero\n', encoding='utf-8')
+    script.chmod(0o700)
+    result = await FirstmateClient(str(tmp_path), snapshot_max_bytes=128).get_snapshot()
+    assert result['tasks'] == []
+    assert result['available'] is False
+    assert result['error'] == 'Fleet snapshot exceeded its bounded output size'
+
+
+@pytest.mark.parametrize('body', [
+    '#!/bin/sh\nexit 3\n',
+    '#!/bin/sh\nprintf \'not-json\\n\'\n',
+    '#!/bin/sh\nprintf \'%s\\n\' \'{"schema":"wrong","tasks":[]}\'\n',
+    '#!/bin/sh\nprintf \'%s\\n\' \'{"schema":"fm-fleet-snapshot.v1","tasks":[],"error":"source failed"}\'\n',
+])
+@pytest.mark.asyncio
+async def test_snapshot_command_and_parse_failures_are_explicitly_unavailable(tmp_path, body):
+    script_dir = tmp_path / 'bin'
+    script_dir.mkdir()
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text(body, encoding='utf-8')
+    script.chmod(0o700)
+    result = await FirstmateClient(str(tmp_path)).get_snapshot()
+    assert result['fm_home'] == str(tmp_path)
+    assert result['available'] is False
+    assert result['error']
+
+
+@pytest.mark.asyncio
+async def test_valid_snapshot_is_explicitly_available(tmp_path):
+    script_dir = tmp_path / 'bin'
+    script_dir.mkdir()
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"schema":"fm-fleet-snapshot.v1","tasks":[]}\'\n',
+        encoding='utf-8',
+    )
+    script.chmod(0o700)
+    result = await FirstmateClient(str(tmp_path)).get_snapshot()
+    assert result['available'] is True
+    assert result['fm_home'] == str(tmp_path)
+
+
 async def _future(value):
     return value

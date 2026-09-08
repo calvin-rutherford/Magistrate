@@ -40,8 +40,8 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     if (initialMessages.length) {
       const canonical = Object.fromEntries(initialMessages.filter(message => message.canonicalId).map(message => [message.canonicalId, message]));
       const pending = Object.fromEntries(initialMessages.filter(message => !message.canonicalId && message.role === 'user' && ['sending', 'failed'].includes(message.delivery)).map(message => [message.id, message]));
-      localStorage.setItem('magistrate.chat.canonical.v1.captain', JSON.stringify({ schema_version: 'conversation-cache.v1', messages: canonical }));
-      localStorage.setItem('magistrate.chat.pending.v1.captain', JSON.stringify({ schema_version: 'conversation-pending.v1', messages: pending }));
+      localStorage.setItem('magistrate.chat.canonical.v1.default_user|captain', JSON.stringify({ schema_version: 'conversation-cache.v1', principal_id: 'default_user', messages: canonical }));
+      localStorage.setItem('magistrate.chat.pending.v1.default_user|captain', JSON.stringify({ schema_version: 'conversation-pending.v1', principal_id: 'default_user', messages: pending }));
     }
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
@@ -65,7 +65,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       const messages = [];
       loadRecord().turns.forEach(turn => {
         const turnId = `ct_${turn.index}`;
-        const base = { turn_id: turnId, turn_status: turn.status, revision: 1, created_at: turn.createdAt };
+        const base = { turn_id: turnId, turn_status: turn.status, revision: 1, source: 'terminal', created_at: turn.createdAt };
         messages.push({ ...base, id: `cm_${turn.index}_u`, client_message_id: turn.clientMessageId, role: 'user', type: 'conversation', text: turn.text, visible_in_chat: true, sequence_index: turn.index * 1000, source: turn.source || 'text', attachments: turn.attachments || [] });
         (turn.tools || []).forEach((tool, position) => messages.push({ ...base, id: `cm_${turn.index}_t${position}`, role: 'assistant', type: 'tool', text: tool, visible_in_chat: false, sequence_index: turn.index * 1000 + 1 + position }));
         if (turn.reply) messages.push({
@@ -1385,7 +1385,7 @@ async function pageWaitForText(page, text) {
 }
 async function cachedCanonicalMessages(page) {
   return page.evaluate(() => {
-    const payload = JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.captain'));
+    const payload = JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.default_user|captain'));
     return Object.values(payload?.messages || {}).sort((left, right) => left.sequenceIndex - right.sequenceIndex);
   });
 }
@@ -1417,9 +1417,11 @@ test('a healthy canonical refresh replaces a stale cache, keeps only unacknowled
   assert.doesNotMatch(history, /stale local text|cache-only reply/);
   assert.ok(history.indexOf('reconcile this persisted turn') < history.indexOf('The persisted primary response'));
   await page.waitForFunction(() => {
-    const payload = JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.captain'));
+    const payload = JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.default_user|captain'));
     return Object.keys(payload?.messages || {}).length === 2;
   });
+  const cacheEnvelope = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.default_user|captain')));
+  assert.equal(cacheEnvelope.principal_id, 'default_user');
   const persisted = await cachedCanonicalMessages(page);
   assert.deepEqual(persisted.map(message => message.text), ['reconcile this persisted turn', 'The persisted primary response.']);
   assert.equal(persisted[0].id, 'u-stale', 'client_message_id still joins the optimistic bubble to the canonical row');
@@ -1618,7 +1620,7 @@ test('gateway millisecond time replaces the optimistic timestamp and survives po
   const selector = '[data-testid^="user-message-u-"]';
   await page.waitForSelector(selector);
   assert.equal(await page.$eval(`${selector} [data-testid^="user-message-text-"]`, element => element.innerText), 'timestamp check');
-  await page.waitForFunction(() => Object.keys(JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.captain'))?.messages || {}).length === 1);
+  await page.waitForFunction(() => Object.keys(JSON.parse(localStorage.getItem('magistrate.chat.canonical.v1.default_user|captain'))?.messages || {}).length === 1);
   const before = await page.$eval(`${selector} [data-testid^="message-timestamp-"]`, element => element.innerText);
   assert.match(before, /\d/);
   const persisted = (await cachedCanonicalMessages(page))[0];

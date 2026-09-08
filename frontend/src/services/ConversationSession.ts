@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useSyncExternalStore } from 'react';
 import { MAGI_MAX_FALLBACK_TEXT_CHARS, MagiResponseV1, normalizeMagiResponse } from './MagiResponse';
+import { setCanonicalActivityPrincipal } from './CanonicalActivity';
 
 export interface ConversationAttachment {
   name: string;
@@ -49,8 +50,13 @@ export interface ConversationMessage {
   sources?: ConversationSource[];
   /** Provider-labelled summary only; raw reasoning is never stored or rendered. */
   thinkingSummary?: { provider: string; text: string };
-  /** A future backend may opt a run into idempotent regeneration. */
+  /** Stable causal identities; both remain distinct from the conversation turn. */
+  objectiveId?: string;
   runId?: string;
+  lifecycleState?: 'active' | 'awaiting-user' | 'completed' | 'failed' | 'cancelled';
+  lifecycleRevision?: number;
+  decisionKey?: string;
+  assistantKind?: 'response' | 'progress' | 'decision' | 'outcome';
   regenerateSafe?: boolean;
   progress?: ConversationProgress;
   /** Explicit conversation boundary; terminal-derived rows without it are not restored. */
@@ -71,6 +77,8 @@ export interface ConversationMessage {
   contentSource?: 'structured' | 'terminal-fallback';
   /** Monotonic producer revision, separate from the canonical row revision. */
   structuredRevision?: number;
+  /** Process-local marker: restored cache rows yield to the first Gateway row. */
+  fromCanonicalCache?: boolean;
 }
 
 // The active thread is kept in memory for reactive rendering and mirrored as
@@ -79,6 +87,13 @@ export interface ConversationMessage {
 const messagesByTarget = new Map<string, ConversationMessage[]>();
 const listenersByTarget = new Map<string, Set<() => void>>();
 const EMPTY_MESSAGES: ConversationMessage[] = [];
+let activePrincipalId: string | null = null;
+const principalTargetKey = (target: string, principal = activePrincipalId) =>
+  `${principal || 'unauthenticated'}\0${target}`;
+const activeMessages = (target: string) => messagesByTarget.get(principalTargetKey(target)) || EMPTY_MESSAGES;
+const setActiveMessages = (target: string, messages: ConversationMessage[]) => {
+  messagesByTarget.set(principalTargetKey(target), messages);
+};
 // Captain persistence is a cache, not a second transcript. Canonical rows are
 // keyed by gateway id and unacknowledged local submissions live in a separate
 // map keyed by client_message_id. Terminal-era v1/v2 captain arrays are deleted
@@ -90,14 +105,83 @@ const CANONICAL_CACHE_PREFIX = 'magistrate.chat.canonical.v1.';
 const PENDING_CACHE_PREFIX = 'magistrate.chat.pending.v1.';
 const LEGACY_STORAGE_PREFIXES = ['magistrate.chat.messages.', WORKER_STORAGE_PREFIX];
 const writesByTarget = new Map<string, Promise<void>>();
-const storageKey = (prefix: string, target: string) => prefix + encodeURIComponent(target);
+let principalTransition: Promise<void> = Promise.resolve();
+// `encodeURIComponent` leaves dots unescaped, so use a delimiter it always
+// escapes inside either component; prefix matching must not confuse `a` with
+// principal `a.b` during stale-account eviction.
+const principalStoragePrefix = (prefix: string, principal: string) =>
+  `${prefix}${encodeURIComponent(principal)}|`;
+const storageKey = (prefix: string, principal: string, target: string) =>
+  `${principalStoragePrefix(prefix, principal)}${encodeURIComponent(target)}`;
+const legacyStorageKey = (prefix: string, target: string) => prefix + encodeURIComponent(target);
 const isPendingLocalMessage = (message: ConversationMessage) =>
   !message.canonicalId && message.role === 'user'
   && (message.delivery === 'sending' || message.delivery === 'failed');
 const discardLegacyStorage = (target: string, includeV2 = false) => {
-  const prefixes = includeV2 ? LEGACY_STORAGE_PREFIXES : LEGACY_STORAGE_PREFIXES.slice(0, 1);
-  void Promise.all(prefixes.map(prefix => AsyncStorage.removeItem(storageKey(prefix, target)))).catch(() => {});
+  const prefixes = includeV2 ? [...LEGACY_STORAGE_PREFIXES, CANONICAL_CACHE_PREFIX, PENDING_CACHE_PREFIX] : LEGACY_STORAGE_PREFIXES.slice(0, 1);
+  void Promise.all(prefixes.map(prefix => AsyncStorage.removeItem(legacyStorageKey(prefix, target)))).catch(() => {});
 };
+const boundedIdentity = (value: unknown, maximum = 128): value is string =>
+  typeof value === 'string' && value.length > 0 && Array.from(value).length <= maximum
+  && !Array.from(value).some(character => {
+    const code = character.codePointAt(0) ?? 0;
+    return code < 32 || (code >= 127 && code <= 159)
+      || (code >= 0xd800 && code <= 0xdfff) || code === 0x2028 || code === 0x2029;
+  });
+const validPrincipalId = (value: unknown): value is string => boundedIdentity(value);
+
+/**
+ * Set the server-validated principal before protected routes mount.
+ *
+ * Memory is cleared synchronously. Persisted state is principal-qualified, and
+ * logout/expiry/account change waits for old writes before removing every old
+ * principal key. Unqualified v1 caches are deleted, never migrated.
+ */
+export async function setConversationPrincipal(principal: string | null): Promise<void> {
+  if (principal !== null && !validPrincipalId(principal)) throw new Error('Invalid conversation principal.');
+  if (activePrincipalId === principal && principal !== null) return;
+  const previous = activePrincipalId;
+  const pendingWrites = [...writesByTarget.values()];
+  activePrincipalId = principal;
+  setCanonicalActivityPrincipal(principal);
+  messagesByTarget.clear();
+  listenersByTarget.forEach(listeners => listeners.forEach(listener => listener()));
+  const transition = principalTransition.catch(() => {}).then(async () => {
+    await Promise.all(pendingWrites.map(write => write.catch(() => {})));
+    if (activePrincipalId !== principal) return;
+    try {
+      const keys = await AsyncStorage.getAllKeys();
+      if (activePrincipalId !== principal) return;
+      const scopedCachePrefixes = [CANONICAL_CACHE_PREFIX, PENDING_CACHE_PREFIX];
+      const activeCachePrefixes = principal ? scopedCachePrefixes.map(
+        prefix => principalStoragePrefix(prefix, principal),
+      ) : [];
+      const previousCachePrefixes = previous ? scopedCachePrefixes.map(
+        prefix => principalStoragePrefix(prefix, previous),
+      ) : [];
+      const unqualifiedCaptainKeys = [
+        ...LEGACY_STORAGE_PREFIXES,
+        CANONICAL_CACHE_PREFIX,
+        PENDING_CACHE_PREFIX,
+      ].map(prefix => legacyStorageKey(prefix, CAPTAIN_TARGET));
+      const remove = keys.filter(key => {
+        const scoped = scopedCachePrefixes.some(prefix => key.startsWith(prefix));
+        const belongsToActivePrincipal = activeCachePrefixes.some(prefix => key.startsWith(prefix));
+        return unqualifiedCaptainKeys.includes(key)
+          || previousCachePrefixes.some(prefix => key.startsWith(prefix))
+          || (scoped && !belongsToActivePrincipal);
+      });
+      if (remove.length && activePrincipalId === principal) await AsyncStorage.multiRemove(remove);
+    } catch { /* cache eviction cannot make local logout fail */ }
+  });
+  principalTransition = transition;
+  await transition;
+}
+
+export function getConversationPrincipal(): string | null {
+  return activePrincipalId;
+}
+
 const normalizeCachedAttachments = (raw: unknown, canonical: boolean): ConversationAttachment[] | undefined => {
   if (!Array.isArray(raw)) return undefined;
   const attachments = raw.slice(0, 10).flatMap(item => {
@@ -126,20 +210,37 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
   // fallback. Other cache rows keep the smaller historical bound.
   const maxText = assistantConversation
     ? MAGI_MAX_FALLBACK_TEXT_CHARS : value.role === 'user' ? 100_000 : 20_000;
-  if (typeof value.canonicalId !== 'string' || value.canonicalId !== cacheKey || !value.canonicalId || value.canonicalId.length > 128
-    || typeof value.id !== 'string' || !value.id || value.id.length > 160
+  if (typeof value.canonicalId !== 'string' || value.canonicalId !== cacheKey || !boundedIdentity(value.canonicalId)
+    || !boundedIdentity(value.id, 160)
     || (value.role !== 'user' && value.role !== 'assistant')
     || (value.role === 'assistant' && value.id !== value.canonicalId)
     || typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText
     || (value.kind !== 'conversation' && value.kind !== 'tool')
     || (value.kind === 'tool' && value.role !== 'assistant')
+    || (value.source !== 'text' && value.source !== 'voice')
     || typeof value.sequenceIndex !== 'number' || !Number.isSafeInteger(value.sequenceIndex) || value.sequenceIndex < 0
     || typeof value.canonicalRevision !== 'number' || !Number.isSafeInteger(value.canonicalRevision) || value.canonicalRevision < 1
-    || typeof value.turnId !== 'string' || !value.turnId || value.turnId.length > 128
+    || !boundedIdentity(value.turnId)
     || typeof value.sentAt !== 'number' || !Number.isSafeInteger(value.sentAt) || value.sentAt < 1_000_000_000_000) return null;
   const progress = ['queued', 'working', 'streaming', 'complete', 'failed', 'cancelled'].includes(String(value.progress)) ? value.progress as ConversationProgress : undefined;
   const delivery = value.role === 'user' && ['sent', 'failed', 'cancelled'].includes(String(value.delivery)) ? value.delivery as ConversationMessage['delivery'] : undefined;
   const structuredRevision = structuredContent ? value.structuredRevision as number : undefined;
+  const lifecycleState = ['active', 'awaiting-user', 'completed', 'failed', 'cancelled'].includes(String(value.lifecycleState))
+    ? value.lifecycleState as ConversationMessage['lifecycleState'] : undefined;
+  const lifecycleRevision = typeof value.lifecycleRevision === 'number' && Number.isSafeInteger(value.lifecycleRevision) && value.lifecycleRevision >= 1
+    ? value.lifecycleRevision : undefined;
+  const assistantKind = value.role === 'assistant' && ['response', 'progress', 'decision', 'outcome'].includes(String(value.assistantKind))
+    ? value.assistantKind as ConversationMessage['assistantKind'] : undefined;
+  const lifecycleProvided = value.lifecycleState !== undefined || value.lifecycleRevision !== undefined
+    || value.decisionKey !== undefined || value.objectiveId !== undefined || value.runId !== undefined;
+  const decisionKey = boundedIdentity(value.decisionKey) ? value.decisionKey : undefined;
+  if (lifecycleProvided && (
+    !lifecycleState || !lifecycleRevision || !boundedIdentity(value.objectiveId)
+    || !boundedIdentity(value.runId)
+    || (lifecycleState === 'awaiting-user' ? !decisionKey : value.decisionKey !== undefined)
+  )) return null;
+  if ((value.assistantKind !== undefined && !assistantKind)
+    || (value.role !== 'assistant' && value.assistantKind !== undefined)) return null;
   return {
     id: value.id,
     role: value.role,
@@ -155,16 +256,25 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     canonicalRevision: value.canonicalRevision,
     turnId: value.turnId,
     sequenceIndex: value.sequenceIndex,
+    objectiveId: boundedIdentity(value.objectiveId) ? value.objectiveId : undefined,
+    runId: boundedIdentity(value.runId) ? value.runId : undefined,
+    lifecycleState,
+    lifecycleRevision,
+    decisionKey,
+    assistantKind,
     structuredContent: structuredContent || undefined,
     contentSource: structuredContent ? 'structured' : assistantConversation ? 'terminal-fallback' : undefined,
     structuredRevision,
+    fromCanonicalCache: true,
   };
 };
 const normalizeCachedPendingMessage = (raw: unknown, cacheKey: string): ConversationMessage | null => {
   if (!raw || typeof raw !== 'object') return null;
   const value = raw as Record<string, unknown>;
   if (typeof value.id !== 'string' || value.id !== cacheKey || !/^(?:u-|voice-u-)[A-Za-z0-9_-]*$/.test(value.id)
-    || value.role !== 'user' || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 20_000
+    || value.role !== 'user' || typeof value.text !== 'string' || !value.text.trim()
+    || Array.from(value.text).length > 100_000
+    || (value.source !== 'text' && value.source !== 'voice')
     || value.canonicalId !== undefined || (value.delivery !== 'sending' && value.delivery !== 'failed')) return null;
   return {
     id: value.id,
@@ -180,12 +290,16 @@ const normalizeCachedPendingMessage = (raw: unknown, cacheKey: string): Conversa
   };
 };
 const persist = (target: string, messages: ConversationMessage[]) => {
-  const previous = writesByTarget.get(target) || Promise.resolve();
+  const principal = activePrincipalId;
+  if (target === CAPTAIN_TARGET && !principal) return;
+  const scope = target === CAPTAIN_TARGET ? principalTargetKey(target, principal) : target;
+  const previous = writesByTarget.get(scope) || Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     if (target !== CAPTAIN_TARGET) {
-      await AsyncStorage.setItem(storageKey(WORKER_STORAGE_PREFIX, target), JSON.stringify(messages));
+      await AsyncStorage.setItem(legacyStorageKey(WORKER_STORAGE_PREFIX, target), JSON.stringify(messages));
       return;
     }
+    const captainPrincipal = principal as string;
     const canonical = Object.fromEntries(messages
       .filter(message => typeof message.canonicalId === 'string' && message.canonicalId)
       .map(message => [message.canonicalId as string, message]));
@@ -193,12 +307,12 @@ const persist = (target: string, messages: ConversationMessage[]) => {
       .filter(isPendingLocalMessage)
       .map(message => [message.id, message]));
     await Promise.all([
-      AsyncStorage.setItem(storageKey(CANONICAL_CACHE_PREFIX, target), JSON.stringify({ schema_version: 'conversation-cache.v1', messages: canonical })),
-      AsyncStorage.setItem(storageKey(PENDING_CACHE_PREFIX, target), JSON.stringify({ schema_version: 'conversation-pending.v1', messages: pending })),
+      AsyncStorage.setItem(storageKey(CANONICAL_CACHE_PREFIX, captainPrincipal, target), JSON.stringify({ schema_version: 'conversation-cache.v1', principal_id: captainPrincipal, messages: canonical })),
+      AsyncStorage.setItem(storageKey(PENDING_CACHE_PREFIX, captainPrincipal, target), JSON.stringify({ schema_version: 'conversation-pending.v1', principal_id: captainPrincipal, messages: pending })),
     ]);
   });
-  writesByTarget.set(target, write);
-  void write.finally(() => { if (writesByTarget.get(target) === write) writesByTarget.delete(target); }).catch(() => {});
+  writesByTarget.set(scope, write);
+  void write.finally(() => { if (writesByTarget.get(scope) === write) writesByTarget.delete(scope); }).catch(() => {});
 };
 
 /**
@@ -212,33 +326,39 @@ const persist = (target: string, messages: ConversationMessage[]) => {
  * snapshot, and terminal-era arrays are still deleted rather than migrated.
  */
 export async function loadCachedCaptainConversation(target: string): Promise<{ canonical: ConversationMessage[]; pending: ConversationMessage[] }> {
-  if (target !== CAPTAIN_TARGET) return { canonical: [], pending: [] };
+  const principal = activePrincipalId;
+  if (target !== CAPTAIN_TARGET || !principal) return { canonical: [], pending: [] };
   try {
-    await writesByTarget.get(target)?.catch(() => {});
+    await writesByTarget.get(principalTargetKey(target, principal))?.catch(() => {});
     const [canonicalRaw, pendingRaw] = await Promise.all([
-      AsyncStorage.getItem(storageKey(CANONICAL_CACHE_PREFIX, target)),
-      AsyncStorage.getItem(storageKey(PENDING_CACHE_PREFIX, target)),
+      AsyncStorage.getItem(storageKey(CANONICAL_CACHE_PREFIX, principal, target)),
+      AsyncStorage.getItem(storageKey(PENDING_CACHE_PREFIX, principal, target)),
     ]);
+    if (activePrincipalId !== principal) return { canonical: [], pending: [] };
     discardLegacyStorage(target, true);
     const canonicalPayload = canonicalRaw ? JSON.parse(canonicalRaw) as Record<string, unknown> : null;
     const pendingPayload = pendingRaw ? JSON.parse(pendingRaw) as Record<string, unknown> : null;
-    const canonicalMap = canonicalPayload?.schema_version === 'conversation-cache.v1' && canonicalPayload.messages && typeof canonicalPayload.messages === 'object'
+    const canonicalMap = canonicalPayload?.schema_version === 'conversation-cache.v1'
+      && canonicalPayload.principal_id === principal
+      && canonicalPayload.messages && typeof canonicalPayload.messages === 'object'
       ? canonicalPayload.messages as Record<string, unknown> : {};
-    const pendingMap = pendingPayload?.schema_version === 'conversation-pending.v1' && pendingPayload.messages && typeof pendingPayload.messages === 'object'
+    const pendingMap = pendingPayload?.schema_version === 'conversation-pending.v1'
+      && pendingPayload.principal_id === principal
+      && pendingPayload.messages && typeof pendingPayload.messages === 'object'
       ? pendingPayload.messages as Record<string, unknown> : {};
     const canonical = Object.entries(canonicalMap)
       .flatMap(([key, value]) => { const normalized = normalizeCachedCanonicalMessage(value, key); return normalized ? [normalized] : []; })
       .sort((left, right) => (left.sequenceIndex as number) - (right.sequenceIndex as number));
     const pending = Object.entries(pendingMap)
       .flatMap(([key, value]) => { const normalized = normalizeCachedPendingMessage(value, key); return normalized ? [normalized] : []; });
-    return { canonical, pending };
+    return activePrincipalId === principal ? { canonical, pending } : { canonical: [], pending: [] };
   } catch { return { canonical: [], pending: [] }; }
 }
 
 export async function hydrateConversationMessages(target: string): Promise<ConversationMessage[]> {
   if (target === CAPTAIN_TARGET) return getConversationMessages(target);
   try {
-    const raw = await AsyncStorage.getItem(storageKey(WORKER_STORAGE_PREFIX, target));
+    const raw = await AsyncStorage.getItem(legacyStorageKey(WORKER_STORAGE_PREFIX, target));
     discardLegacyStorage(target);
     if (!raw) return getConversationMessages(target);
     const parsed = JSON.parse(raw);
@@ -289,7 +409,7 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       const role = value.role as 'user' | 'assistant';
       return { ...value, sentAt, source: value.source === 'voice' ? 'voice' : 'text', kind: value.kind === 'tool' ? 'tool' : 'conversation', attachments, toolResults, sources, thinkingSummary, runId: typeof value.runId === 'string' && value.runId.length <= 160 ? value.runId : undefined, regenerateSafe: value.regenerateSafe === true, progress, audience: role === 'user' ? 'captain' : 'primary', delivery: value.delivery === 'failed' ? 'failed' : value.delivery === 'sending' ? 'sending' : value.delivery === 'sent' ? 'sent' : value.delivery === 'cancelled' ? 'cancelled' : undefined, structuredContent: undefined, contentSource: undefined, structuredRevision: undefined } as ConversationMessage;
     });
-    const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
+    const current = activeMessages(target);
     const currentById = new Map(current.map(message => [message.id, message]));
     const hydrated = normalized.map(stored => {
       const live = currentById.get(stored.id);
@@ -301,7 +421,7 @@ export async function hydrateConversationMessages(target: string): Promise<Conve
       return { ...stored, ...live, sentAt: live.sentAt ?? stored.sentAt };
     });
     const merged = [...hydrated, ...current.filter(message => currentById.has(message.id))];
-    messagesByTarget.set(target, merged);
+    setActiveMessages(target, merged);
     persist(target, merged);
     emit(target);
     return merged;
@@ -313,39 +433,39 @@ function emit(target: string) {
 }
 
 export function appendConversationMessage(target: string, message: ConversationMessage) {
-  const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
+  const current = activeMessages(target);
   // Multiple ChatCanvas instances (or a WebSocket plus polling) can observe
   // the same stable Herdr id. Keep distinct local ids, including repeated
   // identical user text, while making delivery idempotent by message id.
   if (current.some(existing => existing.id === message.id)) return;
   const next = [...current, message];
-  messagesByTarget.set(target, next); persist(target, next); emit(target);
+  setActiveMessages(target, next); persist(target, next); emit(target);
 }
 
 export function prependConversationMessages(target: string, messages: ConversationMessage[]) {
   if (!messages.length) return;
-  const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
+  const current = activeMessages(target);
   const existing = new Set(current.map(message => message.id));
   const next = [...messages.filter(message => !existing.has(message.id)), ...current];
-  messagesByTarget.set(target, next); persist(target, next); emit(target);
+  setActiveMessages(target, next); persist(target, next); emit(target);
 }
 
 export function resetConversationMessages(target: string, messages: ConversationMessage[] = EMPTY_MESSAGES) {
-  messagesByTarget.set(target, messages); persist(target, messages); emit(target);
+  setActiveMessages(target, messages); persist(target, messages); emit(target);
 }
 
 export function updateConversationMessage(target: string, id: string, text: string, sentAt = Date.now()) {
   updateConversationMessageState(target, id, { text, sentAt });
 }
 
-export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'runId' | 'regenerateSafe' | 'progress' | 'audience' | 'canonicalId' | 'canonicalRevision' | 'turnId' | 'sequenceIndex' | 'structuredContent' | 'contentSource' | 'structuredRevision'>>) {
-  const current = messagesByTarget.get(target) || EMPTY_MESSAGES;
+export function updateConversationMessageState(target: string, id: string, update: Partial<Pick<ConversationMessage, 'text' | 'sentAt' | 'delivery' | 'attachments' | 'toolResults' | 'sources' | 'thinkingSummary' | 'objectiveId' | 'runId' | 'lifecycleState' | 'lifecycleRevision' | 'decisionKey' | 'assistantKind' | 'regenerateSafe' | 'progress' | 'audience' | 'canonicalId' | 'canonicalRevision' | 'turnId' | 'sequenceIndex' | 'structuredContent' | 'contentSource' | 'structuredRevision'>>) {
+  const current = activeMessages(target);
   const next = current.map(message => message.id === id ? { ...message, ...update } : message);
-  messagesByTarget.set(target, next); persist(target, next); emit(target);
+  setActiveMessages(target, next); persist(target, next); emit(target);
 }
 
 export function getConversationMessages(target: string): ConversationMessage[] {
-  return messagesByTarget.get(target) || EMPTY_MESSAGES;
+  return activeMessages(target);
 }
 
 export function useConversationMessages(target: string): ConversationMessage[] {
@@ -358,6 +478,6 @@ export function useConversationMessages(target: string): ConversationMessage[] {
       if (listeners.size === 0) listenersByTarget.delete(target);
     };
   }, [target]);
-  const getSnapshot = useCallback(() => messagesByTarget.get(target) || EMPTY_MESSAGES, [target]);
+  const getSnapshot = useCallback(() => activeMessages(target), [target]);
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }

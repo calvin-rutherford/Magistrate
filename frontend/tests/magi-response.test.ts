@@ -123,7 +123,8 @@ test('canonical reconciliation carries validated structure and updates one stabl
 test('malformed or unsupported structured content uses bounded canonical text fallback', () => {
   const malformed = normalizeCanonicalMessage({
     id: 'cm_fallback', turn_id: 'ct_fallback', role: 'assistant', type: 'conversation',
-    text: 'Safe plain fallback', sequence_index: 1, revision: 4, created_at: 1756000000000,
+    text: 'Safe plain fallback', visible_in_chat: true, sequence_index: 1, revision: 4,
+    source: 'magi-event', created_at: 1756000000000,
     content_source: 'structured', structured_revision: 7,
     structured_content: { schema_version: 'magi.response.v2', blocks: [{ type: 'widget', block_id: 'x' }] },
   });
@@ -136,7 +137,8 @@ test('malformed or unsupported structured content uses bounded canonical text fa
 
   const missingRevision = normalizeCanonicalMessage({
     id: 'cm_no_revision', turn_id: 'ct_no_revision', role: 'assistant', type: 'conversation',
-    text: 'Still safe', sequence_index: 2, revision: 1, created_at: 1756000000000,
+    text: 'Still safe', visible_in_chat: true, sequence_index: 2, revision: 1,
+    source: 'magi-event', created_at: 1756000000000,
     content_source: 'structured', structured_content: richResponse(),
   });
   assert.equal(missingRevision?.structured_content, undefined);
@@ -145,15 +147,15 @@ test('malformed or unsupported structured content uses bounded canonical text fa
 test('canonical fallback bounds preserve the existing prompt contract', () => {
   const longPrompt = normalizeCanonicalMessage({
     id: 'cm_long_prompt', turn_id: 'ct_long_prompt', client_message_id: 'u-long-prompt',
-    role: 'user', type: 'conversation', text: 'p'.repeat(100_000),
-    sequence_index: 0, revision: 1, created_at: 1756000000000,
+    role: 'user', type: 'conversation', text: 'p'.repeat(100_000), visible_in_chat: true,
+    sequence_index: 0, revision: 1, source: 'text', created_at: 1756000000000,
   });
   assert.ok(longPrompt, 'the client must not drop a prompt accepted by the 100,000-character Gateway contract');
 
   const boundedFallback = normalizeCanonicalMessage({
     id: 'cm_large_fallback', turn_id: 'ct_large_fallback', role: 'assistant', type: 'conversation',
-    text: 'r'.repeat(MAGI_MAX_FALLBACK_TEXT_CHARS), sequence_index: 999,
-    revision: 1, created_at: 1756000000000, content_source: 'terminal-fallback',
+    text: 'r'.repeat(MAGI_MAX_FALLBACK_TEXT_CHARS), visible_in_chat: true, sequence_index: 999,
+    revision: 1, source: 'terminal', created_at: 1756000000000, content_source: 'terminal-fallback',
   });
   assert.ok(boundedFallback);
   assert.equal(normalizeCanonicalMessage({

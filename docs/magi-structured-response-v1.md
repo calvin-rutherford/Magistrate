@@ -1,9 +1,9 @@
 # Magi structured responses v1
 
-**Status:** implemented in Magistrate; upstream semantic producer integration is explicitly pending
+**Status:** implemented in Magistrate; the separate Firstmate captain-event producer contract is locally validated, while shared installation/deployment and direct `magi.event.v1` production remain pending
 
 **Contracts:** `magi.response.v1`, `magi.event.v1`
-**Canonical endpoint:** `POST /api/v1/conversations/captain/events`
+**Canonical endpoints:** reservation under `POST /api/v1/conversations/captain/turns/{turn_id}/assistant-messages`, then events under `POST /api/v1/conversations/captain/events`
 
 This is an additive path for first-class Magi response semantics. It does not replace Herdr process/terminal control, the canonical conversation record, or the hardened terminal fallback. It never derives JSON from Markdown or terminal prose.
 
@@ -23,7 +23,7 @@ Herdr terminal snapshot
   -> canonical plain-text fallback only
 ```
 
-A captain prompt now reserves both a `turn_id` and one `assistant_message_id`. Every semantic event for that turn must use those exact ids. The prompt response exposes both under `conversation`.
+A captain prompt now reserves a distinct `turn_id`, `objective_id`, `run_id`, and primary `assistant_message_id`. An objective may also reserve bounded, idempotent `progress`, `decision`, and `outcome` assistant-message ids. Every semantic event must use the exact turn/message pair it was given; ids are never inferred from prose. The prompt response exposes the causal and primary identities under `conversation`.
 
 Resolution order is deliberate:
 
@@ -127,31 +127,35 @@ Lifecycle variants are a discriminated union:
 | `assistant.started` | none | Opens the semantic stream; must be revision 1. |
 | `assistant.block.upsert` | `block`, `block_index` | Appends a new block at the next index or updates the same id at its stable index. |
 | `assistant.block.remove` | `block_id` | Explicit producer correction only. Omission never deletes a block. |
+| `assistant.awaiting_user` | `decision_key`, optional `prompt` | Pauses the objective for one explicit keyed choice; it never infers an outcome. |
 | `assistant.completed` | `response` | Supplies the complete authoritative `magi.response.v1` document. |
 | `assistant.failed` | `error_code`, optional `error_message` | Ends the stream as failed. |
 | `assistant.cancelled` | none | Ends the stream as cancelled. |
 
 Ordering and identity rules:
 
-- one captain turn reserves one assistant message id;
-- revisions start at 1 and increase by exactly one;
-- `(turn_id, revision)` and `event_id` are durable uniqueness boundaries;
+- one captain turn reserves a primary assistant message id and may reserve up to 32 additional message ids;
+- fixed assistant slots order progress/decision/outcome rows before the primary final row;
+- revisions start at 1 and increase by exactly one per reserved message;
+- `(message_id, revision)` and globally unique `event_id` are durable uniqueness boundaries (the original primary ledger retains its compatible `(turn_id, revision)` constraint);
 - replaying the same event id and payload is a no-op and returns `status: duplicate`;
 - reusing an event id for different content, skipping/reusing a revision, changing the message id, or writing after a terminal event returns HTTP 409;
 - completion is authoritative; no later semantic or terminal revision can mutate it;
 - removing a missing block or the final remaining block is rejected.
 
-The event body requires an authenticated session with `command` scope and a declared body length. Malformed contracts return 422, unknown turns return 404, ordering/identity conflicts return 409, and oversize bodies return 413.
+The event body requires an authenticated principal with least-privilege `response` scope or the existing owner `command` scope, plus a declared body length. Malformed contracts return 422, unknown/not-owned turns return 404, ordering/identity conflicts return 409, and oversize bodies return 413.
 
 ## Canonical storage and delivery
 
 [`gateway/app/db.py`](../gateway/app/db.py) migrates existing SQLite databases additively:
 
-- `conversation_turns.assistant_message_id` reserves identity before output exists;
+- `conversation_turns.assistant_message_id` reserves primary identity before output exists;
+- additive turn lifecycle/revision/decision and distinct objective/run identity columns preserve existing rows;
+- `conversation_assistant_reservations` stores bounded per-objective message slots;
 - `conversation_messages.content_source` is `structured` or `terminal-fallback` for assistant prose;
 - `conversation_messages.structured_content_json` stores the validated canonical document;
 - `conversation_messages.structured_revision` stores the producer revision represented by that document;
-- `magi_response_events` stores accepted event identity, order, type, and payload hash for durable replay protection.
+- `magi_response_events` preserves the primary ledger and `magi_additional_response_events` stores independent additional-message streams.
 
 Existing raw `text`, terminal `source`, messages, turns, and unrelated tables are not rewritten. Structured rows keep a plain-text projection in `text` for accessibility, export, and old clients; this projection is derived from an already validated document and is not Markdown inference.
 
@@ -169,7 +173,7 @@ The existing `conversation.v1` HTTP and `conversation_messages` WebSocket payloa
 }
 ```
 
-Poll and socket delivery continue to reconcile by canonical message id and revision, so duplicate transports update one row.
+Poll and socket delivery continue to reconcile by canonical message id and revision, so duplicate transports update one row. Lifecycle revision also participates in WebSocket delivery, allowing an unchanged row to report `active`, keyed `awaiting-user`, `completed`, `failed`, or `cancelled`. Full lifecycle/activity semantics and restart policy are specified in [`canonical-lifecycle-activity-v1.md`](./canonical-lifecycle-activity-v1.md).
 
 ## Native rendering and fallback
 
@@ -188,7 +192,7 @@ Investigation was performed against the installed runtime on 2026-09-03:
 Therefore this repository implements the receiving side but does not pretend the missing producer exists. The smallest upstream integration is:
 
 1. Extend the Herdr prompt seam (a protocol-versioned additive field) to carry an opaque host-owned context containing `turn_id` and `assistant_message_id` beside, not inside, prompt text. Those ids must not be model-selectable or inferred from matching prose.
-2. Have Firstmate pass that context unchanged when routing the captain prompt and provide the Gateway event URL plus a command-scoped service credential out of band (never in the prompt, terminal, tool arguments, or session transcript).
+2. Have Firstmate pass that context unchanged when routing the captain prompt and provide the Gateway event URL plus a least-privilege `response`-scoped service credential out of band (the existing owner `command` scope remains compatible). The credential must never enter the prompt, terminal, tool arguments, or session transcript.
 3. Install a Pi extension/harness adapter that registers one closed structured-response tool. The host emits `assistant.started`; validated tool updates emit explicit block upserts/removes; successful tool completion emits the full `assistant.completed`; provider abort/error emits `cancelled`/`failed`.
 4. Render a plain-text projection of the explicit tool document in the terminal so normal Herdr observability remains useful. Do not parse that terminal rendering back into JSON.
 5. Add equivalent explicit adapters for non-Pi harnesses. Until an adapter is present, emit no semantic event and let the existing terminal fallback remain authoritative.

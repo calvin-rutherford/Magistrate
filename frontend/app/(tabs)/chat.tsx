@@ -8,7 +8,7 @@ import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRe
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
-import { AgentHistoryMessage, AgentInfo, AgentMigration, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgentMigration, fetchAgents, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, requestAgentMigration, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
+import { AgentHistoryMessage, AgentInfo, AgentMigration, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgentMigration, fetchAgents, fetchCanonicalActivity, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, requestAgentMigration, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ComposeIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, InfoIcon, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
 import { loadMagiGreeting, magiGreeting } from '../../src/services/Greeting';
@@ -18,9 +18,10 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
+import { getCanonicalActivityCursor, ingestCanonicalActivityPage } from '../../src/services/CanonicalActivity';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
-import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
+import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, getConversationPrincipal, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, saveVoiceCaptureBehavior, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, TIME_IMAGES, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { openExternalUrl, validatedWebUrl } from '../../src/utils/externalLinks';
@@ -525,6 +526,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
 
   useEffect(() => {
     const request = ++historyRequestRef.current;
+    const requestPrincipal = canonicalTarget ? getConversationPrincipal() : null;
     initialHistoryLoadedRef.current = false;
     touchHistoryYRef.current = null;
     setFollowLatestIntent(true);
@@ -582,7 +584,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     // authoritative and prunes rows the Gateway no longer returns.
     const loadCanonicalConversation = async (): Promise<void> => {
       const cached = await captainHydration;
-      if (request !== historyRequestRef.current) return;
+      if (request !== historyRequestRef.current || requestPrincipal !== getConversationPrincipal()) return;
       const current = getConversationMessages(target);
       const inMemoryCanonical = current.filter(message => Boolean(message.canonicalId));
       const canonical = (inMemoryCanonical.length ? inMemoryCanonical : cached.canonical)
@@ -597,12 +599,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       setConversationSync({ status: 'loading', cachedRows: canonical.length });
       try {
         const result = await fetchCanonicalConversation(target);
-        if (request !== historyRequestRef.current) return;
+        if (request !== historyRequestRef.current || requestPrincipal !== getConversationPrincipal()) return;
         applyCanonicalMessages(result.messages, { replace: true, pending: [...pending.values()] });
         setConversationSync({ status: 'fresh', cachedRows: 0 });
         setHistoryBefore(null);
       } catch (error) {
-        if (request !== historyRequestRef.current) return;
+        if (request !== historyRequestRef.current || requestPrincipal !== getConversationPrincipal()) return;
         setConversationSync({ status: 'stale', cachedRows: canonical.length, error: errorText(error, 'The conversation could not be loaded.') });
       }
     };
@@ -642,7 +644,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       }
     };
     void (canonicalTarget ? loadCanonicalConversation() : loadHistory(0)).finally(() => {
-      if (request === historyRequestRef.current) markHistoryReady();
+      if (request === historyRequestRef.current) {
+        markHistoryReady(!canonicalTarget || requestPrincipal === getConversationPrincipal());
+      }
     });
     return () => {
       historyRequestRef.current += 1;
@@ -930,12 +934,15 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     return true;
   };
   const syncCanonicalConversation = async (): Promise<boolean> => {
+    const requestPrincipal = getConversationPrincipal();
     try {
       const result = await fetchCanonicalConversation(target);
+      if (requestPrincipal !== getConversationPrincipal()) return false;
       const answered = applyCanonicalMessages(result.messages, { replace: true });
       setConversationSync(current => current.status === 'fresh' ? current : { status: 'fresh', cachedRows: 0 });
       return answered;
     } catch (error) {
+      if (requestPrincipal !== getConversationPrincipal()) return false;
       const cachedRows = getConversationMessages(target).filter(message => Boolean(message.canonicalId)).length;
       setConversationSync({ status: 'stale', cachedRows, error: errorText(error, 'The conversation could not be refreshed.') });
       throw error;
@@ -1004,15 +1011,24 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // the socket is unavailable or a snapshot is transiently empty.
   useEffect(() => {
     let active = true;
-    const realtime = new RealtimeClient(target);
+    const activityPrincipal = canonicalTarget ? getConversationPrincipal() : null;
+    const realtime = new RealtimeClient(target, canonicalTarget ? getCanonicalActivityCursor() : null);
     const unsubscribe = realtime.subscribe(event => {
+      if (event?.type === 'activity_records') {
+        if (canonicalTarget && activityPrincipal === getConversationPrincipal()
+          && ingestCanonicalActivityPage(event)) {
+          realtime.setActivityCursor(getCanonicalActivityCursor());
+        }
+        return;
+      }
       if (!Array.isArray(event?.messages)) return;
       const canonical = event.type === 'conversation_messages';
-      if (canonical !== canonicalTarget) return;
+      if (canonical !== canonicalTarget
+        || (canonical && activityPrincipal !== getConversationPrincipal())) return;
       // In development React may mount, clean up, and mount effects again. Do
       // not let an early socket delivery race the authoritative initial read.
       void historyReadyRef.current.then(() => {
-        if (!active) return;
+        if (!active || (canonical && activityPrincipal !== getConversationPrincipal())) return;
         // Canonical events are revision deltas keyed by message id, so they
         // merge into the rows already rendered rather than replacing them.
         if (canonical) applyCanonicalMessages(normalizeCanonicalMessages(event.messages));
@@ -1020,6 +1036,22 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       });
     });
     void realtime.connect();
+    if (canonicalTarget) {
+      // Populate the non-visual lifecycle adapter without delaying chat. The
+      // first request performs source reconciliation; later pages and the
+      // socket read only durable canonical change cursors.
+      void (async () => {
+        let cursor = getCanonicalActivityCursor();
+        for (let pageIndex = 0; active && pageIndex < 10; pageIndex += 1) {
+          const page = await fetchCanonicalActivity(cursor, 200, pageIndex === 0);
+          if (!active || activityPrincipal !== getConversationPrincipal()
+            || !ingestCanonicalActivityPage(page)) return;
+          cursor = getCanonicalActivityCursor();
+          realtime.setActivityCursor(cursor);
+          if (!page.has_more) return;
+        }
+      })().catch(() => { /* background catch-up retries on the next mount/reconnect */ });
+    }
     return () => { active = false; unsubscribe(); realtime.disconnect(); };
   }, [target]);
   // Live auto-refresh: whichever agent is behind `target` may produce new
@@ -1050,7 +1082,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       if (editId) setEditingMessageId(null);
     } else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: Date.now(), source: 'text', attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'working' });
     activePromptRef.current = { token, messageId, text: trimmed, controller };
-    const isCurrent = () => activePromptRef.current?.token === token;
+    const promptPrincipal = canonicalTarget ? getConversationPrincipal() : null;
+    const isCurrent = () => activePromptRef.current?.token === token
+      && (!canonicalTarget || promptPrincipal === getConversationPrincipal());
     setPromptText(''); setSendError(null); setIsThinking(true);
     try {
       await historyReadyRef.current;

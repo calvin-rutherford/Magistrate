@@ -13,6 +13,7 @@ import os
 import secrets
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
@@ -22,7 +23,7 @@ from app import db as database
 
 SESSION_TTL_SECONDS = 3600
 SESSION_RETENTION_SECONDS = 30 * 24 * 3600
-KNOWN_SCOPES = frozenset({"read", "account", "providers", "notifications", "voice", "command"})
+KNOWN_SCOPES = frozenset({"read", "account", "providers", "notifications", "voice", "command", "response"})
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,17 @@ def _hash_token(token: str) -> str:
 
 def _truthy(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _valid_user_id(value: object) -> bool:
+    return (
+        isinstance(value, str) and 0 < len(value) <= 128
+        and not any(
+            unicodedata.category(character).startswith('C')
+            or unicodedata.category(character) in {'Zl', 'Zp'}
+            for character in value
+        )
+    )
 
 
 def _session_db() -> None:
@@ -81,7 +93,7 @@ def issue_session(bootstrap_secret: Optional[str] = None) -> dict[str, object]:
         raise HTTPException(status_code=503, detail="Session issuance is not configured")
 
     user_id = os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
-    if not user_id or len(user_id) > 128:
+    if not _valid_user_id(user_id):
         raise HTTPException(status_code=503, detail="Session identity is not configured")
     try:
         scopes = _configured_scopes()
@@ -135,9 +147,13 @@ def _principal_from_token(token: str) -> Principal:
             "SELECT session_id,user_id,scopes,expires_at,revoked_at FROM gateway_sessions WHERE token_hash=?",
             (token_hash,),
         ).fetchone()
-    if not row or row[4] is not None or row[3] <= now:
+    scopes = frozenset(filter(None, row[2].split(","))) if row else frozenset()
+    if (
+        not row or row[4] is not None or row[3] <= now
+        or not _valid_user_id(row[1]) or not scopes or not scopes.issubset(KNOWN_SCOPES)
+    ):
         raise HTTPException(status_code=401, detail="Invalid or expired session")
-    return Principal(row[1], frozenset(filter(None, row[2].split(","))), row[0], row[3])
+    return Principal(row[1], scopes, row[0], row[3])
 
 
 def authenticate_request(request: Request, authorization: Optional[str]) -> Principal:
@@ -164,6 +180,22 @@ def require_scope(scope: str):
     async def dependency(principal: Principal = Depends(verify_token)) -> Principal:
         if not principal.has(scope):
             raise HTTPException(status_code=403, detail=f"Missing required scope: {scope}")
+        return principal
+
+    return dependency
+
+
+def require_any_scope(*scopes: str):
+    """Authorize a least-privilege producer or the existing owner command role."""
+    if not scopes or any(scope not in KNOWN_SCOPES for scope in scopes):
+        raise ValueError('Unknown or empty gateway scope set')
+
+    async def dependency(principal: Principal = Depends(verify_token)) -> Principal:
+        if not any(principal.has(scope) for scope in scopes):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Missing required scope: one of {', '.join(scopes)}",
+            )
         return principal
 
     return dependency

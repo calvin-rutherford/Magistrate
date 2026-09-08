@@ -31,6 +31,14 @@ Firstmate/harnesses`. See [`deskless-operator-alpha.md`](./deskless-operator-alp
 and [`DEAT-001.md`](./DEAT-001.md) for the current slice and its unexecuted
 physical acceptance gate.
 
+## Canonical captain state
+
+Captain chat is Gateway-owned `conversation.v1`, not terminal history. A prompt is durably saved before provider work and carries distinct turn, objective, run, and reserved assistant-message identities. Authenticated `magi.event.v1` streams may publish multiple stable progress/decision/outcome messages; once any semantic stream starts, terminal parsing remains only a legacy fallback and cannot race that objective.
+
+The additive `activity.v1` ledger consumes only structured Firstmate snapshot, append-only supervision, and explicit `fm-captain-event.v1` facts. It has principal-scoped rows, source-native ids, independent cursor/prefix hashes, restart reconciliation, HTTP replay, opt-in WebSocket catch-up, and bounded diagnostics. It never derives an audience or lifecycle from terminal prose. See [`canonical-lifecycle-activity-v1.md`](./canonical-lifecycle-activity-v1.md) and the program traceability baseline in [`opus/soak-p0-day1-baseline.md`](./opus/soak-p0-day1-baseline.md).
+
+These tenant-qualified foundations prevent owner-data crossover but do not claim the future Friend/multi-user product, complete worker transcripts, a visual activity drawer, or physical-device release acceptance.
+
 ## The Metaphor
 
 ```text

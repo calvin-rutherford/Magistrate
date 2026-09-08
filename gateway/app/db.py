@@ -487,7 +487,12 @@ def init_db():
         client_message_id TEXT,
         prompt_key TEXT,
         assistant_message_id TEXT,
+        objective_id TEXT,
+        run_id TEXT,
         status TEXT NOT NULL,
+        lifecycle_state TEXT NOT NULL DEFAULT 'active',
+        lifecycle_revision INTEGER NOT NULL DEFAULT 1,
+        lifecycle_decision_key TEXT,
         sequence_index INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -516,6 +521,7 @@ def init_db():
         content_source TEXT NOT NULL DEFAULT 'terminal-fallback',
         structured_content_json TEXT,
         structured_revision INTEGER,
+        assistant_kind TEXT NOT NULL DEFAULT 'response',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(turn_id, slot),
@@ -527,10 +533,48 @@ def init_db():
     # them additively; the adapter falls back to visible prompt text when the
     # former is NULL and existing rows have no attachment references.
     turn_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_turns)')}
+    lifecycle_state_added = 'lifecycle_state' not in turn_columns
     if 'prompt_key' not in turn_columns:
         cursor.execute('ALTER TABLE conversation_turns ADD COLUMN prompt_key TEXT')
     if 'assistant_message_id' not in turn_columns:
         cursor.execute('ALTER TABLE conversation_turns ADD COLUMN assistant_message_id TEXT')
+    if lifecycle_state_added:
+        cursor.execute("ALTER TABLE conversation_turns ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'")
+    if 'lifecycle_revision' not in turn_columns:
+        cursor.execute('ALTER TABLE conversation_turns ADD COLUMN lifecycle_revision INTEGER NOT NULL DEFAULT 1')
+    if 'lifecycle_decision_key' not in turn_columns:
+        cursor.execute('ALTER TABLE conversation_turns ADD COLUMN lifecycle_decision_key TEXT')
+    if 'objective_id' not in turn_columns:
+        cursor.execute('ALTER TABLE conversation_turns ADD COLUMN objective_id TEXT')
+    if 'run_id' not in turn_columns:
+        cursor.execute('ALTER TABLE conversation_turns ADD COLUMN run_id TEXT')
+    # Existing owner-soak turns retain their legacy status while gaining the
+    # additive objective lifecycle. Run this mapping only when the column is
+    # first introduced so a later explicit awaiting-user state is not reset by
+    # its compatibility `streaming` status on every startup.
+    if lifecycle_state_added:
+        cursor.execute('''
+            UPDATE conversation_turns
+            SET lifecycle_state = CASE status
+                WHEN 'answered' THEN 'completed'
+                WHEN 'failed' THEN 'failed'
+                WHEN 'cancelled' THEN 'cancelled'
+                ELSE 'active'
+            END
+        ''')
+    # Objective and run identities are deliberately not turn identities. The
+    # deterministic compatibility values preserve every existing owner row;
+    # new turns receive opaque ids at creation time.
+    legacy_turns = cursor.execute(
+        "SELECT id, objective_id, run_id FROM conversation_turns "
+        "WHERE objective_id IS NULL OR objective_id = '' OR run_id IS NULL OR run_id = ''"
+    ).fetchall()
+    for turn_id, objective_id, run_id in legacy_turns:
+        digest = hashlib.sha256(str(turn_id).encode('utf-8')).hexdigest()[:24]
+        cursor.execute(
+            '''UPDATE conversation_turns SET objective_id = ?, run_id = ? WHERE id = ?''',
+            (objective_id or f'obj_legacy_{digest}', run_id or f'run_legacy_{digest}', turn_id),
+        )
     message_columns = {row[1] for row in cursor.execute('PRAGMA table_info(conversation_messages)')}
     if 'attachments_json' not in message_columns:
         cursor.execute("ALTER TABLE conversation_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
@@ -540,6 +584,37 @@ def init_db():
         cursor.execute('ALTER TABLE conversation_messages ADD COLUMN structured_content_json TEXT')
     if 'structured_revision' not in message_columns:
         cursor.execute('ALTER TABLE conversation_messages ADD COLUMN structured_revision INTEGER')
+    if 'assistant_kind' not in message_columns:
+        cursor.execute("ALTER TABLE conversation_messages ADD COLUMN assistant_kind TEXT NOT NULL DEFAULT 'response'")
+    conversation_changes_existed = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversation_changes'"
+    ).fetchone() is not None
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS conversation_changes (
+        conversation_id TEXT NOT NULL,
+        change_sequence INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        message_revision INTEGER NOT NULL,
+        changed_at INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, change_sequence),
+        UNIQUE(conversation_id, message_id, message_revision),
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+    )
+    ''')
+    if not conversation_changes_existed:
+        cursor.execute('''
+            INSERT OR IGNORE INTO conversation_changes
+                (conversation_id, change_sequence, message_id, message_revision, changed_at)
+            SELECT conversation_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY conversation_id ORDER BY sequence_index, id
+                   ) - 1,
+                   id, revision, updated_at
+            FROM conversation_messages
+            WHERE type IN ('conversation', 'tool')
+        ''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS idx_conversation_changes_message
+                      ON conversation_changes(conversation_id, message_id, message_revision)''')
     # Existing primary rows already have the identity later semantic events
     # must use. Turns with no reply reserve one when they are next submitted.
     cursor.execute('''
@@ -557,8 +632,41 @@ def init_db():
           )
     ''')
     cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_assistant_message ON conversation_turns(assistant_message_id) WHERE assistant_message_id IS NOT NULL')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_objective ON conversation_turns(objective_id) WHERE objective_id IS NOT NULL')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_run ON conversation_turns(run_id) WHERE run_id IS NOT NULL')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_turns_conversation ON conversation_turns(conversation_id, sequence_index)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation ON conversation_messages(conversation_id, sequence_index)')
+
+    # A turn is one durable objective, but an objective can report several
+    # independently addressed assistant updates before its final response.
+    # Ordinal zero is the assistant_message_id already reserved on every turn;
+    # later reservations are additive and idempotent by producer key.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS conversation_assistant_reservations (
+        message_id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        slot TEXT NOT NULL,
+        message_kind TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(turn_id, ordinal),
+        UNIQUE(turn_id, slot),
+        UNIQUE(turn_id, idempotency_key),
+        FOREIGN KEY(turn_id) REFERENCES conversation_turns(id)
+    )
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO conversation_assistant_reservations
+            (message_id, turn_id, ordinal, slot, message_kind, idempotency_key, created_at)
+        SELECT assistant_message_id, id, 0, 'primary', 'response', 'reserved-primary', created_at
+        FROM conversation_turns WHERE assistant_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_assistant_reservations reservation
+              WHERE reservation.turn_id = conversation_turns.id AND reservation.ordinal = 0
+          )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_assistant_reservations_turn ON conversation_assistant_reservations(turn_id, ordinal)')
 
     # Accepted semantic lifecycle events form the durable ordering/idempotency
     # ledger. Their documents live additively on the canonical assistant row;
@@ -577,6 +685,158 @@ def init_db():
     )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_response_events_turn ON magi_response_events(turn_id, revision)')
+    # The original ledger's UNIQUE(turn_id, revision) remains untouched for
+    # owner-data compatibility. Additional assistant messages use a second
+    # additive ledger whose ordering boundary is (message_id, revision).
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_additional_response_events (
+        event_id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(message_id, revision),
+        FOREIGN KEY(turn_id) REFERENCES conversation_turns(id),
+        FOREIGN KEY(message_id) REFERENCES conversation_assistant_reservations(message_id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_additional_events_turn ON magi_additional_response_events(turn_id, message_id, revision)')
+
+    # The Firstmate adapter has its own non-destructive consumer position. It
+    # never reads or mutates Firstmate/Pi cursor sidecars. Source rows are
+    # immutable by native identity and hash; canonical activity is a bounded,
+    # tenant-owned projection with stable ordering and revisions.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS activity_sources (
+        user_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        stream_name TEXT NOT NULL,
+        bootstrap_policy TEXT NOT NULL,
+        cursor INTEGER NOT NULL DEFAULT 0,
+        prefix_sha256 TEXT NOT NULL DEFAULT '',
+        source_tail INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'unobserved',
+        last_error_code TEXT,
+        last_error_detail TEXT,
+        last_reconciled_at INTEGER,
+        last_snapshot_at INTEGER,
+        snapshot_sha256 TEXT,
+        accepted_count INTEGER NOT NULL DEFAULT 0,
+        duplicate_count INTEGER NOT NULL DEFAULT 0,
+        conflict_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(user_id, source_instance_id, stream_name)
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS canonical_source_events (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        stream_name TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        source_cursor INTEGER NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        event_kind TEXT NOT NULL,
+        audience TEXT NOT NULL,
+        occurred_at INTEGER,
+        payload_json TEXT NOT NULL,
+        ingested_at INTEGER NOT NULL,
+        UNIQUE(user_id, source_instance_id, stream_name, source_event_id),
+        UNIQUE(user_id, source_instance_id, stream_name, source_cursor)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_source_events_tenant_cursor ON canonical_source_events(user_id, source_instance_id, stream_name, source_cursor)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS activity_records (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        source_event_id TEXT,
+        record_key TEXT NOT NULL,
+        sequence_index INTEGER NOT NULL,
+        revision INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL,
+        importance TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        summary_truncated INTEGER NOT NULL DEFAULT 0,
+        task_id TEXT,
+        decision_key TEXT,
+        objective_id TEXT,
+        run_id TEXT,
+        project TEXT,
+        occurred_at INTEGER,
+        observed_at INTEGER NOT NULL,
+        refs_json TEXT NOT NULL DEFAULT '[]',
+        source_payload_sha256 TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(user_id, source_instance_id, record_key),
+        UNIQUE(user_id, sequence_index)
+    )
+    ''')
+    activity_columns = {row[1] for row in cursor.execute('PRAGMA table_info(activity_records)')}
+    if 'objective_id' not in activity_columns:
+        cursor.execute('ALTER TABLE activity_records ADD COLUMN objective_id TEXT')
+    if 'run_id' not in activity_columns:
+        cursor.execute('ALTER TABLE activity_records ADD COLUMN run_id TEXT')
+    if 'summary_truncated' not in activity_columns:
+        cursor.execute('ALTER TABLE activity_records ADD COLUMN summary_truncated INTEGER NOT NULL DEFAULT 0')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_records_tenant_sequence ON activity_records(user_id, sequence_index)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_records_objective ON activity_records(user_id, objective_id, sequence_index)')
+    activity_changes_existed = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'activity_changes'"
+    ).fetchone() is not None
+    # Activity ids/order remain stable while this append-only change cursor
+    # makes in-place lifecycle revisions replayable after disconnect/restart.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS activity_changes (
+        user_id TEXT NOT NULL,
+        change_sequence INTEGER NOT NULL,
+        record_id TEXT NOT NULL,
+        record_revision INTEGER NOT NULL,
+        changed_at INTEGER NOT NULL,
+        PRIMARY KEY(user_id, change_sequence),
+        UNIQUE(user_id, record_id, record_revision),
+        FOREIGN KEY(record_id) REFERENCES activity_records(id)
+    )
+    ''')
+    if not activity_changes_existed:
+        cursor.execute('''
+            INSERT OR IGNORE INTO activity_changes
+                (user_id, change_sequence, record_id, record_revision, changed_at)
+            SELECT user_id, sequence_index, id, revision, updated_at
+            FROM activity_records
+        ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_changes_record ON activity_changes(user_id, record_id, record_revision)')
+
+    # Bounded counters make the soak's known loss mode observable without
+    # retaining terminal bytes, prompts, replies, tool payloads, or identifiers
+    # from an unknown audience.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS conversation_ingest_diagnostics (
+        user_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        observations INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        attribution_misses INTEGER NOT NULL DEFAULT 0,
+        last_observed_at INTEGER,
+        last_success_at INTEGER,
+        last_error_at INTEGER,
+        last_error_code TEXT,
+        last_error_detail TEXT,
+        last_row_count INTEGER NOT NULL DEFAULT 0,
+        last_segment_count INTEGER NOT NULL DEFAULT 0,
+        last_matched_count INTEGER NOT NULL DEFAULT 0,
+        last_promptless_count INTEGER NOT NULL DEFAULT 0,
+        last_change_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(user_id, target)
+    )
+    ''')
+
     # Early preview builds wrote canonical timestamps as epoch seconds. SQLite's
     # INTEGER already holds milliseconds, so normalize only those unmistakably
     # second-scale values; the migration is idempotent and touches no legacy

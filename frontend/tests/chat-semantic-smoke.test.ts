@@ -4,8 +4,8 @@ import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessage
 import { filterCanonicalMessages } from '../src/services/ChatHistory';
 
 const canonical = (overrides: Partial<CanonicalMessage> & Pick<CanonicalMessage, 'id' | 'role' | 'text' | 'sequence_index'>): CanonicalMessage => ({
-  type: 'conversation', visible_in_chat: true, revision: 1,
-  turn_status: 'streaming', created_at: 1_788_313_923_331,
+  type: 'conversation', visible_in_chat: true, turn_id: 'ct_smoke', revision: 1,
+  turn_status: 'streaming', source: 'text', created_at: 1_788_313_923_331,
   ...overrides,
 });
 

@@ -12,9 +12,12 @@ export class RealtimeClient {
   private stopped = false;
   private connecting = false;
   private target: string;
+  private activityAfter: number | null;
 
-  constructor(target = 'captain') {
+  constructor(target = 'captain', activityAfter: number | null = null) {
     this.target = target;
+    this.activityAfter = typeof activityAfter === 'number' && Number.isSafeInteger(activityAfter) && activityAfter >= 0 && activityAfter <= 9_007_199_254_740_991
+      ? activityAfter : null;
   }
 
   private scheduleReconnect() {
@@ -47,11 +50,15 @@ export class RealtimeClient {
         // Browser WebSocket APIs cannot set Authorization headers. Authenticate
         // before subscribing; unlike the old implementation this is not a URL
         // query parameter and cannot leak through proxy access logs.
-        this.socket?.send(JSON.stringify({ type: 'auth', token, target: this.target }));
+        this.socket?.send(JSON.stringify({
+          type: 'auth', token, target: this.target,
+          ...(this.activityAfter !== null ? { activity_after: this.activityAfter } : {}),
+        }));
       };
       this.socket.onmessage = event => {
         try {
-          this.listeners.forEach(listener => listener(JSON.parse(event.data)));
+          const payload = JSON.parse(event.data);
+          this.listeners.forEach(listener => listener(payload));
         } catch { /* malformed event: polling remains authoritative fallback */ }
       };
       this.socket.onclose = () => {
@@ -64,6 +71,12 @@ export class RealtimeClient {
       this.scheduleReconnect();
     } finally {
       this.connecting = false;
+    }
+  }
+
+  setActivityCursor(after: number) {
+    if (Number.isSafeInteger(after) && after >= (this.activityAfter || 0) && after <= 9_007_199_254_740_991) {
+      this.activityAfter = after;
     }
   }
 

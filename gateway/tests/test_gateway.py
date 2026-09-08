@@ -31,7 +31,7 @@ def test_health_reports_healthy_only_when_every_source_is_observed(monkeypatch):
         return {"version": "9.9.9", "agents": []}
 
     async def live_firstmate():
-        return {"fm_home": "/tmp/fm", "tasks": []}
+        return {"fm_home": "/tmp/fm", "tasks": [], "available": True}
 
     monkeypatch.setattr(gateway.herdr_client, "get_snapshot", live_herdr)
     monkeypatch.setattr(gateway.fm_client, "get_snapshot", live_firstmate)
@@ -55,6 +55,27 @@ def test_health_names_each_unobserved_source(monkeypatch):
     assert data["status"] == "degraded"
     assert sorted(data["degraded_sources"]) == ["firstmate", "herdr"]
     assert data["herdr_version"] is None
+
+
+def test_health_keeps_failed_firstmate_unavailable_with_configured_home(monkeypatch):
+    import app.main as gateway
+
+    async def live_herdr():
+        return {"version": "9.9.9", "agents": []}
+
+    async def failed_firstmate():
+        return {
+            "schema": "fm-fleet-snapshot.v1", "fm_home": "/tmp/fm", "tasks": [],
+            "available": False, "error": "Fleet snapshot command failed",
+        }
+
+    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", live_herdr)
+    monkeypatch.setattr(gateway.fm_client, "get_snapshot", failed_firstmate)
+    data = client.get("/api/v1/health", headers=TEST_HEADERS).json()
+    assert data["status"] == "degraded"
+    assert data["degraded_sources"] == ["firstmate"]
+    assert data["firstmate_home"] == "/tmp/fm"
+    assert data["firstmate_available"] is False
 
 
 def test_runtime():

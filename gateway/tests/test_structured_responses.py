@@ -7,15 +7,20 @@ from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
 from app import db
+from app.auth import issue_session
 from app.contracts import MAGI_MAX_RESPONSE_BYTES, MagiEventContract, MagiResponseV1
 from app.conversation_store import (
     MagiEventConflict,
     apply_magi_event,
+    get_turn_lifecycle,
     ingest_terminal_rows,
     list_messages,
     record_primary_reply,
     record_prompt,
+    replay_messages,
+    reserve_assistant_message,
     reset_conversation,
+    set_turn_status,
 )
 from app.main import app, herdr_client
 from conftest import TEST_HEADERS, TEST_SESSION_TOKEN
@@ -228,6 +233,67 @@ def test_event_replay_updates_one_stable_message_and_structured_completion_wins(
     assert assistant[0]['structured_content'] == rich_response()
 
 
+def test_replay_cursor_tracks_committed_changes_not_render_order():
+    owner = 'conversation-change-owner'
+    other_owner = 'conversation-change-other-owner'
+    reset_conversation(owner, TARGET)
+    reset_conversation(other_owner, TARGET)
+    turn = record_prompt(owner, TARGET, 'u-change-ledger', 'Track committed delivery order')
+    progress = reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'late-progress-message', kind='progress',
+    )
+
+    apply_magi_event(owner, TARGET, event('assistant.started', 'evt-change-primary-1', turn, 1))
+    primary = apply_magi_event(owner, TARGET, event(
+        'assistant.block.upsert', 'evt-change-primary-2', turn, 2, block_index=0,
+        block={
+            'type': 'paragraph', 'block_id': 'primary-draft',
+            'content': [{'type': 'text', 'text': 'Primary rendered first.'}],
+        },
+    ))['message']
+    assert primary['sequence_index'] == 999
+    before_progress = replay_messages(owner, TARGET, after=-1)
+    cursor = before_progress['next_cursor']
+
+    progress_turn = {**turn, 'assistant_message_id': progress['message_id']}
+    apply_magi_event(owner, TARGET, event(
+        'assistant.started', 'evt-change-progress-1', progress_turn, 1,
+    ))
+    completed_event = event(
+        'assistant.completed', 'evt-change-progress-2', progress_turn, 2,
+        response=MagiResponseV1.model_validate({
+            'schema_version': 'magi.response.v1',
+            'blocks': [{
+                'type': 'paragraph', 'block_id': 'late-progress',
+                'content': [{'type': 'text', 'text': 'Progress committed later.'}],
+            }],
+        }),
+    )
+    applied = apply_magi_event(owner, TARGET, completed_event)
+    assert applied['message']['sequence_index'] == 900
+
+    catch_up = replay_messages(owner, TARGET, after=cursor)
+    assert [message['id'] for message in catch_up['messages']] == [progress['message_id']]
+    assert catch_up['messages'][0]['delivery_sequence'] > cursor
+    latest_cursor = catch_up['next_cursor']
+
+    assert apply_magi_event(owner, TARGET, completed_event)['status'] == 'duplicate'
+    duplicate_catch_up = replay_messages(owner, TARGET, after=latest_cursor)
+    assert duplicate_catch_up['messages'] == []
+    assert duplicate_catch_up['latest_cursor'] == latest_cursor
+
+    db.init_db()
+    restarted = replay_messages(owner, TARGET, after=cursor)
+    assert [message['id'] for message in restarted['messages']] == [progress['message_id']]
+    assert restarted['next_cursor'] == latest_cursor
+
+    record_prompt(other_owner, TARGET, 'u-other-ledger', 'Other tenant message')
+    other_replay = replay_messages(other_owner, TARGET, after=-1)
+    assert {message['text'] for message in other_replay['messages']} == {'Other tenant message'}
+    with pytest.raises(ValueError, match='ahead'):
+        replay_messages(other_owner, TARGET, after=latest_cursor)
+
+
 def test_event_identity_order_and_explicit_remove_fail_closed():
     reset_conversation(USER, TARGET)
     turn = record_prompt(USER, TARGET, 'u-structured-conflicts', 'Ordering')
@@ -286,6 +352,136 @@ def test_failed_and_cancelled_are_explicit_terminal_lifecycle_events():
     assert cancelled['turn_status'] == 'cancelled'
 
 
+def test_one_objective_can_emit_ordered_progress_messages_before_its_stable_final_reply():
+    owner = 'structured-multi-message-owner'
+    reset_conversation(owner, TARGET)
+    turn = record_prompt(owner, TARGET, 'u-multi-message', 'Carry out the durable objective')
+    assert turn['objective_id'].startswith('obj_')
+    assert turn['run_id'].startswith('run_')
+    assert len({turn['turn_id'], turn['objective_id'], turn['run_id']}) == 3
+
+    first = reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'progress-step-one', kind='progress',
+    )
+    retry = reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'progress-step-one', kind='progress',
+    )
+    second = reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'progress-step-two', kind='progress',
+    )
+    assert retry['status'] == 'existing'
+    assert retry['message_id'] == first['message_id']
+    assert [first['ordinal'], second['ordinal']] == [1, 2]
+
+    progress_one = {**turn, 'assistant_message_id': first['message_id']}
+    progress_two = {**turn, 'assistant_message_id': second['message_id']}
+    apply_magi_event(owner, TARGET, event('assistant.started', 'evt-progress-1-start', progress_one, 1))
+    apply_magi_event(owner, TARGET, event(
+        'assistant.completed', 'evt-progress-1-done', progress_one, 2,
+        response=MagiResponseV1.model_validate({
+            'schema_version': 'magi.response.v1',
+            'blocks': [{'type': 'paragraph', 'block_id': 'p1', 'content': [{'type': 'text', 'text': 'First durable progress.'}]}],
+        }),
+    ))
+    assert get_turn_lifecycle(owner, TARGET, turn['turn_id'])['state'] == 'active'
+    # Once any semantic stream owns the objective, terminal/synchronous prose
+    # cannot race into the primary slot.
+    assert record_primary_reply(owner, TARGET, turn['turn_id'], 'unsafe terminal fallback') == []
+
+    apply_magi_event(owner, TARGET, event('assistant.started', 'evt-progress-2-start', progress_two, 1))
+    apply_magi_event(owner, TARGET, event(
+        'assistant.completed', 'evt-progress-2-done', progress_two, 2,
+        response=MagiResponseV1.model_validate({
+            'schema_version': 'magi.response.v1',
+            'blocks': [{'type': 'paragraph', 'block_id': 'p2', 'content': [{'type': 'text', 'text': 'Second durable progress.'}]}],
+        }),
+    ))
+    failed_progress = reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'progress-render-failure', kind='progress',
+    )
+    failed_stream = {**turn, 'assistant_message_id': failed_progress['message_id']}
+    apply_magi_event(owner, TARGET, event('assistant.started', 'evt-progress-failed-start', failed_stream, 1))
+    failed_update = apply_magi_event(owner, TARGET, event(
+        'assistant.failed', 'evt-progress-failed-done', failed_stream, 2,
+        error_code='progress.render-failed', error_message='A non-final update failed.',
+    ))
+    assert failed_update['lifecycle_state'] == 'active', 'a failed optional update is not a failed objective'
+    apply_magi_event(owner, TARGET, event('assistant.started', 'evt-primary-start', turn, 1))
+    completed = apply_magi_event(owner, TARGET, event(
+        'assistant.completed', 'evt-primary-done', turn, 2, response=rich_response(),
+    ))
+    assert completed['lifecycle_state'] == 'completed'
+    assert completed['objective_id'] == turn['objective_id']
+    assert completed['run_id'] == turn['run_id']
+
+    messages = list_messages(owner, TARGET)['messages']
+    assistant = [message for message in messages if message['role'] == 'assistant']
+    assert [message['assistant_kind'] for message in assistant] == ['progress', 'progress', 'response']
+    assert [message['text'] for message in assistant[:2]] == [
+        'First durable progress.', 'Second durable progress.',
+    ]
+    assert all(message['objective_id'] == turn['objective_id'] for message in assistant)
+    assert all(message['run_id'] == turn['run_id'] for message in assistant)
+    assert reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'progress-step-one', kind='progress',
+    )['message_id'] == first['message_id']
+    with pytest.raises(MagiEventConflict, match='terminal'):
+        reserve_assistant_message(
+            owner, TARGET, turn['turn_id'], 'late-new-message', kind='progress',
+        )
+
+    before_restart = [(row['id'], row['revision'], row['sequence_index']) for row in messages]
+    db.init_db()
+    replayed = replay_messages(owner, TARGET, after=-1, limit=20)['messages']
+    assert [(row['id'], row['revision'], row['sequence_index']) for row in replayed] == before_restart
+
+
+def test_keyed_awaiting_user_lifecycle_is_replayed_without_inferred_decision_outcome():
+    owner = 'structured-awaiting-owner'
+    reset_conversation(owner, TARGET)
+    turn = record_prompt(owner, TARGET, 'u-awaiting-user', 'Ask only if a choice is required')
+    apply_magi_event(owner, TARGET, event('assistant.started', 'evt-awaiting-start', turn, 1))
+    waiting = apply_magi_event(owner, TARGET, event(
+        'assistant.awaiting_user', 'evt-awaiting-key', turn, 2,
+        decision_key='release-channel', prompt='Choose beta or production.',
+    ))
+    assert waiting['lifecycle_state'] == 'awaiting-user'
+    assert waiting['decision_key'] == 'release-channel'
+    inspected = get_turn_lifecycle(owner, TARGET, turn['turn_id'])
+    assert inspected['state'] == 'awaiting-user'
+    assert inspected['decision_key'] == 'release-channel'
+    assert inspected['objective_id'] == turn['objective_id']
+    assert inspected['run_id'] == turn['run_id']
+    set_turn_status(
+        owner, TARGET, 'u-awaiting-user', 'failed', terminal_fallback_only=True,
+    )
+    assert get_turn_lifecycle(owner, TARGET, turn['turn_id'])['state'] == 'awaiting-user'
+
+    # Independently delayed optional progress cannot resolve or clear the exact
+    # objective-level decision merely because its own message stream finishes.
+    progress = reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'progress-after-decision', kind='progress',
+    )
+    progress_turn = {**turn, 'assistant_message_id': progress['message_id']}
+    apply_magi_event(owner, TARGET, event(
+        'assistant.started', 'evt-progress-after-decision-1', progress_turn, 1,
+    ))
+    delayed = apply_magi_event(owner, TARGET, event(
+        'assistant.completed', 'evt-progress-after-decision-2', progress_turn, 2,
+        response=MagiResponseV1.model_validate({
+            'schema_version': 'magi.response.v1',
+            'blocks': [{'type': 'paragraph', 'block_id': 'late-progress', 'content': [
+                {'type': 'text', 'text': 'Background validation is still running.'},
+            ]}],
+        }),
+    ))
+    assert delayed['lifecycle_state'] == 'awaiting-user'
+    assert delayed['decision_key'] == 'release-channel'
+    assert {message['lifecycle_state'] for message in replay_messages(owner, TARGET, after=-1)['messages']} == {'awaiting-user'}
+    db.init_db()
+    assert get_turn_lifecycle(owner, TARGET, turn['turn_id'])['state'] == 'awaiting-user'
+
+
 def test_schema_migration_and_event_ledger_are_additive(monkeypatch, tmp_path):
     legacy_db = tmp_path / 'canonical-before-magi.db'
     with sqlite3.connect(legacy_db) as conn:
@@ -323,16 +519,20 @@ def test_schema_migration_and_event_ledger_are_additive(monkeypatch, tmp_path):
         message_columns = {row[1] for row in conn.execute('PRAGMA table_info(conversation_messages)')}
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         turn_identity = conn.execute(
-            'SELECT assistant_message_id FROM conversation_turns WHERE id = ?', ('ct_old',),
-        ).fetchone()[0]
+            '''SELECT assistant_message_id, objective_id, run_id, lifecycle_state
+               FROM conversation_turns WHERE id = ?''', ('ct_old',),
+        ).fetchone()
         fallback = conn.execute(
             '''SELECT text, revision, content_source, structured_content_json, structured_revision
                FROM conversation_messages WHERE id = ?''', ('cm_old_reply',),
         ).fetchone()
-    assert 'assistant_message_id' in turn_columns
-    assert {'content_source', 'structured_content_json', 'structured_revision'} <= message_columns
-    assert 'magi_response_events' in tables
-    assert turn_identity == 'cm_old_reply'
+    assert {'assistant_message_id', 'objective_id', 'run_id', 'lifecycle_state'} <= turn_columns
+    assert {'content_source', 'structured_content_json', 'structured_revision', 'assistant_kind'} <= message_columns
+    assert {'magi_response_events', 'magi_additional_response_events', 'conversation_assistant_reservations', 'conversation_changes', 'activity_records', 'activity_sources', 'activity_changes'} <= tables
+    assert turn_identity[0] == 'cm_old_reply'
+    assert turn_identity[1].startswith('obj_legacy_')
+    assert turn_identity[2].startswith('run_legacy_')
+    assert turn_identity[3] == 'completed'
     assert fallback == ('Existing terminal reply.', 3, 'terminal-fallback', None, None)
 
 
@@ -366,6 +566,27 @@ def test_authenticated_gateway_event_ingestion_and_payload_bound(monkeypatch):
     })
     assert prompt.status_code == 200
     conversation = prompt.json()['conversation']
+    reservation_url = f"/api/v1/conversations/captain/turns/{conversation['turn_id']}/assistant-messages"
+    assert client.post(reservation_url, headers=TEST_HEADERS, json={
+        'idempotency_key': 'api-progress-one', 'kind': 'progress',
+        'user_id': 'another-owner',
+    }).status_code == 422
+    reserved = client.post(reservation_url, headers=TEST_HEADERS, json={
+        'idempotency_key': 'api-progress-one', 'kind': 'progress',
+    })
+    assert reserved.status_code == 200
+    assert reserved.json()['status'] == 'reserved'
+    assert client.post(reservation_url, headers=TEST_HEADERS, json={
+        'idempotency_key': 'api-progress-one', 'kind': 'progress',
+    }).json()['message_id'] == reserved.json()['message_id']
+    monkeypatch.setenv('MAGISTRATE_SESSION_SCOPES', 'response')
+    response_token = issue_session('test-bootstrap-secret')['session_token']
+    response_headers = {'Authorization': f'Bearer {response_token}'}
+    assert client.post(reservation_url, headers=response_headers, json={
+        'idempotency_key': 'api-progress-two', 'kind': 'progress',
+    }).status_code == 200
+    assert client.get('/api/v1/conversations/captain/messages', headers=response_headers).status_code == 403
+
     identity = {
         'schema_version': 'magi.event.v1', 'event_id': 'evt-api-1',
         'event_type': 'assistant.started', 'turn_id': conversation['turn_id'],
@@ -387,3 +608,9 @@ def test_authenticated_gateway_event_ingestion_and_payload_bound(monkeypatch):
         content=oversized,
     )
     assert response.status_code == 413
+    lied_about_size = client.post(
+        '/api/v1/conversations/captain/events',
+        headers={**TEST_HEADERS, 'Content-Type': 'application/json', 'Content-Length': '1'},
+        content=oversized,
+    )
+    assert lied_about_size.status_code == 413

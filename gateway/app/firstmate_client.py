@@ -2,11 +2,45 @@ import asyncio
 import json
 import os
 import re
+import signal
+import stat as stat_module
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 FIRSTMATE_HOME = os.getenv('FM_HOME', '/home/spectre/firstmate')
+FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS = 20.0
+FIRSTMATE_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
 _GENERIC_AGENT_NAMES = {'magistrate', 'firstmate', 'π - magistrate', 'π - firstmate'}
+
+
+class _SnapshotOutputTooLarge(Exception):
+    pass
+
+
+def _strict_snapshot_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Fleet snapshot contains duplicate JSON keys')
+        result[key] = value
+    return result
+
+
+def _reject_snapshot_constant(_: str):
+    raise ValueError('Fleet snapshot contains a non-finite JSON number')
+
+
+async def _read_bounded(stream: asyncio.StreamReader, maximum: int) -> bytes:
+    chunks: List[bytes] = []
+    size = 0
+    while True:
+        chunk = await stream.read(min(64 * 1024, maximum + 1 - size))
+        if not chunk:
+            return b''.join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > maximum:
+            raise _SnapshotOutputTooLarge
 
 
 def _task_display_name(value: Any, target: str) -> Optional[str]:
@@ -20,45 +54,122 @@ def _task_display_name(value: Any, target: str) -> Optional[str]:
     return name
 
 class FirstmateClient:
-    def __init__(self, fm_home: str = FIRSTMATE_HOME):
+    def __init__(
+        self,
+        fm_home: str = FIRSTMATE_HOME,
+        *,
+        snapshot_timeout: float = FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS,
+        snapshot_max_bytes: int = FIRSTMATE_SNAPSHOT_MAX_BYTES,
+    ):
         self.fm_home = fm_home
         self.snapshot_script = os.path.join(fm_home, 'bin', 'fm-fleet-snapshot.sh')
+        self.snapshot_timeout = snapshot_timeout
+        self.snapshot_max_bytes = snapshot_max_bytes
 
     async def get_snapshot(self) -> Dict[str, Any]:
-        if not os.path.exists(self.snapshot_script):
+        try:
+            script_stat = os.lstat(self.snapshot_script)
+        except FileNotFoundError:
+            script_stat = None
+        except OSError:
+            return {
+                'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
+                'tasks': [], 'available': False, 'error': 'Fleet snapshot reader is unavailable',
+            }
+        if script_stat is None:
             return {
                 'schema': 'fm-fleet-snapshot.v1',
                 'fm_home': self.fm_home,
+                'available': False,
                 'tasks': [],
                 'scout_reports': [],
                 'secondmate_current': {'records': []},
                 'error': 'Snapshot script not found'
             }
+        if (
+            not stat_module.S_ISREG(script_stat.st_mode) or stat_module.S_ISLNK(script_stat.st_mode)
+            or script_stat.st_nlink != 1 or script_stat.st_uid != os.geteuid()
+            or script_stat.st_mode & 0o002 or not os.access(self.snapshot_script, os.X_OK)
+        ):
+            return {
+                'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
+                'tasks': [], 'scout_reports': [], 'available': False,
+                'secondmate_current': {'records': []},
+                'error': 'Fleet snapshot reader is not trusted',
+            }
 
+        environment = {
+            'FM_HOME': self.fm_home,
+            'PATH': '/usr/local/bin:/usr/bin:/bin',
+            'HOME': '/nonexistent',
+            'LANG': 'C.UTF-8',
+            'LC_ALL': 'C.UTF-8',
+        }
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.snapshot_script, '--json',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=self.fm_home
+                cwd=self.fm_home,
+                env=environment,
+                start_new_session=True,
             )
-            stdout, stderr = await proc.communicate()
+            async def collect_output():
+                stdout, stderr, _ = await asyncio.gather(
+                    _read_bounded(proc.stdout, self.snapshot_max_bytes),
+                    _read_bounded(proc.stderr, 64 * 1024),
+                    proc.wait(),
+                )
+                return stdout, stderr
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    collect_output(), timeout=self.snapshot_timeout,
+                )
+            except asyncio.CancelledError:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                raise
+            except (asyncio.TimeoutError, _SnapshotOutputTooLarge) as exc:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                reason = 'timed out' if isinstance(exc, asyncio.TimeoutError) else 'exceeded its bounded output size'
+                return {
+                    'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
+                    'tasks': [], 'available': False, 'error': f'Fleet snapshot {reason}',
+                }
 
             if proc.returncode == 0 and stdout:
-                return json.loads(stdout.decode('utf-8'))
-            else:
-                return {
-                    'schema': 'fm-fleet-snapshot.v1',
-                    'fm_home': self.fm_home,
-                    'tasks': [],
-                    'error': stderr.decode('utf-8') if stderr else 'Failed to run fleet snapshot'
-                }
+                parsed = json.loads(
+                    stdout.decode('utf-8', errors='strict'),
+                    object_pairs_hook=_strict_snapshot_object,
+                    parse_constant=_reject_snapshot_constant,
+                )
+                if not isinstance(parsed, dict):
+                    raise ValueError('Fleet snapshot is not an object')
+                if parsed.get('schema') != 'fm-fleet-snapshot.v1' or not isinstance(parsed.get('tasks'), list):
+                    raise ValueError('Fleet snapshot has an invalid schema')
+                if parsed.get('error'):
+                    return {**parsed, 'fm_home': self.fm_home, 'available': False}
+                return {**parsed, 'fm_home': self.fm_home, 'available': True}
+            return {
+                'schema': 'fm-fleet-snapshot.v1',
+                'fm_home': self.fm_home,
+                'tasks': [], 'available': False,
+                'error': 'Fleet snapshot command failed' if stderr else 'Failed to run fleet snapshot'
+            }
         except Exception as e:
             return {
                 'schema': 'fm-fleet-snapshot.v1',
                 'fm_home': self.fm_home,
-                'tasks': [],
-                'error': str(e)
+                'tasks': [], 'available': False,
+                'error': f'{type(e).__name__}: fleet snapshot unavailable'[:240]
             }
 
     @staticmethod
