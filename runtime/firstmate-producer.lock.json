@@ -1,0 +1,38 @@
+{
+  "schema": "magistrate.firstmate-producer-lock.v1",
+  "source": "https://github.com/calvin-rutherford/firstmate.git",
+  "commit": "2af0d17014cb2e244aa441bfe6df16c4f630475b",
+  "tree": "146c55db1fd4d9cb2edf38d384b4d2362d2041e3",
+  "artifacts": [
+    {
+      "path": "bin/fm-captain-event.sh",
+      "sha256": "2ac045c1cdb0e210d795e196a8c70f5228f9a171e02b5228f397beb4e0ce1a48",
+      "bytes": 39977,
+      "executable": true
+    },
+    {
+      "path": "bin/fm-fleet-snapshot.sh",
+      "sha256": "55895c4f63d08a92db5f9ce201e7e9b95d64236ed1f3886f20bc9b3d03818b4a",
+      "bytes": 97640,
+      "executable": true
+    },
+    {
+      "path": "bin/fm-spawn.sh",
+      "sha256": "851802bb988decc2b0808fde0b80a073044f188c655b3141f3e6682c350b2530",
+      "bytes": 201621,
+      "executable": true
+    },
+    {
+      "path": ".pi/extensions/fm-captain-event.ts",
+      "sha256": "3db603601ac60f5537284bbbeb16023894c9864bd55c791c71b06e3abfb98e78",
+      "bytes": 1048,
+      "executable": false
+    },
+    {
+      "path": ".pi/extensions/lib/fm-captain-event.ts",
+      "sha256": "756477e7652d17fdf7521522fa83b3a7b19e608d5feb968249b19b60346c4cf3",
+      "bytes": 10600,
+      "executable": false
+    }
+  ]
+}

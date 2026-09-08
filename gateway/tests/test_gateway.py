@@ -22,6 +22,8 @@ def test_health_authorized():
     assert data["status"] in ("healthy", "degraded")
     assert (data["status"] == "healthy") == (not data["degraded_sources"])
     assert data["service"] == "magistrate-gateway"
+    assert data["firstmate_producer"]["schema_version"] == "firstmate-producer-readiness.v1"
+    assert "fm_home" not in data["firstmate_producer"]
 
 
 def test_health_reports_healthy_only_when_every_source_is_observed(monkeypatch):
@@ -55,6 +57,30 @@ def test_health_names_each_unobserved_source(monkeypatch):
     assert data["status"] == "degraded"
     assert sorted(data["degraded_sources"]) == ["firstmate", "herdr"]
     assert data["herdr_version"] is None
+
+
+def test_health_degrades_if_a_required_producer_drifts_after_startup(monkeypatch):
+    import app.main as gateway
+
+    async def live_herdr():
+        return {"version": "9.9.9", "agents": []}
+
+    async def live_firstmate():
+        return {"fm_home": "/tmp/fm", "tasks": [], "available": True}
+
+    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", live_herdr)
+    monkeypatch.setattr(gateway.fm_client, "get_snapshot", live_firstmate)
+    monkeypatch.setattr(gateway.fm_client, "get_producer_readiness", lambda: {
+        "schema_version": "firstmate-producer-readiness.v1",
+        "required": True,
+        "expected_commit": "2af0d17014cb2e244aa441bfe6df16c4f630475b",
+        "status": "contract-invalid",
+        "activated": False,
+    })
+
+    data = client.get("/api/v1/health", headers=TEST_HEADERS).json()
+    assert data["status"] == "degraded"
+    assert data["degraded_sources"] == ["firstmate-producer"]
 
 
 def test_health_keeps_failed_firstmate_unavailable_with_configured_home(monkeypatch):

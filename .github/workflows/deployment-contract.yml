@@ -3,6 +3,8 @@ name: Deployment contracts
 on:
   pull_request:
     paths:
+      - 'runtime/firstmate-producer.lock.json'
+      - 'scripts/install_firstmate_producer.sh'
       - 'scripts/deploy_magistrate.sh'
       - 'scripts/test_deploy_magistrate.sh'
       - 'scripts/test_deployment_workflow.sh'
@@ -12,6 +14,8 @@ on:
   push:
     branches: [main]
     paths:
+      - 'runtime/firstmate-producer.lock.json'
+      - 'scripts/install_firstmate_producer.sh'
       - 'scripts/deploy_magistrate.sh'
       - 'scripts/test_deploy_magistrate.sh'
       - 'scripts/test_deployment_workflow.sh'

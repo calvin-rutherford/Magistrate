@@ -206,6 +206,10 @@ async def _reconcile_firstmate_activity() -> None:
 @app.on_event('startup')
 async def start_notification_reconciler():
     global _notification_reconciler_task, _activity_reconciler_task
+    # Optional by default for owner/Friend compatibility. Once an operator
+    # explicitly requires the pinned producer, startup must not serve a runtime
+    # whose reviewed call sites or home-local activation are absent.
+    await firstmate_activity.require_captain_producer_ready()
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
     activity_disabled = os.getenv('MAGISTRATE_DISABLE_ACTIVITY_RECONCILER', '').lower() in {'1', 'true', 'yes'}
@@ -564,10 +568,15 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
     fm_snapshot = await fm_client.get_snapshot()
     herdr_connected = bool(snapshot.get('version'))
     firstmate_available = fm_snapshot.get('available') is True
+    producer = fm_client.get_producer_readiness()
     # The gateway process answering is not the same claim as the product being
     # healthy. Degrade explicitly when a live source is missing, and never
-    # substitute a placeholder Herdr version for one we did not observe.
+    # substitute a placeholder Herdr version for one we did not observe. A
+    # required producer remains part of readiness after startup, so later
+    # contract drift cannot look healthy.
     degraded = [name for name, ok in (('herdr', herdr_connected), ('firstmate', firstmate_available)) if not ok]
+    if producer['required'] and producer['status'] != 'ready':
+        degraded.append('firstmate-producer')
     return {
         'status': 'degraded' if degraded else 'healthy',
         'degraded_sources': degraded,
@@ -577,7 +586,8 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         'herdr_socket_connected': herdr_connected,
         'firstmate_home': fm_snapshot.get('fm_home'),
         'firstmate_available': firstmate_available,
-        'firstmate_tasks_count': len(fm_snapshot.get('tasks', []))
+        'firstmate_tasks_count': len(fm_snapshot.get('tasks', [])),
+        'firstmate_producer': producer,
     }
 
 
@@ -591,6 +601,7 @@ async def get_soak_diagnostics(principal: Principal = Depends(require_scope('rea
         'conversation_ingest': get_ingest_diagnostics(principal.user_id, target),
         'turn_lifecycle': get_lifecycle_diagnostics(principal.user_id, target),
         'activity_sources': source_diagnostics(principal.user_id),
+        'firstmate_producer': fm_client.get_producer_readiness(),
     }
 
 # ACCOUNT PROFILE ENDPOINTS

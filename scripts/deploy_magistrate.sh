@@ -80,8 +80,14 @@ if ! grep -Eq '^MAGISTRATE_ENV=production([[:space:]]|$)' "$ENV_FILE"; then
   echo "refusing deploy: MAGISTRATE_ENV must be production" >&2
   exit 1
 fi
-DB_PATH="$(awk -F= '$1 == "MAGISTRATE_DB_PATH" { sub(/^[[:space:]]+/, "", $2); print $2; exit }' "$ENV_FILE")"
-DB_PATH="${DB_PATH%\"}"; DB_PATH="${DB_PATH#\"}"
+env_value() {
+  local key=$1 value
+  value="$(awk -F= -v key="$key" '$1 == key { sub(/^[[:space:]]+/, "", $2); print $2; exit }' "$ENV_FILE")"
+  value="${value%\"}"; value="${value#\"}"
+  printf '%s' "$value"
+}
+
+DB_PATH="$(env_value MAGISTRATE_DB_PATH)"
 if [[ "$DB_PATH" != /* || "$DB_PATH" == "$DEPLOY_DIR"/* ]]; then
   echo "refusing deploy: MAGISTRATE_DB_PATH must be an absolute path outside the deployment checkout" >&2
   exit 1
@@ -100,6 +106,38 @@ for origin in "${cors_origins[@]}"; do
     exit 1
   fi
 done
+
+# The semantic producer remains optional until an operator explicitly enables
+# the rollout flag. A configured code root is always verified against the
+# immutable reviewed pin; required mode additionally demands the separately
+# activated, valid home-local outbox before any build or service restart.
+CAPTAIN_REQUIRED="$(env_value MAGISTRATE_FIRSTMATE_CAPTAIN_REQUIRED)"
+CAPTAIN_REQUIRED="${CAPTAIN_REQUIRED:-false}"
+case "${CAPTAIN_REQUIRED,,}" in
+  1|true|yes|on) CAPTAIN_REQUIRED=true ;;
+  0|false|no|off) CAPTAIN_REQUIRED=false ;;
+  *)
+    echo "refusing deploy: MAGISTRATE_FIRSTMATE_CAPTAIN_REQUIRED must be a boolean literal" >&2
+    exit 1
+    ;;
+esac
+FIRSTMATE_ROOT="$(env_value MAGISTRATE_FIRSTMATE_ROOT)"
+FIRSTMATE_HOME="$(env_value FM_HOME)"
+if [[ -n "$FIRSTMATE_ROOT" ]]; then
+  if [[ "$FIRSTMATE_ROOT" != /* ]]; then
+    echo "refusing deploy: MAGISTRATE_FIRSTMATE_ROOT must be absolute" >&2
+    exit 1
+  fi
+  "$DEPLOY_DIR/scripts/install_firstmate_producer.sh" verify --root "$FIRSTMATE_ROOT"
+fi
+if [[ "$CAPTAIN_REQUIRED" == true ]]; then
+  if [[ -z "$FIRSTMATE_ROOT" || -z "$FIRSTMATE_HOME" || "$FIRSTMATE_HOME" != /* ]]; then
+    echo "refusing deploy: required captain producer needs absolute FM_HOME and MAGISTRATE_FIRSTMATE_ROOT" >&2
+    exit 1
+  fi
+  "$DEPLOY_DIR/scripts/install_firstmate_producer.sh" ready \
+    --root "$FIRSTMATE_ROOT" --fm-home "$FIRSTMATE_HOME"
+fi
 
 command -v curl >/dev/null 2>&1 || {
   echo "refusing deploy: curl is required for gateway readiness verification" >&2
