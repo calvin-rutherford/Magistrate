@@ -158,6 +158,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     window.__canonicalOnline = !historyScenario?.canonicalFailure;
     window.__setCanonicalOnline = value => { window.__canonicalOnline = Boolean(value); };
     window.__magistrateApiCalls = [];
+    window.__activityRequests = [];
     window.__attentionRequests = () => attentionRequests;
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
@@ -280,6 +281,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         { id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex', workspace_id: 'w1', workspace_role: 'worker' },
       ]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/activity/snapshot')) {
+        window.__activityRequests.push(url);
         if (historyScenario?.activityFailure) return Promise.reject(new TypeError('Gateway activity request failed.'));
         activitySnapshotRequests += 1;
         if (historyScenario?.activityPageFailureOnce && activitySnapshotRequests === 2) {
@@ -296,13 +298,17 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/activity')) {
+        window.__activityRequests.push(url);
         if (historyScenario?.activityFailure) return Promise.reject(new TypeError('Gateway activity request failed.'));
-        return Promise.resolve(new Response(JSON.stringify({
+        const supplied = activitySnapshotRequests > 1
+          ? historyScenario?.activityReplayAfterOlderSnapshot : historyScenario?.activityReplay;
+        const payload = supplied || {
           schema_version: 'activity.v1', records: [], next_cursor: historyScenario?.activitySnapshot?.snapshot_cursor || 0,
           latest_cursor: historyScenario?.activitySnapshot?.snapshot_cursor || 0, has_more: false,
           summary: historyScenario?.activitySnapshot?.summary || { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
           reconciliation: 'not-requested', sources: [],
-        }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/attention/unified')) {
         attentionRequests += 1;
@@ -1221,6 +1227,58 @@ test('failed activity pagination leaves the visible window unchanged before retr
   await clickRendered(page, '[data-testid="load-more-canonical-activity"]');
   await page.waitForFunction(() => document.querySelectorAll('[data-testid^="canonical-activity-row-"]').length === 40);
   assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 40);
+  await page.close();
+});
+
+test('activity pagination replays through a newer page cursor before admitting history', async () => {
+  const activityRecord = (id, sequence, deliverySequence) => ({
+    id, sequence, delivery_sequence: deliverySequence, revision: 1,
+    kind: 'worker.message', state: 'completed', importance: 'routine',
+    title: `Operation ${sequence}`, summary: `Confirmed operation ${sequence}.`, summary_truncated: false,
+    task_id: 'cursor-page-task', decision_key: null, objective_id: 'obj-cursor-page', run_id: 'run-cursor-page',
+    project: 'Magistrate', occurred_at: null, observed_at: 1788840000000, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null },
+  });
+  const summary = { active_objectives: 0, operation_count: 0, pending_decisions: 0 };
+  const current = activityRecord('ca-cursor-current', 2, 2);
+  const older = activityRecord('ca-cursor-older', 1, 1);
+  const arrivedDuringPaging = activityRecord('ca-cursor-arrived', 3, 3);
+  const page = await openChat({ width: 430, height: 820 }, false, '', URL, 0, false, false, 'light', [], false, {
+    manual: true,
+    activitySnapshot: {
+      schema_version: 'activity.v1', records: [current], focus_records: [], focus_truncated: false,
+      snapshot_cursor: 2, latest_sequence: 2, next_before: 2, has_more: true,
+      summary, reconciliation: 'available', sources: [],
+    },
+    activityOlderSnapshot: {
+      schema_version: 'activity.v1', records: [older], focus_records: [], focus_truncated: false,
+      snapshot_cursor: 3, latest_sequence: 3, next_before: null, has_more: false,
+      summary, reconciliation: 'not-requested', sources: [],
+    },
+    activityReplayAfterOlderSnapshot: {
+      schema_version: 'activity.v1', records: [arrivedDuringPaging], next_cursor: 3,
+      latest_cursor: 3, has_more: false, summary,
+      reconciliation: 'not-requested', sources: [],
+    },
+  });
+  await clickRendered(page, '[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await clickRendered(page, '[data-testid="drawer-section-activity"]');
+  await page.waitForSelector('[data-testid="open-canonical-activity"]');
+  await clickRendered(page, '[data-testid="open-canonical-activity"]');
+  await page.waitForSelector('[data-testid="canonical-activity-row-ca-cursor-current"]');
+  await page.$eval('[data-testid="load-more-canonical-activity"]', element => element.scrollIntoView({ block: 'center' }));
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')].some(element => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return rect.width > 0 && rect.height > 0 && !!hit && (hit === element || element.contains(hit));
+  }));
+  await clickRendered(page, '[data-testid="load-more-canonical-activity"]');
+  await page.waitForSelector('[data-testid="canonical-activity-row-ca-cursor-older"]');
+  await page.waitForSelector('[data-testid="canonical-activity-row-ca-cursor-arrived"]');
+  assert.ok(await page.evaluate(() => window.__activityRequests.some(request =>
+    request.includes('/api/v1/activity?') && new URL(request).searchParams.get('after') === '2')));
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 3);
   await page.close();
 });
 

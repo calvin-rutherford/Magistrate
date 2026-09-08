@@ -1055,6 +1055,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         activityBefore, activityPageLimit, false,
       );
       if (owner !== getConversationPrincipal()) return false;
+      // An older page excludes newer non-focus rows even though its snapshot
+      // cursor observes them. Replay through that cursor before merging the
+      // page so pagination can never checkpoint past unseen activity.
+      if (Number.isSafeInteger(snapshot.snapshot_cursor)
+        && snapshot.snapshot_cursor > getCanonicalActivityCursor()) {
+        await recoverCanonicalActivity(false);
+        if (owner !== getConversationPrincipal()) return false;
+      }
       const applied = ingestCanonicalActivitySnapshot(snapshot, true);
       if (!applied) throw new Error('Gateway returned an invalid activity page.');
       setActivityBefore(applied.nextBefore);

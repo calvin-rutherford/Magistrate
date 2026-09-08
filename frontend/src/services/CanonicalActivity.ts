@@ -598,6 +598,10 @@ export function ingestCanonicalActivitySnapshot(
     || !safeInteger(wireSummary.active_objectives)
     || !safeInteger(wireSummary.operation_count)
     || !safeInteger(wireSummary.pending_decisions)) return null;
+  // A historical page does not contain newer non-focus rows. It may therefore
+  // merge only after replay has reached the SQLite snapshot that produced it;
+  // otherwise advancing to snapshot_cursor would permanently skip those rows.
+  if (requireCompletePage && (value.snapshot_cursor as number) > deliveryCursor) return null;
   const normalizedRecords = value.records.map(normalizeCanonicalActivityRecord);
   const normalizedFocus = value.focus_records.map(normalizeCanonicalActivityRecord);
   if ([...normalizedRecords, ...normalizedFocus].some(record => record === null)) return null;

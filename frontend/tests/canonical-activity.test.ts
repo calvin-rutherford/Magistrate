@@ -162,6 +162,50 @@ test('a delayed snapshot cannot regress a newer realtime revision or lifecycle s
   assert.equal(getCanonicalActivitySnapshot().summary.activeObjectives, 0);
 });
 
+test('historical snapshot pages cannot checkpoint past unseen replay rows', () => {
+  setCanonicalActivityPrincipal('activity-history-cursor-race');
+  const current = record({
+    id: 'ca_history_current', sequence: 3, delivery_sequence: 3,
+    kind: 'worker.message', state: 'completed',
+  });
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [current], focus_records: [],
+    focus_truncated: false, snapshot_cursor: 3, latest_sequence: 3,
+    next_before: 3, has_more: true,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  const older = record({
+    id: 'ca_history_older', sequence: 1, delivery_sequence: 1,
+    kind: 'worker.message', state: 'completed',
+  });
+  const pageObservedAfterNewRows = {
+    schema_version: 'activity.v1', records: [older], focus_records: [],
+    focus_truncated: false, snapshot_cursor: 5, latest_sequence: 5,
+    next_before: null, has_more: false,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  };
+
+  assert.equal(ingestCanonicalActivitySnapshot(pageObservedAfterNewRows, true), null);
+  assert.equal(getCanonicalActivityCursor(), 3);
+  assert.ok(!getCanonicalActivityRecords().some(item => item.id === older.id));
+
+  const unseen = [4, 5].map(sequence => record({
+    id: `ca_history_unseen_${sequence}`, sequence, delivery_sequence: sequence,
+    kind: 'worker.message', state: 'completed',
+  }));
+  assert.ok(ingestCanonicalActivityPage({
+    ...page(unseen, 5),
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  const applied = ingestCanonicalActivitySnapshot(pageObservedAfterNewRows, true);
+  assert.equal(applied?.addedHistoryRecords, 1);
+  assert.equal(getCanonicalActivityCursor(), 5);
+  assert.deepEqual(
+    getCanonicalActivityRecords().map(item => item.id),
+    ['ca_history_older', 'ca_history_current', 'ca_history_unseen_4', 'ca_history_unseen_5'],
+  );
+});
+
 test('a current complete focus projection clears a stale cached pending decision without inventing an outcome', () => {
   setCanonicalActivityPrincipal('activity-focus-prune');
   const pending = record({
@@ -417,10 +461,10 @@ test('focus overlap keeps older history reachable and bounds the next complete p
   });
 
   assert.ok(ingestCanonicalActivitySnapshot(
-    snapshot(existingHistory.slice(0, 200), 400, 1_211, true),
+    snapshot(existingHistory.slice(0, 200), 490, 1_211, true),
   ));
   assert.ok(ingestCanonicalActivitySnapshot(
-    snapshot(existingHistory.slice(200), 400, 1_101, true), true,
+    snapshot(existingHistory.slice(200), 490, 1_101, true), true,
   ));
   assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'completed').length, 310);
 
@@ -432,7 +476,7 @@ test('focus overlap keeps older history reachable and bounds the next complete p
     state: 'completed',
   }));
   const overlappingPage = ingestCanonicalActivitySnapshot(
-    snapshot([...focus, ...tenNewHistory], 410, 1_001, true), true,
+    snapshot([...focus, ...tenNewHistory], 490, 1_001, true), true,
   );
   assert.deepEqual(
     [overlappingPage?.addedHistoryRecords, overlappingPage?.hasMore,
