@@ -586,6 +586,35 @@ def init_db():
         cursor.execute('ALTER TABLE conversation_messages ADD COLUMN structured_revision INTEGER')
     if 'assistant_kind' not in message_columns:
         cursor.execute("ALTER TABLE conversation_messages ADD COLUMN assistant_kind TEXT NOT NULL DEFAULT 'response'")
+    conversation_changes_existed = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversation_changes'"
+    ).fetchone() is not None
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS conversation_changes (
+        conversation_id TEXT NOT NULL,
+        change_sequence INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        message_revision INTEGER NOT NULL,
+        changed_at INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, change_sequence),
+        UNIQUE(conversation_id, message_id, message_revision),
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+    )
+    ''')
+    if not conversation_changes_existed:
+        cursor.execute('''
+            INSERT OR IGNORE INTO conversation_changes
+                (conversation_id, change_sequence, message_id, message_revision, changed_at)
+            SELECT conversation_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY conversation_id ORDER BY sequence_index, id
+                   ) - 1,
+                   id, revision, updated_at
+            FROM conversation_messages
+            WHERE type IN ('conversation', 'tool')
+        ''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS idx_conversation_changes_message
+                      ON conversation_changes(conversation_id, message_id, message_revision)''')
     # Existing primary rows already have the identity later semantic events
     # must use. Turns with no reply reserve one when they are next submitted.
     cursor.execute('''

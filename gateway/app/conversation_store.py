@@ -279,6 +279,31 @@ def _sequence_for(turn_index: int, offset: int) -> int:
     return turn_index * _SLOTS_PER_TURN + offset
 
 
+def _record_message_change(conn: sqlite3.Connection, message_id: str) -> int:
+    row = conn.execute(
+        '''SELECT conversation_id, revision, updated_at, type
+           FROM conversation_messages WHERE id = ?''',
+        (message_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError('A conversation change cannot reference a missing message.')
+    if row['type'] not in ('conversation', 'tool'):
+        return -1
+    latest = conn.execute(
+        '''SELECT MAX(change_sequence) AS top FROM conversation_changes
+           WHERE conversation_id = ?''',
+        (row['conversation_id'],),
+    ).fetchone()['top']
+    sequence = int(latest) + 1 if latest is not None else 0
+    conn.execute(
+        '''INSERT INTO conversation_changes
+           (conversation_id, change_sequence, message_id, message_revision, changed_at)
+           VALUES (?, ?, ?, ?, ?)''',
+        (row['conversation_id'], sequence, message_id, row['revision'], row['updated_at']),
+    )
+    return sequence
+
+
 def _upsert_message(
     conn: sqlite3.Connection, *, conversation_id: str, turn_id: str, turn_index: int,
     slot: str, offset: int, role: str, message_type: str, text: str, visible: bool,
@@ -324,6 +349,7 @@ def _upsert_message(
              1 if visible else 0, _sequence_for(turn_index, offset), source,
              attachments_json or '[]', now, now),
         )
+        _record_message_change(conn, message_id)
         return _public_message(
             conn.execute('SELECT * FROM conversation_messages WHERE id = ?', (message_id,)).fetchone(),
             None,
@@ -373,6 +399,7 @@ def _upsert_message(
                WHERE id = ?''',
             (text, attachments_json, now, existing['id']),
         )
+    _record_message_change(conn, existing['id'])
     return _public_message(
         conn.execute('SELECT * FROM conversation_messages WHERE id = ?', (existing['id'],)).fetchone(),
         None,
@@ -774,6 +801,7 @@ def _upsert_structured_message(
                WHERE id = ?''',
             (text, document, event_revision, reservation['message_kind'], now, message_id),
         )
+    _record_message_change(conn, message_id)
     return _public_message(
         conn.execute('SELECT * FROM conversation_messages WHERE id = ?', (message_id,)).fetchone(),
         None,
@@ -1727,50 +1755,68 @@ def replay_messages(
     after: int = -1,
     limit: int = MAX_MESSAGE_WINDOW,
 ) -> Dict[str, Any]:
-    """Cursor catch-up for canonical conversation rows, oldest first."""
+    """Replay insertions and revisions after a tenant-local durable change cursor."""
     if after < -1 or after > 9_007_199_254_740_991:
         raise ValueError('Conversation replay cursor is outside the supported range.')
     limit = max(1, min(limit, MAX_MESSAGE_WINDOW))
     with _session() as conn:
         conversation_id = _ensure_conversation(conn, user_id, target)
-        rows = conn.execute(
-            '''SELECT m.*, t.client_message_id AS client_message_id, t.status AS turn_status,
-                      t.lifecycle_state AS lifecycle_state,
-                      t.lifecycle_revision AS lifecycle_revision,
-                      t.lifecycle_decision_key AS lifecycle_decision_key,
-                      t.objective_id AS objective_id, t.run_id AS run_id
-               FROM conversation_messages m
-               JOIN conversation_turns t ON t.id = m.turn_id
-               WHERE m.conversation_id = ? AND m.type IN ('conversation', 'tool')
-                 AND m.sequence_index > ?
-               ORDER BY m.sequence_index LIMIT ?''',
+        changes = conn.execute(
+            '''SELECT change_sequence, message_id, message_revision
+               FROM conversation_changes
+               WHERE conversation_id = ? AND change_sequence > ?
+               ORDER BY change_sequence LIMIT ?''',
             (conversation_id, after, limit + 1),
         ).fetchall()
         latest = conn.execute(
-            '''SELECT MAX(sequence_index) AS top FROM conversation_messages
-               WHERE conversation_id = ? AND type IN ('conversation', 'tool')''',
+            '''SELECT MAX(change_sequence) AS top FROM conversation_changes
+               WHERE conversation_id = ?''',
             (conversation_id,),
         ).fetchone()['top']
-    latest_cursor = int(latest) if latest is not None else -1
-    if after > latest_cursor:
-        raise ValueError('Conversation cursor is ahead of the durable message ledger.')
-    has_more = len(rows) > limit
-    page = rows[:limit]
-    messages = [{
-        **_public_message(row, row['client_message_id'] if row['role'] == 'user' else None),
-        'turn_status': row['turn_status'],
-        'lifecycle_state': row['lifecycle_state'],
-        'lifecycle_revision': row['lifecycle_revision'],
-        'decision_key': row['lifecycle_decision_key'],
-        'objective_id': row['objective_id'],
-        'run_id': row['run_id'],
-    } for row in page]
+        latest_cursor = int(latest) if latest is not None else -1
+        if after > latest_cursor:
+            raise ValueError('Conversation cursor is ahead of the durable change ledger.')
+        page = changes[:limit]
+        if any(
+            change['change_sequence'] != after + offset
+            for offset, change in enumerate(page, start=1)
+        ):
+            raise RuntimeError('The durable conversation change ledger is not contiguous.')
+        messages: List[Dict[str, Any]] = []
+        for change in page:
+            row = conn.execute(
+                '''SELECT m.*, t.client_message_id AS client_message_id,
+                          t.status AS turn_status, t.lifecycle_state AS lifecycle_state,
+                          t.lifecycle_revision AS lifecycle_revision,
+                          t.lifecycle_decision_key AS lifecycle_decision_key,
+                          t.objective_id AS objective_id, t.run_id AS run_id
+                   FROM conversation_messages m
+                   JOIN conversation_turns t ON t.id = m.turn_id
+                   WHERE m.conversation_id = ? AND m.id = ?
+                     AND m.type IN ('conversation', 'tool')''',
+                (conversation_id, change['message_id']),
+            ).fetchone()
+            if row is None:
+                continue
+            if row['revision'] < change['message_revision']:
+                raise RuntimeError('The durable conversation change ledger is inconsistent.')
+            messages.append({
+                **_public_message(row, row['client_message_id'] if row['role'] == 'user' else None),
+                'turn_status': row['turn_status'],
+                'lifecycle_state': row['lifecycle_state'],
+                'lifecycle_revision': row['lifecycle_revision'],
+                'decision_key': row['lifecycle_decision_key'],
+                'objective_id': row['objective_id'],
+                'run_id': row['run_id'],
+                'delivery_sequence': change['change_sequence'],
+            })
+    has_more = len(changes) > limit
     return {
         'schema_version': CONVERSATION_SCHEMA,
         'target': target,
         'conversation_id': conversation_id,
         'messages': messages,
-        'next_cursor': messages[-1]['sequence_index'] if messages else after,
+        'next_cursor': page[-1]['change_sequence'] if page else after,
         'latest_cursor': latest_cursor,
         'has_more': has_more,
     }
@@ -1830,6 +1876,7 @@ def reset_conversation(user_id: str, target: str) -> Dict[str, Any]:
                WHERE turn_id IN (SELECT id FROM conversation_turns WHERE conversation_id = ?)''',
             (conversation_id,),
         )
+        conn.execute('DELETE FROM conversation_changes WHERE conversation_id = ?', (conversation_id,))
         conn.execute('DELETE FROM conversation_messages WHERE conversation_id = ?', (conversation_id,))
         conn.execute(
             '''DELETE FROM conversation_assistant_reservations

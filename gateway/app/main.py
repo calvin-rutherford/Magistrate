@@ -553,6 +553,7 @@ async def get_runtime(principal: Principal = Depends(require_scope('read'))):
         'firstmate': {
             'fm_home': fm_snapshot.get('fm_home'),
             'schema': fm_snapshot.get('schema', 'fm-fleet-snapshot.v1'),
+            'status': 'connected' if fm_snapshot.get('available') is True else 'disconnected',
             'tasks_count': len(fm_snapshot.get('tasks', []))
         }
     }
@@ -562,7 +563,7 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
     snapshot = await herdr_client.get_snapshot()
     fm_snapshot = await fm_client.get_snapshot()
     herdr_connected = bool(snapshot.get('version'))
-    firstmate_available = bool(fm_snapshot.get('fm_home'))
+    firstmate_available = fm_snapshot.get('available') is True
     # The gateway process answering is not the same claim as the product being
     # healthy. Degrade explicitly when a live source is missing, and never
     # substitute a placeholder Herdr version for one we did not observe.
@@ -1479,7 +1480,7 @@ async def replay_conversation(
     limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
     principal: Principal = Depends(require_scope('read')),
 ):
-    """Catch up canonical rows after a stable sequence without terminal reads."""
+    """Catch up canonical rows after a durable change cursor without terminal reads."""
     try:
         return replay_messages(principal.user_id, target, after=after, limit=limit)
     except ValueError as exc:

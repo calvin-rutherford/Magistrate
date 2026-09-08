@@ -233,6 +233,67 @@ def test_event_replay_updates_one_stable_message_and_structured_completion_wins(
     assert assistant[0]['structured_content'] == rich_response()
 
 
+def test_replay_cursor_tracks_committed_changes_not_render_order():
+    owner = 'conversation-change-owner'
+    other_owner = 'conversation-change-other-owner'
+    reset_conversation(owner, TARGET)
+    reset_conversation(other_owner, TARGET)
+    turn = record_prompt(owner, TARGET, 'u-change-ledger', 'Track committed delivery order')
+    progress = reserve_assistant_message(
+        owner, TARGET, turn['turn_id'], 'late-progress-message', kind='progress',
+    )
+
+    apply_magi_event(owner, TARGET, event('assistant.started', 'evt-change-primary-1', turn, 1))
+    primary = apply_magi_event(owner, TARGET, event(
+        'assistant.block.upsert', 'evt-change-primary-2', turn, 2, block_index=0,
+        block={
+            'type': 'paragraph', 'block_id': 'primary-draft',
+            'content': [{'type': 'text', 'text': 'Primary rendered first.'}],
+        },
+    ))['message']
+    assert primary['sequence_index'] == 999
+    before_progress = replay_messages(owner, TARGET, after=-1)
+    cursor = before_progress['next_cursor']
+
+    progress_turn = {**turn, 'assistant_message_id': progress['message_id']}
+    apply_magi_event(owner, TARGET, event(
+        'assistant.started', 'evt-change-progress-1', progress_turn, 1,
+    ))
+    completed_event = event(
+        'assistant.completed', 'evt-change-progress-2', progress_turn, 2,
+        response=MagiResponseV1.model_validate({
+            'schema_version': 'magi.response.v1',
+            'blocks': [{
+                'type': 'paragraph', 'block_id': 'late-progress',
+                'content': [{'type': 'text', 'text': 'Progress committed later.'}],
+            }],
+        }),
+    )
+    applied = apply_magi_event(owner, TARGET, completed_event)
+    assert applied['message']['sequence_index'] == 900
+
+    catch_up = replay_messages(owner, TARGET, after=cursor)
+    assert [message['id'] for message in catch_up['messages']] == [progress['message_id']]
+    assert catch_up['messages'][0]['delivery_sequence'] > cursor
+    latest_cursor = catch_up['next_cursor']
+
+    assert apply_magi_event(owner, TARGET, completed_event)['status'] == 'duplicate'
+    duplicate_catch_up = replay_messages(owner, TARGET, after=latest_cursor)
+    assert duplicate_catch_up['messages'] == []
+    assert duplicate_catch_up['latest_cursor'] == latest_cursor
+
+    db.init_db()
+    restarted = replay_messages(owner, TARGET, after=cursor)
+    assert [message['id'] for message in restarted['messages']] == [progress['message_id']]
+    assert restarted['next_cursor'] == latest_cursor
+
+    record_prompt(other_owner, TARGET, 'u-other-ledger', 'Other tenant message')
+    other_replay = replay_messages(other_owner, TARGET, after=-1)
+    assert {message['text'] for message in other_replay['messages']} == {'Other tenant message'}
+    with pytest.raises(ValueError, match='ahead'):
+        replay_messages(other_owner, TARGET, after=latest_cursor)
+
+
 def test_event_identity_order_and_explicit_remove_fail_closed():
     reset_conversation(USER, TARGET)
     turn = record_prompt(USER, TARGET, 'u-structured-conflicts', 'Ordering')
@@ -467,7 +528,7 @@ def test_schema_migration_and_event_ledger_are_additive(monkeypatch, tmp_path):
         ).fetchone()
     assert {'assistant_message_id', 'objective_id', 'run_id', 'lifecycle_state'} <= turn_columns
     assert {'content_source', 'structured_content_json', 'structured_revision', 'assistant_kind'} <= message_columns
-    assert {'magi_response_events', 'magi_additional_response_events', 'conversation_assistant_reservations', 'activity_records', 'activity_sources', 'activity_changes'} <= tables
+    assert {'magi_response_events', 'magi_additional_response_events', 'conversation_assistant_reservations', 'conversation_changes', 'activity_records', 'activity_sources', 'activity_changes'} <= tables
     assert turn_identity[0] == 'cm_old_reply'
     assert turn_identity[1].startswith('obj_legacy_')
     assert turn_identity[2].startswith('run_legacy_')

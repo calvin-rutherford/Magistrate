@@ -74,12 +74,13 @@ class FirstmateClient:
         except OSError:
             return {
                 'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
-                'tasks': [], 'error': 'Fleet snapshot reader is unavailable',
+                'tasks': [], 'available': False, 'error': 'Fleet snapshot reader is unavailable',
             }
         if script_stat is None:
             return {
                 'schema': 'fm-fleet-snapshot.v1',
                 'fm_home': self.fm_home,
+                'available': False,
                 'tasks': [],
                 'scout_reports': [],
                 'secondmate_current': {'records': []},
@@ -92,7 +93,7 @@ class FirstmateClient:
         ):
             return {
                 'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
-                'tasks': [], 'scout_reports': [],
+                'tasks': [], 'scout_reports': [], 'available': False,
                 'secondmate_current': {'records': []},
                 'error': 'Fleet snapshot reader is not trusted',
             }
@@ -141,7 +142,7 @@ class FirstmateClient:
                 reason = 'timed out' if isinstance(exc, asyncio.TimeoutError) else 'exceeded its bounded output size'
                 return {
                     'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
-                    'tasks': [], 'error': f'Fleet snapshot {reason}',
+                    'tasks': [], 'available': False, 'error': f'Fleet snapshot {reason}',
                 }
 
             if proc.returncode == 0 and stdout:
@@ -152,18 +153,22 @@ class FirstmateClient:
                 )
                 if not isinstance(parsed, dict):
                     raise ValueError('Fleet snapshot is not an object')
-                return parsed
+                if parsed.get('schema') != 'fm-fleet-snapshot.v1' or not isinstance(parsed.get('tasks'), list):
+                    raise ValueError('Fleet snapshot has an invalid schema')
+                if parsed.get('error'):
+                    return {**parsed, 'fm_home': self.fm_home, 'available': False}
+                return {**parsed, 'fm_home': self.fm_home, 'available': True}
             return {
                 'schema': 'fm-fleet-snapshot.v1',
                 'fm_home': self.fm_home,
-                'tasks': [],
+                'tasks': [], 'available': False,
                 'error': 'Fleet snapshot command failed' if stderr else 'Failed to run fleet snapshot'
             }
         except Exception as e:
             return {
                 'schema': 'fm-fleet-snapshot.v1',
                 'fm_home': self.fm_home,
-                'tasks': [],
+                'tasks': [], 'available': False,
                 'error': f'{type(e).__name__}: fleet snapshot unavailable'[:240]
             }
 
