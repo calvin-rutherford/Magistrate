@@ -40,8 +40,26 @@ MAGISTRATE_FIRSTMATE_TOOL_PATH=/opt/firstmate/bin:/usr/local/bin:/usr/bin
 
 An explicitly configured list fails closed if any entry is invalid. Use the
 actual service-account installation directories; do not encode one operator's
-home as a product default. The child still receives only the bounded allowlist
-of process basics and does not inherit Gateway credentials.
+home as a product default.
+
+The snapshot's Firstmate-owned lifecycle tools also need their account/runtime
+`HOME` to resolve their own no-mistakes run state. Owner installs conventionally
+place `FM_HOME` directly below that home (for example, `<account-home>/firstmate`),
+so when no override is set Gateway derives only the direct parent of the
+resolved `FM_HOME`. A Friend runtime with a deeper contained `FM_HOME`, or any
+other layout, must bind it explicitly:
+
+```dotenv
+MAGISTRATE_FIRSTMATE_RUNTIME_HOME=/var/lib/magistrate-runtime
+```
+
+The runtime home must be an absolute existing directory owned by root or the
+Gateway service identity, must contain the selected `FM_HOME`, and may have no
+symlink or unsafe world-writable path component. `/` and cross-runtime bindings
+are rejected. An invalid explicit value makes Firstmate unavailable rather than
+falling back to an ambient or derived home. The child receives this validated
+`HOME` plus only the existing bounded allowlist of process basics; it does not
+inherit Gateway credentials or unrestricted environment variables.
 
 Run `scripts/deploy_magistrate.sh` from a trusted shell for a manual update. The
 script fetches `origin/main`, refuses dirty or divergent checkouts, performs a

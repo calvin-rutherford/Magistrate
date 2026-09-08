@@ -2,7 +2,11 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from app.firstmate_client import FIRSTMATE_TOOL_PATH_ENV, FirstmateClient
+from app.firstmate_client import (
+    FIRSTMATE_RUNTIME_HOME_ENV,
+    FIRSTMATE_TOOL_PATH_ENV,
+    FirstmateClient,
+)
 
 
 def make_snapshot(tasks, records=None):
@@ -11,6 +15,18 @@ def make_snapshot(tasks, records=None):
         'tasks': tasks,
         'backlog': {'records': records or []}
     }
+
+
+def write_snapshot_script(fm_home, body=None):
+    script_dir = fm_home / 'bin'
+    script_dir.mkdir(parents=True)
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text(
+        body or '#!/bin/sh\nprintf \'%s\\n\' \'{"schema":"fm-fleet-snapshot.v1","tasks":[]}\'\n',
+        encoding='utf-8',
+    )
+    script.chmod(0o700)
+    return script
 
 
 def test_firstmate_agent_names_prefer_matched_task_title_and_keep_unmatched_herdr_fallback():
@@ -220,6 +236,185 @@ def test_ambient_tool_path_excludes_empty_relative_and_world_writable_entries(tm
     )
 
     assert FirstmateClient(str(tmp_path)).get_trusted_tool_path() == str(trusted)
+
+
+def test_owner_layout_derives_runtime_home_from_directly_containing_fm_home(tmp_path, monkeypatch):
+    runtime_home = tmp_path / 'owner'
+    fm_home = runtime_home / 'firstmate'
+    write_snapshot_script(fm_home)
+    monkeypatch.delenv(FIRSTMATE_RUNTIME_HOME_ENV, raising=False)
+
+    client = FirstmateClient(str(fm_home), tool_path=str(runtime_home))
+
+    assert client.get_trusted_runtime_home() == str(runtime_home)
+
+
+def test_runtime_home_chain_accepts_root_and_service_ownership(tmp_path, monkeypatch):
+    runtime_home = tmp_path / 'root-owned-runtime'
+    fm_home = runtime_home / 'firstmate'
+    fm_home.mkdir(parents=True)
+    real_lstat = os.lstat
+
+    def root_owned_runtime(path):
+        result = real_lstat(path)
+        if os.fspath(path) == str(runtime_home):
+            return SimpleNamespace(st_mode=result.st_mode, st_uid=0)
+        return result
+
+    monkeypatch.setattr(os, 'lstat', root_owned_runtime)
+    assert FirstmateClient(
+        str(fm_home), tool_path=str(tmp_path), runtime_home=str(runtime_home),
+    ).get_trusted_runtime_home() == str(runtime_home)
+
+
+def test_friend_runtime_style_layout_can_bind_nested_fm_home(tmp_path):
+    runtime_home = tmp_path / 'friend-runtime'
+    fm_home = runtime_home / '.local' / 'share' / 'firstmate'
+    runtime_home.mkdir()
+    fm_home.mkdir(parents=True)
+
+    client = FirstmateClient(
+        str(fm_home), tool_path=str(runtime_home), runtime_home=str(runtime_home),
+    )
+
+    assert client.get_trusted_runtime_home() == str(runtime_home)
+
+
+@pytest.mark.asyncio
+async def test_explicit_valid_runtime_home_is_passed_without_gateway_environment(tmp_path, monkeypatch):
+    runtime_home = tmp_path / 'service-home'
+    fm_home = runtime_home / 'firstmate'
+    runtime_home.mkdir()
+    write_snapshot_script(
+        fm_home,
+        '#!/bin/sh\n'
+        '[ -z "${MAGISTRATE_SECRET_KEY+x}" ] || exit 8\n'
+        'printf \'{"schema":"fm-fleet-snapshot.v1","tasks":[],"observed_home":"%s"}\\n\' "$HOME"\n',
+    )
+    monkeypatch.setenv('MAGISTRATE_SECRET_KEY', 'must-not-enter-child')
+
+    result = await FirstmateClient(
+        str(fm_home), tool_path=str(runtime_home), runtime_home=str(runtime_home),
+    ).get_snapshot()
+
+    assert result['available'] is True
+    assert result['observed_home'] == str(runtime_home)
+
+
+@pytest.mark.parametrize('configured', ['', 'relative', '/definitely/missing/magistrate-runtime-home'])
+def test_invalid_or_relative_runtime_home_is_rejected(tmp_path, configured):
+    runtime_home = tmp_path / 'owner'
+    fm_home = runtime_home / 'firstmate'
+    fm_home.mkdir(parents=True)
+
+    assert FirstmateClient(
+        str(fm_home), tool_path=str(runtime_home), runtime_home=configured,
+    ).get_trusted_runtime_home() is None
+
+
+def test_symlink_world_writable_and_untrusted_runtime_homes_are_rejected(tmp_path, monkeypatch):
+    runtime_home = tmp_path / 'runtime'
+    fm_home = runtime_home / 'firstmate'
+    fm_home.mkdir(parents=True)
+    linked_home = tmp_path / 'linked-runtime'
+    linked_home.symlink_to(runtime_home, target_is_directory=True)
+    assert FirstmateClient(
+        str(fm_home), tool_path=str(runtime_home), runtime_home=str(linked_home),
+    ).get_trusted_runtime_home() is None
+
+    runtime_home.chmod(0o777)
+    assert FirstmateClient(
+        str(fm_home), tool_path=str(tmp_path), runtime_home=str(runtime_home),
+    ).get_trusted_runtime_home() is None
+    runtime_home.chmod(0o755)
+
+    real_lstat = os.lstat
+
+    def untrusted_owner(path):
+        result = real_lstat(path)
+        if os.fspath(path) == str(runtime_home):
+            return SimpleNamespace(st_mode=result.st_mode, st_uid=os.geteuid() + 1)
+        return result
+
+    monkeypatch.setattr(os, 'lstat', untrusted_owner)
+    assert FirstmateClient(
+        str(fm_home), tool_path=str(tmp_path), runtime_home=str(runtime_home),
+    ).get_trusted_runtime_home() is None
+
+
+def test_runtime_home_must_own_the_selected_firstmate_runtime(tmp_path):
+    selected_runtime = tmp_path / 'selected-runtime'
+    other_runtime = tmp_path / 'other-runtime'
+    fm_home = selected_runtime / 'firstmate'
+    fm_home.mkdir(parents=True)
+    other_runtime.mkdir()
+
+    assert FirstmateClient(
+        str(fm_home), tool_path=str(selected_runtime), runtime_home=str(other_runtime),
+    ).get_trusted_runtime_home() is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_explicit_runtime_home_fails_closed_without_default_fallback(tmp_path, monkeypatch):
+    runtime_home = tmp_path / 'owner'
+    fm_home = runtime_home / 'firstmate'
+    marker = fm_home / 'executed'
+    write_snapshot_script(
+        fm_home,
+        f'#!/bin/sh\n: > "{marker}"\nprintf \'%s\\n\' \'{{"schema":"fm-fleet-snapshot.v1","tasks":[]}}\'\n',
+    )
+    monkeypatch.setenv(FIRSTMATE_RUNTIME_HOME_ENV, 'relative-home')
+
+    result = await FirstmateClient(str(fm_home), tool_path=str(runtime_home)).get_snapshot()
+
+    assert result['available'] is False
+    assert result['error'] == 'Fleet snapshot runtime home is unavailable'
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_runtime_home_state_avoids_no_mistakes_coarse_run_fallback(tmp_path):
+    runtime_home = tmp_path / 'owner'
+    fm_home = runtime_home / 'firstmate'
+    tools = runtime_home / 'tools'
+    run_state = runtime_home / '.no-mistakes' / 'runs'
+    runtime_home.mkdir()
+    tools.mkdir()
+    run_state.mkdir(parents=True)
+    (run_state / 'ship.run').write_text('run-authoritative-17\n', encoding='utf-8')
+    fallback_marker = fm_home / 'coarse-fallback-called'
+    fake_no_mistakes = tools / 'no-mistakes'
+    fake_no_mistakes.write_text(
+        '#!/bin/sh\n'
+        'if [ "$*" = "axi status ship" ]; then\n'
+        '  if [ -f "$HOME/.no-mistakes/runs/ship.run" ]; then\n'
+        '    IFS= read -r run < "$HOME/.no-mistakes/runs/ship.run"\n'
+        '    printf \'%s\\n\' "$run"\n'
+        '  fi\n'
+        'elif [ "$*" = "runs --limit 200" ]; then\n'
+        '  : > "$FM_HOME/coarse-fallback-called"\n'
+        '  sleep 1\n'
+        '  printf \'%s\\n\' run-misattributed\n'
+        'fi\n',
+        encoding='utf-8',
+    )
+    fake_no_mistakes.chmod(0o700)
+    write_snapshot_script(
+        fm_home,
+        '#!/bin/sh\n'
+        'run="$(no-mistakes axi status ship)"\n'
+        '[ -n "$run" ] || run="$(no-mistakes runs --limit 200)"\n'
+        'printf \'{"schema":"fm-fleet-snapshot.v1","tasks":[{"run_id":"%s"}]}\\n\' "$run"\n',
+    )
+
+    result = await FirstmateClient(
+        str(fm_home), tool_path=f'{tools}{os.pathsep}/usr/bin',
+        runtime_home=str(runtime_home), snapshot_timeout=0.5,
+    ).get_snapshot()
+
+    assert result['available'] is True
+    assert result['tasks'][0]['run_id'] == 'run-authoritative-17'
+    assert not fallback_marker.exists()
 
 
 @pytest.mark.parametrize('configured', ['', 'relative'])
