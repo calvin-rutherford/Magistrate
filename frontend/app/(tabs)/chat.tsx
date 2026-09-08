@@ -19,7 +19,7 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
-import { canonicalActivityResponseIsDegraded, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, getCanonicalActivityRecords, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
+import { canonicalActivityResponseIsDegraded, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, getCanonicalActivityRecords, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, getConversationPrincipal, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
@@ -1004,15 +1004,28 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         }
         let cursor = getCanonicalActivityCursor();
         let caughtUp = false;
+        let resetReplayBudget = true;
         for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
           const page = await fetchCanonicalActivity(cursor, 200, false);
-          if (owner !== getConversationPrincipal() || !ingestCanonicalActivityPage(page)) {
+          if (owner !== getConversationPrincipal()) return;
+          const applied = await ingestCanonicalActivityReplayPage(
+            page, () => fetchCanonicalActivitySnapshot(undefined, 100, true),
+          );
+          if (owner !== getConversationPrincipal() || !applied) {
             throw new Error('Gateway activity replay could not be applied.');
           }
-          health ||= page;
+          if (applied.snapshotPage) {
+            setActivityBefore(applied.snapshotPage.nextBefore);
+            setActivityHasMore(applied.snapshotPage.hasMore);
+            health = applied.response;
+            if (resetReplayBudget) {
+              pageIndex = -1;
+              resetReplayBudget = false;
+            }
+          } else health ||= page;
           cursor = getCanonicalActivityCursor();
           activityRealtimeRef.current?.setActivityCursor(cursor);
-          if (!page.has_more) { caughtUp = true; break; }
+          if (!applied.snapshotPage && !page.has_more) { caughtUp = true; break; }
         }
         if (!caughtUp) throw new Error('Gateway activity replay exceeded the bounded catch-up window.');
         if (canonicalActivityResponseIsDegraded(health)) markCanonicalActivityInterrupted();
@@ -1137,9 +1150,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           return;
         }
         if (event?.type === 'activity_records') {
-          if (canonicalTarget && activityPrincipal === getConversationPrincipal()
-            && ingestCanonicalActivityPage(event)) {
-            realtime?.setActivityCursor(getCanonicalActivityCursor());
+          if (canonicalTarget && activityPrincipal === getConversationPrincipal()) {
+            if (ingestCanonicalActivityPage(event)) {
+              realtime?.setActivityCursor(getCanonicalActivityCursor());
+            } else void recoverCanonicalActivity(true);
           }
           return;
         }

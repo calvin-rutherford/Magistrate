@@ -538,6 +538,11 @@ export interface CanonicalActivitySnapshotPage {
   snapshotCursor: number;
 }
 
+export interface CanonicalActivityReplayApplyResult {
+  response: unknown;
+  snapshotPage?: CanonicalActivitySnapshotPage;
+}
+
 export function ingestCanonicalActivitySnapshot(
   raw: unknown, requireCompletePage = false,
 ): CanonicalActivitySnapshotPage | null {
@@ -616,6 +621,18 @@ export function ingestCanonicalActivitySnapshot(
     hasMore: canLoadAnotherPage,
     snapshotCursor: value.snapshot_cursor as number,
   };
+}
+
+export async function ingestCanonicalActivityReplayPage(
+  raw: unknown, recoverSnapshot: () => Promise<unknown>,
+): Promise<CanonicalActivityReplayApplyResult | null> {
+  const owner = principalId;
+  if (!owner) return null;
+  if (ingestCanonicalActivityPage(raw)) return { response: raw };
+  const snapshot = await recoverSnapshot();
+  if (principalId !== owner) return null;
+  const snapshotPage = ingestCanonicalActivitySnapshot(snapshot);
+  return snapshotPage ? { response: snapshot, snapshotPage } : null;
 }
 
 export function deriveCanonicalWorkState(
