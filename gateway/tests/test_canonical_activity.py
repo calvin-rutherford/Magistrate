@@ -496,7 +496,7 @@ def test_snapshot_recovers_every_accepted_active_objective_and_pending_decision(
     user = 'activity-focus-capacity-owner'
     candidates = []
     open_decisions = []
-    for index in range(1_000):
+    for index in range(4_000):
         task_id = f'focus-task-{index}'
         objective_id = f'obj_focus_{index}'
         common = {
@@ -509,6 +509,14 @@ def test_snapshot_recovers_every_accepted_active_objective_and_pending_decision(
             'state': 'active', 'summary': 'Active objective.', 'decision_key': None,
             'source_payload_sha256': hashlib.sha256(f'objective:{index}'.encode()).hexdigest(),
         })
+    for index in range(1_000):
+        task_id = f'focus-task-{index}'
+        objective_id = f'obj_focus_{index}'
+        common = {
+            'importance': 'routine', 'title': f'Focus task {index}',
+            'source_event_id': None, 'task_id': task_id, 'objective_id': objective_id,
+            'run_id': f'run_focus_{index}', 'project': None, 'occurred_at': None, 'refs': [],
+        }
         decision_key = f'decision-{index}'
         candidates.append({
             **common, 'record_key': f'decision:{index}', 'kind': 'decision.requested',
@@ -526,7 +534,28 @@ def test_snapshot_recovers_every_accepted_active_objective_and_pending_decision(
     assert len(projection['focus_records']) == MAX_ACTIVITY_FOCUS_RECORDS
     assert projection['focus_truncated'] is False
     assert projection['summary'] == {
-        'active_objectives': 1_000, 'operation_count': 0, 'pending_decisions': 1_000,
+        'active_objectives': 4_000, 'operation_count': 0, 'pending_decisions': 1_000,
+    }
+
+    terminal = {
+        **candidates[0], 'kind': 'objective.completed', 'state': 'completed',
+        'summary': 'Objective completed.',
+        'source_payload_sha256': hashlib.sha256(b'objective:0:completed').hexdigest(),
+    }
+    changed = reconcile_snapshot(
+        user, 'firstmate:main', observed_at=3_000, snapshot_sha256='b' * 64,
+        records=[terminal, *candidates[1:]], open_decision_keys=open_decisions,
+    )
+    assert any(
+        row['task_id'] == terminal['task_id']
+        and row['revision'] == 2 and row['state'] == 'completed'
+        for row in changed
+    )
+    projection = snapshot_activity(user, limit=1)
+    assert len(projection['focus_records']) == MAX_ACTIVITY_FOCUS_RECORDS - 1
+    assert projection['focus_truncated'] is False
+    assert projection['summary'] == {
+        'active_objectives': 3_999, 'operation_count': 0, 'pending_decisions': 1_000,
     }
 
 
@@ -612,7 +641,7 @@ async def test_snapshot_ignores_pane_derived_runtime_state_but_keeps_keyed_decis
 
 
 @pytest.mark.asyncio
-async def test_snapshot_rejects_record_only_focus_beyond_recovery_capacity(tmp_path):
+async def test_snapshot_rejects_normalized_focus_beyond_recovery_capacity(tmp_path):
     class RecordOnlyFirstmate(EmptyFirstmate):
         async def get_snapshot(self):
             snapshot = await super().get_snapshot()
@@ -622,8 +651,17 @@ async def test_snapshot_rejects_record_only_focus_beyond_recovery_capacity(tmp_p
                 for index in range(2_000)
             ]}
             snapshot['secondmate_landed'] = {'records': [
-                {'id': 'landed-overflow', 'title': 'Landed overflow', 'state': 'queued'},
+                {'id': f'landed-{index}', 'title': f'Landed {index}', 'state': 'queued'}
+                for index in range(2_000)
             ]}
+            snapshot['tasks'] = [{
+                'id': f'task-{index}', 'spawn_gen': '1',
+                'current_state': {'source': 'firstmate', 'state': 'working'},
+                'hints': {'open_decisions': [{
+                    'verb': 'needs-decision', 'key': 'release-channel',
+                    'summary': 'Choose the release channel.',
+                }]} if index == 0 else {},
+            } for index in range(1_000)]
             return snapshot
 
     source = adapter(tmp_path, [], firstmate=RecordOnlyFirstmate())

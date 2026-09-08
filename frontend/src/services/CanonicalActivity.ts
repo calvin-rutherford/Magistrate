@@ -95,11 +95,48 @@ const RECORD_KEYS = new Set([
 const CACHE_PREFIX = 'magistrate.activity.canonical.v1.';
 const CACHE_SCHEMA = 'activity-cache.v1';
 const MAX_RECENT_ACTIVITY_RECORDS = 400;
-const MAX_FOCUS_RECORDS = 2_000;
+const MAX_FOCUS_RECORDS = 5_000;
 const MAX_ACTIVITY_RECORDS = MAX_FOCUS_RECORDS + MAX_RECENT_ACTIVITY_RECORDS;
 const EMPTY_SUMMARY: CanonicalActivitySummary = {
   activeObjectives: 0, operationCount: 0, pendingDecisions: 0,
 };
+
+type CanonicalActivityRecoveryRunner = (authoritativeSnapshot: boolean) => Promise<void>;
+
+export class CanonicalActivityRecoveryCoordinator {
+  private requestedStrength = 0;
+  private pendingRunner: CanonicalActivityRecoveryRunner | null = null;
+  private inFlight: Promise<void> | null = null;
+
+  request(authoritativeSnapshot: boolean, runner: CanonicalActivityRecoveryRunner): Promise<void> {
+    this.requestedStrength = Math.max(this.requestedStrength, authoritativeSnapshot ? 2 : 1);
+    this.pendingRunner = runner;
+    if (this.inFlight) return this.inFlight;
+    const drain = async (): Promise<void> => {
+      let firstError: unknown;
+      let failed = false;
+      while (this.requestedStrength > 0) {
+        const strength = this.requestedStrength;
+        const requestedRunner = this.pendingRunner;
+        this.requestedStrength = 0;
+        this.pendingRunner = null;
+        if (!requestedRunner) continue;
+        try {
+          await requestedRunner(strength === 2);
+        } catch (error) {
+          failed = true;
+          firstError ??= error;
+        }
+      }
+      if (failed) throw firstError;
+    };
+    const tracked = drain().finally(() => {
+      if (this.inFlight === tracked) this.inFlight = null;
+    });
+    this.inFlight = tracked;
+    return tracked;
+  }
+}
 const ENV_ASSIGNMENT = /(?:^|[^A-Za-z0-9_])(?:export\s+)?[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=/i;
 const SENSITIVE_TEXT = /(?:(?:proxy[-_ ]?)?authorization\s*["']?\s*[:=]\s*[^\s,;}]+(?:\s+[^\s,;}]+)?|["']?[A-Za-z0-9_. -]{0,96}(?:secret|pass(?:word|wd)?|pwd|token|auth|key|credential)[A-Za-z0-9_. -]{0,96}["']?\s*[:=]\s*["']?[^\s,;}"']+|\b[A-Z][A-Z0-9_]{1,63}\s*=\s*[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s]+@|\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/@]+@[^\s,;]+|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{8,}|\bsk-[A-Za-z0-9]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b)/i;
 const containsSensitiveText = (value: string): boolean => {

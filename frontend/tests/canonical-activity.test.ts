@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CanonicalActivityRecoveryCoordinator,
   decisionAttentionItemId,
   deriveCanonicalWorkState,
   getCanonicalActivityCursor,
@@ -286,46 +287,46 @@ test('snapshot and replay retention preserves full focus capacity and recent rev
 });
 
 test('an overflowing replay prefix recovers through the authoritative cursor snapshot', async () => {
-  const focus = Array.from({ length: 2_000 }, (_, index) => record({
+  const focus = Array.from({ length: 5_000 }, (_, index) => record({
     id: `ca_recovery_${index + 1}`, sequence: index + 1, delivery_sequence: index + 1,
     task_id: `recovery-task-${index + 1}`, objective_id: `recovery-objective-${index + 1}`,
   }));
   setCanonicalActivityPrincipal('activity-replay-prefix-overflow');
   assert.ok(ingestCanonicalActivitySnapshot({
     schema_version: 'activity.v1', records: [], focus_records: focus,
-    focus_truncated: false, snapshot_cursor: 2_000, latest_sequence: 2_000,
+    focus_truncated: false, snapshot_cursor: 5_000, latest_sequence: 5_000,
     next_before: null, has_more: false,
-    summary: { active_objectives: 2_000, operation_count: 0, pending_decisions: 0 },
+    summary: { active_objectives: 5_000, operation_count: 0, pending_decisions: 0 },
   }));
 
   const newlyActive = record({
-    id: 'ca_recovery_2001', sequence: 2_001, delivery_sequence: 2_001,
-    task_id: 'recovery-task-2001', objective_id: 'recovery-objective-2001',
+    id: 'ca_recovery_5001', sequence: 5_001, delivery_sequence: 5_001,
+    task_id: 'recovery-task-5001', objective_id: 'recovery-objective-5001',
   });
   const terminalRevision = record({
-    id: focus[0].id, sequence: focus[0].sequence, delivery_sequence: 2_002, revision: 2,
+    id: focus[0].id, sequence: focus[0].sequence, delivery_sequence: 5_002, revision: 2,
     kind: 'objective.completed', state: 'completed', task_id: focus[0].task_id,
     objective_id: focus[0].objective_id, summary: 'Objective completed authoritatively.',
   });
   let snapshotRequests = 0;
   const applied = await ingestCanonicalActivityReplayPage({
-    ...page([newlyActive], 2_001, 2_002), has_more: true,
+    ...page([newlyActive], 5_001, 5_002), has_more: true,
   }, async () => {
     snapshotRequests += 1;
     return {
       schema_version: 'activity.v1', records: [terminalRevision],
       focus_records: [...focus.slice(1), newlyActive], focus_truncated: false,
-      snapshot_cursor: 2_002, latest_sequence: 2_001,
+      snapshot_cursor: 5_002, latest_sequence: 5_001,
       next_before: null, has_more: false,
-      summary: { active_objectives: 2_000, operation_count: 0, pending_decisions: 0 },
+      summary: { active_objectives: 5_000, operation_count: 0, pending_decisions: 0 },
     };
   });
 
   assert.equal(snapshotRequests, 1);
-  assert.equal(applied?.snapshotPage?.snapshotCursor, 2_002);
-  assert.equal(getCanonicalActivityCursor(), 2_002);
-  assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'active').length, 2_000);
-  assert.equal(getCanonicalActivityRecords().length, 2_001);
+  assert.equal(applied?.snapshotPage?.snapshotCursor, 5_002);
+  assert.equal(getCanonicalActivityCursor(), 5_002);
+  assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'active').length, 5_000);
+  assert.equal(getCanonicalActivityRecords().length, 5_001);
   assert.deepEqual(
     getCanonicalActivityRecords().filter(item => item.id === focus[0].id)
       .map(item => [item.sequence, item.revision, item.state]),
@@ -333,8 +334,32 @@ test('an overflowing replay prefix recovers through the authoritative cursor sna
   );
   assert.ok(getCanonicalActivityRecords().some(item => item.id === newlyActive.id));
   assert.deepEqual(getCanonicalActivitySnapshot().summary, {
-    activeObjectives: 2_000, operationCount: 0, pendingDecisions: 0,
+    activeObjectives: 5_000, operationCount: 0, pendingDecisions: 0,
   });
+});
+
+test('an authoritative recovery requested during an in-flight sync runs afterward', async () => {
+  const coordinator = new CanonicalActivityRecoveryCoordinator();
+  const calls: boolean[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>(resolve => { releaseFirst = resolve; });
+  let firstStarted!: () => void;
+  const started = new Promise<void>(resolve => { firstStarted = resolve; });
+  const runner = async (authoritativeSnapshot: boolean) => {
+    calls.push(authoritativeSnapshot);
+    if (calls.length === 1) {
+      firstStarted();
+      await firstBlocked;
+    }
+  };
+
+  const initial = coordinator.request(false, runner);
+  await started;
+  const queued = coordinator.request(true, runner);
+  releaseFirst();
+  await Promise.all([initial, queued]);
+
+  assert.deepEqual(calls, [false, true]);
 });
 
 test('snapshot pagination reveals complete older pages and stops at retained history capacity', () => {

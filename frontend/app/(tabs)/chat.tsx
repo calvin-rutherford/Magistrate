@@ -19,7 +19,7 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
-import { canonicalActivityResponseIsDegraded, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, getCanonicalActivityRecords, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
+import { canonicalActivityResponseIsDegraded, CanonicalActivityRecoveryCoordinator, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, getCanonicalActivityRecords, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, getConversationPrincipal, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
@@ -432,7 +432,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const promptTokenRef = useRef(0);
   const activePromptRef = useRef<ActivePrompt | null>(null);
   const postPromptPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activitySyncRef = useRef<Promise<void> | null>(null);
+  const activityRecoveryCoordinatorRef = useRef<CanonicalActivityRecoveryCoordinator | null>(null);
+  activityRecoveryCoordinatorRef.current ??= new CanonicalActivityRecoveryCoordinator();
   const activityRealtimeRef = useRef<RealtimeClient | null>(null);
   // A prompt must not race the initial scrollback seed. If the seed resolves
   // after a new reply is already present, it would mark that reply as known
@@ -976,14 +977,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   };
   const recoverCanonicalActivity = (authoritativeSnapshot: boolean): Promise<void> => {
     if (!canonicalTarget) return Promise.resolve();
-    if (activitySyncRef.current) return activitySyncRef.current;
     const owner = getConversationPrincipal();
     if (!owner) return Promise.resolve();
-    markCanonicalActivityRecovering();
-    const request = (async () => {
+    return activityRecoveryCoordinatorRef.current!.request(authoritativeSnapshot, async requestedSnapshot => {
+      if (owner !== getConversationPrincipal()) return;
+      markCanonicalActivityRecovering();
       let health: unknown = null;
       try {
-        if (authoritativeSnapshot) {
+        if (requestedSnapshot) {
           try {
             const snapshot = await fetchCanonicalActivitySnapshot(undefined, 100, true);
             if (owner !== getConversationPrincipal()) return;
@@ -1033,12 +1034,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       } catch {
         if (owner === getConversationPrincipal()) markCanonicalActivityInterrupted();
       }
-    })();
-    const tracked = request.finally(() => {
-      if (activitySyncRef.current === tracked) activitySyncRef.current = null;
     });
-    activitySyncRef.current = tracked;
-    return tracked;
   };
   const loadOlderCanonicalActivity = async (): Promise<boolean> => {
     if (!canonicalTarget || !activityHasMore || !activityBefore || activityLoadingMore) return false;
