@@ -25,6 +25,24 @@ Set restrictive permissions on the env file and database directory. Rotate the
 bootstrap and Fernet keys through the approved secret-management procedure;
 never commit them or put them in a frontend build.
 
+The read-only Firstmate snapshot also needs the service account's trusted tool
+directories (including the installed `herdr`, `tasks-axi`, and `quota-axi`) on
+its subprocess `PATH`. By default the Gateway derives that path from the
+service `PATH`, retaining only absolute, existing directories whose ownership
+chain belongs to root or the service user and contains no symlink or unsafe
+world-writable component. Empty, relative, missing, and untrusted entries are
+excluded; if no trusted entry remains, Firstmate is unavailable. To pin a
+stricter deployment contract, set a colon-separated list such as:
+
+```dotenv
+MAGISTRATE_FIRSTMATE_TOOL_PATH=/opt/firstmate/bin:/usr/local/bin:/usr/bin
+```
+
+An explicitly configured list fails closed if any entry is invalid. Use the
+actual service-account installation directories; do not encode one operator's
+home as a product default. The child still receives only the bounded allowlist
+of process basics and does not inherit Gateway credentials.
+
 Run `scripts/deploy_magistrate.sh` from a trusted shell for a manual update. The
 script fetches `origin/main`, refuses dirty or divergent checkouts, performs a
 fast-forward-only update, runs the supported `npx expo export -p web` build,
