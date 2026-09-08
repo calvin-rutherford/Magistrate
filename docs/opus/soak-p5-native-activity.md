@@ -6,24 +6,24 @@ This is compact software evidence for the native activity/recovery slice based o
 
 | Boundary | Command / observation | Result |
 |---|---|---|
-| Gateway authority and isolation | `cd gateway && PYTHONPATH=. uv run pytest -v` | **PASS — 334 tests** |
-| Frontend behavior, browser recovery, auth isolation | `cd frontend && npm test` | **PASS** (complete command reached its final successful exit) |
-| Type generation and types | `npm run typegen && npm run typecheck` | **PASS** |
-| Lint | `npm run lint` | **PASS — 0 errors, 29 existing warnings** |
-| Web production bundle | `npx expo export --platform web` | **PASS — 25 static routes** |
-| Unsigned native bundle | `npx expo export --platform ios --output-dir /tmp/magistrate-opus-native-activity-ios --clear` | **PASS — 1,741 modules; 4.4 MB Hermes bundle** |
+| Gateway authority and isolation | `cd gateway && PYTHONPATH=. uv run pytest -v` | **PASS — 337 tests** |
+| Frontend behavior, browser recovery, auth isolation | `cd frontend && npm test` | **PASS — 206 tests** |
+| Type generation and types | `cd frontend && npm run typegen && npm run typecheck` | **PASS** |
+| Lint | `cd frontend && npm run lint` | **PASS — 0 errors, 29 warnings** |
+| Web production bundle | `cd frontend && npx expo export --platform web` | **PASS — 25 static routes** |
+| Unsigned native bundle | `cd frontend && npx expo export --platform ios --output-dir /tmp/magistrate-opus-native-activity-ios --clear` | **PASS — 1,741 modules; 4.4 MB Hermes bundle** |
 | Patch hygiene | `git diff --check` | **PASS** |
 
-Focused observed behavior includes a 430×820 mobile viewport showing exactly `Magi is working · 12 operations`, a tappable bounded native-style activity sheet with all 12 operation records, stable in-place revisions under delayed snapshot/realtime overlap, cold-start retention of an exact keyed decision during an outage, deep-link reuse of `captain-question-<decision_key>`, and synchronous prior-principal cache eviction on account change/logout/expiry/401.
+Focused observed behavior includes a 430×820 mobile viewport showing exactly `Magi is working · 12 operations`, a tappable bounded native-style activity sheet with all 12 operation records, stable in-place revisions under delayed snapshot/realtime overlap, cold-start retention of an exact keyed decision during an outage, deep-link reuse of `captain-question-<decision_key>`, synchronous prior-principal cache eviction on account change/logout/expiry/401, overlap pagination in which 90 repeated focus rows do not consume the 400-row history budget and the final request is bounded to the remaining 80 rows, and historical-page admission that cannot checkpoint past unseen replay rows.
 
 ### expo-doctor baseline (not suppressed)
 
-`npx expo-doctor` reports **19/21 checks passed** and exactly two failures:
+`cd frontend && npx expo-doctor` reports **19/21 checks passed** and exactly two failures:
 
 1. `Check for legacy global CLI installed locally`: the existing `eas-cli` development dependency.
-2. `Check that packages match versions required by installed Expo SDK`: five existing one-patch mismatches — `@expo/ui` 57.0.15 vs 57.0.16, `expo` 57.0.19 vs 57.0.20, `expo-image-picker` 57.0.15 vs 57.0.16, `expo-notifications` 57.0.16 vs 57.0.17, and `expo-router` 57.0.18 vs 57.0.19.
+2. `Check that packages match versions required by installed Expo SDK`: six existing patch mismatches — `@expo/ui` 57.0.15 vs 57.0.17, `expo` 57.0.19 vs 57.0.21, `expo-glass-effect` 57.0.1 vs 57.0.2, `expo-image-picker` 57.0.15 vs 57.0.16, `expo-notifications` 57.0.16 vs 57.0.17, and `expo-router` 57.0.18 vs 57.0.20.
 
-These are not introduced by this slice: `git diff --exit-code ce5db24 -- frontend/package.json frontend/package-lock.json` returned 0, and running the same doctor against a `git archive ce5db24` tree produced the identical two failures. They remain visible baseline debt rather than being suppressed or folded into this correctness-focused change.
+These are not introduced by this slice: `git diff --exit-code ce5db24 -- frontend/package.json frontend/package-lock.json` returned 0. They remain visible baseline debt rather than being suppressed or folded into this correctness-focused change.
 
 ## Physical iPhone SOAK — **NOT RUN / UNPASSED**
 
