@@ -11,8 +11,9 @@ FIRSTMATE_HOME = os.getenv('FM_HOME', '/home/spectre/firstmate')
 FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS = 20.0
 FIRSTMATE_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
 FIRSTMATE_TOOL_PATH_ENV = 'MAGISTRATE_FIRSTMATE_TOOL_PATH'
+FIRSTMATE_RUNTIME_HOME_ENV = 'MAGISTRATE_FIRSTMATE_RUNTIME_HOME'
 _DEFAULT_SYSTEM_TOOL_PATH = '/usr/local/bin:/usr/bin:/bin'
-_MAX_TOOL_PATH_BYTES = 4096
+_MAX_TRUSTED_PATH_BYTES = 4096
 _MAX_TOOL_PATH_ENTRIES = 64
 _GENERIC_AGENT_NAMES = {'magistrate', 'firstmate', 'π - magistrate', 'π - firstmate'}
 
@@ -85,7 +86,7 @@ def _sanitize_tool_path(value: str, *, reject_invalid: bool) -> Optional[str]:
         encoded = value.encode('utf-8')
     except UnicodeEncodeError:
         return None
-    if len(encoded) > _MAX_TOOL_PATH_BYTES:
+    if len(encoded) > _MAX_TRUSTED_PATH_BYTES:
         return None
     entries = value.split(os.pathsep)
     if len(entries) > _MAX_TOOL_PATH_ENTRIES:
@@ -106,6 +107,24 @@ def _sanitize_tool_path(value: str, *, reject_invalid: bool) -> Optional[str]:
     return os.pathsep.join(trusted) if trusted else None
 
 
+def _trusted_runtime_home(value: str, fm_home: str) -> Optional[str]:
+    """Bind a trusted process HOME to the selected Firstmate runtime."""
+    if not isinstance(value, str) or '\x00' in value or value == os.sep:
+        return None
+    try:
+        if len(value.encode('utf-8')) > _MAX_TRUSTED_PATH_BYTES:
+            return None
+        runtime_home = _trusted_tool_directory(value)
+        trusted_fm_home = _trusted_tool_directory(fm_home)
+        if runtime_home is None or trusted_fm_home is None:
+            return None
+        if os.path.commonpath((runtime_home, trusted_fm_home)) != runtime_home:
+            return None
+    except (OSError, ValueError, UnicodeEncodeError):
+        return None
+    return runtime_home
+
+
 def _task_display_name(value: Any, target: str) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -124,6 +143,7 @@ class FirstmateClient:
         snapshot_timeout: float = FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS,
         snapshot_max_bytes: int = FIRSTMATE_SNAPSHOT_MAX_BYTES,
         tool_path: Optional[str] = None,
+        runtime_home: Optional[str] = None,
     ):
         self.fm_home = fm_home
         self.snapshot_script = os.path.join(fm_home, 'bin', 'fm-fleet-snapshot.sh')
@@ -138,6 +158,18 @@ class FirstmateClient:
         else:
             self._tool_path_source = os.environ.get('PATH', _DEFAULT_SYSTEM_TOOL_PATH)
             self._tool_path_is_explicit = False
+        if runtime_home is not None:
+            self._runtime_home_source = runtime_home
+            self._runtime_home_is_explicit = True
+        elif FIRSTMATE_RUNTIME_HOME_ENV in os.environ:
+            self._runtime_home_source = os.environ[FIRSTMATE_RUNTIME_HOME_ENV]
+            self._runtime_home_is_explicit = True
+        else:
+            # The conventional owner layout puts FM_HOME directly below the
+            # account HOME. Deeper Friend-runtime layouts require an explicit
+            # binding; never infer one from the Gateway's ambient HOME.
+            self._runtime_home_source = os.path.dirname(os.path.normpath(fm_home))
+            self._runtime_home_is_explicit = False
 
     def get_trusted_tool_path(self) -> Optional[str]:
         """Build the minimal child PATH, rejecting a malformed explicit policy."""
@@ -145,6 +177,16 @@ class FirstmateClient:
             self._tool_path_source,
             reject_invalid=self._tool_path_is_explicit,
         )
+
+    def get_trusted_runtime_home(self) -> Optional[str]:
+        """Return the validated HOME bound to this exact Firstmate home."""
+        runtime_home = _trusted_runtime_home(self._runtime_home_source, self.fm_home)
+        if runtime_home is None or (
+            not self._runtime_home_is_explicit
+            and os.path.dirname(os.path.normpath(self.fm_home)) != runtime_home
+        ):
+            return None
+        return runtime_home
 
     async def get_snapshot(self) -> Dict[str, Any]:
         try:
@@ -186,11 +228,19 @@ class FirstmateClient:
                 'secondmate_current': {'records': []},
                 'error': 'Fleet snapshot tool path is unavailable',
             }
+        runtime_home = self.get_trusted_runtime_home()
+        if runtime_home is None:
+            return {
+                'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
+                'tasks': [], 'scout_reports': [], 'available': False,
+                'secondmate_current': {'records': []},
+                'error': 'Fleet snapshot runtime home is unavailable',
+            }
 
         environment = {
             'FM_HOME': self.fm_home,
             'PATH': tool_path,
-            'HOME': '/nonexistent',
+            'HOME': runtime_home,
             'LANG': 'C.UTF-8',
             'LC_ALL': 'C.UTF-8',
         }
