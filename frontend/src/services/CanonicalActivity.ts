@@ -94,7 +94,8 @@ const RECORD_KEYS = new Set([
 ]);
 const CACHE_PREFIX = 'magistrate.activity.canonical.v1.';
 const CACHE_SCHEMA = 'activity-cache.v1';
-const MAX_CACHE_RECORDS = 400;
+const MAX_ACTIVITY_RECORDS = 400;
+const MAX_FOCUS_RECORDS = 200;
 const EMPTY_SUMMARY: CanonicalActivitySummary = {
   activeObjectives: 0, operationCount: 0, pendingDecisions: 0,
 };
@@ -281,17 +282,24 @@ let published: CanonicalActivitySnapshot = {
 const storageKey = (principal: string): string => `${CACHE_PREFIX}${encodeURIComponent(principal)}`;
 const sortedRecords = (): CanonicalActivityRecord[] =>
   [...records.values()].sort((left, right) => left.sequence - right.sequence);
-const cacheRecords = (): CanonicalActivityRecord[] => {
-  const ordered = sortedRecords();
+const retainedRecords = (
+  source: ReadonlyMap<string, CanonicalActivityRecord>,
+): CanonicalActivityRecord[] => {
+  const ordered = [...source.values()].sort((left, right) => left.sequence - right.sequence);
   const focus = ordered.filter(activity => (
     (activity.kind === 'objective.started' || activity.kind === 'objective.progress'
       || activity.kind === 'decision.requested')
     && (activity.state === 'active' || activity.state === 'awaiting-user')
-  )).slice(-200);
+  )).slice(-MAX_FOCUS_RECORDS);
   const focusedIds = new Set(focus.map(activity => activity.id));
-  const recent = [...ordered].reverse().filter(activity => !focusedIds.has(activity.id))
-    .slice(0, MAX_CACHE_RECORDS - focus.length);
+  const recent = ordered.filter(activity => !focusedIds.has(activity.id))
+    .sort((left, right) => right.deliverySequence - left.deliverySequence)
+    .slice(0, MAX_ACTIVITY_RECORDS - focus.length);
   return [...focus, ...recent].sort((left, right) => left.sequence - right.sequence);
+};
+const replaceRecords = (source: ReadonlyMap<string, CanonicalActivityRecord>): void => {
+  records.clear();
+  retainedRecords(source).forEach(activity => records.set(activity.id, activity));
 };
 const publish = (): void => {
   published = {
@@ -314,7 +322,7 @@ const persist = (): void => {
       operation_count: summary.operationCount,
       pending_decisions: summary.pendingDecisions,
     },
-    records: cacheRecords().map(toWireRecord),
+    records: sortedRecords().map(toWireRecord),
   });
   writeChain = writeChain.catch(() => {}).then(async () => {
     if (principalId !== owner) return;
@@ -374,7 +382,7 @@ export async function hydrateCanonicalActivity(): Promise<boolean> {
     if (payload.schema_version !== CACHE_SCHEMA || payload.principal !== owner
       || !safeInteger(payload.cursor) || !safeInteger(payload.summary_cursor)
       || typeof payload.summary_authoritative !== 'boolean'
-      || !Array.isArray(payload.records) || payload.records.length > MAX_CACHE_RECORDS
+      || !Array.isArray(payload.records) || payload.records.length > MAX_ACTIVITY_RECORDS
       || !wireSummary || !safeInteger(wireSummary.active_objectives)
       || !safeInteger(wireSummary.operation_count) || !safeInteger(wireSummary.pending_decisions)) {
       throw new Error('invalid activity cache');
@@ -390,8 +398,7 @@ export async function hydrateCanonicalActivity(): Promise<boolean> {
       sequences.add(activity.sequence);
     }
     if (principalId !== owner) return false;
-    records.clear();
-    staged.forEach((activity, id) => records.set(id, activity));
+    replaceRecords(staged);
     deliveryCursor = payload.cursor as number;
     summaryCursor = payload.summary_cursor as number;
     summary = {
@@ -501,8 +508,7 @@ export function ingestCanonicalActivityPage(raw: unknown): boolean {
     if (sequences.has(activity.sequence)) return false;
     sequences.add(activity.sequence);
   }
-  records.clear();
-  staged.forEach((activity, id) => records.set(id, activity));
+  replaceRecords(staged);
   deliveryCursor = Math.max(deliveryCursor, page.next_cursor);
   if (wireSummary && (page.latest_cursor as number) >= summaryCursor) {
     summaryCursor = page.latest_cursor as number;
@@ -571,8 +577,7 @@ export function ingestCanonicalActivitySnapshot(raw: unknown): CanonicalActivity
     if (owner && owner !== activity.id) return null;
     sequences.set(activity.sequence, activity.id);
   }
-  records.clear();
-  staged.forEach((activity, id) => records.set(id, activity));
+  replaceRecords(staged);
   deliveryCursor = Math.max(deliveryCursor, value.snapshot_cursor as number);
   if ((value.snapshot_cursor as number) >= summaryCursor) {
     summaryCursor = value.snapshot_cursor as number;
@@ -656,6 +661,7 @@ export function deriveCanonicalWorkState(
 }
 
 export function decisionAttentionItemId(decisionKey: string | undefined): string | null {
-  if (!decisionKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(decisionKey)) return null;
+  if (!decisionKey || !bounded(decisionKey, 128) || decisionKey.trim() !== decisionKey
+    || /[\p{C}\p{Zl}\p{Zp}]/u.test(decisionKey)) return null;
   return `captain-question-${decisionKey}`;
 }
