@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -7,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from app import activity_store
 from app.activity_store import (
     MAX_ACTIVITY_FOCUS_RECORDS, SourceEventConflict, list_activity,
     reconcile_snapshot, snapshot_activity, source_diagnostics,
@@ -526,6 +528,57 @@ def test_snapshot_recovers_every_accepted_active_objective_and_pending_decision(
     assert projection['summary'] == {
         'active_objectives': 1_000, 'operation_count': 0, 'pending_decisions': 1_000,
     }
+
+
+def test_replay_cursor_records_and_summary_share_one_read_snapshot(monkeypatch):
+    user = 'activity-replay-snapshot-owner'
+    active = {
+        'record_key': 'objective:replay-snapshot',
+        'kind': 'objective.progress', 'state': 'active', 'importance': 'routine',
+        'title': 'Replay snapshot', 'summary': 'Objective is active.',
+        'source_payload_sha256': 'b' * 64, 'source_event_id': None,
+        'task_id': 'replay-snapshot', 'decision_key': None,
+        'objective_id': 'obj_replay_snapshot', 'run_id': 'run_replay_snapshot',
+        'project': None, 'occurred_at': None, 'refs': [],
+    }
+    reconcile_snapshot(
+        user, 'test:replay-snapshot', observed_at=1_000,
+        snapshot_sha256='c' * 64, records=[active], open_decision_keys=[],
+    )
+    before_update = list_activity(user)['latest_cursor']
+    with sqlite3.connect(activity_store.db.DB_PATH) as conn:
+        conn.execute('PRAGMA journal_mode=WAL')
+
+    original_summary = activity_store._activity_summary
+    update_committed = False
+
+    def update_before_summary(conn, owner):
+        nonlocal update_committed
+        if owner == user and not update_committed:
+            update_committed = True
+            reconcile_snapshot(
+                user, 'test:replay-snapshot', observed_at=2_000,
+                snapshot_sha256='d' * 64,
+                records=[{
+                    **active, 'kind': 'objective.completed', 'state': 'completed',
+                    'summary': 'Objective completed.', 'source_payload_sha256': 'e' * 64,
+                }],
+                open_decision_keys=[],
+            )
+        return original_summary(conn, owner)
+
+    monkeypatch.setattr(activity_store, '_activity_summary', update_before_summary)
+    replay = list_activity(user)
+    assert replay['latest_cursor'] == before_update
+    assert [(row['revision'], row['state']) for row in replay['records']] == [(1, 'active')]
+    assert replay['summary'] == {
+        'active_objectives': 1, 'operation_count': 0, 'pending_decisions': 0,
+    }
+
+    current = list_activity(user, after=before_update)
+    assert current['latest_cursor'] > replay['latest_cursor']
+    assert [(row['revision'], row['state']) for row in current['records']] == [(2, 'completed')]
+    assert current['summary']['active_objectives'] == 0
 
 
 @pytest.mark.asyncio

@@ -939,6 +939,7 @@ def list_activity(user_id: str, *, after: int = 0, limit: int = 100) -> Dict[str
         raise ValueError('Activity cursor is outside the supported range.')
     limit = max(1, min(limit, MAX_ACTIVITY_PAGE))
     with _session() as conn:
+        conn.execute('BEGIN')
         changes = conn.execute(
             '''SELECT change_sequence, record_id, record_revision FROM activity_changes
                WHERE user_id = ? AND change_sequence > ?
