@@ -7,11 +7,19 @@ import stat as stat_module
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
+from app.firstmate_producer import (
+    ProducerContractError,
+    producer_readiness,
+    validate_producer_root,
+)
+
 FIRSTMATE_HOME = os.getenv('FM_HOME', '/home/spectre/firstmate')
 FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS = 20.0
 FIRSTMATE_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
 FIRSTMATE_TOOL_PATH_ENV = 'MAGISTRATE_FIRSTMATE_TOOL_PATH'
 FIRSTMATE_RUNTIME_HOME_ENV = 'MAGISTRATE_FIRSTMATE_RUNTIME_HOME'
+FIRSTMATE_ROOT_ENV = 'MAGISTRATE_FIRSTMATE_ROOT'
+FIRSTMATE_CAPTAIN_REQUIRED_ENV = 'MAGISTRATE_FIRSTMATE_CAPTAIN_REQUIRED'
 _DEFAULT_SYSTEM_TOOL_PATH = '/usr/local/bin:/usr/bin:/bin'
 _MAX_TRUSTED_PATH_BYTES = 4096
 _MAX_TOOL_PATH_ENTRIES = 64
@@ -140,13 +148,36 @@ class FirstmateClient:
         self,
         fm_home: str = FIRSTMATE_HOME,
         *,
+        fm_root: Optional[str] = None,
         snapshot_timeout: float = FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS,
         snapshot_max_bytes: int = FIRSTMATE_SNAPSHOT_MAX_BYTES,
         tool_path: Optional[str] = None,
         runtime_home: Optional[str] = None,
+        captain_producer_required: Optional[bool] = None,
     ):
         self.fm_home = fm_home
-        self.snapshot_script = os.path.join(fm_home, 'bin', 'fm-fleet-snapshot.sh')
+        if fm_root is not None:
+            self.fm_root = fm_root
+            self.fm_root_is_explicit = True
+        elif FIRSTMATE_ROOT_ENV in os.environ:
+            self.fm_root = os.environ[FIRSTMATE_ROOT_ENV]
+            self.fm_root_is_explicit = True
+        else:
+            self.fm_root = fm_home
+            self.fm_root_is_explicit = False
+        if captain_producer_required is None:
+            raw_required = os.getenv(FIRSTMATE_CAPTAIN_REQUIRED_ENV, '').strip().lower()
+            if raw_required in {'', '0', 'false', 'no', 'off'}:
+                self.captain_producer_required = False
+            elif raw_required in {'1', 'true', 'yes', 'on'}:
+                self.captain_producer_required = True
+            else:
+                raise ValueError('MAGISTRATE_FIRSTMATE_CAPTAIN_REQUIRED must be a boolean literal.')
+        elif type(captain_producer_required) is bool:
+            self.captain_producer_required = captain_producer_required
+        else:
+            raise ValueError('captain_producer_required must be boolean.')
+        self.snapshot_script = os.path.join(self.fm_root, 'bin', 'fm-fleet-snapshot.sh')
         self.snapshot_timeout = snapshot_timeout
         self.snapshot_max_bytes = snapshot_max_bytes
         if tool_path is not None:
@@ -188,7 +219,31 @@ class FirstmateClient:
             return None
         return runtime_home
 
+    def validate_producer_contract(self) -> None:
+        if not self.fm_root_is_explicit:
+            if self.captain_producer_required:
+                raise ProducerContractError('root-not-configured')
+            return
+        validate_producer_root(self.fm_root, fm_home=self.fm_home)
+
+    def get_producer_readiness(self) -> Dict[str, Any]:
+        return producer_readiness(
+            fm_home=self.fm_home,
+            fm_root=self.fm_root if self.fm_root_is_explicit else None,
+            required=self.captain_producer_required,
+        )
+
     async def get_snapshot(self) -> Dict[str, Any]:
+        if self.fm_root_is_explicit:
+            try:
+                self.validate_producer_contract()
+            except ProducerContractError:
+                return {
+                    'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
+                    'tasks': [], 'scout_reports': [], 'available': False,
+                    'secondmate_current': {'records': []},
+                    'error': 'Pinned Firstmate producer contract is unavailable',
+                }
         try:
             script_stat = os.lstat(self.snapshot_script)
         except FileNotFoundError:
@@ -239,6 +294,7 @@ class FirstmateClient:
 
         environment = {
             'FM_HOME': self.fm_home,
+            'FM_ROOT_OVERRIDE': self.fm_root,
             'PATH': tool_path,
             'HOME': runtime_home,
             'LANG': 'C.UTF-8',

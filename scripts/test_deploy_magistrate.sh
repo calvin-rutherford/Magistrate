@@ -16,7 +16,12 @@ git -C "$SEED" config user.email test@example.invalid
 git -C "$SEED" config user.name deployment-test
 mkdir -p "$SEED/frontend" "$SEED/gateway" "$SEED/scripts"
 cp scripts/smoke_magistrate.sh "$SEED/scripts/smoke_magistrate.sh"
-chmod +x "$SEED/scripts/smoke_magistrate.sh"
+cat > "$SEED/scripts/install_firstmate_producer.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${MAGISTRATE_TEST_INSTALL_LOG:?}"
+EOF
+chmod +x "$SEED/scripts/smoke_magistrate.sh" "$SEED/scripts/install_firstmate_producer.sh"
 cat > "$SEED/gateway/.env" <<EOF
 MAGISTRATE_ENV=production
 MAGISTRATE_DB_PATH=$ROOT/state/magistrate.sqlite3
@@ -70,6 +75,7 @@ run_update() {
     MAGISTRATE_READINESS_TIMEOUT_SECONDS="${TEST_READINESS_TIMEOUT_SECONDS:-3}" \
     MAGISTRATE_READINESS_INTERVAL_SECONDS=0 MAGISTRATE_READINESS_CURL_TIMEOUT_SECONDS=1 \
     MAGISTRATE_TRUSTED_SMOKE="${TEST_TRUSTED_SMOKE:-0}" MAGISTRATE_TEST_CURL_COUNT="$ROOT/curl.count" \
+    MAGISTRATE_TEST_INSTALL_LOG="$ROOT/producer-install.log" \
     bash scripts/deploy_magistrate.sh
 }
 
@@ -124,6 +130,40 @@ fi
 sed -i 's#MAGISTRATE_CORS_ORIGINS=.*#MAGISTRATE_CORS_ORIGINS=https://demo.example.invalid#' "$DEPLOY/gateway/.env"
 git -C "$DEPLOY" add gateway/.env
 git -C "$DEPLOY" commit -m restore-cors >/dev/null
+
+# The new producer gate is opt-in. Once required, a missing immutable code root
+# must refuse before a build/restart rather than silently using FM_HOME's older
+# unmanaged checkout.
+printf 'MAGISTRATE_FIRSTMATE_CAPTAIN_REQUIRED=true\nFM_HOME=%s\n' "$ROOT/firstmate-home" >> "$DEPLOY/gateway/.env"
+mkdir -p "$ROOT/firstmate-home"
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m require-missing-producer >/dev/null
+if MISSING_PRODUCER_OUTPUT="$(run_update 2>&1)"; then
+  echo 'required missing Firstmate producer was not rejected' >&2
+  exit 1
+fi
+grep -Fq 'required captain producer needs absolute FM_HOME and MAGISTRATE_FIRSTMATE_ROOT' <<<"$MISSING_PRODUCER_OUTPUT"
+
+# With both roots configured, required mode must run immutable verification and
+# activated-state readiness before proceeding with the ordinary deploy.
+printf 'MAGISTRATE_FIRSTMATE_ROOT=%s\n' "$ROOT/managed-firstmate-code" >> "$DEPLOY/gateway/.env"
+mkdir -p "$ROOT/managed-firstmate-code"
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m require-configured-producer >/dev/null
+cat > "$STUBS/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '401'
+EOF
+chmod +x "$STUBS/curl"
+: > "$ROOT/producer-install.log"
+CONFIGURED_PRODUCER_OUTPUT="$(run_update 2>&1)"
+grep -Fxq "verify --root $ROOT/managed-firstmate-code" "$ROOT/producer-install.log"
+grep -Fxq "ready --root $ROOT/managed-firstmate-code --fm-home $ROOT/firstmate-home" "$ROOT/producer-install.log"
+grep -Fq 'gateway readiness verified' <<<"$CONFIGURED_PRODUCER_OUTPUT"
+sed -i 's/MAGISTRATE_FIRSTMATE_CAPTAIN_REQUIRED=true/MAGISTRATE_FIRSTMATE_CAPTAIN_REQUIRED=false/' "$DEPLOY/gateway/.env"
+sed -i '/^MAGISTRATE_FIRSTMATE_ROOT=/d' "$DEPLOY/gateway/.env"
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m restore-optional-producer >/dev/null
 
 # Restore the normal stub and exercise the trusted-host authenticated smoke
 # through the deploy script, while keeping its credentials out of output.

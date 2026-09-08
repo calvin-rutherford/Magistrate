@@ -8,7 +8,8 @@ This is the compact Magistrate-side execution baseline derived from `/home/spect
 |---|---|
 | Program start (T0) | `2026-09-07T22:59:09-05:00` |
 | Deadline | `2026-09-14T22:59:09-05:00` |
-| Magistrate code baseline | `9492b7c87a710f4359e5cd5d7bc641eae644f76b` |
+| Program baseline | `9492b7c87a710f4359e5cd5d7bc641eae644f76b` |
+| Pinned-producer slice baseline | `a55fde8f4436de1a862fae90b87de98219a79fba` |
 | Day-1 objective | Durable tenant-scoped objective/activity lifecycle plus a real Firstmate semantic captain-event producer/consumer path |
 | Release posture | **NO-GO** until required gates pass |
 | Paid-spend authorization | **USD 0** |
@@ -29,6 +30,8 @@ Objective ids, run ids, conversation turns, canonical message ids, Firstmate tas
 | Save an objective before provider work | `conversation_store.record_prompt` persists prompt, turn, objective, run, and reserved primary message atomically | `gateway/tests/test_conversation_store.py`, `gateway/tests/test_structured_responses.py` |
 | Actual progress and more than one assistant message | Idempotent assistant-message reservations plus independent gap-free `magi.event.v1` ledgers | `test_one_objective_can_emit_ordered_progress_messages_before_its_stable_final_reply` |
 | Real semantic Firstmate source, no terminal inference | Strict fleet/branch/`fm-captain-event.v1` adapter; pane provenance and unknown audience fail closed | `gateway/tests/test_canonical_activity.py` |
+| Reproducible reviewed producer runtime | Direct immutable fetch from the one allowed source, detached commit/tree and runtime-call-site hash verification, distinct code/state roots, atomic opt-in and rollback | `runtime/firstmate-producer.lock.json`, `scripts/install_firstmate_producer.sh`, `gateway/tests/test_firstmate_producer_contract.py` |
+| Real Pi producer compatibility boundary | Exact pinned TypeScript `turn_end` implementation invokes exact pinned CLI; twelve semantic operations include post-start failure retry and crash-after-pending convergence | `gateway/tests/fixtures/run_pinned_firstmate_producer.mjs`, `test_pinned_firstmate_producer_integration.py` |
 | Durable cursors, hashes, restart recovery | `activity_sources`, `canonical_source_events`, transactional projection/cursor advance, immutable-prefix hashes, startup cadence | restart, ordering, conflict, gap, torn-tail, and bootstrap tests in `test_canonical_activity.py` |
 | Truthful lifecycle and decisions | Monotonic lifecycle state/revision; exact decision keys; disappearance means only resolved | structured awaiting-user and activity decision-resolution tests |
 | Replay and WebSocket catch-up | Independent append-only conversation/activity change cursors, opt-in `activity_after` delivery, and non-visual frontend catch-up adapter | Gateway `test_conversation_store.py`, `test_canonical_activity.py`, `test_structured_responses.py`, and frontend `canonical-activity.test.ts` |
@@ -45,6 +48,43 @@ The detailed runtime, bootstrap, security, and delivery contract is [`../canonic
 On 2026-09-08, a temporary default-off Firstmate home was explicitly enabled and the delegated real `bin/fm-captain-event.sh` published one `primary.message` and one `worker.final`. This Gateway consumed the exact canonical `state/captain-events/events.jsonl` records through the versioned reader, transactionally persisted two completed canonical activity records (`primary.message`, `worker.final`) without treating Pi's per-turn `final` stop reason as task completion, advanced its durable cursor to 2, and only then produced the exact matching `acks/magistrate.json` receipt through sequence 2. The repeated hermetic check against exact producer head `2af0d17014cb2e244aa441bfe6df16c4f630475b` returned `status=available`, cursor/ack `2`, and a receipt event id equal to the second canonical row. The hermetic reader/commit/ack behavior is retained in `test_versioned_reader_is_activated_explicitly_and_acked_only_after_ingestion`.
 
 This is local software contract evidence, not evidence that the shared Firstmate installation was upgraded, the live Gateway was deployed, a long soak passed, or a physical iPhone received the events.
+
+## Pinned runtime compatibility evidence (2026-09-08)
+
+The bounded P6 slice is [Magistrate PR #91](https://github.com/calvin-rutherford/Magistrate/pull/91), starts from Magistrate `a55fde8f4436de1a862fae90b87de98219a79fba`, and pins only `https://github.com/calvin-rutherford/firstmate.git` commit `2af0d17014cb2e244aa441bfe6df16c4f630475b` (tree `146c55db1fd4d9cb2edf38d384b4d2362d2041e3`). At observation time Firstmate PR #3982 remained open at that exact head; Greptile was successful and GitHub reported `mergeStateStatus=UNSTABLE`. No merge authority is claimed. The observed runtime inventory remains Herdr `0.8.2` / protocol `20` and Pi `0.84.4`.
+
+Local commands completed against a fresh direct immutable fetch:
+
+```text
+scripts/install_firstmate_producer.sh install
+scripts/install_firstmate_producer.sh verify
+cd gateway && MAGISTRATE_TEST_PINNED_FIRSTMATE_ROOT=<fresh-managed-root> uv run pytest -q
+# 348 passed
+bash scripts/test_deployment_workflow.sh && bash scripts/test_deploy_magistrate.sh
+# manual-only invariant and deployment safeguards passed
+cd frontend && npm ci && npx expo export -p web
+# web export passed; npm audit still reports the known 25 findings (15 moderate, 10 high)
+shellcheck scripts/install_firstmate_producer.sh scripts/deploy_magistrate.sh scripts/test_deploy_magistrate.sh
+# passed
+actionlint .github/workflows/gateway.yml .github/workflows/deployment-contract.yml
+# passed
+git diff --check
+if git diff --no-ext-diff | rg -q '(BEGIN [A-Z ]+PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})'; then exit 1; fi
+# passed
+```
+
+The compatibility test uses the checked-out TypeScript producer itself, not a hand-authored event stand-in. It delivered **12** harmless captain-visible semantic operations through the exact CLI journal and Gateway adapter. It proved summaries exclude supplied thinking/tool arguments; one malformed activation after session start surfaces and retries the same persisted entry; one crash after pending publication converges without a duplicate; event identities and sequences remain stable; two principals receive distinct canonical ids; restart makes no duplicate projection; acknowledgement equals the exact transactionally committed tail; fleet-owned decision and completion facts revise stable rows and replay after prior cursors; and autonomous source activity creates no captain conversation turn.
+
+| SOAK-P0 boundary | State | Evidence / exact blocker |
+|---|---|---|
+| Immutable install, verify, activation rollback | **PASS_LOCAL** | Fresh direct fetch; invalid state removed the newly created activation; repaired activation/ready/deactivate retained journal bytes |
+| Real producer → outbox → Gateway, 10+ operations | **PASS_DETERMINISTIC_LOCAL (12)** | `test_pinned_firstmate_producer_integration.py` |
+| Shared operational Firstmate live sequence | **NOT_RUN — FIRSTMATE ROLLOUT PENDING** | The current development Firstmate session under `/home/spectre/firstmate` is unmanaged and must not be edited/reloaded in place. The Firstmate owner must separately identify the deployed Gateway runtime's configured operational home and reload only its applicable sessions onto the managed pin before activation. |
+| Live Gateway deployment | **NOT_RUN — GREEN PR + GUARDED ROLLOUT PENDING** | The captain has standing merge and guarded-deploy authority for this program, but this worker must not merge or deploy. The post-merge sequence waits for green PR checks and Firstmate-owned producer rollout, then uses the existing guarded deployment path. |
+| Physical-iPhone background/reconnect/force-quit SOAK-P0-001 | **OWNER_REQUIRED / NOT_RUN** | No physical-device result is claimed; requires the exact PR candidate to be built/signed and the shared producer/Gateway activation above |
+| Paid/provider traffic | **NOT_RUN** | Authorization remains USD 0; deterministic fixture uses local subprocesses only |
+
+Installation, rollout, bounded readiness, and rollback are in [`../firstmate-pinned-producer.md`](../firstmate-pinned-producer.md). The exact physical-owner execution script is [`soak-p0-001-owner-script.md`](soak-p0-001-owner-script.md); it derives and records the immutable PR head/build rather than accepting an unrecorded candidate.
 
 ## Gate posture
 

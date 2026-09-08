@@ -38,6 +38,7 @@ from app.activity_store import (
     source_diagnostics,
 )
 from app.firstmate_client import FirstmateClient
+from app.firstmate_producer import ProducerContractError, activation_state
 
 SOURCE_INSTANCE_ID = 'firstmate:main'
 BRANCH_STREAM = 'branch-outcomes'
@@ -138,6 +139,9 @@ class FirstmateActivityAdapter:
     ) -> None:
         self.firstmate = firstmate
         self.fm_home = fm_home or firstmate.fm_home
+        self.fm_root = getattr(firstmate, 'fm_root', self.fm_home)
+        self.fm_root_is_explicit = bool(getattr(firstmate, 'fm_root_is_explicit', False))
+        self.captain_producer_required = bool(getattr(firstmate, 'captain_producer_required', False))
         self.source_instance_id = source_instance_id
         if (
             not isinstance(source_instance_id, str) or not source_instance_id
@@ -156,7 +160,7 @@ class FirstmateActivityAdapter:
         self.branch_path = Path(self.fm_home) / 'state' / 'branch-outcomes.jsonl'
         configured_captain_path = captain_event_path
         self.captain_event_path = Path(configured_captain_path) if configured_captain_path else Path(self.fm_home) / 'state' / 'captain-events' / 'events.jsonl'
-        self.captain_event_script = Path(self.fm_home) / 'bin' / 'fm-captain-event.sh'
+        self.captain_event_script = Path(self.fm_root) / 'bin' / 'fm-captain-event.sh'
         self.captain_consumer_id = os.getenv('MAGISTRATE_FIRSTMATE_CAPTAIN_CONSUMER', 'magistrate').strip()
         if not re.fullmatch(r'^(?!\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$', self.captain_consumer_id):
             raise ValueError('The Firstmate captain-event consumer id is invalid.')
@@ -450,6 +454,15 @@ class FirstmateActivityAdapter:
     async def _run_captain_command(
         self, *arguments: str, maximum_stdout: int,
     ) -> Tuple[int, bytes, bytes]:
+        if self.fm_root_is_explicit:
+            try:
+                self.firstmate.validate_producer_contract()
+            except ProducerContractError as exc:
+                raise SourceUnavailable('The pinned Firstmate captain-event producer contract is unavailable.') from exc
+            if activation_state(self.fm_home) == 'invalid':
+                raise SourceUnavailable('The Firstmate captain-event activation is not trusted.')
+        elif self.captain_producer_required:
+            raise SourceUnavailable('The required pinned Firstmate captain-event root is not configured.')
         try:
             script_stat = self.captain_event_script.lstat()
         except FileNotFoundError as exc:
@@ -465,6 +478,7 @@ class FirstmateActivityAdapter:
         # provider/session/database environment variables.
         environment = {
             'FM_HOME': self.fm_home,
+            'FM_ROOT_OVERRIDE': self.fm_root,
             'PATH': '/usr/local/bin:/usr/bin:/bin',
             'HOME': '/nonexistent',
             'LANG': 'C.UTF-8',
@@ -475,7 +489,7 @@ class FirstmateActivityAdapter:
                 str(self.captain_event_script), *arguments,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=self.fm_home,
+                cwd=self.fm_root,
                 env=environment,
                 start_new_session=True,
             )
@@ -520,6 +534,13 @@ class FirstmateActivityAdapter:
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         if self.captain_event_path_explicit:
             return True, await asyncio.to_thread(self._read_captain_event_rows, titles)
+        if self.fm_root_is_explicit:
+            try:
+                self.firstmate.validate_producer_contract()
+            except ProducerContractError as exc:
+                raise SourceUnavailable('The pinned Firstmate captain-event producer contract is unavailable.') from exc
+        elif self.captain_producer_required:
+            raise SourceUnavailable('The required pinned Firstmate captain-event root is not configured.')
         if not self.captain_event_script.exists():
             if self.captain_event_path.exists():
                 raise SourceUnavailable('Captain-event state exists without its versioned Firstmate reader.')
@@ -528,6 +549,8 @@ class FirstmateActivityAdapter:
             'enabled', maximum_stdout=128,
         )
         if returncode == 1 and not stdout and not stderr:
+            if self.captain_producer_required:
+                raise SourceUnavailable('The required Firstmate captain-event producer is not activated.')
             return False, []
         if returncode != 0 or stdout or stderr:
             raise SourceUnavailable('Firstmate captain-event activation could not be validated.')
@@ -556,6 +579,31 @@ class FirstmateActivityAdapter:
         if reader_rows != expected:
             raise SourceEventConflict('The Firstmate captain-event journal changed during validation.')
         return True, rows
+
+    async def require_captain_producer_ready(self) -> None:
+        """Fail startup only when the explicit required-producer flag is on."""
+        if not self.captain_producer_required:
+            return
+        try:
+            self.firstmate.validate_producer_contract()
+        except (AttributeError, ProducerContractError) as exc:
+            raise RuntimeError('The required pinned Firstmate producer contract is unavailable.') from exc
+        if activation_state(self.fm_home) != 'enabled':
+            raise RuntimeError('The required Firstmate captain-event producer is not activated.')
+        returncode, stdout, stderr = await self._run_captain_command(
+            'enabled', maximum_stdout=128,
+        )
+        if returncode != 0 or stdout or stderr:
+            raise RuntimeError('The required Firstmate captain-event producer is not activated.')
+        returncode, stdout, stderr = await self._run_captain_command(
+            'validate', maximum_stdout=128,
+        )
+        if (
+            returncode != 0 or stderr
+            or not re.fullmatch(rb'(?:0|[1-9][0-9]{0,4})\n', stdout)
+            or int(stdout.strip()) > MAX_CAPTAIN_EVENT_ROWS
+        ):
+            raise RuntimeError('The required Firstmate captain-event producer state is invalid.')
 
     async def _acknowledge_captain_events(self, through: int, event_id: str) -> None:
         if through <= 0 or self.captain_event_path_explicit:

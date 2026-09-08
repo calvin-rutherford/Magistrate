@@ -281,6 +281,31 @@ def test_friend_runtime_style_layout_can_bind_nested_fm_home(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pinned_code_root_stays_distinct_from_runtime_home_and_is_passed_to_snapshot(tmp_path, monkeypatch):
+    runtime_home = tmp_path / 'service-home'
+    fm_home = runtime_home / 'firstmate'
+    fm_root = runtime_home / 'managed-code'
+    runtime_home.mkdir()
+    fm_home.mkdir()
+    write_snapshot_script(
+        fm_root,
+        '#!/bin/sh\n'
+        '[ "$FM_HOME" = "' + str(fm_home) + '" ] || exit 7\n'
+        '[ "$FM_ROOT_OVERRIDE" = "' + str(fm_root) + '" ] || exit 8\n'
+        'printf \'%s\\n\' \'{"schema":"fm-fleet-snapshot.v1","tasks":[]}\'\n',
+    )
+    monkeypatch.setattr('app.firstmate_client.validate_producer_root', lambda root, fm_home=None: None)
+
+    result = await FirstmateClient(
+        str(fm_home), fm_root=str(fm_root), tool_path=str(runtime_home),
+        runtime_home=str(runtime_home),
+    ).get_snapshot()
+
+    assert result['available'] is True
+    assert not (fm_home / 'bin' / 'fm-fleet-snapshot.sh').exists()
+
+
+@pytest.mark.asyncio
 async def test_explicit_valid_runtime_home_is_passed_without_gateway_environment(tmp_path, monkeypatch):
     runtime_home = tmp_path / 'service-home'
     fm_home = runtime_home / 'firstmate'

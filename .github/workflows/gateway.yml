@@ -4,12 +4,16 @@ on:
   pull_request:
     paths:
       - 'gateway/**'
+      - 'runtime/firstmate-producer.lock.json'
+      - 'scripts/install_firstmate_producer.sh'
       - '.github/workflows/gateway.yml'
   push:
     branches:
       - main
     paths:
       - 'gateway/**'
+      - 'runtime/firstmate-producer.lock.json'
+      - 'scripts/install_firstmate_producer.sh'
       - '.github/workflows/gateway.yml'
 
 defaults:
@@ -38,5 +42,13 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: uv sync
+      - name: Install and verify pinned Firstmate producer contract
+        working-directory: .
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/magistrate-runtime
+        run: |
+          scripts/install_firstmate_producer.sh install
+          scripts/install_firstmate_producer.sh verify
+          echo "MAGISTRATE_TEST_PINNED_FIRSTMATE_ROOT=${XDG_DATA_HOME}/magistrate/firstmate-producer/2af0d17014cb2e244aa441bfe6df16c4f630475b" >> "$GITHUB_ENV"
       - name: Run complete hermetic gateway suite
         run: PYTHONPATH=. uv run pytest -v
