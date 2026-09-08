@@ -19,7 +19,7 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
-import { canonicalActivityResponseIsDegraded, CanonicalActivityRecoveryCoordinator, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, getCanonicalActivityRecords, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
+import { canonicalActivityResponseIsDegraded, CanonicalActivityRecoveryCoordinator, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, getConversationPrincipal, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
@@ -45,6 +45,7 @@ type DrawerSection = 'attention' | 'fleet' | 'activity' | 'projects' | 'connecti
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 type ConversationSyncState = { status: 'loading' | 'fresh' | 'stale'; cachedRows: number; error?: string };
 const FLOATING_CHROME_GAP = 12;
+const CANONICAL_ACTIVITY_PAGE_SIZE = 100;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 const isDarkTheme = (scheme: string | null | undefined) => scheme !== 'light';
 const optionId = (harness: string, model: string) => `${harness}-${model}`.replace(/[^A-Za-z0-9_-]/g, '-');
@@ -374,6 +375,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const canonicalTarget = target === 'captain';
   const canonicalActivity = useCanonicalActivity();
   const [activityBefore, setActivityBefore] = useState<number | undefined>();
+  const [activityPageLimit, setActivityPageLimit] = useState(CANONICAL_ACTIVITY_PAGE_SIZE);
   const [activityHasMore, setActivityHasMore] = useState(false);
   const [activityLoadingMore, setActivityLoadingMore] = useState(false);
   const [activityRefreshing, setActivityRefreshing] = useState(false);
@@ -986,11 +988,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       try {
         if (requestedSnapshot) {
           try {
-            const snapshot = await fetchCanonicalActivitySnapshot(undefined, 100, true);
+            const snapshot = await fetchCanonicalActivitySnapshot(
+              undefined, CANONICAL_ACTIVITY_PAGE_SIZE, true,
+            );
             if (owner !== getConversationPrincipal()) return;
             const applied = ingestCanonicalActivitySnapshot(snapshot);
             if (!applied) throw new Error('Gateway returned an invalid activity snapshot.');
             setActivityBefore(applied.nextBefore);
+            setActivityPageLimit(applied.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE);
             setActivityHasMore(applied.hasMore);
             health = snapshot;
           } catch {
@@ -1010,13 +1015,18 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           const page = await fetchCanonicalActivity(cursor, 200, false);
           if (owner !== getConversationPrincipal()) return;
           const applied = await ingestCanonicalActivityReplayPage(
-            page, () => fetchCanonicalActivitySnapshot(undefined, 100, true),
+            page, () => fetchCanonicalActivitySnapshot(
+              undefined, CANONICAL_ACTIVITY_PAGE_SIZE, true,
+            ),
           );
           if (owner !== getConversationPrincipal() || !applied) {
             throw new Error('Gateway activity replay could not be applied.');
           }
           if (applied.snapshotPage) {
             setActivityBefore(applied.snapshotPage.nextBefore);
+            setActivityPageLimit(
+              applied.snapshotPage.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE,
+            );
             setActivityHasMore(applied.snapshotPage.hasMore);
             health = applied.response;
             if (resetReplayBudget) {
@@ -1039,16 +1049,18 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const loadOlderCanonicalActivity = async (): Promise<boolean> => {
     if (!canonicalTarget || !activityHasMore || !activityBefore || activityLoadingMore) return false;
     const owner = getConversationPrincipal();
-    const beforeCount = getCanonicalActivityRecords().length;
     setActivityLoadingMore(true);
     try {
-      const snapshot = await fetchCanonicalActivitySnapshot(activityBefore, 100, false);
+      const snapshot = await fetchCanonicalActivitySnapshot(
+        activityBefore, activityPageLimit, false,
+      );
       if (owner !== getConversationPrincipal()) return false;
       const applied = ingestCanonicalActivitySnapshot(snapshot, true);
       if (!applied) throw new Error('Gateway returned an invalid activity page.');
       setActivityBefore(applied.nextBefore);
+      setActivityPageLimit(applied.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE);
       setActivityHasMore(applied.hasMore);
-      return getCanonicalActivityRecords().length > beforeCount;
+      return applied.addedHistoryRecords > 0;
     } catch {
       if (owner === getConversationPrincipal()) markCanonicalActivityInterrupted();
       return false;

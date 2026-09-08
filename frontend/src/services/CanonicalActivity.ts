@@ -571,8 +571,10 @@ export function ingestCanonicalActivityPage(raw: unknown): boolean {
 
 export interface CanonicalActivitySnapshotPage {
   nextBefore?: number;
+  nextLimit?: number;
   hasMore: boolean;
   snapshotCursor: number;
+  addedHistoryRecords: number;
 }
 
 export interface CanonicalActivityReplayApplyResult {
@@ -601,6 +603,9 @@ export function ingestCanonicalActivitySnapshot(
   if ([...normalizedRecords, ...normalizedFocus].some(record => record === null)) return null;
   const pageRecords = normalizedRecords as CanonicalActivityRecord[];
   const delivered = [...pageRecords, ...normalizedFocus as CanonicalActivityRecord[]];
+  const retainedHistoryIdsBefore = new Set(
+    [...records.values()].filter(activity => !isFocusRecord(activity)).map(activity => activity.id),
+  );
   const staged = new Map(records);
   const authoritativeAtCursor = (value.snapshot_cursor as number) >= deliveryCursor;
   if (authoritativeAtCursor) {
@@ -634,6 +639,9 @@ export function ingestCanonicalActivitySnapshot(
   if (!retained) return null;
   const retainedIds = new Set(retained.map(activity => activity.id));
   if (requireCompletePage && pageRecords.some(activity => !retainedIds.has(activity.id))) return null;
+  const addedHistoryRecords = pageRecords.filter(activity =>
+    !isFocusRecord(activity) && retainedIds.has(activity.id)
+    && !retainedHistoryIdsBefore.has(activity.id)).length;
   records.clear();
   retained.forEach(activity => records.set(activity.id, activity));
   deliveryCursor = Math.max(deliveryCursor, value.snapshot_cursor as number);
@@ -651,12 +659,19 @@ export function ingestCanonicalActivitySnapshot(
   persist();
   const remainingHistoryCapacity = MAX_RECENT_ACTIVITY_RECORDS
     - retained.filter(activity => !isFocusRecord(activity)).length;
+  // Focus rows are repeated in every snapshot so they remain recoverable, but
+  // overlap does not consume the separate history budget. Continue while any
+  // history capacity remains and cap the next request so a complete page can
+  // always be retained even when every next row is non-focus history.
   const canLoadAnotherPage = value.has_more && pageRecords.length > 0
-    && remainingHistoryCapacity >= pageRecords.length;
+    && remainingHistoryCapacity > 0;
   return {
     nextBefore: canLoadAnotherPage ? value.next_before as number : undefined,
+    nextLimit: canLoadAnotherPage
+      ? Math.min(pageRecords.length, remainingHistoryCapacity) : undefined,
     hasMore: canLoadAnotherPage,
     snapshotCursor: value.snapshot_cursor as number,
+    addedHistoryRecords,
   };
 }
 

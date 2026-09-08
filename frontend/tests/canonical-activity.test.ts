@@ -391,6 +391,73 @@ test('snapshot pagination reveals complete older pages and stops at retained his
   assert.deepEqual([applied?.hasMore, applied?.nextBefore], [false, undefined]);
 });
 
+test('focus overlap keeps older history reachable and bounds the next complete page', () => {
+  setCanonicalActivityPrincipal('activity-pagination-focus-overlap');
+  const focus = Array.from({ length: 90 }, (_, index) => record({
+    id: `ca_overlap_focus_${index + 1}`,
+    sequence: 1_001 + index,
+    delivery_sequence: index + 1,
+    task_id: `overlap-task-${index + 1}`,
+    objective_id: `overlap-objective-${index + 1}`,
+  }));
+  const existingHistory = Array.from({ length: 310 }, (_, index) => record({
+    id: `ca_overlap_history_${index + 1}`,
+    sequence: 1_101 + index,
+    delivery_sequence: 91 + index,
+    kind: 'worker.message',
+    state: 'completed',
+  }));
+  const snapshot = (
+    records: unknown[], cursor: number, nextBefore: number | null, hasMore: boolean,
+  ) => ({
+    schema_version: 'activity.v1', records, focus_records: focus,
+    focus_truncated: false, snapshot_cursor: cursor, latest_sequence: 1_410,
+    next_before: nextBefore, has_more: hasMore,
+    summary: { active_objectives: 90, operation_count: 0, pending_decisions: 0 },
+  });
+
+  assert.ok(ingestCanonicalActivitySnapshot(
+    snapshot(existingHistory.slice(0, 200), 400, 1_211, true),
+  ));
+  assert.ok(ingestCanonicalActivitySnapshot(
+    snapshot(existingHistory.slice(200), 400, 1_101, true), true,
+  ));
+  assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'completed').length, 310);
+
+  const tenNewHistory = Array.from({ length: 10 }, (_, index) => record({
+    id: `ca_overlap_new_${index + 1}`,
+    sequence: 1_091 + index,
+    delivery_sequence: 401 + index,
+    kind: 'worker.message',
+    state: 'completed',
+  }));
+  const overlappingPage = ingestCanonicalActivitySnapshot(
+    snapshot([...focus, ...tenNewHistory], 410, 1_001, true), true,
+  );
+  assert.deepEqual(
+    [overlappingPage?.addedHistoryRecords, overlappingPage?.hasMore,
+      overlappingPage?.nextBefore, overlappingPage?.nextLimit],
+    [10, true, 1_001, 80],
+  );
+
+  const finalHistoryPage = Array.from({ length: 80 }, (_, index) => record({
+    id: `ca_overlap_final_${index + 1}`,
+    sequence: 921 + index,
+    delivery_sequence: 411 + index,
+    kind: 'worker.message',
+    state: 'completed',
+  }));
+  const finalPage = ingestCanonicalActivitySnapshot(
+    snapshot(finalHistoryPage, 490, 921, true), true,
+  );
+  assert.deepEqual(
+    [finalPage?.addedHistoryRecords, finalPage?.hasMore, finalPage?.nextLimit],
+    [80, false, undefined],
+  );
+  assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'completed').length, 400);
+  assert.ok(getCanonicalActivityRecords().some(item => item.id === 'ca_overlap_final_1'));
+});
+
 test('safe references and more than ten ordered activity rows survive bounded catch-up', () => {
   setCanonicalActivityPrincipal('activity-user-many');
   const rows = Array.from({ length: 12 }, (_, index) => record({
