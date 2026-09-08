@@ -50,16 +50,27 @@ terminal parsing is demoted to an ingestion adapter.
   harness is not a routing role: if that workspace is absent, routing fails
   closed instead of injecting the captain's prompt into an arbitrary worker.
 
-### Schema
+### Core chat schema
 
 ```
 conversations         (id, user_id, target, created_at, updated_at)
 conversation_turns    (id, conversation_id, client_message_id, prompt_key,
-                       status, sequence_index, created_at, updated_at)
+                       assistant_message_id, objective_id, run_id, status,
+                       lifecycle_state, lifecycle_revision,
+                       lifecycle_decision_key, sequence_index, created_at,
+                       updated_at)
 conversation_messages (id, turn_id, conversation_id, role, type, slot, text,
                        visible_in_chat, sequence_index, revision, source,
-                       attachments_json, created_at, updated_at)
+                       attachments_json, content_source,
+                       structured_content_json, structured_revision,
+                       assistant_kind, created_at, updated_at)
+conversation_changes  (conversation_id, change_sequence, message_id,
+                       message_revision, changed_at)
 ```
+
+Assistant reservations, structured-event ledgers, and the separate activity
+schema are additive. Their detailed contract is owned by
+[`docs/canonical-lifecycle-activity-v1.md`](docs/canonical-lifecycle-activity-v1.md).
 
 All three `created_at`/`updated_at` pairs are Unix epoch **milliseconds**. The
 Gateway authors them; the composer's `Date.now()` is only an optimistic
@@ -76,8 +87,8 @@ delivered, because status rows are intentionally outside the chat payload.
 Two constraints carry the whole guarantee:
 
 - `UNIQUE(conversation_id, client_message_id)` — one turn per submission.
-- `UNIQUE(turn_id, slot)` — one row per role in a turn. `slot` is `prompt`,
-  `primary`, `tool:<n>`, or `internal:<n>`, and `sequence_index` is derived from
+- `UNIQUE(turn_id, slot)` — one row per fixed slot in a turn. `slot` is `prompt`,
+  `primary`, `assistant:<n>`, `tool:<n>`, or `internal:<n>`, and `sequence_index` is derived from
   it (`turn_index * 1000 + slot_offset`), so render order is fixed and stable no
   matter when a row is discovered.
 
@@ -93,13 +104,13 @@ composer ──POST /captain/prompt {message_id}──► record_prompt()   → 
 poll  ──GET /conversations/captain/messages──► read_typed_rows() → parse → classify
 socket ──WS /events (conversation_messages)──► ingest_terminal_rows()  → upsert
                                           ◄── canonical messages (WS sends only
-                                              records whose revision changed)
+                                              new message/lifecycle versions)
 ```
 
 The client contract is now just two rules: **append when a new canonical message
 arrives, update when an existing one changes.** `frontend/src/services/CanonicalConversation.ts`
-is the only place that implements it, and it does so by id, monotonic revision,
-and sequence index — no text matching, timestamp comparison, optimistic
+is the only place that implements it, and it does so by id, monotonic message
+and lifecycle revisions, and sequence index — no text matching, timestamp comparison, optimistic
 counting, prompt-boundary inference, or replay reconciliation. A delayed poll or
 socket revision cannot roll a newer rendered revision backwards.
 
@@ -214,8 +225,11 @@ downgrade step.
   silently dropped.
 - **The delivered window is bounded to 200 messages.** A full list read is
   authoritative, so a client viewing a very long conversation keeps only the most
-  recent 200 canonical records. Older turns remain in the database; the replay
-  API can page by sequence, but visual history backfill is not implemented. Canonical ingestion always asks Herdr for its maximum
+  recent 200 canonical records. Older turns remain in the database, but visual
+  history backfill is not implemented. The replay endpoint is append-order change
+  catch-up, not history pagination; its cursor contract is owned by
+  [`docs/canonical-lifecycle-activity-v1.md`](docs/canonical-lifecycle-activity-v1.md).
+  Canonical ingestion always asks Herdr for its maximum
   retained line range, rather than applying the worker-pane 400-line default a
   second time.
 - **Tool chips are standalone rows again.** #67 attached tool previews under the

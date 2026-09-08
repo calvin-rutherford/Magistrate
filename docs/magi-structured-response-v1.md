@@ -192,7 +192,7 @@ Investigation was performed against the installed runtime on 2026-09-03:
 Therefore this repository implements the receiving side but does not pretend the missing producer exists. The smallest upstream integration is:
 
 1. Extend the Herdr prompt seam (a protocol-versioned additive field) to carry an opaque host-owned context containing `turn_id` and `assistant_message_id` beside, not inside, prompt text. Those ids must not be model-selectable or inferred from matching prose.
-2. Have Firstmate pass that context unchanged when routing the captain prompt and provide the Gateway event URL plus a command-scoped service credential out of band (never in the prompt, terminal, tool arguments, or session transcript).
+2. Have Firstmate pass that context unchanged when routing the captain prompt and provide the Gateway event URL plus a least-privilege `response`-scoped service credential out of band (the existing owner `command` scope remains compatible). The credential must never enter the prompt, terminal, tool arguments, or session transcript.
 3. Install a Pi extension/harness adapter that registers one closed structured-response tool. The host emits `assistant.started`; validated tool updates emit explicit block upserts/removes; successful tool completion emits the full `assistant.completed`; provider abort/error emits `cancelled`/`failed`.
 4. Render a plain-text projection of the explicit tool document in the terminal so normal Herdr observability remains useful. Do not parse that terminal rendering back into JSON.
 5. Add equivalent explicit adapters for non-Pi harnesses. Until an adapter is present, emit no semantic event and let the existing terminal fallback remain authoritative.

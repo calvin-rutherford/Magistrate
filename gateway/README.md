@@ -15,14 +15,19 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 
 `POST /api/v1/conversations/captain/events` accepts the strict,
 authenticated `magi.event.v1` lifecycle and writes a validated
-`magi.response.v1` document into the existing canonical conversation. It
-requires `command` scope, stable ids reserved by the prompt response, contiguous
-revisions, and a declared body no larger than 256 KiB. It is additive: without
-a semantic producer, the existing terminal-derived text path is unchanged.
-Unknown/unsafe JSON never becomes render instructions. See
+`magi.response.v1` document into a reserved assistant slot in the existing
+canonical conversation. The prompt response reserves the stable primary slot;
+producers may idempotently reserve bounded progress, decision, and outcome slots
+through `POST /api/v1/conversations/{target}/turns/{turn_id}/assistant-messages`.
+Each slot has independent contiguous revisions. Both endpoints require the
+least-privilege `response` scope or the existing owner `command` scope, and an
+event body may be no larger than 256 KiB. It is additive:
+without a semantic producer, the existing terminal-derived text path is
+unchanged. Unknown/unsafe JSON never becomes render instructions. See
 [`../docs/magi-structured-response-v1.md`](../docs/magi-structured-response-v1.md)
-for schemas, sequencing, rollout, and the explicit upstream adapter still
-required in Firstmate/Herdr.
+for response schemas and sequencing, and
+[`../docs/canonical-lifecycle-activity-v1.md`](../docs/canonical-lifecycle-activity-v1.md)
+for reservation, lifecycle, replay, and activity contracts.
 
 ## Attention action API
 
