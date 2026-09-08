@@ -165,9 +165,9 @@ class FirstmateClient:
             self._runtime_home_source = os.environ[FIRSTMATE_RUNTIME_HOME_ENV]
             self._runtime_home_is_explicit = True
         else:
-            # Firstmate's owner and Friend runtime layouts put FM_HOME directly
-            # below the account/runtime HOME. Do not consult the Gateway's
-            # ambient HOME: derive only this documented, bound relationship.
+            # The conventional owner layout puts FM_HOME directly below the
+            # account HOME. Deeper Friend-runtime layouts require an explicit
+            # binding; never infer one from the Gateway's ambient HOME.
             self._runtime_home_source = os.path.dirname(os.path.normpath(fm_home))
             self._runtime_home_is_explicit = False
 
