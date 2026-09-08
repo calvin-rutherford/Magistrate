@@ -10,6 +10,10 @@ from typing import Dict, Any, List, Optional
 FIRSTMATE_HOME = os.getenv('FM_HOME', '/home/spectre/firstmate')
 FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS = 20.0
 FIRSTMATE_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
+FIRSTMATE_TOOL_PATH_ENV = 'MAGISTRATE_FIRSTMATE_TOOL_PATH'
+_DEFAULT_SYSTEM_TOOL_PATH = '/usr/local/bin:/usr/bin:/bin'
+_MAX_TOOL_PATH_BYTES = 4096
+_MAX_TOOL_PATH_ENTRIES = 64
 _GENERIC_AGENT_NAMES = {'magistrate', 'firstmate', 'π - magistrate', 'π - firstmate'}
 
 
@@ -43,6 +47,56 @@ async def _read_bounded(stream: asyncio.StreamReader, maximum: int) -> bytes:
             raise _SnapshotOutputTooLarge
 
 
+def _trusted_tool_directory(value: str) -> Optional[str]:
+    """Return a canonical PATH entry only when its ownership chain is trusted."""
+    if not value or not os.path.isabs(value):
+        return None
+    candidate = os.path.normpath(value)
+    if candidate != value.rstrip(os.sep) and not (candidate == os.sep and value == os.sep):
+        return None
+
+    current = os.sep
+    allowed_owners = {0, os.geteuid()}
+    for component in candidate.split(os.sep)[1:]:
+        current = os.path.join(current, component)
+        try:
+            entry_stat = os.lstat(current)
+        except OSError:
+            return None
+        if (
+            not stat_module.S_ISDIR(entry_stat.st_mode)
+            or stat_module.S_ISLNK(entry_stat.st_mode)
+            or entry_stat.st_uid not in allowed_owners
+        ):
+            return None
+        if entry_stat.st_mode & stat_module.S_IWOTH:
+            # A sticky ancestor such as /tmp cannot be used by another user to
+            # replace this owned child. The PATH directory itself must never be
+            # writable by everyone.
+            if current == candidate or not entry_stat.st_mode & stat_module.S_ISVTX:
+                return None
+    return candidate
+
+
+def _sanitize_tool_path(value: str, *, reject_invalid: bool) -> Optional[str]:
+    if not isinstance(value, str) or len(value.encode('utf-8')) > _MAX_TOOL_PATH_BYTES:
+        return None
+    entries = value.split(os.pathsep)
+    if len(entries) > _MAX_TOOL_PATH_ENTRIES:
+        return None
+
+    trusted: List[str] = []
+    for entry in entries:
+        accepted = _trusted_tool_directory(entry)
+        if accepted is None:
+            if reject_invalid:
+                return None
+            continue
+        if accepted not in trusted:
+            trusted.append(accepted)
+    return os.pathsep.join(trusted) if trusted else None
+
+
 def _task_display_name(value: Any, target: str) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -60,11 +114,28 @@ class FirstmateClient:
         *,
         snapshot_timeout: float = FIRSTMATE_SNAPSHOT_TIMEOUT_SECONDS,
         snapshot_max_bytes: int = FIRSTMATE_SNAPSHOT_MAX_BYTES,
+        tool_path: Optional[str] = None,
     ):
         self.fm_home = fm_home
         self.snapshot_script = os.path.join(fm_home, 'bin', 'fm-fleet-snapshot.sh')
         self.snapshot_timeout = snapshot_timeout
         self.snapshot_max_bytes = snapshot_max_bytes
+        if tool_path is not None:
+            self._tool_path_source = tool_path
+            self._tool_path_is_explicit = True
+        elif FIRSTMATE_TOOL_PATH_ENV in os.environ:
+            self._tool_path_source = os.environ[FIRSTMATE_TOOL_PATH_ENV]
+            self._tool_path_is_explicit = True
+        else:
+            self._tool_path_source = os.environ.get('PATH', _DEFAULT_SYSTEM_TOOL_PATH)
+            self._tool_path_is_explicit = False
+
+    def get_trusted_tool_path(self) -> Optional[str]:
+        """Build the minimal child PATH, rejecting a malformed explicit policy."""
+        return _sanitize_tool_path(
+            self._tool_path_source,
+            reject_invalid=self._tool_path_is_explicit,
+        )
 
     async def get_snapshot(self) -> Dict[str, Any]:
         try:
@@ -98,9 +169,18 @@ class FirstmateClient:
                 'error': 'Fleet snapshot reader is not trusted',
             }
 
+        tool_path = self.get_trusted_tool_path()
+        if tool_path is None:
+            return {
+                'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
+                'tasks': [], 'scout_reports': [], 'available': False,
+                'secondmate_current': {'records': []},
+                'error': 'Fleet snapshot tool path is unavailable',
+            }
+
         environment = {
             'FM_HOME': self.fm_home,
-            'PATH': '/usr/local/bin:/usr/bin:/bin',
+            'PATH': tool_path,
             'HOME': '/nonexistent',
             'LANG': 'C.UTF-8',
             'LC_ALL': 'C.UTF-8',

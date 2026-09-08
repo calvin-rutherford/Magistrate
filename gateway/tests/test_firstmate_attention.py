@@ -1,5 +1,8 @@
+import os
+from types import SimpleNamespace
+
 import pytest
-from app.firstmate_client import FirstmateClient
+from app.firstmate_client import FIRSTMATE_TOOL_PATH_ENV, FirstmateClient
 
 
 def make_snapshot(tasks, records=None):
@@ -174,6 +177,93 @@ async def test_recent_activity_includes_and_deduplicates_landed_records(monkeypa
     assert len(items) == 1
     assert items[0]['type'] == 'pull_request_merged'
     assert items[0]['url'].endswith('/pull/7')
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_admits_validated_service_tool_directories(tmp_path, monkeypatch):
+    local_bin = tmp_path / 'local-bin'
+    npm_bin = tmp_path / 'npm-bin'
+    local_bin.mkdir(mode=0o755)
+    npm_bin.mkdir(mode=0o755)
+    for path in (local_bin / 'herdr', npm_bin / 'tasks-axi', npm_bin / 'quota-axi'):
+        path.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+        path.chmod(0o700)
+
+    script_dir = tmp_path / 'bin'
+    script_dir.mkdir()
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text(
+        '#!/bin/sh\n'
+        'command -v herdr >/dev/null && command -v tasks-axi >/dev/null '
+        '&& command -v quota-axi >/dev/null || exit 4\n'
+        'printf \'%s\\n\' \'{"schema":"fm-fleet-snapshot.v1","tasks":[]}\'\n',
+        encoding='utf-8',
+    )
+    script.chmod(0o700)
+    monkeypatch.setenv(FIRSTMATE_TOOL_PATH_ENV, f'{local_bin}{os.pathsep}{npm_bin}')
+
+    result = await FirstmateClient(str(tmp_path)).get_snapshot()
+
+    assert result['available'] is True
+
+
+def test_ambient_tool_path_excludes_empty_relative_and_world_writable_entries(tmp_path, monkeypatch):
+    trusted = tmp_path / 'trusted'
+    world_writable = tmp_path / 'world-writable'
+    trusted.mkdir(mode=0o755)
+    world_writable.mkdir(mode=0o777)
+    world_writable.chmod(0o777)
+    monkeypatch.delenv(FIRSTMATE_TOOL_PATH_ENV, raising=False)
+    monkeypatch.setenv(
+        'PATH',
+        f'{os.pathsep}relative{os.pathsep}{world_writable}{os.pathsep}{trusted}{os.pathsep}',
+    )
+
+    assert FirstmateClient(str(tmp_path)).get_trusted_tool_path() == str(trusted)
+
+
+@pytest.mark.parametrize('configured', ['', 'relative'])
+@pytest.mark.asyncio
+async def test_empty_or_relative_explicit_tool_path_fails_snapshot_closed(tmp_path, configured):
+    script_dir = tmp_path / 'bin'
+    script_dir.mkdir()
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"schema":"fm-fleet-snapshot.v1","tasks":[]}\'\n',
+        encoding='utf-8',
+    )
+    script.chmod(0o700)
+
+    result = await FirstmateClient(str(tmp_path), tool_path=configured).get_snapshot()
+
+    assert result['available'] is False
+    assert result['tasks'] == []
+    assert result['error'] == 'Fleet snapshot tool path is unavailable'
+
+
+def test_explicit_tool_path_fails_closed_for_world_writable_or_untrusted_entry(tmp_path, monkeypatch):
+    trusted = tmp_path / 'trusted'
+    world_writable = tmp_path / 'world-writable'
+    untrusted = tmp_path / 'untrusted'
+    trusted.mkdir(mode=0o755)
+    world_writable.mkdir(mode=0o777)
+    world_writable.chmod(0o777)
+    untrusted.mkdir(mode=0o755)
+
+    assert FirstmateClient(
+        str(tmp_path), tool_path=f'{trusted}{os.pathsep}{world_writable}',
+    ).get_trusted_tool_path() is None
+
+    real_lstat = os.lstat
+
+    def untrusted_owner(path):
+        result = real_lstat(path)
+        if os.fspath(path) == str(untrusted):
+            return SimpleNamespace(st_mode=result.st_mode, st_uid=os.geteuid() + 1)
+        return result
+
+    monkeypatch.setattr(os, 'lstat', untrusted_owner)
+    assert FirstmateClient(str(tmp_path), tool_path=str(untrusted)).get_trusted_tool_path() is None
 
 
 @pytest.mark.asyncio
