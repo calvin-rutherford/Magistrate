@@ -28,7 +28,7 @@ async function open(mode = 'normal', preserveStorage = false) {
       sessionStorage.setItem('__auth_test_initialized', '1');
     }
     const nativeFetch = window.fetch.bind(window);
-    const state = { mode, valid: false, calls: [], authCalls: [] };
+    const state = { mode, valid: false, calls: [], authCalls: [], userId: sessionStorage.getItem('__auth_test_user') || 'default_user' };
     const expiresAt = mode === 'expiry' ? Math.floor(Date.now() / 1000) + 20 : 4102444800;
     let validationFailures = mode === 'validation-failure' ? 1 : 0;
     window.__authLifecycle = state;
@@ -52,7 +52,7 @@ async function open(mode = 'normal', preserveStorage = false) {
         }
         if (authorization === 'Bearer browser-test-session') {
           state.valid = true;
-          return json({ authenticated: true, expires_at: expiresAt, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' });
+          return json({ authenticated: true, expires_at: expiresAt, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: state.userId });
         }
         return json({ detail: 'Invalid or expired session' }, 401);
       }
@@ -65,8 +65,8 @@ async function open(mode = 'normal', preserveStorage = false) {
         // The captain transcript is the gateway's canonical record, so a prompt
         // answers with the turn it recorded rather than a bare reply string.
         const canonicalMessages = () => state.turn ? [
-          { id: 'cm_0_u', turn_id: 'ct_0', client_message_id: state.turn.clientMessageId, role: 'user', type: 'conversation', text: state.turn.text, visible_in_chat: true, sequence_index: 0, revision: 1, turn_status: 'answered' },
-          { id: 'cm_0_a', turn_id: 'ct_0', role: 'assistant', type: 'conversation', text: 'Authenticated reply from Firstmate.', visible_in_chat: true, sequence_index: 999, revision: 1, turn_status: 'answered' },
+          { id: 'cm_0_u', turn_id: 'ct_0', client_message_id: state.turn.clientMessageId, role: 'user', type: 'conversation', text: state.turn.text, visible_in_chat: true, sequence_index: 0, revision: 1, source: 'text', created_at: 1756000000000, turn_status: 'answered' },
+          { id: 'cm_0_a', turn_id: 'ct_0', role: 'assistant', type: 'conversation', text: 'Authenticated reply from Firstmate.', visible_in_chat: true, sequence_index: 999, revision: 1, source: 'text', created_at: 1756000000000, turn_status: 'answered' },
         ] : [];
         if (url.includes('/captain/prompt')) {
           let body = {};
@@ -93,6 +93,18 @@ async function open(mode = 'normal', preserveStorage = false) {
   await page.goto(URL, { waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.getElementById('error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   return page;
+}
+
+async function seedPrincipalCache(page, principal = 'default_user') {
+  await page.evaluate(owner => {
+    const row = { id: 'cm-secret', canonicalId: 'cm-secret', role: 'assistant', kind: 'conversation', text: `private for ${owner}`, source: 'text', sentAt: Date.now() };
+    localStorage.setItem(`magistrate.chat.canonical.v1.${encodeURIComponent(owner)}|captain`, JSON.stringify({ schema_version: 'conversation-cache.v1', principal_id: owner, messages: { 'cm-secret': row } }));
+    localStorage.setItem(`magistrate.chat.pending.v1.${encodeURIComponent(owner)}|captain`, JSON.stringify({ schema_version: 'conversation-pending.v1', principal_id: owner, messages: {} }));
+  }, principal);
+}
+
+async function principalCacheKeys(page, principal = 'default_user') {
+  return page.evaluate(owner => Object.keys(localStorage).filter(key => key.startsWith('magistrate.chat.') && key.includes(`.${encodeURIComponent(owner)}|`)), principal);
 }
 
 async function connect(page) {
@@ -158,17 +170,34 @@ test('a validated bearer and expiry metadata survive reload without re-bootstrap
   await page.close();
 });
 
-test('obvious expiry invalidates the session, unmounts protected activity, and returns to login', async () => {
-  const page = await open('expiry');
+test('server-observed principal change evicts the previous principal cache before protected remount', async () => {
+  const page = await open();
   await connect(page);
-  await page.waitForSelector('[data-testid="bootstrap-secret"]', { timeout: 30000 });
-  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
+  await seedPrincipalCache(page);
+  assert.ok((await principalCacheKeys(page)).length >= 2);
+  await page.evaluate(() => sessionStorage.setItem('__auth_test_user', 'other_user'));
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="branded-chat-shell"]');
+  assert.deepEqual(await principalCacheKeys(page, 'default_user'), []);
+  const storedSession = await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.gateway.session')));
+  assert.equal(storedSession.user_id, 'other_user');
   await page.close();
 });
 
-test('an active protected 401 invalidates once, unmounts protected activity, and returns to login', async () => {
+test('obvious expiry invalidates the session, evicts principal chat caches, and returns to login', async () => {
+  const page = await open('expiry');
+  await connect(page);
+  await seedPrincipalCache(page);
+  await page.waitForSelector('[data-testid="bootstrap-secret"]', { timeout: 30000 });
+  assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
+  assert.deepEqual(await principalCacheKeys(page), []);
+  await page.close();
+});
+
+test('an active protected 401 invalidates once, evicts principal chat caches, and returns to login', async () => {
   const page = await open('active-401');
   await connect(page);
+  await seedPrincipalCache(page);
   await page.type('[data-testid="captain-prompt"]', 'expire now');
   await page.click('[data-testid="send-captain-prompt"]');
   await page.waitForSelector('[data-testid="bootstrap-secret"]');
@@ -176,6 +205,7 @@ test('an active protected 401 invalidates once, unmounts protected activity, and
   await new Promise(resolve => setTimeout(resolve, 1200));
   assert.equal(await page.evaluate(() => window.__authLifecycle.calls.length), callsAtLogin);
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
+  assert.deepEqual(await principalCacheKeys(page), []);
   await page.close();
 });
 
@@ -191,9 +221,10 @@ test('a 403 remains an authorization error and does not invalidate the session',
   await page.close();
 });
 
-test('logout revokes the session locally and returns to the authentication gate', async () => {
+test('logout revokes the session, evicts principal chat caches, and returns to the authentication gate', async () => {
   const page = await open();
   await connect(page);
+  await seedPrincipalCache(page);
   // The drawer slides in and Settings is a long scroller, so wait for the layer
   // to arrive and bring Sign out into view before pressing it.
   await page.click('[data-testid="brand-drawer-toggle"]');
@@ -207,5 +238,6 @@ test('logout revokes the session locally and returns to the authentication gate'
   await page.waitForSelector('[data-testid="bootstrap-secret"]');
   assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
+  assert.deepEqual(await principalCacheKeys(page), []);
   await page.close();
 });

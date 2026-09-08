@@ -11,7 +11,8 @@ import { filterCanonicalMessages } from '../src/services/ChatHistory';
 import { ConversationMessage } from '../src/services/ConversationSession';
 
 const canonical = (overrides: Partial<CanonicalMessage> & Pick<CanonicalMessage, 'id' | 'role' | 'text' | 'sequence_index'>): CanonicalMessage => ({
-  type: 'conversation', visible_in_chat: true, turn_status: 'answered', created_at: 1756000000000, ...overrides,
+  type: 'conversation', visible_in_chat: true, turn_id: 'ct_test', revision: 1,
+  turn_status: 'answered', source: 'text', created_at: 1756000000000, ...overrides,
 });
 
 test('a canonical user message and its optimistic bubble are one row', () => {
@@ -33,7 +34,7 @@ test('canonical attachment references replace optimistic upload state without ca
   const [message] = normalizeCanonicalMessages([{
     id: 'cm_attachment', turn_id: 'ct_attachment', client_message_id: 'u-attachment',
     role: 'user', type: 'conversation', text: 'review this', visible_in_chat: true,
-    sequence_index: 0, revision: 1, created_at: 1756000000456,
+    sequence_index: 0, revision: 1, source: 'text', created_at: 1756000000456,
     attachments: [{
       id: 'upload-0000000000000001', upload_id: 'upload-0000000000000001',
       name: 'notes.txt', media_type: 'text/plain', size: 5,
@@ -67,6 +68,28 @@ test('a revised assistant message updates its row instead of appending a second'
   ]);
 });
 
+test('a higher revision cannot move a stable canonical row to another causal identity', () => {
+  let rows = reconcileCanonicalMessages([], [
+    canonical({
+      id: 'cm_stable', turn_id: 'ct_stable', role: 'assistant', text: 'Original.',
+      sequence_index: 999, revision: 1, objective_id: 'obj_stable', run_id: 'run_stable',
+      assistant_kind: 'response',
+    }),
+  ]);
+  rows = reconcileCanonicalMessages(rows, [
+    canonical({
+      id: 'cm_stable', turn_id: 'ct_other', role: 'assistant', text: 'Moved.',
+      sequence_index: 1999, revision: 2, objective_id: 'obj_other', run_id: 'run_other',
+      assistant_kind: 'outcome',
+    }),
+  ]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].text, 'Original.');
+  assert.equal(rows[0].turnId, 'ct_stable');
+  assert.equal(rows[0].canonicalRevision, 1);
+});
+
 test('an out-of-order revision cannot roll a canonical reply backwards', () => {
   let rows = reconcileCanonicalMessages([], [
     canonical({ id: 'cm_a', role: 'assistant', text: 'The final answer.', sequence_index: 999, revision: 3 }),
@@ -93,6 +116,29 @@ test('a same-revision turn-status update still reaches the rendered row', () => 
   assert.equal(rows[0].progress, 'cancelled');
 });
 
+test('multiple assistant messages retain causal ids, fixed order, and monotonic lifecycle', () => {
+  let rows = reconcileCanonicalMessages([], [
+    canonical({ id: 'cm_multi_u', turn_id: 'ct_multi', role: 'user', text: 'Run the objective', sequence_index: 0, client_message_id: 'u-multi', objective_id: 'obj_multi', run_id: 'run_multi', lifecycle_state: 'active', lifecycle_revision: 1 }),
+    canonical({ id: 'cm_progress_1', turn_id: 'ct_multi', role: 'assistant', text: 'First progress.', sequence_index: 900, revision: 1, objective_id: 'obj_multi', run_id: 'run_multi', lifecycle_state: 'active', lifecycle_revision: 2, assistant_kind: 'progress' }),
+    canonical({ id: 'cm_progress_2', turn_id: 'ct_multi', role: 'assistant', text: 'Second progress.', sequence_index: 901, revision: 1, objective_id: 'obj_multi', run_id: 'run_multi', lifecycle_state: 'active', lifecycle_revision: 2, assistant_kind: 'progress' }),
+    canonical({ id: 'cm_multi_final', turn_id: 'ct_multi', role: 'assistant', text: 'Final result.', sequence_index: 999, revision: 1, objective_id: 'obj_multi', run_id: 'run_multi', lifecycle_state: 'completed', lifecycle_revision: 3, assistant_kind: 'response' }),
+  ]);
+  assert.deepEqual(rows.map(row => row.text), ['Run the objective', 'First progress.', 'Second progress.', 'Final result.']);
+  assert.deepEqual(rows.slice(1).map(row => row.assistantKind), ['progress', 'progress', 'response']);
+  assert.ok(rows.every(row => row.objectiveId === 'obj_multi' && row.runId === 'run_multi'));
+
+  // A delayed same-message transport cannot roll lifecycle revision three back
+  // to active even when its canonical text revision is not stale.
+  rows = reconcileCanonicalMessages(rows, [
+    canonical({ id: 'cm_multi_final', turn_id: 'ct_multi', role: 'assistant', text: 'Final result with detail.', sequence_index: 999, revision: 2, objective_id: 'obj_multi', run_id: 'run_multi', lifecycle_state: 'active', lifecycle_revision: 2, assistant_kind: 'response' }),
+  ]);
+  const final = rows.at(-1)!;
+  assert.equal(final.text, 'Final result with detail.');
+  assert.equal(final.lifecycleState, 'completed');
+  assert.equal(final.lifecycleRevision, 3);
+  assert.equal(final.progress, 'complete');
+});
+
 test('repeated identical prompts stay separate rows with their own replies', () => {
   const rows = reconcileCanonicalMessages([], [
     canonical({ id: 'cm_1', role: 'user', text: 'same wording', sequence_index: 0, client_message_id: 'u-a' }),
@@ -114,7 +160,7 @@ test('messages render in the gateway sequence, not in delivery order', () => {
 
 test('an authoritative canonical sync replaces stale cache rows and overlays only an unacknowledged send', () => {
   const existing: ConversationMessage[] = [
-    { id: 'u-old', role: 'user', text: 'stale cached text', source: 'text', sentAt: 123, audience: 'captain', delivery: 'sent', canonicalId: 'cm_x', sequenceIndex: 0 },
+    { id: 'u-old', role: 'user', text: 'stale cached text', source: 'text', sentAt: 123, audience: 'captain', delivery: 'sent', canonicalId: 'cm_x', sequenceIndex: 0, fromCanonicalCache: true },
     { id: 'poisoned-duplicate', role: 'assistant', text: 'A duplicate from the terminal era.', source: 'text', audience: 'primary', canonicalId: 'cm_poison', sequenceIndex: 999 },
     { id: 'u-inflight', role: 'user', text: 'just sent', source: 'text', sentAt: 1756000000999, audience: 'captain', delivery: 'sending' },
   ];
@@ -142,7 +188,7 @@ test('a full list read drops a recorded row the gateway no longer returns', () =
 
   // A revision delta is not a full list and must not prune anything.
   const delta = reconcileCanonicalMessages(first, [
-    canonical({ id: 'cm_2', role: 'assistant', text: 'still here', sequence_index: 999 }),
+    canonical({ id: 'cm_2', role: 'assistant', text: 'still here', sequence_index: 999, revision: 2 }),
   ]);
   assert.deepEqual(delta.map(row => row.text), ['kept', 'still here']);
 });
@@ -190,7 +236,7 @@ test('internal, status, and malformed records are never renderable messages', ()
 test('tool events are hidden by default and revealed only as canonical tool rows', () => {
   const rows = reconcileCanonicalMessages([], [
     canonical({ id: 'cm_u', role: 'user', text: 'check the deploy', sequence_index: 0, client_message_id: 'u-t' }),
-    canonical({ id: 'cm_t', role: 'assistant', text: 'Running…', type: 'tool', sequence_index: 1, visible_in_chat: false }),
+    canonical({ id: 'cm_t', role: 'assistant', text: 'Running…', type: 'tool', sequence_index: 1, visible_in_chat: false, source: 'terminal' }),
     canonical({ id: 'cm_a', role: 'assistant', text: 'The deploy is healthy.', sequence_index: 999 }),
   ]);
 
@@ -225,7 +271,7 @@ test('an unchanged sync produces no rendered change', () => {
   const second = reconcileCanonicalMessages(first, list, { authoritative: true });
   assert.ok(sameRenderedTranscript(first, second));
   assert.ok(!sameRenderedTranscript(first, reconcileCanonicalMessages(first, [
-    canonical({ id: 'cm_1', role: 'assistant', text: 'Steady, and finished.', sequence_index: 0 }),
+    canonical({ id: 'cm_1', role: 'assistant', text: 'Steady, and finished.', sequence_index: 0, revision: 2 }),
   ])));
 });
 

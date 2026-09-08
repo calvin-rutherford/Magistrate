@@ -8,6 +8,7 @@ import {
   setGatewaySessionPayload,
 } from '../services/GatewaySessionStorage';
 import { CanonicalMessage, normalizeCanonicalMessages } from '../services/CanonicalConversation';
+import { setConversationPrincipal } from '../services/ConversationSession';
 import { parseAgentHistory } from '../services/ChatHistory';
 import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
 import { OperatingPermissionMode } from '../services/OperatingPermissionModes';
@@ -40,7 +41,7 @@ export interface GatewaySession {
   token: string;
   expiresAt: number;
   scopes: string[];
-  userId?: string;
+  userId: string;
 }
 export interface GatewaySessionSnapshot {
   status: GatewaySessionStatus;
@@ -78,14 +79,31 @@ export function useGatewaySession(): GatewaySessionSnapshot {
   return useSyncExternalStore(subscribeGatewaySession, () => sessionSnapshot, () => sessionSnapshot);
 }
 
+const validGatewayUserId = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && Array.from(value).length <= 128
+  && !Array.from(value).some(character => {
+    const code = character.codePointAt(0) ?? 0;
+    return code < 32 || (code >= 127 && code <= 159)
+      || (code >= 0xd800 && code <= 0xdfff) || code === 0x2028 || code === 0x2029;
+  });
+const KNOWN_GATEWAY_SCOPES = new Set(['read', 'account', 'providers', 'notifications', 'voice', 'command', 'response']);
+const validGatewayScopes = (value: unknown): string[] | null => {
+  if (!Array.isArray(value) || value.length === 0
+    || value.some(scope => typeof scope !== 'string' || !KNOWN_GATEWAY_SCOPES.has(scope))) return null;
+  const scopes = value as string[];
+  return new Set(scopes).size === scopes.length ? scopes : null;
+};
+
 function sessionFromPayload(payload: unknown): GatewaySession | null {
   if (!payload || typeof payload !== 'object') return null;
   const value = payload as Record<string, unknown>;
   const token = typeof value.session_token === 'string' ? value.session_token : typeof value.token === 'string' ? value.token : null;
   const expiresAt = typeof value.expires_at === 'number' ? value.expires_at : null;
-  if (!token || !token.trim() || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) return null;
-  const scopes = Array.isArray(value.scopes) ? value.scopes.filter((scope): scope is string => typeof scope === 'string') : [];
-  return { token, expiresAt, scopes, userId: typeof value.user_id === 'string' ? value.user_id : undefined };
+  const userId = value.user_id;
+  const scopes = validGatewayScopes(value.scopes);
+  if (!token || !token.trim() || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)
+    || !validGatewayUserId(userId) || !scopes) return null;
+  return { token, expiresAt, scopes, userId };
 }
 
 function storedSessionPayload(session: GatewaySession): Record<string, unknown> {
@@ -161,7 +179,7 @@ export async function createGatewaySession(bootstrapSecret?: string): Promise<Ga
 }
 
 export async function validateGatewaySession(): Promise<GatewaySession> {
-  const session = sessionInfo || (sessionToken ? { token: sessionToken, expiresAt: 0, scopes: [] } : null);
+  const session = sessionInfo;
   if (!session || (session.expiresAt > 0 && session.expiresAt * 1000 <= Date.now())) {
     await invalidateGatewaySession('Your session has expired.');
     throw new GatewayAuthError('Authentication required');
@@ -175,9 +193,18 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
   if (!response.ok) throw responseError(response, payload);
   const serverSession = sessionFromPayload(payload);
   const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
-  if (value.authenticated !== true || typeof value.expires_at !== 'number' || !Number.isSafeInteger(value.expires_at) || value.expires_at <= Math.floor(Date.now() / 1000)) throw new Error('Gateway returned an invalid session validation response.');
-  const validated = { ...session, expiresAt: value.expires_at, scopes: Array.isArray(value.scopes) ? value.scopes.filter((scope): scope is string => typeof scope === 'string') : session.scopes, userId: typeof value.user_id === 'string' ? value.user_id : session.userId };
+  const validatedScopes = validGatewayScopes(value.scopes);
+  if (value.authenticated !== true || typeof value.expires_at !== 'number' || !Number.isSafeInteger(value.expires_at) || value.expires_at <= Math.floor(Date.now() / 1000)
+    || !validGatewayUserId(value.user_id) || !validatedScopes) {
+    await invalidateGatewaySession('The gateway returned an invalid session identity.');
+    throw new GatewayAuthError('Gateway returned an invalid session validation response.');
+  }
+  const validated = { ...session, expiresAt: value.expires_at, scopes: validatedScopes, userId: value.user_id };
   if (serverSession?.token) validated.token = serverSession.token;
+  // Principal isolation is established before publishing authenticated state,
+  // so protected routes can never mount with another account's in-memory or
+  // persisted conversation cache.
+  await setConversationPrincipal(validated.userId);
   sessionToken = validated.token;
   sessionInfo = validated;
   await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(validated))).catch(() => {});
@@ -203,12 +230,13 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
     if (stored) {
       try {
         const parsed = JSON.parse(stored) as Record<string, unknown>;
+        const storedPrincipal = validGatewayUserId(parsed.user_id) ? parsed.user_id : null;
+        if (storedPrincipal) await setConversationPrincipal(storedPrincipal);
         candidate = sessionFromPayload({ session_token: parsed.token, expires_at: parsed.expires_at, scopes: parsed.scopes, user_id: parsed.user_id });
       } catch { candidate = null; }
     }
-    if (candidate && candidate.expiresAt * 1000 <= Date.now()) {
-      await invalidateGatewaySession('Your saved session has expired.');
-      candidate = null;
+    if (stored && !candidate) {
+      await invalidateGatewaySession('Your saved session is invalid or expired.');
     }
     if (!candidate && process.env.NODE_ENV !== 'production') {
       // Development may explicitly opt into server-side auto-session. A
@@ -221,6 +249,7 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
     // rather than letting that stale restore attempt reopen the gate.
     if (!candidate && sessionInfo) candidate = sessionInfo;
     if (!candidate) {
+      await setConversationPrincipal(null);
       publish({ status: 'authentication-required', session: null, error: null });
       return null;
     }
@@ -240,7 +269,10 @@ export async function invalidateGatewaySession(message = 'Authentication require
     sessionToken = null;
     sessionInfo = null;
     clearExpiryTimer();
-    await clearGatewaySessionPayload().catch(() => {});
+    await Promise.all([
+      clearGatewaySessionPayload().catch(() => {}),
+      setConversationPrincipal(null).catch(() => {}),
+    ]);
     publish({ status: 'authentication-required', session: null, error: message });
   })().finally(() => { invalidationPromise = null; });
   return invalidationPromise;
@@ -337,6 +369,11 @@ export interface CanonicalConversationResult {
   conversation_id?: string;
   /** Reserved stable assistant identity for semantic response producers. */
   assistant_message_id?: string;
+  turn_id?: string;
+  objective_id?: string;
+  run_id?: string;
+  lifecycle_state?: 'active' | 'awaiting-user' | 'completed' | 'failed' | 'cancelled';
+  lifecycle_revision?: number;
   messages: CanonicalMessage[];
 }
 
@@ -641,6 +678,46 @@ export interface RecentActivityFeed {
   sources: { firstmate: 'available' | 'unavailable'; github: 'available' | 'unavailable' };
 }
 
+/** Additive lifecycle/activity contract, consumed only by the non-visual catch-up adapter. */
+export interface CanonicalActivityRecord {
+  id: string;
+  sequence: number;
+  /** Append-only replay cursor for this insertion or in-place revision. */
+  delivery_sequence: number;
+  revision: number;
+  kind: 'objective.started' | 'objective.progress' | 'decision.requested' | 'decision.resolved' | 'objective.completed' | 'objective.failed' | 'objective.cancelled' | 'supervision.outcome' | 'primary.message' | 'primary.final' | 'worker.message' | 'worker.final';
+  state: 'active' | 'awaiting-user' | 'completed' | 'failed' | 'cancelled' | 'resolved';
+  importance: 'routine' | 'attention';
+  title: string;
+  summary: string;
+  summary_truncated: boolean;
+  task_id?: string | null;
+  decision_key?: string | null;
+  objective_id?: string | null;
+  run_id?: string | null;
+  project?: string | null;
+  occurred_at?: number | null;
+  observed_at: number;
+  refs: ({ kind: 'pull-request'; url: string } | { kind: 'report'; id: string })[];
+  source: { instance_id: string; event_id?: string | null };
+}
+
+export interface CanonicalActivityPage {
+  schema_version: 'activity.v1';
+  records: CanonicalActivityRecord[];
+  next_cursor: number;
+  latest_cursor: number;
+  has_more: boolean;
+  reconciliation?: 'available' | 'degraded' | 'not-requested';
+  sources?: {
+    source_instance_id: string;
+    stream: string;
+    state: 'unobserved' | 'available' | 'fault';
+    cursor: number;
+    source_tail: number;
+  }[];
+}
+
 export async function fetchHealth() {
   const res = await authorizedFetch(GATEWAY_URL + '/health', {
   });
@@ -796,6 +873,26 @@ export async function fetchAttentionAction(actionKey: string): Promise<Attention
 export async function fetchAttentionActionForItem(itemId: string): Promise<AttentionAction | AttentionActionOutcome> {
   const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/by-item/${encodeURIComponent(itemId)}`);
   return checkedJson<AttentionAction | AttentionActionOutcome>(res);
+}
+
+export async function fetchCanonicalActivity(after = 0, limit = 100, reconcile = true): Promise<CanonicalActivityPage> {
+  const params = new URLSearchParams({ after: String(after), limit: String(limit), reconcile: String(reconcile) });
+  const response = await authorizedFetch(`${GATEWAY_URL}/activity?${params}`);
+  const data = await checkedJson<CanonicalActivityPage>(response);
+  if (data?.schema_version !== 'activity.v1' || !Array.isArray(data.records)) {
+    throw new Error('Gateway returned invalid canonical activity data.');
+  }
+  return data;
+}
+
+export async function replayCanonicalActivity(after = 0, limit = 100): Promise<CanonicalActivityPage> {
+  const params = new URLSearchParams({ after: String(after), limit: String(limit) });
+  const response = await authorizedFetch(`${GATEWAY_URL}/activity/replay?${params}`);
+  const data = await checkedJson<CanonicalActivityPage>(response);
+  if (data?.schema_version !== 'activity.v1' || !Array.isArray(data.records)) {
+    throw new Error('Gateway returned invalid canonical activity replay data.');
+  }
+  return data;
 }
 
 export async function fetchRecentActivity(limit = 20): Promise<RecentActivityFeed> {

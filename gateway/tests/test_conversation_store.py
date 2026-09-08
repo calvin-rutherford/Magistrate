@@ -5,6 +5,7 @@ treating a mutable Herdr snapshot as the chat database.
 """
 from pathlib import Path
 import asyncio
+import json
 import sqlite3
 from unittest.mock import AsyncMock
 
@@ -625,13 +626,22 @@ def test_conversation_endpoint_requires_authentication():
 
 def test_conversation_endpoint_reports_an_unreadable_snapshot_without_hiding_the_record(monkeypatch):
     store.record_prompt(USER, TARGET, 'u-http-5', 'a recorded turn')
-    failing = AsyncMock(side_effect=RuntimeError('herdr socket closed'))
+    failing = AsyncMock(side_effect=RuntimeError('herdr socket closed with token=ghp_privatevalue'))
     monkeypatch.setattr('app.main.herdr_client.read_typed_rows', failing)
 
     payload = client.get(f'/api/v1/conversations/{TARGET}/messages', headers=TEST_HEADERS).json()
 
-    assert 'herdr socket closed' in payload['ingest_error']
+    assert payload['ingest_error'] == 'RuntimeError: terminal snapshot unavailable'
+    assert 'privatevalue' not in json.dumps(payload)
     assert [item['text'] for item in payload['messages']] == ['a recorded turn']
+
+
+def test_synchronous_reply_cannot_cross_an_authenticated_owner_boundary():
+    turn = store.record_prompt(USER, TARGET, 'u-owner-boundary', 'owner-only prompt')
+    assert store.record_primary_reply(
+        'another-owner', TARGET, turn['turn_id'], 'cross-tenant reply',
+    ) == []
+    assert visible() == [('user', 'conversation', 'owner-only prompt')]
 
 
 def test_a_cancelled_turn_never_gains_a_later_reply():
@@ -683,6 +693,38 @@ def test_events_stream_delivers_canonical_messages_once_per_revision(monkeypatch
         assert [item['text'] for item in update['messages']] == ['The tests are running and all 42 pass.']
         assert update['messages'][0]['id'] == first['messages'][1]['id']
         assert update['messages'][0]['revision'] == 2
+
+
+def test_events_stream_reconnect_replays_latest_revision_at_an_existing_sequence(monkeypatch):
+    store.record_prompt(USER, TARGET, 'u-ws-reconnect', 'retain this identity')
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'retain this identity'),
+        ('assistant', 'conversation', 'Initial durable reply.'),
+    ), response_complete=False)
+
+    async def empty_snapshot(target, lines=None):
+        return {'target': target, 'rows': []}
+
+    monkeypatch.setattr('app.main.herdr_client.read_typed_rows', empty_snapshot)
+    with client.websocket_connect('/api/v1/events') as websocket:
+        websocket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': TARGET})
+        websocket.receive_json()
+        initial = websocket.receive_json()['messages']
+    [before] = [message for message in initial if message['role'] == 'assistant']
+
+    store.ingest_terminal_rows(USER, TARGET, rows(
+        ('user', 'conversation', 'retain this identity'),
+        ('assistant', 'conversation', 'Initial durable reply. Reconciled after disconnect.'),
+    ), response_complete=False)
+    with client.websocket_connect('/api/v1/events') as websocket:
+        websocket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': TARGET})
+        websocket.receive_json()
+        replay = websocket.receive_json()['messages']
+    [after] = [message for message in replay if message['role'] == 'assistant']
+    assert after['id'] == before['id']
+    assert after['sequence_index'] == before['sequence_index']
+    assert after['revision'] == before['revision'] + 1
+    assert after['text'].endswith('Reconciled after disconnect.')
 
 
 def test_events_stream_delivers_same_revision_completion_status(monkeypatch):
@@ -931,6 +973,9 @@ def test_promptless_prose_without_unique_continuity_still_fails_closed():
     shared = 'A deliberately substantial opening shared by two different assistant turns.'
     store.record_primary_reply(USER, TARGET, first['turn_id'], shared)
     store.record_primary_reply(USER, TARGET, second['turn_id'], shared)
+    # This is the P0 observability shape: a still-open objective has no reply,
+    # while promptless prose cannot be uniquely joined to either prior anchor.
+    store.record_prompt(USER, TARGET, 'u-anchor-open', 'third prompt still awaiting a reply')
 
     store.ingest_terminal_rows(USER, TARGET, rows(
         ('assistant', 'conversation', shared + ' This continuation has no visible prompt.'),
@@ -939,6 +984,12 @@ def test_promptless_prose_without_unique_continuity_still_fails_closed():
     assert [(item['turn_id'], item['text'], item['revision']) for item in replies] == [
         (first['turn_id'], shared, 1), (second['turn_id'], shared, 1),
     ]
+    diagnostic = store.get_ingest_diagnostics(USER, TARGET)
+    assert diagnostic['state'] == 'degraded'
+    assert diagnostic['attribution_misses'] >= 1
+    assert diagnostic['last_failure']['code'] == 'promptless-initial-attribution'
+    assert shared not in diagnostic['last_failure']['detail']
+    assert diagnostic['terminal_truncation_observed'] is None
 
 
 def test_real_pi_boundary_fixture_produces_one_canonical_row_per_role():

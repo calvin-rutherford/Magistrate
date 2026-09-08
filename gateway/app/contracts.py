@@ -278,6 +278,14 @@ class MagiAssistantBlockRemoveEvent(_MagiEventBase):
     block_id: str = Field(min_length=1, max_length=128, pattern=_MAGI_ID_PATTERN)
 
 
+class MagiAssistantAwaitingUserEvent(_MagiEventBase):
+    """Pause an objective only for an explicit, stable decision key."""
+
+    event_type: Literal['assistant.awaiting_user']
+    decision_key: str = Field(min_length=1, max_length=128, pattern=_MAGI_ID_PATTERN)
+    prompt: Optional[str] = Field(default=None, max_length=600)
+
+
 class MagiAssistantCompletedEvent(_MagiEventBase):
     event_type: Literal['assistant.completed']
     response: MagiResponseV1
@@ -298,12 +306,32 @@ MagiEventContract = Annotated[
         MagiAssistantStartedEvent,
         MagiAssistantBlockUpsertEvent,
         MagiAssistantBlockRemoveEvent,
+        MagiAssistantAwaitingUserEvent,
         MagiAssistantCompletedEvent,
         MagiAssistantFailedEvent,
         MagiAssistantCancelledEvent,
     ],
     Field(discriminator='event_type'),
 ]
+
+
+class AssistantMessageReservationContract(BaseModel):
+    """Reserve another stable assistant identity inside an existing objective."""
+
+    model_config = ConfigDict(extra='forbid', strict=True)
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'
+    )
+    kind: Literal['progress', 'decision', 'outcome']
+
+
+class ActivityCatchUpContract(BaseModel):
+    """Bounded body form of the activity replay endpoint."""
+
+    model_config = ConfigDict(extra='forbid', strict=True)
+    after: int = Field(default=0, ge=0, le=9_007_199_254_740_991)
+    limit: int = Field(default=100, ge=1, le=200)
+    reconcile: bool = True
 
 
 class UniversalInputContract(BaseModel):

@@ -139,13 +139,16 @@ transient reconnect display.
   boundaries, tool accumulation).
 - `ConversationSession` lost `insertConversationMessageAfter`, which existed only
   to splice a discovered reply under the right user row.
-- Captain persistence is now two explicitly non-authoritative maps:
-  `magistrate.chat.canonical.v1.captain` is keyed by canonical message id, and
-  `magistrate.chat.pending.v1.captain` is keyed by `client_message_id` and holds
-  only genuinely unacknowledged sends. The canonical map is restored only after
-  strict identity/revision/sequence validation and is replaced by the next
-  successful full list. The old v1/v2 captain arrays are **deleted, not
-  migrated** because they have no trustworthy canonical identity. Worker
+- Captain persistence is now two explicitly non-authoritative,
+  principal-qualified maps: `magistrate.chat.canonical.v1.<principal>|captain`
+  is keyed by canonical message id, and
+  `magistrate.chat.pending.v1.<principal>|captain` is keyed by
+  `client_message_id` and holds only genuinely unacknowledged sends. Each
+  payload repeats the validated principal; auth expiry/logout/change evicts the
+  prior principal. The canonical map is restored only after strict
+  identity/revision/sequence validation and is replaced by the next successful
+  full list. Unqualified and old v1/v2 captain arrays are **deleted, not
+  migrated** because they have no trustworthy ownership/canonical identity. Worker
   targets retain their transitional `magistrate.chat.messages.v2.<target>`
   cache.
 
@@ -154,9 +157,11 @@ transient reconnect display.
 The new tables and the `prompt_key` column are created by `init_db()` at startup
 with `CREATE TABLE IF NOT EXISTS` and a guarded `ALTER TABLE`. An existing
 deployment database (the demo runs against a SQLite file outside the checkout)
-gains those objects on restart; no pre-existing application table or row is
-rewritten or dropped. The canonical record starts empty and fills from the next
-prompt onward. An idempotent, canonical-table-only normalization multiplies
+gains those objects on restart; no pre-existing identity, message text, or
+application table is replaced or dropped. Existing turns receive additive
+lifecycle and deterministic compatibility objective/run fields. The canonical
+record starts empty only for deployments that had no prior canonical rows. An
+idempotent, canonical-table-only normalization multiplies
 unmistakable preview-era epoch-second timestamps by 1000, so a database briefly
 run from an earlier revision of this branch remains readable at millisecond
 precision. The guarded `attachments_json` column addition defaults existing
@@ -198,8 +203,8 @@ downgrade step.
   `tool_call_preview` label is recorded, because a tool row's raw text is a shell
   command or file excerpt that can carry tokens and paths. The full activity
   stays in the terminal, reachable via `/api/v1/captain/output`.
-- **One primary reply per turn is a loss-resistant join.** A harness interleaves
-  prose with tool activity, so a turn's prose blocks are folded into one message
+- **One terminal-derived primary reply per turn is a loss-resistant join.** A harness interleaves
+  prose with tool activity, so a turn's fallback prose blocks are folded into one message
   and render as one assistant bubble. Exact containment, reflow-normalized
   containment, and conservative suffix/prefix overlap merge sliding terminal
   windows without duplicate text; an unsafe disjoint window fails closed rather
@@ -209,8 +214,8 @@ downgrade step.
   silently dropped.
 - **The delivered window is bounded to 200 messages.** A full list read is
   authoritative, so a client viewing a very long conversation keeps only the most
-  recent 200 canonical records. Older turns remain in the database; paging them
-  back is not implemented. Canonical ingestion always asks Herdr for its maximum
+  recent 200 canonical records. Older turns remain in the database; the replay
+  API can page by sequence, but visual history backfill is not implemented. Canonical ingestion always asks Herdr for its maximum
   retained line range, rather than applying the worker-pane 400-line default a
   second time.
 - **Tool chips are standalone rows again.** #67 attached tool previews under the
@@ -229,17 +234,21 @@ downgrade step.
 
 ## Structured responses remain additive
 
-A validated `magi.event.v1` stream can now attach a canonical
-`magi.response.v1` document to the same primary reply slot. The turn reserves
-its assistant message id when the prompt is recorded; block updates revise that
-one row, and completion makes the structured document authoritative. From the
-first accepted semantic event onward, terminal ingestion is disabled for that
-turn, while turns with no semantic producer continue through every terminal
-firewall above unchanged. The app independently validates the document and
+A validated `magi.event.v1` stream can attach canonical `magi.response.v1`
+documents to stable reserved assistant slots. The turn reserves its primary
+message plus distinct objective/run identities when the prompt is recorded;
+producers may idempotently reserve bounded progress, decision, and outcome
+messages before the primary final response. Each has an independent gap-free
+event stream. From the first accepted semantic event on any slot, terminal
+fallback is disabled for the whole objective, while turns with no semantic
+producer continue through every terminal firewall above unchanged. Lifecycle
+state/revision and exact awaiting-user decision keys are replayable even when
+message text does not change. The app independently validates each document and
 renders its closed block allowlist with native components; unknown JSON falls
-back to canonical text and is never inferred from Markdown. See
-[`docs/magi-structured-response-v1.md`](docs/magi-structured-response-v1.md) for
-the event lifecycle, security bounds, and the pending upstream producer seam.
+back to canonical text and is never inferred from Markdown. Autonomous
+Firstmate activity remains a separate source-native ledger and never borrows a
+chat turn. See [`docs/magi-structured-response-v1.md`](docs/magi-structured-response-v1.md)
+and [`docs/canonical-lifecycle-activity-v1.md`](docs/canonical-lifecycle-activity-v1.md).
 
 ## Verifying in the deployed app
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from app.auth import Principal, issue_session, revoke_session, require_scope, verify_token
+from app.auth import Principal, issue_session, revoke_session, require_any_scope, require_scope, verify_token
 from app.herdr_client import DEFAULT_HISTORY_LINES, HERDR_MAX_READ_LINES, HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
@@ -21,20 +21,27 @@ from app.contracts import (UniversalInputContract, ExecutionSettingsContract, Ex
                            NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
                            AttentionActionExecuteContract, RoutingPreferenceContract,
                            AgentMigrationRequestContract, AgentMigrationTransitionContract,
+                           ActivityCatchUpContract, AssistantMessageReservationContract,
                            MagiEventContract, MAGI_MAX_RESPONSE_BYTES,
                            RenameAgentContract, VoiceMoveRequest)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
 from app.voice_moves import VoiceMoveService
 from app.conversation_store import (CONVERSATION_SCHEMA, MAX_MESSAGE_WINDOW, MagiEventConflict,
-                                    apply_magi_event, ingest_terminal_rows,
-                                    list_messages as list_conversation_messages, record_primary_reply,
-                                    record_prompt, reset_conversation, set_turn_status, turn_messages)
+                                    apply_magi_event, get_ingest_diagnostics, get_lifecycle_diagnostics,
+                                    get_turn_lifecycle,
+                                    ingest_terminal_rows,
+                                    list_messages as list_conversation_messages, record_ingest_error,
+                                    record_primary_reply, record_prompt, replay_messages,
+                                    reserve_assistant_message, reset_conversation, set_turn_status,
+                                    turn_messages)
 from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
                     disconnect_account, get_execution_preferences, get_execution_credential_status,
                     save_execution_preferences, save_execution_credential, delete_execution_credential,
                     create_agent_migration, get_agent_migration, get_agent_migration_by_idempotency, transition_agent_migration)
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
+from app.activity_store import known_activity_users, list_activity, source_diagnostics
+from app.firstmate_activity import FirstmateActivityAdapter
 from app.attention_service import attention_service
 from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
                                    prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
@@ -112,21 +119,39 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
     if request.url.path == '/api/v1/captain/prompt' and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
-    structured_event_path = request.method == 'POST' and re.fullmatch(r'/api/v1/conversations/[^/]+/events', request.url.path)
-    if structured_event_path and content_length is None:
-        # Semantic events are small JSON records, never streaming uploads. A
-        # declared size makes the transport bound effective before JSON parse.
-        return JSONResponse({'detail': 'A structured response event size is required.'}, status_code=411)
-    if structured_event_path and length > MAGI_MAX_RESPONSE_BYTES:
-        return JSONResponse({'detail': 'The structured response event is too large.'}, status_code=413)
+    bounded_contract_path = request.method == 'POST' and (
+        request.url.path == '/api/v1/activity/catch-up'
+        or bool(re.fullmatch(
+            r'/api/v1/conversations/[^/]+/(?:events|turns/[^/]+/assistant-messages)',
+            request.url.path,
+        ))
+    )
+    if bounded_contract_path and content_length is None:
+        # Semantic/catch-up contracts are small JSON records, never streaming
+        # uploads. A declared size makes the bound effective before JSON parse.
+        return JSONResponse({'detail': 'A semantic response request size is required.'}, status_code=411)
+    if bounded_contract_path and length > MAGI_MAX_RESPONSE_BYTES:
+        return JSONResponse({'detail': 'The semantic response request is too large.'}, status_code=413)
+    if bounded_contract_path:
+        # Content-Length is an early rejection aid, not authority: a peer can
+        # lie or send a differently framed body. Buffer only through the hard
+        # contract cap and let Starlette reuse the verified cached bytes.
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAGI_MAX_RESPONSE_BYTES:
+                return JSONResponse({'detail': 'The semantic response request is too large.'}, status_code=413)
+            body.extend(chunk)
+        request._body = bytes(body)
     return await call_next(request)
 
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
+firstmate_activity = FirstmateActivityAdapter(fm_client)
 recent_activity_service = RecentActivityService(fm_client, github_service)
 stt_adapter = VoiceInputAdapter()
 voice_move_service = VoiceMoveService(herdr_client)
 _notification_reconciler_task = None
+_activity_reconciler_task = None
 
 
 async def _reconcile_registered_notifications() -> None:
@@ -149,20 +174,55 @@ async def _reconcile_registered_notifications() -> None:
             print('Notification reconciler unavailable:', exc)
 
 
+async def _reconcile_firstmate_activity() -> None:
+    """Recover structured source state after startup and on a bounded cadence."""
+    try:
+        interval = max(5, int(os.getenv('MAGISTRATE_ACTIVITY_POLL_SECONDS', '15')))
+    except ValueError:
+        interval = 15
+    user_offset = 0
+    while True:
+        try:
+            # Every durable candidate originated at an authenticated route or
+            # an unexpired server-issued session. Never invent a default owner
+            # for source rows that have no tenant identity of their own. Rotate
+            # bounded batches so a large tenant set cannot starve later rows.
+            users = sorted(set(known_activity_users()))
+            if users:
+                start = user_offset % len(users)
+                batch = (users + users)[start:start + min(100, len(users))]
+                user_offset = (start + len(batch)) % len(users)
+                for user_id in batch:
+                    await firstmate_activity.reconcile(user_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The adapter persists bounded per-source fault detail. Logging only
+            # the class avoids echoing a source payload or local path.
+            print('Activity reconciler unavailable:', type(exc).__name__)
+        await asyncio.sleep(interval)
+
+
 @app.on_event('startup')
 async def start_notification_reconciler():
-    global _notification_reconciler_task
+    global _notification_reconciler_task, _activity_reconciler_task
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
+    activity_disabled = os.getenv('MAGISTRATE_DISABLE_ACTIVITY_RECONCILER', '').lower() in {'1', 'true', 'yes'}
+    if os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'} and not activity_disabled:
+        _activity_reconciler_task = asyncio.create_task(_reconcile_firstmate_activity())
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
-    global _notification_reconciler_task
-    if _notification_reconciler_task:
-        _notification_reconciler_task.cancel()
-        await asyncio.gather(_notification_reconciler_task, return_exceptions=True)
-        _notification_reconciler_task = None
+    global _notification_reconciler_task, _activity_reconciler_task
+    tasks = [task for task in (_notification_reconciler_task, _activity_reconciler_task) if task]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _notification_reconciler_task = None
+    _activity_reconciler_task = None
 
 
 # The captain thread is the conversation Magistrate owns end to end, and the
@@ -201,7 +261,11 @@ async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_
         )
         return None
     except Exception as exc:
-        return f'{type(exc).__name__}: {exc}'[:200]
+        record_ingest_error(user_id, target, exc)
+        # Exception strings can contain pane excerpts, paths, or transport
+        # credentials. The canonical record reports only a classification.
+        code = re.sub(r'[^A-Za-z0-9._-]+', '-', type(exc).__name__)[:64] or 'ingest-error'
+        return f'{code}: terminal snapshot unavailable'
 
 
 def _record_prompt_result(user_id: str, target: str, client_message_id: str, turn_id: str, result: Any) -> None:
@@ -212,7 +276,9 @@ def _record_prompt_result(user_id: str, target: str, client_message_id: str, tur
     asking a later client to guess the assistant identity from terminal text.
     """
     if not isinstance(result, dict) or result.get('status') == 'error' or result.get('error'):
-        set_turn_status(user_id, target, client_message_id, 'failed')
+        set_turn_status(
+            user_id, target, client_message_id, 'failed', terminal_fallback_only=True,
+        )
         return
     response = result.get('response')
     if isinstance(response, str) and response.strip():
@@ -233,7 +299,9 @@ async def _finish_detached_prompt(
     except asyncio.CancelledError:
         return
     except Exception:
-        set_turn_status(user_id, target, client_message_id, 'failed')
+        set_turn_status(
+            user_id, target, client_message_id, 'failed', terminal_fallback_only=True,
+        )
         return
     _record_prompt_result(user_id, target, client_message_id, turn_id, result)
 
@@ -257,6 +325,14 @@ async def agent_events(websocket: WebSocket):
     try:
         if principal is None:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            try:
+                oversized_auth_frame = len(raw.encode('utf-8', errors='strict')) > 4096
+            except UnicodeEncodeError:
+                await websocket.close(code=1008)
+                return
+            if oversized_auth_frame:
+                await websocket.close(code=1009)
+                return
             message = json.loads(raw)
             token = message.get('token') if isinstance(message, dict) and message.get('type') == 'auth' else None
             requested_target = message.get('target') if isinstance(message, dict) else None
@@ -274,22 +350,72 @@ async def agent_events(websocket: WebSocket):
         if not principal.has('read'):
             await websocket.close(code=1008)
             return
+        if requested_target is not None and not (
+            isinstance(requested_target, str) and 0 < len(requested_target) <= 200
+            and not any(
+                ord(character) < 32 or 127 <= ord(character) <= 159
+                or 0xD800 <= ord(character) <= 0xDFFF or ord(character) in {0x2028, 0x2029}
+                for character in requested_target
+            )
+        ):
+            await websocket.close(code=1008)
+            return
         target = requested_target if principal is not None and isinstance(requested_target, str) and requested_target else 'captain'
+        activity_after_present = isinstance(message, dict) and 'activity_after' in message
+        activity_after = message.get('activity_after') if isinstance(message, dict) else None
+        activity_enabled = type(activity_after) is int and 0 <= activity_after <= 9_007_199_254_740_991
+        if activity_after_present and not activity_enabled:
+            await websocket.close(code=1008)
+            return
+        activity_cursor = activity_after if activity_enabled else 0
         seen: set[str] = set()
-        revisions: Dict[str, tuple[int, str]] = {}
+        revisions: Dict[str, tuple[int, str, str, int]] = {}
         await websocket.send_json({'type': 'connected', 'target': target})
         while True:
             try:
                 control = await asyncio.wait_for(websocket.receive_text(), timeout=0.75)
                 try:
+                    oversized_control_frame = len(control.encode('utf-8', errors='strict')) > 4096
+                except UnicodeEncodeError:
+                    await websocket.close(code=1008)
+                    return
+                if oversized_control_frame:
+                    await websocket.close(code=1009)
+                    return
+                try:
                     message = json.loads(control)
                 except json.JSONDecodeError:
                     message = {}
-                if isinstance(message, dict) and isinstance(message.get('target'), str):
-                    target = message['target']
-                    seen.clear()
-                    revisions.clear()
-                    await websocket.send_json({'type': 'subscribed', 'target': target})
+                if isinstance(message, dict):
+                    subscription_changed = False
+                    if 'target' in message:
+                        requested = message['target']
+                        if not (
+                            isinstance(requested, str) and 0 < len(requested) <= 200
+                            and not any(
+                                ord(character) < 32 or 127 <= ord(character) <= 159
+                                or 0xD800 <= ord(character) <= 0xDFFF or ord(character) in {0x2028, 0x2029}
+                                for character in requested
+                            )
+                        ):
+                            await websocket.close(code=1008)
+                            return
+                        target = requested
+                        subscription_changed = True
+                    if 'activity_after' in message:
+                        if not (
+                            type(message['activity_after']) is int
+                            and 0 <= message['activity_after'] <= 9_007_199_254_740_991
+                        ):
+                            await websocket.close(code=1008)
+                            return
+                        activity_enabled = True
+                        activity_cursor = message['activity_after']
+                        subscription_changed = True
+                    if subscription_changed:
+                        seen.clear()
+                        revisions.clear()
+                        await websocket.send_json({'type': 'subscribed', 'target': target})
             except asyncio.TimeoutError:
                 pass
             if target == CANONICAL_CONVERSATION_TARGET:
@@ -301,14 +427,20 @@ async def agent_events(websocket: WebSocket):
                 payload = list_conversation_messages(principal.user_id, target)
                 fresh = [
                     item for item in payload['messages']
-                    if revisions.get(item['id']) != (item['revision'], item['turn_status'])
+                    if revisions.get(item['id']) != (
+                        item['revision'], item['turn_status'], item['lifecycle_state'],
+                        item['lifecycle_revision'],
+                    )
                 ]
                 # Rebuilt rather than accumulated: the delivered window slides,
                 # so this stays bounded by the window instead of by session age.
                 # Turn status participates because idle can complete an unchanged
                 # final prose row and clients must observe that transition.
                 revisions = {
-                    item['id']: (item['revision'], item['turn_status'])
+                    item['id']: (
+                        item['revision'], item['turn_status'], item['lifecycle_state'],
+                        item['lifecycle_revision'],
+                    )
                     for item in payload['messages']
                 }
                 if fresh:
@@ -316,6 +448,23 @@ async def agent_events(websocket: WebSocket):
                         'type': 'conversation_messages', 'schema_version': CONVERSATION_SCHEMA,
                         'target': target, 'messages': fresh,
                     })
+                if activity_enabled:
+                    # Delivery reads only durable canonical rows. Source I/O is
+                    # performed by startup/cadence reconciliation or an explicit
+                    # catch-up request, never in the chat delivery loop.
+                    try:
+                        activity_page = list_activity(
+                            principal.user_id, after=activity_cursor, limit=100,
+                        )
+                    except ValueError:
+                        await websocket.close(code=1008)
+                        return
+                    if activity_page['records']:
+                        activity_cursor = activity_page['next_cursor']
+                        await websocket.send_json({
+                            'type': 'activity_records',
+                            **activity_page,
+                        })
                 continue
             # Worker panes still read their transcript from the terminal; see
             # CHAT_ARCHITECTURE_FIX.md for why that path is transitional.
@@ -428,6 +577,19 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         'firstmate_home': fm_snapshot.get('fm_home'),
         'firstmate_available': firstmate_available,
         'firstmate_tasks_count': len(fm_snapshot.get('tasks', []))
+    }
+
+
+@app.get('/api/v1/diagnostics/soak')
+async def get_soak_diagnostics(principal: Principal = Depends(require_scope('read'))):
+    """Bounded P0 evidence without prompts, terminal bytes, or source payloads."""
+    target = CANONICAL_CONVERSATION_TARGET
+    return {
+        'schema_version': 'soak-diagnostics.v1',
+        'target': target,
+        'conversation_ingest': get_ingest_diagnostics(principal.user_id, target),
+        'turn_lifecycle': get_lifecycle_diagnostics(principal.user_id, target),
+        'activity_sources': source_diagnostics(principal.user_id),
     }
 
 # ACCOUNT PROFILE ENDPOINTS
@@ -624,6 +786,68 @@ async def get_recent_activity(limit: int = Query(20, ge=1, le=50), refresh: bool
         return await recent_activity_service.get_recent_activity(limit, refresh)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+async def _activity_catch_up(user_id: str, *, after: int, limit: int, reconcile: bool) -> Dict[str, Any]:
+    reconciliation = None
+    if reconcile:
+        reconciliation = await firstmate_activity.reconcile(user_id)
+    return {
+        **list_activity(user_id, after=after, limit=limit),
+        'sources': source_diagnostics(user_id),
+        'reconciliation': reconciliation['status'] if reconciliation else 'not-requested',
+    }
+
+
+@app.get('/api/v1/activity')
+async def get_canonical_activity(
+    after: int = Query(0, ge=0, le=9_007_199_254_740_991),
+    limit: int = Query(100, ge=1, le=200),
+    reconcile: bool = Query(True),
+    principal: Principal = Depends(require_scope('read')),
+):
+    """Catch up sources, then replay tenant-owned canonical activity."""
+    try:
+        return await _activity_catch_up(
+            principal.user_id, after=after, limit=limit, reconcile=reconcile,
+        )
+    except (ValueError, MagiEventConflict) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail='Structured activity reconciliation is unavailable.') from exc
+
+
+@app.get('/api/v1/activity/replay')
+async def replay_canonical_activity(
+    after: int = Query(0, ge=0, le=9_007_199_254_740_991),
+    limit: int = Query(100, ge=1, le=200),
+    principal: Principal = Depends(require_scope('read')),
+):
+    """Replay durable rows without touching Firstmate or terminal state."""
+    try:
+        return await _activity_catch_up(
+            principal.user_id, after=after, limit=limit, reconcile=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post('/api/v1/activity/catch-up')
+async def post_canonical_activity_catch_up(
+    contract: ActivityCatchUpContract,
+    principal: Principal = Depends(require_scope('read')),
+):
+    try:
+        return await _activity_catch_up(
+            principal.user_id,
+            after=contract.after,
+            limit=contract.limit,
+            reconcile=contract.reconcile,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail='Structured activity reconciliation is unavailable.') from exc
 
 # JIRA & TEAMS ENDPOINTS
 @app.get('/api/v1/jira/issues')
@@ -1209,7 +1433,10 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
         )
         raise
     except Exception:
-        set_turn_status(principal.user_id, contract.target, client_message_id, 'failed')
+        set_turn_status(
+            principal.user_id, contract.target, client_message_id, 'failed',
+            terminal_fallback_only=True,
+        )
         raise
     _record_prompt_result(principal.user_id, contract.target, client_message_id, turn['turn_id'], result)
     return {
@@ -1220,7 +1447,10 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
             'target': contract.target,
             'conversation_id': turn['conversation_id'],
             'turn_id': turn['turn_id'],
+            'objective_id': turn['objective_id'],
+            'run_id': turn['run_id'],
             'assistant_message_id': turn['assistant_message_id'],
+            'lifecycle': get_turn_lifecycle(principal.user_id, contract.target, turn['turn_id']),
             'messages': turn_messages(turn['turn_id']),
         },
     }
@@ -1242,11 +1472,59 @@ async def get_conversation_messages(
     return {**list_conversation_messages(principal.user_id, target, limit=limit), 'ingest_error': ingest_error}
 
 
+@app.get('/api/v1/conversations/{target}/replay')
+async def replay_conversation(
+    target: str,
+    after: int = Query(-1, ge=-1, le=9_007_199_254_740_991),
+    limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
+    principal: Principal = Depends(require_scope('read')),
+):
+    """Catch up canonical rows after a stable sequence without terminal reads."""
+    try:
+        return replay_messages(principal.user_id, target, after=after, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get('/api/v1/conversations/{target}/turns/{turn_id}')
+async def inspect_conversation_turn(
+    target: str,
+    turn_id: str,
+    principal: Principal = Depends(require_scope('read')),
+):
+    try:
+        return get_turn_lifecycle(principal.user_id, target, turn_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post('/api/v1/conversations/{target}/turns/{turn_id}/assistant-messages')
+async def reserve_conversation_assistant_message(
+    target: str,
+    turn_id: str,
+    contract: AssistantMessageReservationContract,
+    principal: Principal = Depends(require_any_scope('response', 'command')),
+):
+    if target != CANONICAL_CONVERSATION_TARGET:
+        raise HTTPException(status_code=422, detail='Semantic assistant messages are supported only for captain chat.')
+    try:
+        return reserve_assistant_message(
+            principal.user_id, target, turn_id, contract.idempotency_key,
+            kind=contract.kind,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MagiEventConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post('/api/v1/conversations/{target}/events')
 async def post_magi_response_event(
     target: str,
     event: MagiEventContract,
-    principal: Principal = Depends(require_scope('command')),
+    principal: Principal = Depends(require_any_scope('response', 'command')),
 ):
     """Accept one authenticated, strictly validated semantic response event."""
     if target != CANONICAL_CONVERSATION_TARGET:
