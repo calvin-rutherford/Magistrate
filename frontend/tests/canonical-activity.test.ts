@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CanonicalActivityRecoveryCoordinator,
+  decisionAttentionItemId,
+  deriveCanonicalWorkState,
   getCanonicalActivityCursor,
   getCanonicalActivityRecords,
+  getCanonicalActivitySnapshot,
   ingestCanonicalActivityPage,
+  ingestCanonicalActivityReplayPage,
+  ingestCanonicalActivitySnapshot,
+  markCanonicalActivityFresh,
   normalizeCanonicalActivityRecord,
   setCanonicalActivityPrincipal,
 } from '../src/services/CanonicalActivity';
@@ -129,6 +136,370 @@ test('malformed fields, credentials, controls, and cursor gaps fail closed witho
   ], 2)), 'two stable records cannot claim one insertion sequence');
   assert.equal(getCanonicalActivityCursor(), 0);
   assert.deepEqual(getCanonicalActivityRecords(), []);
+});
+
+test('a delayed snapshot cannot regress a newer realtime revision or lifecycle summary', () => {
+  setCanonicalActivityPrincipal('activity-snapshot-race');
+  const snapshot = (activityRecord: unknown, cursor: number, active: number) => ({
+    schema_version: 'activity.v1', records: [activityRecord], focus_records: [activityRecord],
+    focus_truncated: false, snapshot_cursor: cursor, latest_sequence: 1,
+    next_before: null, has_more: false,
+    summary: { active_objectives: active, operation_count: active ? 12 : 0, pending_decisions: 0 },
+  });
+  const running = record({ delivery_sequence: 2, revision: 2 });
+  assert.ok(ingestCanonicalActivitySnapshot(snapshot(running, 2, 1)));
+  const completed = record({
+    delivery_sequence: 3, revision: 3, kind: 'objective.completed',
+    state: 'completed', summary: 'Objective completed.',
+  });
+  assert.ok(ingestCanonicalActivityPage({
+    ...page([completed], 3),
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  assert.ok(ingestCanonicalActivitySnapshot(snapshot(running, 2, 1)));
+  assert.equal(getCanonicalActivityRecords()[0].state, 'completed');
+  assert.equal(getCanonicalActivityRecords()[0].revision, 3);
+  assert.equal(getCanonicalActivitySnapshot().summary.activeObjectives, 0);
+});
+
+test('historical snapshot pages cannot checkpoint past unseen replay rows', () => {
+  setCanonicalActivityPrincipal('activity-history-cursor-race');
+  const current = record({
+    id: 'ca_history_current', sequence: 3, delivery_sequence: 3,
+    kind: 'worker.message', state: 'completed',
+  });
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [current], focus_records: [],
+    focus_truncated: false, snapshot_cursor: 3, latest_sequence: 3,
+    next_before: 3, has_more: true,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  const older = record({
+    id: 'ca_history_older', sequence: 1, delivery_sequence: 1,
+    kind: 'worker.message', state: 'completed',
+  });
+  const pageObservedAfterNewRows = {
+    schema_version: 'activity.v1', records: [older], focus_records: [],
+    focus_truncated: false, snapshot_cursor: 5, latest_sequence: 5,
+    next_before: null, has_more: false,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  };
+
+  assert.equal(ingestCanonicalActivitySnapshot(pageObservedAfterNewRows, true), null);
+  assert.equal(getCanonicalActivityCursor(), 3);
+  assert.ok(!getCanonicalActivityRecords().some(item => item.id === older.id));
+
+  const unseen = [4, 5].map(sequence => record({
+    id: `ca_history_unseen_${sequence}`, sequence, delivery_sequence: sequence,
+    kind: 'worker.message', state: 'completed',
+  }));
+  assert.ok(ingestCanonicalActivityPage({
+    ...page(unseen, 5),
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  const applied = ingestCanonicalActivitySnapshot(pageObservedAfterNewRows, true);
+  assert.equal(applied?.addedHistoryRecords, 1);
+  assert.equal(getCanonicalActivityCursor(), 5);
+  assert.deepEqual(
+    getCanonicalActivityRecords().map(item => item.id),
+    ['ca_history_older', 'ca_history_current', 'ca_history_unseen_4', 'ca_history_unseen_5'],
+  );
+});
+
+test('a current complete focus projection clears a stale cached pending decision without inventing an outcome', () => {
+  setCanonicalActivityPrincipal('activity-focus-prune');
+  const pending = record({
+    id: 'ca_pending', kind: 'decision.requested', state: 'awaiting-user',
+    task_id: 'soak-task', decision_key: 'release-channel',
+  });
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [pending], focus_records: [pending], focus_truncated: false,
+    snapshot_cursor: 1, latest_sequence: 1, next_before: null, has_more: false,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 1 },
+  }));
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
+    snapshot_cursor: 2, latest_sequence: 1, next_before: null, has_more: false,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  assert.deepEqual(getCanonicalActivityRecords(), []);
+  assert.equal(getCanonicalActivitySnapshot().summary.pendingDecisions, 0);
+});
+
+test('working state and decision routing use only canonical identities', () => {
+  setCanonicalActivityPrincipal('activity-working-state');
+  const rows = [record({ id: 'ca_objective', kind: 'objective.progress' }), ...Array.from(
+    { length: 12 },
+    (_, index) => record({
+      id: `ca_operation_${index + 1}`, sequence: index + 2, delivery_sequence: index + 2,
+      kind: 'worker.message', state: 'completed', summary: `Operation ${index + 1}.`,
+    }),
+  )];
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: rows, focus_records: [rows[0]],
+    focus_truncated: false, snapshot_cursor: 13, latest_sequence: 13,
+    next_before: null, has_more: false,
+    summary: { active_objectives: 1, operation_count: 12, pending_decisions: 0 },
+  }));
+  markCanonicalActivityFresh();
+  const work = deriveCanonicalWorkState(getCanonicalActivitySnapshot(), [{
+    canonicalId: 'cm_user', objectiveId: 'obj_soak', lifecycleState: 'active', progress: 'working',
+  }]);
+  assert.deepEqual([work.active, work.phase, work.operationCount], [true, 'active', 12]);
+  assert.equal(decisionAttentionItemId('release-channel'), 'captain-question-release-channel');
+  assert.equal(decisionAttentionItemId('release/channel'), 'captain-question-release/channel');
+  assert.equal(decisionAttentionItemId('release window?#'), 'captain-question-release window?#');
+  assert.equal(decisionAttentionItemId('部署/承認'), 'captain-question-部署/承認');
+  for (const invalid of [undefined, '', ' leading', 'trailing ', 'line\nbreak', 'zero\u200bwidth', 'x'.repeat(129)]) {
+    assert.equal(decisionAttentionItemId(invalid), null);
+  }
+  setCanonicalActivityPrincipal('activity-local-only');
+  assert.equal(deriveCanonicalWorkState(getCanonicalActivitySnapshot(), [{ progress: 'working' }]).active, false,
+    'component-local progress without a Gateway identity cannot activate lifecycle UI');
+});
+
+test('snapshot and replay retention preserves full focus capacity and recent revisions', () => {
+  const makeRows = (start: number, count: number) => Array.from({ length: count }, (_, offset) => {
+    const sequence = start + offset;
+    return record({
+      id: `ca_volume_${sequence}`, sequence, delivery_sequence: sequence,
+      kind: 'worker.message', state: 'completed', summary: `Completed operation ${sequence}.`,
+    });
+  });
+  const focus = Array.from({ length: 2_000 }, (_, index) => index < 1_000
+    ? record({
+      id: `ca_active_${index}`, sequence: index + 1, delivery_sequence: index + 1,
+      task_id: `task-${index}`, objective_id: `obj-${index}`,
+    })
+    : record({
+      id: `ca_pending_${index}`, sequence: index + 1, delivery_sequence: index + 1,
+      kind: 'decision.requested', state: 'awaiting-user', task_id: `task-${index - 1_000}`,
+      decision_key: `decision-${index}`, objective_id: `obj-${index - 1_000}`,
+    }));
+  const active = focus[0];
+  const pending = focus[1_000];
+
+  setCanonicalActivityPrincipal('activity-snapshot-volume');
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [], focus_records: focus,
+    focus_truncated: false, snapshot_cursor: 2_000, latest_sequence: 2_000,
+    next_before: null, has_more: false,
+    summary: { active_objectives: 1_000, operation_count: 0, pending_decisions: 1_000 },
+  }));
+  assert.equal(getCanonicalActivityRecords().length, 2_000);
+  assert.ok(getCanonicalActivityRecords().some(item => item.id === active.id));
+  assert.ok(getCanonicalActivityRecords().some(item => item.id === pending.id));
+  assert.deepEqual(getCanonicalActivitySnapshot().summary, {
+    activeObjectives: 1_000, operationCount: 0, pendingDecisions: 1_000,
+  });
+
+  setCanonicalActivityPrincipal('activity-replay-volume');
+  for (let offset = 0; offset < focus.length; offset += 200) {
+    const batch = focus.slice(offset, offset + 200);
+    const nextCursor = offset + 200;
+    assert.ok(ingestCanonicalActivityPage({
+      ...page(batch, nextCursor, 2_000),
+      ...(nextCursor === 2_000 ? {
+        summary: { active_objectives: 1_000, operation_count: 0, pending_decisions: 1_000 },
+      } : {}),
+    }));
+  }
+  const completed = makeRows(2_001, 500).map(row => ({
+    ...row, task_id: 'task-0', objective_id: 'obj-0',
+  }));
+  for (let offset = 0; offset < completed.length; offset += 100) {
+    const batch = completed.slice(offset, offset + 100);
+    assert.ok(ingestCanonicalActivityPage(page(batch, 2_100 + offset, 2_500)));
+  }
+  assert.equal(getCanonicalActivityRecords().length, 2_400);
+
+  assert.ok(ingestCanonicalActivityPage({
+    ...page([record({
+      id: pending.id, sequence: pending.sequence, delivery_sequence: 2_501, revision: 2,
+      kind: 'decision.resolved', state: 'resolved', task_id: pending.task_id,
+      decision_key: pending.decision_key, objective_id: pending.objective_id,
+      summary: 'Release channel selected.',
+    })], 2_501),
+    summary: { active_objectives: 1_000, operation_count: 500, pending_decisions: 999 },
+  }));
+  const revised = getCanonicalActivityRecords().find(item => item.id === pending.id);
+  assert.deepEqual([revised?.state, revised?.revision, revised?.deliverySequence], ['resolved', 2, 2_501]);
+  assert.equal(getCanonicalActivityRecords().length, 2_399);
+  assert.deepEqual(getCanonicalActivitySnapshot().summary, {
+    activeObjectives: 1_000, operationCount: 500, pendingDecisions: 999,
+  });
+});
+
+test('an overflowing replay prefix recovers through the authoritative cursor snapshot', async () => {
+  const focus = Array.from({ length: 5_000 }, (_, index) => record({
+    id: `ca_recovery_${index + 1}`, sequence: index + 1, delivery_sequence: index + 1,
+    task_id: `recovery-task-${index + 1}`, objective_id: `recovery-objective-${index + 1}`,
+  }));
+  setCanonicalActivityPrincipal('activity-replay-prefix-overflow');
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [], focus_records: focus,
+    focus_truncated: false, snapshot_cursor: 5_000, latest_sequence: 5_000,
+    next_before: null, has_more: false,
+    summary: { active_objectives: 5_000, operation_count: 0, pending_decisions: 0 },
+  }));
+
+  const newlyActive = record({
+    id: 'ca_recovery_5001', sequence: 5_001, delivery_sequence: 5_001,
+    task_id: 'recovery-task-5001', objective_id: 'recovery-objective-5001',
+  });
+  const terminalRevision = record({
+    id: focus[0].id, sequence: focus[0].sequence, delivery_sequence: 5_002, revision: 2,
+    kind: 'objective.completed', state: 'completed', task_id: focus[0].task_id,
+    objective_id: focus[0].objective_id, summary: 'Objective completed authoritatively.',
+  });
+  let snapshotRequests = 0;
+  const applied = await ingestCanonicalActivityReplayPage({
+    ...page([newlyActive], 5_001, 5_002), has_more: true,
+  }, async () => {
+    snapshotRequests += 1;
+    return {
+      schema_version: 'activity.v1', records: [terminalRevision],
+      focus_records: [...focus.slice(1), newlyActive], focus_truncated: false,
+      snapshot_cursor: 5_002, latest_sequence: 5_001,
+      next_before: null, has_more: false,
+      summary: { active_objectives: 5_000, operation_count: 0, pending_decisions: 0 },
+    };
+  });
+
+  assert.equal(snapshotRequests, 1);
+  assert.equal(applied?.snapshotPage?.snapshotCursor, 5_002);
+  assert.equal(getCanonicalActivityCursor(), 5_002);
+  assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'active').length, 5_000);
+  assert.equal(getCanonicalActivityRecords().length, 5_001);
+  assert.deepEqual(
+    getCanonicalActivityRecords().filter(item => item.id === focus[0].id)
+      .map(item => [item.sequence, item.revision, item.state]),
+    [[1, 2, 'completed']],
+  );
+  assert.ok(getCanonicalActivityRecords().some(item => item.id === newlyActive.id));
+  assert.deepEqual(getCanonicalActivitySnapshot().summary, {
+    activeObjectives: 5_000, operationCount: 0, pendingDecisions: 0,
+  });
+});
+
+test('an authoritative recovery requested during an in-flight sync runs afterward', async () => {
+  const coordinator = new CanonicalActivityRecoveryCoordinator();
+  const calls: boolean[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>(resolve => { releaseFirst = resolve; });
+  let firstStarted!: () => void;
+  const started = new Promise<void>(resolve => { firstStarted = resolve; });
+  const runner = async (authoritativeSnapshot: boolean) => {
+    calls.push(authoritativeSnapshot);
+    if (calls.length === 1) {
+      firstStarted();
+      await firstBlocked;
+    }
+  };
+
+  const initial = coordinator.request(false, runner);
+  await started;
+  const queued = coordinator.request(true, runner);
+  releaseFirst();
+  await Promise.all([initial, queued]);
+
+  assert.deepEqual(calls, [false, true]);
+});
+
+test('snapshot pagination reveals complete older pages and stops at retained history capacity', () => {
+  setCanonicalActivityPrincipal('activity-pagination-capacity');
+  const active = record({ id: 'ca_page_active', sequence: 1, delivery_sequence: 1 });
+  const snapshotPage = (start: number, nextBefore: number) => ({
+    schema_version: 'activity.v1', records: Array.from({ length: 100 }, (_, offset) => {
+      const sequence = start + offset;
+      return record({
+        id: `ca_page_${sequence}`, sequence, delivery_sequence: sequence,
+        kind: 'worker.message', state: 'completed', summary: `Historical operation ${sequence}.`,
+      });
+    }),
+    focus_records: [active], focus_truncated: false, snapshot_cursor: 500,
+    latest_sequence: 500, next_before: nextBefore, has_more: true,
+    summary: { active_objectives: 1, operation_count: 0, pending_decisions: 0 },
+  });
+
+  let applied = ingestCanonicalActivitySnapshot(snapshotPage(401, 401));
+  assert.deepEqual([applied?.hasMore, applied?.nextBefore], [true, 401]);
+  for (const [start, nextBefore] of [[301, 301], [201, 201], [101, 101]] as const) {
+    const beforeCount = getCanonicalActivityRecords().length;
+    applied = ingestCanonicalActivitySnapshot(snapshotPage(start, nextBefore), true);
+    assert.ok(applied);
+    assert.equal(getCanonicalActivityRecords().length, beforeCount + 100);
+    assert.ok(getCanonicalActivityRecords().some(item => item.id === `ca_page_${start}`));
+  }
+  assert.equal(getCanonicalActivityRecords().length, 401);
+  assert.deepEqual([applied?.hasMore, applied?.nextBefore], [false, undefined]);
+});
+
+test('focus overlap keeps older history reachable and bounds the next complete page', () => {
+  setCanonicalActivityPrincipal('activity-pagination-focus-overlap');
+  const focus = Array.from({ length: 90 }, (_, index) => record({
+    id: `ca_overlap_focus_${index + 1}`,
+    sequence: 1_001 + index,
+    delivery_sequence: index + 1,
+    task_id: `overlap-task-${index + 1}`,
+    objective_id: `overlap-objective-${index + 1}`,
+  }));
+  const existingHistory = Array.from({ length: 310 }, (_, index) => record({
+    id: `ca_overlap_history_${index + 1}`,
+    sequence: 1_101 + index,
+    delivery_sequence: 91 + index,
+    kind: 'worker.message',
+    state: 'completed',
+  }));
+  const snapshot = (
+    records: unknown[], cursor: number, nextBefore: number | null, hasMore: boolean,
+  ) => ({
+    schema_version: 'activity.v1', records, focus_records: focus,
+    focus_truncated: false, snapshot_cursor: cursor, latest_sequence: 1_410,
+    next_before: nextBefore, has_more: hasMore,
+    summary: { active_objectives: 90, operation_count: 0, pending_decisions: 0 },
+  });
+
+  assert.ok(ingestCanonicalActivitySnapshot(
+    snapshot(existingHistory.slice(0, 200), 490, 1_211, true),
+  ));
+  assert.ok(ingestCanonicalActivitySnapshot(
+    snapshot(existingHistory.slice(200), 490, 1_101, true), true,
+  ));
+  assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'completed').length, 310);
+
+  const tenNewHistory = Array.from({ length: 10 }, (_, index) => record({
+    id: `ca_overlap_new_${index + 1}`,
+    sequence: 1_091 + index,
+    delivery_sequence: 401 + index,
+    kind: 'worker.message',
+    state: 'completed',
+  }));
+  const overlappingPage = ingestCanonicalActivitySnapshot(
+    snapshot([...focus, ...tenNewHistory], 490, 1_001, true), true,
+  );
+  assert.deepEqual(
+    [overlappingPage?.addedHistoryRecords, overlappingPage?.hasMore,
+      overlappingPage?.nextBefore, overlappingPage?.nextLimit],
+    [10, true, 1_001, 80],
+  );
+
+  const finalHistoryPage = Array.from({ length: 80 }, (_, index) => record({
+    id: `ca_overlap_final_${index + 1}`,
+    sequence: 921 + index,
+    delivery_sequence: 411 + index,
+    kind: 'worker.message',
+    state: 'completed',
+  }));
+  const finalPage = ingestCanonicalActivitySnapshot(
+    snapshot(finalHistoryPage, 490, 921, true), true,
+  );
+  assert.deepEqual(
+    [finalPage?.addedHistoryRecords, finalPage?.hasMore, finalPage?.nextLimit],
+    [80, false, undefined],
+  );
+  assert.equal(getCanonicalActivityRecords().filter(item => item.state === 'completed').length, 400);
+  assert.ok(getCanonicalActivityRecords().some(item => item.id === 'ca_overlap_final_1'));
 });
 
 test('safe references and more than ten ordered activity rows survive bounded catch-up', () => {

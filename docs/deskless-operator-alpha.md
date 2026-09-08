@@ -53,7 +53,7 @@ cd frontend
 EXPO_PUBLIC_GATEWAY_URL=https://gateway.example/api/v1 \
 EXPO_PUBLIC_EAS_PROJECT_ID=<linked-eas-project-id> \
 npx expo config --type public
-npx eas build --profile development --platform ios
+npx eas-cli@23.0.0 build --profile development --platform ios
 ```
 
 The gateway/runner stays private behind the deployment's TLS reverse proxy;

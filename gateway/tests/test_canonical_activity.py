@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -7,7 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app.activity_store import SourceEventConflict, list_activity, reconcile_snapshot, source_diagnostics
+from app import activity_store
+from app.activity_store import (
+    MAX_ACTIVITY_FOCUS_RECORDS, SourceEventConflict, list_activity,
+    reconcile_snapshot, snapshot_activity, source_diagnostics,
+)
 from app.auth import issue_session
 from app.firstmate_activity import FirstmateActivityAdapter
 from app.main import app, firstmate_activity
@@ -487,6 +492,124 @@ def test_snapshot_reconciliation_never_regresses_or_reuses_an_observation_identi
         )
 
 
+def test_snapshot_recovers_every_accepted_active_objective_and_pending_decision():
+    user = 'activity-focus-capacity-owner'
+    candidates = []
+    open_decisions = []
+    for index in range(4_000):
+        task_id = f'focus-task-{index}'
+        objective_id = f'obj_focus_{index}'
+        common = {
+            'importance': 'routine', 'title': f'Focus task {index}',
+            'source_event_id': None, 'task_id': task_id, 'objective_id': objective_id,
+            'run_id': f'run_focus_{index}', 'project': None, 'occurred_at': None, 'refs': [],
+        }
+        candidates.append({
+            **common, 'record_key': f'objective:{index}', 'kind': 'objective.progress',
+            'state': 'active', 'summary': 'Active objective.', 'decision_key': None,
+            'source_payload_sha256': hashlib.sha256(f'objective:{index}'.encode()).hexdigest(),
+        })
+    for index in range(1_000):
+        task_id = f'focus-task-{index}'
+        objective_id = f'obj_focus_{index}'
+        common = {
+            'importance': 'routine', 'title': f'Focus task {index}',
+            'source_event_id': None, 'task_id': task_id, 'objective_id': objective_id,
+            'run_id': f'run_focus_{index}', 'project': None, 'occurred_at': None, 'refs': [],
+        }
+        decision_key = f'decision-{index}'
+        candidates.append({
+            **common, 'record_key': f'decision:{index}', 'kind': 'decision.requested',
+            'state': 'awaiting-user', 'importance': 'attention', 'summary': 'Choose an option.',
+            'decision_key': decision_key,
+            'source_payload_sha256': hashlib.sha256(f'decision:{index}'.encode()).hexdigest(),
+        })
+        open_decisions.append(f'{task_id}\0{decision_key}')
+    reconcile_snapshot(
+        user, 'firstmate:main', observed_at=2_000, snapshot_sha256='a' * 64,
+        records=candidates, open_decision_keys=open_decisions,
+    )
+
+    projection = snapshot_activity(user, limit=1)
+    assert len(projection['focus_records']) == MAX_ACTIVITY_FOCUS_RECORDS
+    assert projection['focus_truncated'] is False
+    assert projection['summary'] == {
+        'active_objectives': 4_000, 'operation_count': 0, 'pending_decisions': 1_000,
+    }
+
+    terminal = {
+        **candidates[0], 'kind': 'objective.completed', 'state': 'completed',
+        'summary': 'Objective completed.',
+        'source_payload_sha256': hashlib.sha256(b'objective:0:completed').hexdigest(),
+    }
+    changed = reconcile_snapshot(
+        user, 'firstmate:main', observed_at=3_000, snapshot_sha256='b' * 64,
+        records=[terminal, *candidates[1:]], open_decision_keys=open_decisions,
+    )
+    assert any(
+        row['task_id'] == terminal['task_id']
+        and row['revision'] == 2 and row['state'] == 'completed'
+        for row in changed
+    )
+    projection = snapshot_activity(user, limit=1)
+    assert len(projection['focus_records']) == MAX_ACTIVITY_FOCUS_RECORDS - 1
+    assert projection['focus_truncated'] is False
+    assert projection['summary'] == {
+        'active_objectives': 3_999, 'operation_count': 0, 'pending_decisions': 1_000,
+    }
+
+
+def test_replay_cursor_records_and_summary_share_one_read_snapshot(monkeypatch):
+    user = 'activity-replay-snapshot-owner'
+    active = {
+        'record_key': 'objective:replay-snapshot',
+        'kind': 'objective.progress', 'state': 'active', 'importance': 'routine',
+        'title': 'Replay snapshot', 'summary': 'Objective is active.',
+        'source_payload_sha256': 'b' * 64, 'source_event_id': None,
+        'task_id': 'replay-snapshot', 'decision_key': None,
+        'objective_id': 'obj_replay_snapshot', 'run_id': 'run_replay_snapshot',
+        'project': None, 'occurred_at': None, 'refs': [],
+    }
+    reconcile_snapshot(
+        user, 'test:replay-snapshot', observed_at=1_000,
+        snapshot_sha256='c' * 64, records=[active], open_decision_keys=[],
+    )
+    before_update = list_activity(user)['latest_cursor']
+    with sqlite3.connect(activity_store.db.DB_PATH) as conn:
+        conn.execute('PRAGMA journal_mode=WAL')
+
+    original_summary = activity_store._activity_summary
+    update_committed = False
+
+    def update_before_summary(conn, owner):
+        nonlocal update_committed
+        if owner == user and not update_committed:
+            update_committed = True
+            reconcile_snapshot(
+                user, 'test:replay-snapshot', observed_at=2_000,
+                snapshot_sha256='d' * 64,
+                records=[{
+                    **active, 'kind': 'objective.completed', 'state': 'completed',
+                    'summary': 'Objective completed.', 'source_payload_sha256': 'e' * 64,
+                }],
+                open_decision_keys=[],
+            )
+        return original_summary(conn, owner)
+
+    monkeypatch.setattr(activity_store, '_activity_summary', update_before_summary)
+    replay = list_activity(user)
+    assert replay['latest_cursor'] == before_update
+    assert [(row['revision'], row['state']) for row in replay['records']] == [(1, 'active')]
+    assert replay['summary'] == {
+        'active_objectives': 1, 'operation_count': 0, 'pending_decisions': 0,
+    }
+
+    current = list_activity(user, after=before_update)
+    assert current['latest_cursor'] > replay['latest_cursor']
+    assert [(row['revision'], row['state']) for row in current['records']] == [(2, 'completed')]
+    assert current['summary']['active_objectives'] == 0
+
+
 @pytest.mark.asyncio
 async def test_snapshot_ignores_pane_derived_runtime_state_but_keeps_keyed_decisions(tmp_path):
     class SnapshotFirstmate(EmptyFirstmate):
@@ -515,6 +638,37 @@ async def test_snapshot_ignores_pane_derived_runtime_state_but_keeps_keyed_decis
     [decision] = [record for record in result['changed'] if record['kind'] == 'decision.requested']
     assert decision['decision_key'] == 'ship-or-hold'
     assert decision['state'] == 'awaiting-user'
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_normalized_focus_beyond_recovery_capacity(tmp_path):
+    class RecordOnlyFirstmate(EmptyFirstmate):
+        async def get_snapshot(self):
+            snapshot = await super().get_snapshot()
+            snapshot['generated'] = '2026-09-08T04:00:00Z'
+            snapshot['backlog'] = {'records': [
+                {'id': f'backlog-{index}', 'title': f'Backlog {index}', 'state': 'queued'}
+                for index in range(2_000)
+            ]}
+            snapshot['secondmate_landed'] = {'records': [
+                {'id': f'landed-{index}', 'title': f'Landed {index}', 'state': 'queued'}
+                for index in range(2_000)
+            ]}
+            snapshot['tasks'] = [{
+                'id': f'task-{index}', 'spawn_gen': '1',
+                'current_state': {'source': 'firstmate', 'state': 'working'},
+                'hints': {'open_decisions': [{
+                    'verb': 'needs-decision', 'key': 'release-channel',
+                    'summary': 'Choose the release channel.',
+                }]} if index == 0 else {},
+            } for index in range(1_000)]
+            return snapshot
+
+    source = adapter(tmp_path, [], firstmate=RecordOnlyFirstmate())
+    result = await source.reconcile('activity-record-focus-overflow')
+    assert result['status'] == 'degraded'
+    assert {'stream': 'fleet-snapshot', 'code': 'SourceUnavailable'} in result['errors']
+    assert list_activity('activity-record-focus-overflow')['records'] == []
 
 
 @pytest.mark.asyncio
@@ -627,10 +781,21 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
     client = TestClient(app)
 
     assert client.get('/api/v1/activity/replay').status_code == 401
+    assert client.get('/api/v1/activity/snapshot?reconcile=false').status_code == 401
     replay = client.get(f'/api/v1/activity/replay?after={before}&limit=10', headers=TEST_HEADERS)
     assert replay.status_code == 200
     assert [row['summary'] for row in replay.json()['records']] == ['Actual semantic progress.']
     assert replay.json()['records'][0]['objective_id'] == 'obj_http_replay'
+    snapshot = client.get(
+        '/api/v1/activity/snapshot?limit=1&reconcile=false&user_id=isolated-http-owner',
+        headers=TEST_HEADERS,
+    )
+    assert snapshot.status_code == 200
+    assert snapshot.json()['snapshot_cursor'] == replay.json()['latest_cursor']
+    assert snapshot.json()['focus_records'][0]['id'] == replay.json()['records'][0]['id']
+    assert snapshot.json()['summary'] == {
+        'active_objectives': 1, 'operation_count': 0, 'pending_decisions': 0,
+    }
     assert client.get(
         f"/api/v1/activity/replay?after={replay.json()['latest_cursor'] + 1}",
         headers=TEST_HEADERS,
@@ -658,6 +823,13 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
     )
     assert other.status_code == 200
     assert other.json()['records'] == []
+    isolated_snapshot = client.get(
+        '/api/v1/activity/snapshot?reconcile=false',
+        headers={'Authorization': f'Bearer {other_token}'},
+    )
+    assert isolated_snapshot.status_code == 200
+    assert isolated_snapshot.json()['records'] == []
+    assert isolated_snapshot.json()['focus_records'] == []
 
     with client.websocket_connect('/api/v1/events') as socket:
         socket.send_json({

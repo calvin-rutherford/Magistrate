@@ -52,6 +52,7 @@ _ACTIVITY_KIND_STATES = {
     'worker.final': frozenset({'completed'}),
 }
 MAX_ACTIVITY_PAGE = 200
+MAX_ACTIVITY_FOCUS_RECORDS = 5_000
 MAX_ACTIVITY_SUMMARY_CHARS = 600
 MAX_ACTIVITY_TITLE_CHARS = 240
 MAX_SOURCE_PAYLOAD_BYTES = 8 * 1024
@@ -814,6 +815,119 @@ def mark_source_fault(
         )
 
 
+def _activity_summary(conn: sqlite3.Connection, user_id: str) -> Dict[str, int]:
+    active_objective_count = int(conn.execute(
+        '''SELECT COUNT(DISTINCT objective_id) FROM activity_records
+           WHERE user_id = ? AND kind IN ('objective.started', 'objective.progress')
+             AND state IN ('active', 'awaiting-user') AND objective_id IS NOT NULL''',
+        (user_id,),
+    ).fetchone()[0])
+    operation_count = int(conn.execute(
+        '''SELECT COUNT(*) FROM activity_records AS operation
+           WHERE operation.user_id = ?
+             AND operation.kind NOT LIKE 'objective.%'
+             AND operation.kind NOT LIKE 'decision.%'
+             AND EXISTS (
+               SELECT 1 FROM activity_records AS objective
+               WHERE objective.user_id = operation.user_id
+                 AND objective.objective_id = operation.objective_id
+                 AND objective.kind IN ('objective.started', 'objective.progress')
+                 AND objective.state IN ('active', 'awaiting-user')
+             )''',
+        (user_id,),
+    ).fetchone()[0])
+    pending_decisions = int(conn.execute(
+        '''SELECT COUNT(*) FROM activity_records
+           WHERE user_id = ? AND kind = 'decision.requested' AND state = 'awaiting-user' ''',
+        (user_id,),
+    ).fetchone()[0])
+    return {
+        'active_objectives': active_objective_count,
+        'operation_count': operation_count,
+        'pending_decisions': pending_decisions,
+    }
+
+
+def snapshot_activity(
+    user_id: str, *, before: Optional[int] = None, limit: int = 100,
+) -> Dict[str, Any]:
+    """Return a bounded current projection plus its durable replay cursor.
+
+    Snapshot pagination uses the stable insertion sequence, while
+    ``snapshot_cursor`` identifies the last activity change included by this
+    SQLite read transaction.  Callers merge the projection monotonically and
+    then replay after that cursor, so a response delayed behind realtime cannot
+    roll a newer revision backwards.
+    """
+    if (
+        not isinstance(user_id, str) or not user_id or len(user_id) > 128
+        or _has_controls(user_id)
+    ):
+        raise ValueError('A bounded tenant identity is required.')
+    if before is not None and (
+        type(before) is not int or before < 1 or before > MAX_SAFE_INTEGER
+    ):
+        raise ValueError('Activity snapshot cursor is outside the supported range.')
+    limit = max(1, min(limit, MAX_ACTIVITY_PAGE))
+    with _session() as conn:
+        # Python's sqlite wrapper does not start a transaction for SELECTs.
+        # Pin every page/focus/summary/cursor read to one WAL snapshot.
+        conn.execute('BEGIN')
+        latest_sequence = int(conn.execute(
+            'SELECT COALESCE(MAX(sequence_index), 0) FROM activity_records WHERE user_id = ?',
+            (user_id,),
+        ).fetchone()[0])
+        snapshot_cursor = int(conn.execute(
+            'SELECT COALESCE(MAX(change_sequence), 0) FROM activity_changes WHERE user_id = ?',
+            (user_id,),
+        ).fetchone()[0])
+        page_before = before if before is not None else latest_sequence + 1
+        rows = conn.execute(
+            '''SELECT r.*,
+                      (SELECT MAX(c.change_sequence) FROM activity_changes c
+                       WHERE c.user_id = r.user_id AND c.record_id = r.id) AS delivery_sequence
+               FROM activity_records r
+               WHERE r.user_id = ? AND r.sequence_index < ?
+               ORDER BY r.sequence_index DESC LIMIT ?''',
+            (user_id, page_before, limit + 1),
+        ).fetchall()
+        page = rows[:limit]
+        # Current non-terminal objectives and decisions must be recoverable even
+        # when a long completed history pushes them outside the newest page.
+        focus_rows = conn.execute(
+            '''SELECT r.*,
+                      (SELECT MAX(c.change_sequence) FROM activity_changes c
+                       WHERE c.user_id = r.user_id AND c.record_id = r.id) AS delivery_sequence
+               FROM activity_records r
+               WHERE r.user_id = ? AND (
+                    (r.kind IN ('objective.started', 'objective.progress')
+                     AND r.state IN ('active', 'awaiting-user'))
+                    OR (r.kind = 'decision.requested' AND r.state = 'awaiting-user')
+               )
+               ORDER BY r.sequence_index DESC LIMIT ?''',
+            (user_id, MAX_ACTIVITY_FOCUS_RECORDS + 1),
+        ).fetchall()
+        summary = _activity_summary(conn, user_id)
+
+    def deliver(row: sqlite3.Row) -> Dict[str, Any]:
+        delivery_sequence = row['delivery_sequence']
+        if delivery_sequence is None:
+            raise RuntimeError('A canonical activity row has no durable change identity.')
+        return {**_public_activity(row), 'delivery_sequence': int(delivery_sequence)}
+
+    return {
+        'schema_version': ACTIVITY_SCHEMA,
+        'records': [deliver(row) for row in page],
+        'focus_records': [deliver(row) for row in focus_rows[:MAX_ACTIVITY_FOCUS_RECORDS]],
+        'focus_truncated': len(focus_rows) > MAX_ACTIVITY_FOCUS_RECORDS,
+        'snapshot_cursor': snapshot_cursor,
+        'latest_sequence': latest_sequence,
+        'next_before': page[-1]['sequence_index'] if len(rows) > limit and page else None,
+        'has_more': len(rows) > limit,
+        'summary': summary,
+    }
+
+
 def list_activity(user_id: str, *, after: int = 0, limit: int = 100) -> Dict[str, Any]:
     """Replay insertions and in-place revisions after a durable change cursor."""
     if (
@@ -825,6 +939,7 @@ def list_activity(user_id: str, *, after: int = 0, limit: int = 100) -> Dict[str
         raise ValueError('Activity cursor is outside the supported range.')
     limit = max(1, min(limit, MAX_ACTIVITY_PAGE))
     with _session() as conn:
+        conn.execute('BEGIN')
         changes = conn.execute(
             '''SELECT change_sequence, record_id, record_revision FROM activity_changes
                WHERE user_id = ? AND change_sequence > ?
@@ -856,6 +971,7 @@ def list_activity(user_id: str, *, after: int = 0, limit: int = 100) -> Dict[str
                 **_public_activity(row),
                 'delivery_sequence': change['change_sequence'],
             })
+        summary = _activity_summary(conn, user_id)
     has_more = len(changes) > limit
     next_cursor = page[-1]['change_sequence'] if page else after
     return {
@@ -864,6 +980,7 @@ def list_activity(user_id: str, *, after: int = 0, limit: int = 100) -> Dict[str
         'next_cursor': next_cursor,
         'latest_cursor': latest_cursor,
         'has_more': has_more,
+        'summary': summary,
     }
 
 

@@ -43,9 +43,13 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       localStorage.setItem('magistrate.chat.canonical.v1.default_user|captain', JSON.stringify({ schema_version: 'conversation-cache.v1', principal_id: 'default_user', messages: canonical }));
       localStorage.setItem('magistrate.chat.pending.v1.default_user|captain', JSON.stringify({ schema_version: 'conversation-pending.v1', principal_id: 'default_user', messages: pending }));
     }
+    if (historyScenario?.seedActivityCache) {
+      localStorage.setItem('magistrate.activity.canonical.v1.default_user', JSON.stringify(historyScenario.seedActivityCache));
+    }
     const nativeFetch = window.fetch.bind(window);
     let promptSent = false;
     let postPromptHistoryRequests = 0;
+    let activitySnapshotRequests = 0;
 
     // A stand-in for the gateway's canonical conversation record (see
     // gateway/app/conversation_store.py). It lives in its own storage key so it
@@ -65,7 +69,14 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
       const messages = [];
       loadRecord().turns.forEach(turn => {
         const turnId = `ct_${turn.index}`;
-        const base = { turn_id: turnId, turn_status: turn.status, revision: 1, source: 'terminal', created_at: turn.createdAt };
+        const base = {
+          turn_id: turnId, turn_status: turn.status, revision: 1, source: 'terminal', created_at: turn.createdAt,
+          ...(turn.lifecycleState ? {
+            lifecycle_state: turn.lifecycleState, lifecycle_revision: turn.lifecycleRevision || 1,
+            decision_key: turn.lifecycleState === 'awaiting-user' ? turn.decisionKey : null,
+            objective_id: turn.objectiveId || `obj_${turn.index}`, run_id: turn.runId || `run_${turn.index}`,
+          } : {}),
+        };
         messages.push({ ...base, id: `cm_${turn.index}_u`, client_message_id: turn.clientMessageId, role: 'user', type: 'conversation', text: turn.text, visible_in_chat: true, sequence_index: turn.index * 1000, source: turn.source || 'text', attachments: turn.attachments || [] });
         (turn.tools || []).forEach((tool, position) => messages.push({ ...base, id: `cm_${turn.index}_t${position}`, role: 'assistant', type: 'tool', text: tool, visible_in_chat: false, sequence_index: turn.index * 1000 + 1 + position }));
         if (turn.reply) messages.push({
@@ -77,6 +88,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
             structured_content: turn.structuredContent,
             structured_revision: turn.structuredRevision || 1,
           } : {}),
+          ...(turn.assistantKind ? { assistant_kind: turn.assistantKind } : {}),
         });
       });
       return [...messages, ...(historyScenario?.extras || [])];
@@ -146,6 +158,7 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
     window.__canonicalOnline = !historyScenario?.canonicalFailure;
     window.__setCanonicalOnline = value => { window.__canonicalOnline = Boolean(value); };
     window.__magistrateApiCalls = [];
+    window.__activityRequests = [];
     window.__attentionRequests = () => attentionRequests;
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
@@ -267,6 +280,36 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         { id: 'w4:p1', name: 'Primary conversation', status: 'idle', harness: 'pi', workspace_id: 'w4', workspace_role: 'primary' },
         { id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex', workspace_id: 'w1', workspace_role: 'worker' },
       ]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (url.includes('/api/v1/activity/snapshot')) {
+        window.__activityRequests.push(url);
+        if (historyScenario?.activityFailure) return Promise.reject(new TypeError('Gateway activity request failed.'));
+        activitySnapshotRequests += 1;
+        if (historyScenario?.activityPageFailureOnce && activitySnapshotRequests === 2) {
+          return Promise.reject(new TypeError('Gateway activity page request failed.'));
+        }
+        const supplied = activitySnapshotRequests > 1 && historyScenario?.activityOlderSnapshot
+          ? historyScenario.activityOlderSnapshot : historyScenario?.activitySnapshot;
+        const payload = supplied || {
+          schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
+          snapshot_cursor: 0, latest_sequence: 0, next_before: null, has_more: false,
+          summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+          reconciliation: 'available', sources: [],
+        };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (url.includes('/api/v1/activity')) {
+        window.__activityRequests.push(url);
+        if (historyScenario?.activityFailure) return Promise.reject(new TypeError('Gateway activity request failed.'));
+        const supplied = activitySnapshotRequests > 1
+          ? historyScenario?.activityReplayAfterOlderSnapshot : historyScenario?.activityReplay;
+        const payload = supplied || {
+          schema_version: 'activity.v1', records: [], next_cursor: historyScenario?.activitySnapshot?.snapshot_cursor || 0,
+          latest_cursor: historyScenario?.activitySnapshot?.snapshot_cursor || 0, has_more: false,
+          summary: historyScenario?.activitySnapshot?.summary || { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+          reconciliation: 'not-requested', sources: [],
+        };
+        return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
       if (url.includes('/api/v1/attention/unified')) {
         attentionRequests += 1;
         const items = simulateLiveUpdates && attentionRequests > 1 ? [{ id: 'attention-live', provider: 'firstmate', title: 'New decision', subtitle: 'Choose next step', status: 'blocked', url: '', requires_action: true }] : [];
@@ -1096,14 +1139,230 @@ test('Settings sections are collapsed, keyboard accessible, and retain persisted
   await page.close();
 });
 
-test('pending response moves thinking into history and Stop/Escape share interruption without late insertion', async () => {
+test('canonical lifecycle drives a tappable bounded activity surface with more than ten operations', async () => {
+  const activityRecord = (overrides = {}) => ({
+    id: 'ca-objective', sequence: 1, delivery_sequence: 1, revision: 1,
+    kind: 'objective.progress', state: 'active', importance: 'routine',
+    title: 'Release objective', summary: 'The release objective is running.', summary_truncated: false,
+    task_id: 'release-task', decision_key: null, objective_id: 'obj-release', run_id: 'run-release',
+    project: 'Magistrate', occurred_at: null, observed_at: 1788840000000, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null }, ...overrides,
+  });
+  const records = [activityRecord(), ...Array.from({ length: 12 }, (_, index) => activityRecord({
+    id: `ca-operation-${index + 1}`, sequence: index + 2, delivery_sequence: index + 2,
+    kind: 'worker.message', state: 'completed', summary: `Confirmed operation ${index + 1}.`,
+  }))];
+  const page = await openChat({ width: 430, height: 820 }, false, '', URL, 0, false, false, 'light', [], false, {
+    manual: true,
+    seedTurns: [{
+      text: 'Release safely.', status: 'streaming', reply: 'Validating the release.',
+      lifecycleState: 'active', lifecycleRevision: 2, objectiveId: 'obj-release', runId: 'run-release',
+      assistantKind: 'progress',
+    }],
+    activitySnapshot: {
+      schema_version: 'activity.v1', records, focus_records: [records[0]], focus_truncated: false,
+      snapshot_cursor: 13, latest_sequence: 13, next_before: null, has_more: false,
+      summary: { active_objectives: 1, operation_count: 12, pending_decisions: 0 },
+      reconciliation: 'available', sources: [],
+    },
+  });
+  await page.waitForSelector('[data-testid="agent-thinking-message"]');
+  assert.equal(await page.$eval('[data-testid="working-state-label"]', element => element.textContent), 'Magi is working · 12 operations');
+  await page.click('[data-testid="agent-thinking-message"]');
+  await page.waitForSelector('[data-testid="canonical-activity-surface"]');
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 13);
+  assert.match(await page.$eval('[data-testid="canonical-activity-surface"]', element => element.innerText), /Completed/);
+  await page.close();
+});
+
+test('failed activity pagination leaves the visible window unchanged before retry', async () => {
+  const activityRecord = sequence => ({
+    id: `ca-page-${sequence}`, sequence, delivery_sequence: sequence, revision: 1,
+    kind: 'worker.message', state: 'completed', importance: 'routine',
+    title: `Operation ${sequence}`, summary: `Confirmed operation ${sequence}.`, summary_truncated: false,
+    task_id: 'page-task', decision_key: null, objective_id: 'obj-page', run_id: 'run-page',
+    project: 'Magistrate', occurred_at: null, observed_at: 1788840000000, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null },
+  });
+  const initial = [activityRecord(101)];
+  const older = Array.from({ length: 100 }, (_, index) => activityRecord(index + 1));
+  const summary = { active_objectives: 0, operation_count: 0, pending_decisions: 0 };
+  const page = await openChat({ width: 430, height: 820 }, false, '', URL, 0, false, false, 'light', [], false, {
+    activityPageFailureOnce: true,
+    activitySnapshot: {
+      schema_version: 'activity.v1', records: initial, focus_records: [], focus_truncated: false,
+      snapshot_cursor: 101, latest_sequence: 101, next_before: 101, has_more: true,
+      summary, reconciliation: 'available', sources: [],
+    },
+    activityOlderSnapshot: {
+      schema_version: 'activity.v1', records: older, focus_records: [], focus_truncated: false,
+      snapshot_cursor: 101, latest_sequence: 101, next_before: null, has_more: false,
+      summary, reconciliation: 'not-requested', sources: [],
+    },
+  });
+  await clickRendered(page, '[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await clickRendered(page, '[data-testid="drawer-section-activity"]');
+  await page.waitForSelector('[data-testid="open-canonical-activity"]');
+  await clickRendered(page, '[data-testid="open-canonical-activity"]');
+  await page.waitForSelector('[data-testid="canonical-activity-surface"]');
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 1);
+
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')].some(element => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return rect.width > 0 && rect.height > 0 && !!hit && (hit === element || element.contains(hit));
+  }));
+  await clickRendered(page, '[data-testid="load-more-canonical-activity"]');
+  await page.waitForSelector('[data-testid="activity-recovery-banner"]');
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 1);
+
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')]
+    .some(element => element.getAttribute('aria-disabled') !== 'true' && element.textContent.includes('Show earlier activity')));
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')].some(element => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return rect.width > 0 && rect.height > 0 && !!hit && (hit === element || element.contains(hit));
+  }));
+  await clickRendered(page, '[data-testid="load-more-canonical-activity"]');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="canonical-activity-row-"]').length === 40);
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 40);
+  await page.close();
+});
+
+test('activity pagination replays through a newer page cursor before admitting history', async () => {
+  const activityRecord = (id, sequence, deliverySequence) => ({
+    id, sequence, delivery_sequence: deliverySequence, revision: 1,
+    kind: 'worker.message', state: 'completed', importance: 'routine',
+    title: `Operation ${sequence}`, summary: `Confirmed operation ${sequence}.`, summary_truncated: false,
+    task_id: 'cursor-page-task', decision_key: null, objective_id: 'obj-cursor-page', run_id: 'run-cursor-page',
+    project: 'Magistrate', occurred_at: null, observed_at: 1788840000000, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null },
+  });
+  const summary = { active_objectives: 0, operation_count: 0, pending_decisions: 0 };
+  const current = activityRecord('ca-cursor-current', 2, 2);
+  const older = activityRecord('ca-cursor-older', 1, 1);
+  const arrivedDuringPaging = activityRecord('ca-cursor-arrived', 3, 3);
+  const page = await openChat({ width: 430, height: 820 }, false, '', URL, 0, false, false, 'light', [], false, {
+    manual: true,
+    activitySnapshot: {
+      schema_version: 'activity.v1', records: [current], focus_records: [], focus_truncated: false,
+      snapshot_cursor: 2, latest_sequence: 2, next_before: 2, has_more: true,
+      summary, reconciliation: 'available', sources: [],
+    },
+    activityOlderSnapshot: {
+      schema_version: 'activity.v1', records: [older], focus_records: [], focus_truncated: false,
+      snapshot_cursor: 3, latest_sequence: 3, next_before: null, has_more: false,
+      summary, reconciliation: 'not-requested', sources: [],
+    },
+    activityReplayAfterOlderSnapshot: {
+      schema_version: 'activity.v1', records: [arrivedDuringPaging], next_cursor: 3,
+      latest_cursor: 3, has_more: false, summary,
+      reconciliation: 'not-requested', sources: [],
+    },
+  });
+  await clickRendered(page, '[data-testid="brand-drawer-toggle"]');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('[data-testid="magistrate-drawer"]')).opacity) > 0.95);
+  await clickRendered(page, '[data-testid="drawer-section-activity"]');
+  await page.waitForSelector('[data-testid="open-canonical-activity"]');
+  await clickRendered(page, '[data-testid="open-canonical-activity"]');
+  await page.waitForSelector('[data-testid="canonical-activity-row-ca-cursor-current"]');
+  await page.$eval('[data-testid="load-more-canonical-activity"]', element => element.scrollIntoView({ block: 'center' }));
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="load-more-canonical-activity"]')].some(element => {
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return rect.width > 0 && rect.height > 0 && !!hit && (hit === element || element.contains(hit));
+  }));
+  await clickRendered(page, '[data-testid="load-more-canonical-activity"]');
+  await page.waitForSelector('[data-testid="canonical-activity-row-ca-cursor-older"]');
+  await page.waitForSelector('[data-testid="canonical-activity-row-ca-cursor-arrived"]');
+  assert.ok(await page.evaluate(() => window.__activityRequests.some(request =>
+    request.includes('/api/v1/activity?') && new URL(request).searchParams.get('after') === '2')));
+  assert.equal((await page.$$('[data-testid^="canonical-activity-row-"]')).length, 3);
+  await page.close();
+});
+
+test('a recovered canonical decision uses the same Attention identity as chat', async () => {
+  const decision = {
+    id: 'ca-decision', sequence: 2, delivery_sequence: 2, revision: 1,
+    kind: 'decision.requested', state: 'awaiting-user', importance: 'attention',
+    title: 'Release choice', summary: 'Choose the release channel.', summary_truncated: false,
+    task_id: 'release-task', decision_key: 'release-channel', objective_id: 'obj-release', run_id: 'run-release',
+    project: 'Magistrate', occurred_at: null, observed_at: 1788840000000, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null },
+  };
+  const objective = { ...decision, id: 'ca-objective', sequence: 1, delivery_sequence: 1,
+    kind: 'objective.progress', title: 'Release objective', state: 'awaiting-user', decision_key: null };
+  const page = await openChat({ width: 430, height: 820 }, false, '', URL, 0, false, false, 'light', [], false, {
+    manual: true,
+    seedTurns: [{
+      text: 'Release safely.', status: 'streaming', reply: 'Choose the release channel.',
+      lifecycleState: 'awaiting-user', lifecycleRevision: 3, decisionKey: 'release-channel',
+      objectiveId: 'obj-release', runId: 'run-release', assistantKind: 'decision',
+    }],
+    activitySnapshot: {
+      schema_version: 'activity.v1', records: [objective, decision], focus_records: [objective, decision],
+      focus_truncated: false, snapshot_cursor: 2, latest_sequence: 2, next_before: null, has_more: false,
+      summary: { active_objectives: 1, operation_count: 0, pending_decisions: 1 },
+      reconciliation: 'available', sources: [],
+    },
+  });
+  await page.waitForSelector('[data-testid="assistant-decision-captain-question-release-channel"]');
+  await page.click('[data-testid="assistant-decision-captain-question-release-channel"]');
+  await page.waitForFunction(() => location.pathname.endsWith('/attention'));
+  assert.match(page.url(), /item=captain-question-release-channel/);
+  await page.close();
+});
+
+test('cold start retains an account-scoped decision when observability is interrupted', async () => {
+  const observedAt = 1788840000000;
+  const objective = {
+    id: 'ca-cached-objective', sequence: 1, delivery_sequence: 1, revision: 1,
+    kind: 'objective.progress', state: 'awaiting-user', importance: 'attention',
+    title: 'Cached release objective', summary: 'Last confirmed waiting state.', summary_truncated: false,
+    task_id: 'release-task', decision_key: null, objective_id: 'obj-cached', run_id: 'run-cached',
+    project: 'Magistrate', occurred_at: null, observed_at: observedAt, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null },
+  };
+  const decision = { ...objective, id: 'ca-cached-decision', sequence: 2, delivery_sequence: 2,
+    kind: 'decision.requested', decision_key: 'cached-release', title: 'Cached release choice',
+    summary: 'Choose beta or production.' };
+  const cachedMessage = {
+    id: 'cm-cached-decision', canonicalId: 'cm-cached-decision', canonicalRevision: 2,
+    turnId: 'ct-cached', sequenceIndex: 1999, role: 'assistant', kind: 'conversation',
+    text: 'Choose beta or production.', source: 'text', sentAt: observedAt,
+    progress: 'streaming', objectiveId: 'obj-cached', runId: 'run-cached',
+    lifecycleState: 'awaiting-user', lifecycleRevision: 3, decisionKey: 'cached-release',
+    assistantKind: 'decision',
+  };
+  const page = await openChat({ width: 430, height: 820 }, false, '', URL, 0, false, false, 'light', [cachedMessage], false, {
+    canonicalFailure: true, activityFailure: true,
+    seedActivityCache: {
+      schema_version: 'activity-cache.v1', principal: 'default_user', cursor: 2, summary_cursor: 2,
+      summary_authoritative: true,
+      summary: { active_objectives: 1, operation_count: 0, pending_decisions: 1 },
+      records: [objective, decision],
+    },
+  });
+  await page.waitForSelector('[data-testid="assistant-decision-captain-question-cached-release"]');
+  await page.waitForSelector('[data-testid="agent-thinking-message"]');
+  assert.match(await page.$eval('[data-testid="working-state-label"]', element => element.textContent), /observability interrupted/i);
+  await page.click('[data-testid="agent-thinking-message"]');
+  await page.waitForSelector('[data-testid="activity-recovery-banner"]');
+  const surface = await page.$eval('[data-testid="canonical-activity-surface"]', element => element.innerText);
+  assert.match(surface, /Awaiting you/);
+  assert.doesNotMatch(surface, /Completed/);
+  await page.close();
+});
+
+test('pending response shows activity only after canonical polling observes the recorded turn', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
     turnPhases: [{ reply: 'late response must stay hidden' }], promptDelay: 5000,
   });
   await submit(page, 'first request');
   const pendingState = await page.evaluate(() => ({ history: document.querySelector('[data-testid="chat-history"]')?.innerText, stop: Boolean(document.querySelector('[data-testid="stop-captain-response"]')), thinking: Boolean(document.querySelector('[data-testid="agent-thinking-message"]')) }));
   assert.equal(pendingState.stop, true, `expected pending control; state=${JSON.stringify(pendingState)}`);
-  assert.equal(pendingState.thinking, true, `expected in-conversation thinking; state=${JSON.stringify(pendingState)}`);
+  assert.equal(pendingState.thinking, true, `the Gateway-recorded turn should drive lifecycle UI; state=${JSON.stringify(pendingState)}`);
   assert.equal(await page.$('[data-testid="composer-status"] [data-testid="thinking-dots"]'), null, 'thinking must not sit under the composer');
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => !document.querySelector('[data-testid="agent-thinking-message"]'));

@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote
 
 from app.activity_store import (
+    MAX_ACTIVITY_FOCUS_RECORDS,
     MAX_ACTIVITY_SUMMARY_CHARS,
     MAX_SAFE_INTEGER,
     SourceEventConflict,
@@ -1183,6 +1184,18 @@ class FirstmateActivityAdapter:
                 'occurred_at': occurred_at,
                 'refs': refs,
             })
+        recoverable_focus_count = sum(
+            1 for candidate in candidates
+            if (
+                candidate['kind'] in {'objective.started', 'objective.progress'}
+                and candidate['state'] in {'active', 'awaiting-user'}
+            ) or (
+                candidate['kind'] == 'decision.requested'
+                and candidate['state'] == 'awaiting-user'
+            )
+        )
+        if recoverable_focus_count > MAX_ACTIVITY_FOCUS_RECORDS:
+            raise SourceUnavailable('Firstmate returned an oversized recoverable-focus projection.')
         semantic_snapshot = {
             'schema': 'fm-fleet-snapshot.v1',
             'generated': snapshot.get('generated'),

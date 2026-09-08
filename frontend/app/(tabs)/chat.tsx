@@ -3,12 +3,13 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Image, ImageSourcePropType, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, AppState, Image, ImageSourcePropType, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
-import { AgentHistoryMessage, AgentInfo, AgentMigration, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgentMigration, fetchAgents, fetchCanonicalActivity, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, requestAgentMigration, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
+import { AgentHistoryMessage, AgentInfo, AgentMigration, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgentMigration, fetchAgents, fetchCanonicalActivity, fetchCanonicalActivitySnapshot, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, requestAgentMigration, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
+import { CanonicalActivitySurface } from '../../src/components/CanonicalActivitySurface';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ComposeIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, InfoIcon, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
 import { loadMagiGreeting, magiGreeting } from '../../src/services/Greeting';
@@ -18,7 +19,7 @@ import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
-import { getCanonicalActivityCursor, ingestCanonicalActivityPage } from '../../src/services/CanonicalActivity';
+import { canonicalActivityResponseIsDegraded, CanonicalActivityRecoveryCoordinator, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
 import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, getConversationPrincipal, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
@@ -44,6 +45,7 @@ type DrawerSection = 'attention' | 'fleet' | 'activity' | 'projects' | 'connecti
 type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 type ConversationSyncState = { status: 'loading' | 'fresh' | 'stale'; cachedRows: number; error?: string };
 const FLOATING_CHROME_GAP = 12;
+const CANONICAL_ACTIVITY_PAGE_SIZE = 100;
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 const isDarkTheme = (scheme: string | null | undefined) => scheme !== 'light';
 const optionId = (harness: string, model: string) => `${harness}-${model}`.replace(/[^A-Za-z0-9_-]/g, '-');
@@ -199,11 +201,29 @@ function ThinkingIndicator({ dark }: { dark: boolean }) {
  * canonical record already carries for the turn in flight; it stays a compact
  * line and the detail stays behind the existing tool-call preference.
  */
-function WorkingState({ dark, muted, operations }: { dark: boolean; muted: string; operations: number }) {
-  return <View testID="agent-thinking-message" accessibilityRole="text" accessibilityLabel={`Magi is working${operations ? `, ${operations} operation${operations === 1 ? '' : 's'}` : ''}`} accessibilityLiveRegion="polite" style={styles.workingRow}>
+function WorkingState({ dark, muted, operations, phase, onPress }: {
+  dark: boolean; muted: string; operations: number;
+  phase: 'active' | 'awaiting-user' | 'recovering' | 'observability-interrupted';
+  onPress: () => void;
+}) {
+  const prefix = phase === 'awaiting-user' ? 'Magi is awaiting you'
+    : phase === 'recovering' ? 'Magi is recovering'
+      : phase === 'observability-interrupted' ? 'Magi observability interrupted'
+        : 'Magi is working';
+  const label = `${prefix}${operations ? ` · ${operations} operation${operations === 1 ? '' : 's'}` : ''}`;
+  return <TouchableOpacity
+    testID="agent-thinking-message"
+    accessibilityRole="button"
+    accessibilityLabel={label}
+    accessibilityHint="Opens durable Magi activity"
+    accessibilityLiveRegion="polite"
+    onPress={onPress}
+    activeOpacity={0.7}
+    style={styles.workingRow}
+  >
     <ThinkingIndicator dark={dark} />
-    <Text testID="working-state-label" style={[styles.workingLabel, { color: muted }]}>Magi is working{operations ? ` · ${operations} operation${operations === 1 ? '' : 's'}` : ''}…</Text>
-  </View>;
+    <Text testID="working-state-label" style={[styles.workingLabel, { color: muted }]}>{label}</Text>
+  </TouchableOpacity>;
 }
 
 /**
@@ -307,9 +327,12 @@ function SourceList({ sources, dark, text, muted }: { sources: NonNullable<Conve
   return <View testID="message-sources" accessibilityLabel="Sources" style={styles.sources}><Text style={[styles.sourcesTitle, { color: muted }]}>Sources</Text>{safeSources.map((source, index) => <TouchableOpacity key={source.id} testID={`message-source-${source.id}`} accessibilityRole="link" accessibilityLabel={`Source ${index + 1}: ${source.title}`} onPress={() => void openExternalUrl(source.url)} style={styles.sourceRow}><Text style={[styles.sourceMarker, { color: dark ? brand.cyan : brand.violet }]}>{index + 1}</Text><View style={styles.sourceCopy}><Text numberOfLines={2} style={[styles.sourceTitle, { color: text }]}>{source.title}</Text><Text numberOfLines={1} style={[styles.sourceMeta, { color: muted }]}>{source.publisher || new URL(source.url).hostname}{source.page ? ` · p. ${source.page}` : ''}</Text>{source.quote ? <Text numberOfLines={2} style={[styles.sourceQuote, { color: muted }]}>“{source.quote}”</Text> : null}</View></TouchableOpacity>)}</View>;
 }
 
-function AssistantMessage({ message, dark, text, muted, showToolCalls, onActions }: { message: ConversationMessage; dark: boolean; text: string; muted: string; showToolCalls: boolean; onActions: () => void }) {
+function AssistantMessage({ message, dark, text, muted, showToolCalls, onActions, onOpenDecision }: { message: ConversationMessage; dark: boolean; text: string; muted: string; showToolCalls: boolean; onActions: () => void; onOpenDecision: (itemId: string) => void }) {
   const summary = safeThinkingSummary(message.thinkingSummary);
-  return <View testID="agent-message" style={styles.assistantMessage}><View style={styles.assistantBody}>{message.structuredContent ? <StructuredAssistantMessage response={message.structuredContent} color={text} mutedColor={muted} dark={dark} testID={`assistant-structured-${message.id}`} /> : <SafeMarkdown markdown={message.text} color={text} mutedColor={muted} dark={dark} testID={`assistant-markdown-${message.id}`} />}{showToolCalls && message.toolResults?.map((result, index) => <View key={`${message.id}-tool-${index}`} testID="tool-history-message" style={styles.attachedToolResult}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{result}</Text></View>)}{summary ? <View testID="safe-thinking-summary" style={styles.thinkingSummary}><Text style={[styles.thinkingSummaryLabel, { color: muted }]}>{summary.provider} summary</Text><Text style={[styles.thinkingSummaryText, { color: muted }]}>{summary.text}</Text></View> : null}<SourceList sources={message.sources || []} dark={dark} text={text} muted={muted} />{message.progress === 'failed' ? <Text testID={`assistant-failed-${message.id}`} accessibilityRole="alert" style={styles.assistantStateFailed}>Response stopped before completion. Retry is available only when this run is safe to repeat.</Text> : message.progress === 'cancelled' ? <Text testID={`assistant-cancelled-${message.id}`} style={[styles.assistantState, { color: muted }]}>Response stopped</Text> : message.progress === 'streaming' ? <Text testID={`assistant-streaming-${message.id}`} style={[styles.assistantState, { color: muted }]}>Updating response…</Text> : message.progress === 'working' || message.progress === 'queued' ? <Text testID={`assistant-working-${message.id}`} style={[styles.assistantState, { color: muted }]}>Working…</Text> : null}</View><TouchableOpacity testID={`message-actions-${message.id}`} accessibilityRole="button" accessibilityLabel="Assistant message actions" onPress={onActions} style={styles.inlineMessageAction}><Text style={styles.inlineMessageActionText}>•••</Text></TouchableOpacity></View>;
+  const decisionItemId = message.assistantKind === 'decision'
+    && message.lifecycleState === 'awaiting-user'
+    ? decisionAttentionItemId(message.decisionKey) : null;
+  return <View testID="agent-message" style={styles.assistantMessage}><View style={styles.assistantBody}>{message.structuredContent ? <StructuredAssistantMessage response={message.structuredContent} color={text} mutedColor={muted} dark={dark} testID={`assistant-structured-${message.id}`} /> : <SafeMarkdown markdown={message.text} color={text} mutedColor={muted} dark={dark} testID={`assistant-markdown-${message.id}`} />}{showToolCalls && message.toolResults?.map((result, index) => <View key={`${message.id}-tool-${index}`} testID="tool-history-message" style={styles.attachedToolResult}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{result}</Text></View>)}{summary ? <View testID="safe-thinking-summary" style={styles.thinkingSummary}><Text style={[styles.thinkingSummaryLabel, { color: muted }]}>{summary.provider} summary</Text><Text style={[styles.thinkingSummaryText, { color: muted }]}>{summary.text}</Text></View> : null}<SourceList sources={message.sources || []} dark={dark} text={text} muted={muted} />{decisionItemId ? <TouchableOpacity testID={`assistant-decision-${decisionItemId}`} accessibilityRole="button" accessibilityLabel="Open decision in Attention" onPress={() => onOpenDecision(decisionItemId)} style={styles.decisionAction}><Text style={[styles.decisionActionText, { color: dark ? brand.cyan : brand.violet }]}>Open in Attention</Text></TouchableOpacity> : null}{message.progress === 'failed' ? <Text testID={`assistant-failed-${message.id}`} accessibilityRole="alert" style={styles.assistantStateFailed}>Response stopped before completion. Retry is available only when this run is safe to repeat.</Text> : message.progress === 'cancelled' ? <Text testID={`assistant-cancelled-${message.id}`} style={[styles.assistantState, { color: muted }]}>Response stopped</Text> : message.progress === 'streaming' ? <Text testID={`assistant-streaming-${message.id}`} style={[styles.assistantState, { color: muted }]}>Updating response…</Text> : message.progress === 'working' || message.progress === 'queued' ? <Text testID={`assistant-working-${message.id}`} style={[styles.assistantState, { color: muted }]}>Working…</Text> : null}</View><TouchableOpacity testID={`message-actions-${message.id}`} accessibilityRole="button" accessibilityLabel="Assistant message actions" onPress={onActions} style={styles.inlineMessageAction}><Text style={styles.inlineMessageActionText}>•••</Text></TouchableOpacity></View>;
 }
 
 // Identity and reconciliation live in one place for every delivery path; see
@@ -337,7 +360,7 @@ function conversationalPromptResponse(response: unknown): string | null {
   return isHarnessArtifact(response) ? null : response.trim();
 }
 
-export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawerToggle = () => {}, drawerOpen = false, profiles = [], capabilityLoading = false, capabilityError = null, selectedProfileId = null, routingReady = true, onProfileChange = () => {}, voiceInputMode = 'automatic', voiceCapabilities, voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, onRegenerate }: { target?: string; showToolCalls?: boolean; onDrawerToggle?: () => void; drawerOpen?: boolean; profiles?: ExecutionProfile[]; capabilityLoading?: boolean; capabilityError?: string | null; selectedProfileId?: string | null; routingReady?: boolean; onProfileChange?: (profileId: string | null) => void; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; onRegenerate?: (message: ConversationMessage) => Promise<void> }) {
+export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawerToggle = () => {}, drawerOpen = false, profiles = [], capabilityLoading = false, capabilityError = null, selectedProfileId = null, routingReady = true, onProfileChange = () => {}, voiceInputMode = 'automatic', voiceCapabilities, voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {}, onRegenerate }: { target?: string; showToolCalls?: boolean; onDrawerToggle?: () => void; drawerOpen?: boolean; profiles?: ExecutionProfile[]; capabilityLoading?: boolean; capabilityError?: string | null; selectedProfileId?: string | null; routingReady?: boolean; onProfileChange?: (profileId: string | null) => void; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void; onRegenerate?: (message: ConversationMessage) => Promise<void> }) {
   const router = useRouter();
   const dark = isDarkTheme(useChatColorScheme());
   const text = dark ? '#F4F5F7' : brand.ink;
@@ -350,6 +373,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // reading terminal history until they get a submission path of their own; see
   // CHAT_ARCHITECTURE_FIX.md.
   const canonicalTarget = target === 'captain';
+  const canonicalActivity = useCanonicalActivity();
+  const [activityBefore, setActivityBefore] = useState<number | undefined>();
+  const [activityPageLimit, setActivityPageLimit] = useState(CANONICAL_ACTIVITY_PAGE_SIZE);
+  const [activityHasMore, setActivityHasMore] = useState(false);
+  const [activityLoadingMore, setActivityLoadingMore] = useState(false);
+  const [activityRefreshing, setActivityRefreshing] = useState(false);
   const [promptText, setPromptText] = useState('');
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [messageActionsId, setMessageActionsId] = useState<string | null>(null);
@@ -405,6 +434,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const promptTokenRef = useRef(0);
   const activePromptRef = useRef<ActivePrompt | null>(null);
   const postPromptPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activityRecoveryCoordinatorRef = useRef<CanonicalActivityRecoveryCoordinator | null>(null);
+  activityRecoveryCoordinatorRef.current ??= new CanonicalActivityRecoveryCoordinator();
+  const activityRealtimeRef = useRef<RealtimeClient | null>(null);
   // A prompt must not race the initial scrollback seed. If the seed resolves
   // after a new reply is already present, it would mark that reply as known
   // without rendering it and the live poll would skip it forever.
@@ -424,17 +456,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     loadMagiGreeting().then(value => { if (mounted) setGreeting(value); }).catch(() => {});
     return () => { mounted = false; };
   }, []);
-  // The count of real tool events already recorded against the turn in flight,
-  // so the single working line can say how much is happening without listing it.
-  const activeOperations = useMemo(() => {
-    let count = 0;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role === 'user') break;
-      if (messages[index].kind === 'tool') count += 1;
-      count += messages[index].toolResults?.length || 0;
-    }
-    return count;
-  }, [messages]);
+  // Only Gateway-issued message/activity identities can drive this status.
+  // Local send promises still control composer affordances, never lifecycle UI.
+  const canonicalWork = useMemo(() => {
+    const derived = deriveCanonicalWorkState(canonicalActivity, messages);
+    return canonicalTarget && conversationSync.status === 'stale' && derived.active
+      ? { ...derived, phase: 'observability-interrupted' as const }
+      : derived;
+  }, [canonicalActivity, canonicalTarget, conversationSync.status, messages]);
 
   const cancelLatestScroll = () => {
     pendingLatestScrollRef.current = false;
@@ -948,6 +977,114 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       throw error;
     }
   };
+  const recoverCanonicalActivity = (authoritativeSnapshot: boolean): Promise<void> => {
+    if (!canonicalTarget) return Promise.resolve();
+    const owner = getConversationPrincipal();
+    if (!owner) return Promise.resolve();
+    return activityRecoveryCoordinatorRef.current!.request(authoritativeSnapshot, async requestedSnapshot => {
+      if (owner !== getConversationPrincipal()) return;
+      markCanonicalActivityRecovering();
+      let health: unknown = null;
+      try {
+        if (requestedSnapshot) {
+          try {
+            const snapshot = await fetchCanonicalActivitySnapshot(
+              undefined, CANONICAL_ACTIVITY_PAGE_SIZE, true,
+            );
+            if (owner !== getConversationPrincipal()) return;
+            const applied = ingestCanonicalActivitySnapshot(snapshot);
+            if (!applied) throw new Error('Gateway returned an invalid activity snapshot.');
+            setActivityBefore(applied.nextBefore);
+            setActivityPageLimit(applied.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE);
+            setActivityHasMore(applied.hasMore);
+            health = snapshot;
+          } catch {
+            // Rolling-deploy compatibility: the replay contract remains a safe
+            // recovery path when the additive snapshot route is not available.
+            const page = await fetchCanonicalActivity(getCanonicalActivityCursor(), 200, true);
+            if (owner !== getConversationPrincipal() || !ingestCanonicalActivityPage(page)) {
+              throw new Error('Gateway activity catch-up could not be applied.');
+            }
+            health = page;
+          }
+        }
+        let cursor = getCanonicalActivityCursor();
+        let caughtUp = false;
+        let resetReplayBudget = true;
+        for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+          const page = await fetchCanonicalActivity(cursor, 200, false);
+          if (owner !== getConversationPrincipal()) return;
+          const applied = await ingestCanonicalActivityReplayPage(
+            page, () => fetchCanonicalActivitySnapshot(
+              undefined, CANONICAL_ACTIVITY_PAGE_SIZE, true,
+            ),
+          );
+          if (owner !== getConversationPrincipal() || !applied) {
+            throw new Error('Gateway activity replay could not be applied.');
+          }
+          if (applied.snapshotPage) {
+            setActivityBefore(applied.snapshotPage.nextBefore);
+            setActivityPageLimit(
+              applied.snapshotPage.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE,
+            );
+            setActivityHasMore(applied.snapshotPage.hasMore);
+            health = applied.response;
+            if (resetReplayBudget) {
+              pageIndex = -1;
+              resetReplayBudget = false;
+            }
+          } else health ||= page;
+          cursor = getCanonicalActivityCursor();
+          activityRealtimeRef.current?.setActivityCursor(cursor);
+          if (!applied.snapshotPage && !page.has_more) { caughtUp = true; break; }
+        }
+        if (!caughtUp) throw new Error('Gateway activity replay exceeded the bounded catch-up window.');
+        if (canonicalActivityResponseIsDegraded(health)) markCanonicalActivityInterrupted();
+        else markCanonicalActivityFresh();
+      } catch {
+        if (owner === getConversationPrincipal()) markCanonicalActivityInterrupted();
+      }
+    });
+  };
+  const loadOlderCanonicalActivity = async (): Promise<boolean> => {
+    if (!canonicalTarget || !activityHasMore || !activityBefore || activityLoadingMore) return false;
+    const owner = getConversationPrincipal();
+    setActivityLoadingMore(true);
+    try {
+      const snapshot = await fetchCanonicalActivitySnapshot(
+        activityBefore, activityPageLimit, false,
+      );
+      if (owner !== getConversationPrincipal()) return false;
+      // An older page excludes newer non-focus rows even though its snapshot
+      // cursor observes them. Replay through that cursor before merging the
+      // page so pagination can never checkpoint past unseen activity.
+      if (Number.isSafeInteger(snapshot.snapshot_cursor)
+        && snapshot.snapshot_cursor > getCanonicalActivityCursor()) {
+        await recoverCanonicalActivity(false);
+        if (owner !== getConversationPrincipal()) return false;
+      }
+      const applied = ingestCanonicalActivitySnapshot(snapshot, true);
+      if (!applied) throw new Error('Gateway returned an invalid activity page.');
+      setActivityBefore(applied.nextBefore);
+      setActivityPageLimit(applied.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE);
+      setActivityHasMore(applied.hasMore);
+      return applied.addedHistoryRecords > 0;
+    } catch {
+      if (owner === getConversationPrincipal()) markCanonicalActivityInterrupted();
+      return false;
+    } finally {
+      if (owner === getConversationPrincipal()) setActivityLoadingMore(false);
+    }
+  };
+  const refreshCanonicalState = async (): Promise<void> => {
+    setActivityRefreshing(true);
+    try {
+      if (canonicalTarget) {
+        await Promise.allSettled([syncCanonicalConversation(), recoverCanonicalActivity(true)]);
+      } else await syncFromHistory();
+    } finally { setActivityRefreshing(false); }
+  };
+
   // Herdr ids hash terminal content (see gateway/app/herdr_client.py), and that
   // content mutates while a reply renders, reflows, or scrolls its head out of
   // the snapshot. Update the row it already produced instead of adding a second
@@ -1012,47 +1149,63 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   useEffect(() => {
     let active = true;
     const activityPrincipal = canonicalTarget ? getConversationPrincipal() : null;
-    const realtime = new RealtimeClient(target, canonicalTarget ? getCanonicalActivityCursor() : null);
-    const unsubscribe = realtime.subscribe(event => {
-      if (event?.type === 'activity_records') {
-        if (canonicalTarget && activityPrincipal === getConversationPrincipal()
-          && ingestCanonicalActivityPage(event)) {
-          realtime.setActivityCursor(getCanonicalActivityCursor());
+    let realtime: RealtimeClient | null = null;
+    let unsubscribe = () => {};
+    const start = async () => {
+      if (canonicalTarget) await hydrateCanonicalActivity();
+      if (!active || (canonicalTarget && activityPrincipal !== getConversationPrincipal())) return;
+      realtime = new RealtimeClient(target, canonicalTarget ? getCanonicalActivityCursor() : null);
+      if (canonicalTarget) activityRealtimeRef.current = realtime;
+      unsubscribe = realtime.subscribe(event => {
+        if (event?.type === 'connection_state' && event.state === 'disconnected') {
+          if (canonicalTarget) markCanonicalActivityRecovering();
+          return;
         }
-        return;
-      }
-      if (!Array.isArray(event?.messages)) return;
-      const canonical = event.type === 'conversation_messages';
-      if (canonical !== canonicalTarget
-        || (canonical && activityPrincipal !== getConversationPrincipal())) return;
-      // In development React may mount, clean up, and mount effects again. Do
-      // not let an early socket delivery race the authoritative initial read.
-      void historyReadyRef.current.then(() => {
-        if (!active || (canonical && activityPrincipal !== getConversationPrincipal())) return;
-        // Canonical events are revision deltas keyed by message id, so they
-        // merge into the rows already rendered rather than replacing them.
-        if (canonical) applyCanonicalMessages(normalizeCanonicalMessages(event.messages));
-        else if (appendHistoryMessages(event.messages)) setIsThinking(false);
+        if (event?.type === 'connected') {
+          if (canonicalTarget) void recoverCanonicalActivity(false);
+          return;
+        }
+        if (event?.type === 'activity_records') {
+          if (canonicalTarget && activityPrincipal === getConversationPrincipal()) {
+            if (ingestCanonicalActivityPage(event)) {
+              realtime?.setActivityCursor(getCanonicalActivityCursor());
+            } else void recoverCanonicalActivity(true);
+          }
+          return;
+        }
+        if (!Array.isArray(event?.messages)) return;
+        const canonical = event.type === 'conversation_messages';
+        if (canonical !== canonicalTarget
+          || (canonical && activityPrincipal !== getConversationPrincipal())) return;
+        // In development React may mount, clean up, and mount effects again. Do
+        // not let an early socket delivery race the authoritative initial read.
+        void historyReadyRef.current.then(() => {
+          if (!active || (canonical && activityPrincipal !== getConversationPrincipal())) return;
+          // Canonical events are revision deltas keyed by message id, so they
+          // merge into the rows already rendered rather than replacing them.
+          if (canonical) applyCanonicalMessages(normalizeCanonicalMessages(event.messages));
+          else if (appendHistoryMessages(event.messages)) setIsThinking(false);
+        });
       });
+      // Start the authoritative read before authentication can trigger a
+      // socket catch-up. Both paths merge by stable id/revision and cursor.
+      const recovery = canonicalTarget ? recoverCanonicalActivity(true) : Promise.resolve();
+      void realtime.connect();
+      await recovery;
+    };
+    void start();
+    const appState = AppState.addEventListener('change', state => {
+      if (!active || state !== 'active') return;
+      if (canonicalTarget) void recoverCanonicalActivity(true);
+      void realtime?.connect();
     });
-    void realtime.connect();
-    if (canonicalTarget) {
-      // Populate the non-visual lifecycle adapter without delaying chat. The
-      // first request performs source reconciliation; later pages and the
-      // socket read only durable canonical change cursors.
-      void (async () => {
-        let cursor = getCanonicalActivityCursor();
-        for (let pageIndex = 0; active && pageIndex < 10; pageIndex += 1) {
-          const page = await fetchCanonicalActivity(cursor, 200, pageIndex === 0);
-          if (!active || activityPrincipal !== getConversationPrincipal()
-            || !ingestCanonicalActivityPage(page)) return;
-          cursor = getCanonicalActivityCursor();
-          realtime.setActivityCursor(cursor);
-          if (!page.has_more) return;
-        }
-      })().catch(() => { /* background catch-up retries on the next mount/reconnect */ });
-    }
-    return () => { active = false; unsubscribe(); realtime.disconnect(); };
+    return () => {
+      active = false;
+      appState.remove();
+      unsubscribe();
+      if (activityRealtimeRef.current === realtime) activityRealtimeRef.current = null;
+      realtime?.disconnect();
+    };
   }, [target]);
   // Live auto-refresh: whichever agent is behind `target` may produce new
   // terminal output without this device having sent the prompt (Herdr has no
@@ -1242,9 +1395,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // The environment owns the colour of the canvas. A theme tint here would
   // cover the entire scene and stack with EnvironmentBackground's targeted dim.
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={styles.canvas}>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} onTouchStart={handleHistoryTouchStart} onTouchMove={handleHistoryTouchMove} onTouchEnd={handleHistoryTouchEnd} {...(Platform.OS === 'web' ? ({ onWheel: handleHistoryWheel, onKeyDown: handleHistoryKeyDown, onMouseDown: handleHistoryMouseDown } as any) : {})} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
-      {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} />)}
-      {isThinking ? <WorkingState dark={dark} muted={muted} operations={activeOperations} /> : null}
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} onTouchStart={handleHistoryTouchStart} onTouchMove={handleHistoryTouchMove} onTouchEnd={handleHistoryTouchEnd} {...(Platform.OS === 'web' ? ({ onWheel: handleHistoryWheel, onKeyDown: handleHistoryKeyDown, onMouseDown: handleHistoryMouseDown } as any) : {})} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} refreshControl={<RefreshControl refreshing={activityRefreshing} onRefresh={() => { void refreshCanonicalState(); }} />} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
+      {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} onOpenDecision={itemId => router.push({ pathname: '/attention', params: { item: itemId, source: 'conversation' } } as any)} />)}
+      {canonicalTarget && canonicalWork.active ? <WorkingState dark={dark} muted={muted} operations={canonicalWork.operationCount} phase={canonicalWork.phase === 'idle' ? 'active' : canonicalWork.phase} onPress={onActivityOpen} /> : null}
     </ScrollView>
     <EmptyStateMagi dark={dark} visible={showEmptyState} greeting={greeting} active={isThinking || isRecording} />
     <View testID="chat-header" style={styles.headerDock} pointerEvents="box-none" onLayout={handleHeaderLayout}>
@@ -1295,6 +1448,21 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     </View>
     <View testID="composer-status" style={styles.composerStatus} accessibilityLiveRegion="polite">{editingMessageId ? <Text style={styles.editingLabel}>Editing message</Text> : !isThinking && (micStatus === 'requesting' ? <Text testID="mic-status" style={styles.micTranscribingLabel}>Requesting microphone permission…</Text> : micStatus === 'listening' ? <Text testID="mic-status" style={styles.micListeningLabel}>Listening… {voiceCaptureBehavior === 'hold-to-talk' ? 'release mic to finish' : 'tap mic to finish'}</Text> : micStatus === 'transcribing' ? <Text testID="mic-status" style={styles.micTranscribingLabel}>Transcribing…</Text> : micStatus === 'ready' ? <Text testID="mic-status" style={styles.micReadyLabel}>Transcript ready — review before sending</Text> : micStatus === 'error' ? <Text testID="mic-status" accessibilityRole="alert" style={styles.micErrorLabel}>Microphone unavailable. {sendError || 'Try again.'}</Text> : null)}{queuedPrompts.length ? <Text testID="queued-message-count" style={styles.queuedLabel}>{queuedPrompts.length} queued · sends in order</Text> : null}{sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}</View>
     </View>
+    <CanonicalActivitySurface
+      visible={activityOpen}
+      snapshot={canonicalActivity}
+      work={canonicalWork}
+      hasMore={activityHasMore}
+      loadingMore={activityLoadingMore}
+      refreshing={activityRefreshing}
+      onClose={onActivityClose}
+      onLoadMore={loadOlderCanonicalActivity}
+      onRefresh={refreshCanonicalState}
+      onOpenDecision={itemId => {
+        onActivityClose();
+        router.push({ pathname: '/attention', params: { item: itemId, source: 'activity' } } as any);
+      }}
+    />
     <ExecutionSheet dark={dark} profiles={profiles} loading={capabilityLoading} error={capabilityError} open={modelMenuOpen} selection={modelSelection} onClose={() => setModelMenuOpen(false)} onSelect={selection => { setModelSelection(selection); onProfileChange(selection?.profileId || null); setModelMenuOpen(false); setSendError(null); }} />
   </KeyboardAvoidingView>;
 }
@@ -1375,9 +1543,9 @@ function activityDate(value: string) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenAgent, agents, executionProfiles, attention, activity, providers, errors, loading }: {
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenActivity, onOpenAgent, agents, executionProfiles, attention, activity, providers, errors, loading }: {
   open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onClose: () => void; onOpenSettings: () => void;
-  onOpenHome: () => void; onOpenAgent: (agentId: string) => void;
+  onOpenHome: () => void; onOpenActivity: () => void; onOpenAgent: (agentId: string) => void;
   agents: AgentInfo[]; executionProfiles: ExecutionProfile[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
 }) {
   const router = useRouter();
@@ -1437,7 +1605,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
         ) : row.key === 'fleet' ? (
           loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No live agent sessions are available." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <FleetAgentRow key={agent.id} agent={agent} activeStatus={displayStatus} dark={dark} profiles={executionProfiles} onOpenChat={() => onOpenAgent(agent.id)} />)
         ) : row.key === 'activity' ? (
-          loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} accessibilityRole="button" accessibilityLabel={`${item.title}. ${item.description}. ${item.project}`} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)
+          <><TouchableOpacity testID="open-canonical-activity" accessibilityRole="button" accessibilityLabel="Open durable Magi activity" onPress={onOpenActivity} style={[styles.panelItem, { backgroundColor: glassFill(dark) }]}><Text style={[styles.panelItemTitle, { color: text }]}>Magi operations</Text><Text style={[styles.panelItemMeta, { color: muted }]}>Inspect Gateway-confirmed lifecycle and decisions</Text></TouchableOpacity>{loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} accessibilityRole="button" accessibilityLabel={`${item.title}. ${item.description}. ${item.project}`} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)}</>
         ) : row.key === 'projects' ? (
           loading ? <PanelText text="Loading projects…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : projects.length === 0 ? <PanelText text="No project activity is available." muted={muted} /> : projects.map(([name, count]) => <View key={name} testID={`drawer-project-${name}`} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{name}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{count} recent item{count === 1 ? '' : 's'}</Text></View>)
         ) : errors.providers ? <PanelText text={errors.providers} muted={brand.critical} /> : providers.length === 0 ? <PanelText text="No connected account data is available." muted={muted} /> : providers.map(provider => <View key={provider.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{provider.provider}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{provider.status}{provider.username ? ` · ${provider.username}` : ''}</Text></View>)}</View> : null}
@@ -1627,7 +1795,7 @@ export default function ChatScreen() {
   const { agentId, record } = useLocalSearchParams<{ agentId?: string | string[]; record?: string | string[] }>(); const target = Array.isArray(agentId) ? agentId[0] : agentId; const autoStartRecording = (Array.isArray(record) ? record[0] : record) === 'true';
   const router = useRouter();
   const dark = isDarkTheme(useChatColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
-  const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES); const [preferencesReady, setPreferencesReady] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activityOpen, setActivityOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES); const [preferencesReady, setPreferencesReady] = useState(false);
   const [executionProfiles, setExecutionProfiles] = useState<ExecutionProfile[]>([]);
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({ profile_id: null, routing_profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
   const [executionLoading, setExecutionLoading] = useState(true);
@@ -1698,8 +1866,8 @@ export default function ChatScreen() {
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls preserveCanvas><SafeAreaView style={styles.page}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
-      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => { setDrawerOpen(false); if (target) router.push('/chat' as any); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} executionProfiles={executionProfiles} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
-      <Animated.View style={styles.chatStage}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} />
+      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => { setDrawerOpen(false); if (target) router.push('/chat' as any); }} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} executionProfiles={executionProfiles} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
+      <Animated.View style={styles.chatStage}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} />
         <Animated.View testID="chat-dim" pointerEvents={drawerOpen ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
           <TouchableOpacity testID="drawer-dismiss" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={() => setDrawerOpen(false)} activeOpacity={1} style={styles.chatDimPress} />
         </Animated.View>
@@ -1743,8 +1911,10 @@ const styles = StyleSheet.create({
   attachedToolResult: { maxWidth: 280, marginTop: 7, paddingVertical: 5, paddingHorizontal: 9, borderRadius: 8, backgroundColor: 'rgba(142,153,170,0.10)', overflow: 'hidden' },
   toolMessageText: { fontSize: 12, lineHeight: 18 },
   messageText: { fontSize: 17, lineHeight: 26 }, progressLabel: { fontSize: 13, fontWeight: '700', marginBottom: 3 },
-  workingRow: { maxWidth: 680, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 2 },
+  workingRow: { maxWidth: 680, minHeight: 44, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 2 },
   workingLabel: { fontSize: 13, lineHeight: 19 },
+  decisionAction: { alignSelf: 'flex-start', minHeight: 40, justifyContent: 'center', marginTop: 8, paddingHorizontal: 2 },
+  decisionActionText: { fontSize: 13, fontWeight: '800' },
   assistantState: { fontSize: 11, marginTop: 8 }, assistantStateFailed: { color: brand.critical, fontSize: 11, lineHeight: 17, marginTop: 8 },
   thinkingSummary: { marginTop: 8, paddingLeft: 9, borderLeftWidth: 2, borderLeftColor: 'rgba(139,108,255,0.5)' }, thinkingSummaryLabel: { fontSize: 10, fontWeight: '800' }, thinkingSummaryText: { fontSize: 12, lineHeight: 17, marginTop: 2 },
   sources: { marginTop: 10, gap: 4 }, sourcesTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase' }, sourceRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, minHeight: 38, paddingVertical: 4 }, sourceMarker: { width: 20, fontSize: 12, lineHeight: 18, fontWeight: '800', textAlign: 'center' }, sourceCopy: { flex: 1, minWidth: 0 }, sourceTitle: { fontSize: 12, lineHeight: 17, fontWeight: '700' }, sourceMeta: { fontSize: 10, lineHeight: 14, marginTop: 1 }, sourceQuote: { fontSize: 11, lineHeight: 15, marginTop: 2 },

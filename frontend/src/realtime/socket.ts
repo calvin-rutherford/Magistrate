@@ -63,6 +63,9 @@ export class RealtimeClient {
       };
       this.socket.onclose = () => {
         this.socket = null;
+        this.listeners.forEach(listener => listener({
+          type: 'connection_state', state: 'disconnected', target: this.target,
+        }));
         void getGatewaySessionToken().then(currentToken => { if (currentToken) this.scheduleReconnect(); });
       };
       this.socket.onerror = () => { /* onclose schedules the fallback reconnect */ };
