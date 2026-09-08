@@ -241,6 +241,27 @@ async def test_empty_or_relative_explicit_tool_path_fails_snapshot_closed(tmp_pa
     assert result['error'] == 'Fleet snapshot tool path is unavailable'
 
 
+@pytest.mark.parametrize('malformed_suffix', ['\x00/bin', '\udcff'])
+@pytest.mark.asyncio
+async def test_malformed_explicit_tool_path_fails_snapshot_closed(tmp_path, malformed_suffix):
+    script_dir = tmp_path / 'bin'
+    script_dir.mkdir()
+    script = script_dir / 'fm-fleet-snapshot.sh'
+    script.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"schema":"fm-fleet-snapshot.v1","tasks":[]}\'\n',
+        encoding='utf-8',
+    )
+    script.chmod(0o700)
+
+    result = await FirstmateClient(
+        str(tmp_path), tool_path=f'{tmp_path}{malformed_suffix}',
+    ).get_snapshot()
+
+    assert result['available'] is False
+    assert result['tasks'] == []
+    assert result['error'] == 'Fleet snapshot tool path is unavailable'
+
+
 def test_explicit_tool_path_fails_closed_for_world_writable_or_untrusted_entry(tmp_path, monkeypatch):
     trusted = tmp_path / 'trusted'
     world_writable = tmp_path / 'world-writable'

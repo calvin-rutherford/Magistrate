@@ -79,7 +79,13 @@ def _trusted_tool_directory(value: str) -> Optional[str]:
 
 
 def _sanitize_tool_path(value: str, *, reject_invalid: bool) -> Optional[str]:
-    if not isinstance(value, str) or len(value.encode('utf-8')) > _MAX_TOOL_PATH_BYTES:
+    if not isinstance(value, str) or '\x00' in value:
+        return None
+    try:
+        encoded = value.encode('utf-8')
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > _MAX_TOOL_PATH_BYTES:
         return None
     entries = value.split(os.pathsep)
     if len(entries) > _MAX_TOOL_PATH_ENTRIES:
@@ -87,7 +93,10 @@ def _sanitize_tool_path(value: str, *, reject_invalid: bool) -> Optional[str]:
 
     trusted: List[str] = []
     for entry in entries:
-        accepted = _trusted_tool_directory(entry)
+        try:
+            accepted = _trusted_tool_directory(entry)
+        except (OSError, ValueError):
+            return None
         if accepted is None:
             if reject_invalid:
                 return None
