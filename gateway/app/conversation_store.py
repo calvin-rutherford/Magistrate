@@ -359,8 +359,16 @@ def _upsert_message(
     # primary row's document or its plain-text projection.
     if slot == _PRIMARY_SLOT and existing['content_source'] == 'structured':
         return None
+    repairing_poison = (
+        slot == _PRIMARY_SLOT
+        and existing['role'] == 'assistant'
+        and existing['type'] == 'conversation'
+        and existing['source'] == 'terminal'
+        and not existing['visible_in_chat']
+        and is_pi_status_footer(existing['text'])
+    )
     attachments_changed = attachments_json is not None and existing['attachments_json'] != attachments_json
-    if not force and message_type == 'conversation':
+    if not force and message_type == 'conversation' and not repairing_poison:
         if structurally_bounded:
             # A later prompt boundary makes this segment ordered, but does not
             # prove that a partial observation contains the whole earlier reply.
@@ -385,9 +393,19 @@ def _upsert_message(
             text = merged
     elif not force and existing['text'] == text:
         return None
-    if existing['text'] == text and not attachments_changed:
+    if existing['text'] == text and not attachments_changed and not repairing_poison:
         return None
-    if attachments_json is None:
+    if repairing_poison:
+        conn.execute(
+            '''UPDATE conversation_messages
+               SET role = ?, type = ?, text = ?, visible_in_chat = ?, source = ?,
+                   attachments_json = COALESCE(?, attachments_json),
+                   revision = revision + 1, updated_at = ?
+               WHERE id = ?''',
+            (role, message_type, text, 1 if visible else 0, source,
+             attachments_json, now, existing['id']),
+        )
+    elif attachments_json is None:
         conn.execute(
             'UPDATE conversation_messages SET text = ?, revision = revision + 1, updated_at = ? WHERE id = ?',
             (text, now, existing['id']),
@@ -1402,7 +1420,7 @@ def _match_segments_to_turns(
 def _remove_structural_pi_footer_poison(
     conn: sqlite3.Connection, conversation_id: str,
 ) -> int:
-    """Delete only terminal replies proven to be complete Pi telemetry rows.
+    """Quarantine only terminal replies proven to be complete Pi telemetry rows.
 
     This repairs canonical rows written before the no-CH footer grammar existed.
     It deliberately does not search for similar text, trim mixed prose, or
@@ -1412,13 +1430,22 @@ def _remove_structural_pi_footer_poison(
     candidates = conn.execute(
         '''SELECT id, text FROM conversation_messages
            WHERE conversation_id = ? AND role = 'assistant'
-             AND type = 'conversation' AND slot = ? AND source = 'terminal' ''',
+             AND type = 'conversation' AND slot = ? AND source = 'terminal'
+             AND visible_in_chat = 1''',
         (conversation_id, _PRIMARY_SLOT),
     ).fetchall()
     poisoned = [row['id'] for row in candidates if is_pi_status_footer(row['text'])]
     if not poisoned:
         return 0
-    conn.executemany('DELETE FROM conversation_messages WHERE id = ?', [(item,) for item in poisoned])
+    now = _now()
+    conn.executemany(
+        '''UPDATE conversation_messages
+           SET visible_in_chat = 0, revision = revision + 1, updated_at = ?
+           WHERE id = ?''',
+        [(now, item) for item in poisoned],
+    )
+    for message_id in poisoned:
+        _record_message_change(conn, message_id)
     _touch_conversation(conn, conversation_id)
     return len(poisoned)
 
@@ -1724,6 +1751,7 @@ def list_messages(
                 FROM conversation_messages m
                 JOIN conversation_turns t ON t.id = m.turn_id
                 WHERE m.conversation_id = ? AND m.type IN ({placeholders})
+                  AND (m.type != 'conversation' OR m.visible_in_chat = 1)
                 ORDER BY m.sequence_index DESC LIMIT ?''',
             (conversation_id, *types, max(1, min(limit, MAX_MESSAGE_WINDOW))),
         ).fetchall()

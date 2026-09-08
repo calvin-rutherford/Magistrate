@@ -864,9 +864,8 @@ def test_structural_footer_cleanup_removes_only_poison_and_reingests_real_prose(
             "UPDATE conversation_messages SET text = ? WHERE turn_id = ? AND slot = 'primary'",
             (CURRENT_PI_FOOTER['text'], turn['turn_id']),
         )
+    cursor_before_repair = store.replay_messages(USER, TARGET, after=-1)['next_cursor']
 
-    # Ingestion first removes the metadata-only legacy primary, then uses the
-    # corrected typed snapshot through the normal prompt/segment path.
     store.ingest_terminal_rows(USER, TARGET, rows(
         ('user', 'conversation', prompt),
         ('assistant', 'control', CURRENT_PI_FOOTER['text']),
@@ -876,6 +875,15 @@ def test_structural_footer_cleanup_removes_only_poison_and_reingests_real_prose(
         ('user', 'conversation', prompt),
         ('assistant', 'conversation', 'The recovered conversational response.'),
     ]
+    repaired = store.replay_messages(USER, TARGET, after=cursor_before_repair)
+    assert [message['delivery_sequence'] for message in repaired['messages']] == [
+        cursor_before_repair + 1, cursor_before_repair + 2,
+    ]
+    assert {message['id'] for message in repaired['messages']} == {turn['assistant_message_id']}
+    assert {message['revision'] for message in repaired['messages']} == {3}
+    assert {message['text'] for message in repaired['messages']} == {
+        'The recovered conversational response.',
+    }
 
 
 def test_structural_footer_cleanup_does_not_delete_legitimate_model_prose():
