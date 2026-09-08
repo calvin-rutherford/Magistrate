@@ -40,7 +40,7 @@ from app.db import (init_db, get_profile, update_profile, get_connected_accounts
                     create_agent_migration, get_agent_migration, get_agent_migration_by_idempotency, transition_agent_migration)
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
-from app.activity_store import known_activity_users, list_activity, source_diagnostics
+from app.activity_store import known_activity_users, list_activity, snapshot_activity, source_diagnostics
 from app.firstmate_activity import FirstmateActivityAdapter
 from app.attention_service import attention_service
 from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
@@ -798,6 +798,29 @@ async def _activity_catch_up(user_id: str, *, after: int, limit: int, reconcile:
         'sources': source_diagnostics(user_id),
         'reconciliation': reconciliation['status'] if reconciliation else 'not-requested',
     }
+
+
+@app.get('/api/v1/activity/snapshot')
+async def get_canonical_activity_snapshot(
+    before: Optional[int] = Query(None, ge=1, le=9_007_199_254_740_991),
+    limit: int = Query(100, ge=1, le=200),
+    reconcile: bool = Query(True),
+    principal: Principal = Depends(require_scope('read')),
+):
+    """Return a bounded authoritative projection and its replay cursor."""
+    try:
+        reconciliation = await firstmate_activity.reconcile(principal.user_id) if reconcile else None
+        return {
+            **snapshot_activity(principal.user_id, before=before, limit=limit),
+            'sources': source_diagnostics(principal.user_id),
+            'reconciliation': reconciliation['status'] if reconciliation else 'not-requested',
+        }
+    except (ValueError, MagiEventConflict) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail='Structured activity reconciliation is unavailable.',
+        ) from exc
 
 
 @app.get('/api/v1/activity')

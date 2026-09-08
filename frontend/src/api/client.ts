@@ -708,6 +708,11 @@ export interface CanonicalActivityPage {
   next_cursor: number;
   latest_cursor: number;
   has_more: boolean;
+  summary?: {
+    active_objectives: number;
+    operation_count: number;
+    pending_decisions: number;
+  };
   reconciliation?: 'available' | 'degraded' | 'not-requested';
   sources?: {
     source_instance_id: string;
@@ -716,6 +721,24 @@ export interface CanonicalActivityPage {
     cursor: number;
     source_tail: number;
   }[];
+}
+
+export interface CanonicalActivitySnapshotPage {
+  schema_version: 'activity.v1';
+  records: CanonicalActivityRecord[];
+  focus_records: CanonicalActivityRecord[];
+  focus_truncated: boolean;
+  snapshot_cursor: number;
+  latest_sequence: number;
+  next_before: number | null;
+  has_more: boolean;
+  summary: {
+    active_objectives: number;
+    operation_count: number;
+    pending_decisions: number;
+  };
+  reconciliation?: 'available' | 'degraded' | 'not-requested';
+  sources?: CanonicalActivityPage['sources'];
 }
 
 export async function fetchHealth() {
@@ -881,6 +904,20 @@ export async function fetchCanonicalActivity(after = 0, limit = 100, reconcile =
   const data = await checkedJson<CanonicalActivityPage>(response);
   if (data?.schema_version !== 'activity.v1' || !Array.isArray(data.records)) {
     throw new Error('Gateway returned invalid canonical activity data.');
+  }
+  return data;
+}
+
+export async function fetchCanonicalActivitySnapshot(
+  before?: number, limit = 100, reconcile = true,
+): Promise<CanonicalActivitySnapshotPage> {
+  const params = new URLSearchParams({ limit: String(limit), reconcile: String(reconcile) });
+  if (before !== undefined) params.set('before', String(before));
+  const response = await authorizedFetch(`${GATEWAY_URL}/activity/snapshot?${params}`);
+  const data = await checkedJson<CanonicalActivitySnapshotPage>(response);
+  if (data?.schema_version !== 'activity.v1' || !Array.isArray(data.records)
+    || !Array.isArray(data.focus_records)) {
+    throw new Error('Gateway returned invalid canonical activity snapshot data.');
   }
   return data;
 }

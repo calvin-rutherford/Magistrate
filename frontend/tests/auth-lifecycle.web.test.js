@@ -100,11 +100,26 @@ async function seedPrincipalCache(page, principal = 'default_user') {
     const row = { id: 'cm-secret', canonicalId: 'cm-secret', role: 'assistant', kind: 'conversation', text: `private for ${owner}`, source: 'text', sentAt: Date.now() };
     localStorage.setItem(`magistrate.chat.canonical.v1.${encodeURIComponent(owner)}|captain`, JSON.stringify({ schema_version: 'conversation-cache.v1', principal_id: owner, messages: { 'cm-secret': row } }));
     localStorage.setItem(`magistrate.chat.pending.v1.${encodeURIComponent(owner)}|captain`, JSON.stringify({ schema_version: 'conversation-pending.v1', principal_id: owner, messages: {} }));
+    localStorage.setItem(`magistrate.activity.canonical.v1.${encodeURIComponent(owner)}`, JSON.stringify({
+      schema_version: 'activity-cache.v1', principal: owner, cursor: 1, summary_cursor: 1,
+      summary_authoritative: true,
+      summary: { active_objectives: 1, operation_count: 0, pending_decisions: 1 },
+      records: [{
+        id: 'ca-private-decision', sequence: 1, delivery_sequence: 1, revision: 1,
+        kind: 'decision.requested', state: 'awaiting-user', importance: 'attention',
+        title: `Private decision for ${owner}`, summary: 'Choose a release channel.', summary_truncated: false,
+        task_id: 'release-task', decision_key: 'release-channel', objective_id: 'obj-release',
+        run_id: 'run-release', project: 'Magistrate', occurred_at: null, observed_at: Date.now(),
+        refs: [], source: { instance_id: 'firstmate:main', event_id: null },
+      }],
+    }));
   }, principal);
 }
 
 async function principalCacheKeys(page, principal = 'default_user') {
-  return page.evaluate(owner => Object.keys(localStorage).filter(key => key.startsWith('magistrate.chat.') && key.includes(`.${encodeURIComponent(owner)}|`)), principal);
+  return page.evaluate(owner => Object.keys(localStorage).filter(key =>
+    (key.startsWith('magistrate.chat.') && key.includes(`.${encodeURIComponent(owner)}|`))
+      || key === `magistrate.activity.canonical.v1.${encodeURIComponent(owner)}`), principal);
 }
 
 async function connect(page) {

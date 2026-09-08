@@ -7,7 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app.activity_store import SourceEventConflict, list_activity, reconcile_snapshot, source_diagnostics
+from app.activity_store import (
+    SourceEventConflict, list_activity, reconcile_snapshot, source_diagnostics,
+)
 from app.auth import issue_session
 from app.firstmate_activity import FirstmateActivityAdapter
 from app.main import app, firstmate_activity
@@ -627,10 +629,21 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
     client = TestClient(app)
 
     assert client.get('/api/v1/activity/replay').status_code == 401
+    assert client.get('/api/v1/activity/snapshot?reconcile=false').status_code == 401
     replay = client.get(f'/api/v1/activity/replay?after={before}&limit=10', headers=TEST_HEADERS)
     assert replay.status_code == 200
     assert [row['summary'] for row in replay.json()['records']] == ['Actual semantic progress.']
     assert replay.json()['records'][0]['objective_id'] == 'obj_http_replay'
+    snapshot = client.get(
+        '/api/v1/activity/snapshot?limit=1&reconcile=false&user_id=isolated-http-owner',
+        headers=TEST_HEADERS,
+    )
+    assert snapshot.status_code == 200
+    assert snapshot.json()['snapshot_cursor'] == replay.json()['latest_cursor']
+    assert snapshot.json()['focus_records'][0]['id'] == replay.json()['records'][0]['id']
+    assert snapshot.json()['summary'] == {
+        'active_objectives': 1, 'operation_count': 0, 'pending_decisions': 0,
+    }
     assert client.get(
         f"/api/v1/activity/replay?after={replay.json()['latest_cursor'] + 1}",
         headers=TEST_HEADERS,
@@ -658,6 +671,13 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
     )
     assert other.status_code == 200
     assert other.json()['records'] == []
+    isolated_snapshot = client.get(
+        '/api/v1/activity/snapshot?reconcile=false',
+        headers={'Authorization': f'Bearer {other_token}'},
+    )
+    assert isolated_snapshot.status_code == 200
+    assert isolated_snapshot.json()['records'] == []
+    assert isolated_snapshot.json()['focus_records'] == []
 
     with client.websocket_connect('/api/v1/events') as socket:
         socket.send_json({

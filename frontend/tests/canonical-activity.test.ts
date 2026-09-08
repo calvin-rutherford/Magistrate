@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  decisionAttentionItemId,
+  deriveCanonicalWorkState,
   getCanonicalActivityCursor,
   getCanonicalActivityRecords,
+  getCanonicalActivitySnapshot,
   ingestCanonicalActivityPage,
+  ingestCanonicalActivitySnapshot,
+  markCanonicalActivityFresh,
   normalizeCanonicalActivityRecord,
   setCanonicalActivityPrincipal,
 } from '../src/services/CanonicalActivity';
@@ -129,6 +134,77 @@ test('malformed fields, credentials, controls, and cursor gaps fail closed witho
   ], 2)), 'two stable records cannot claim one insertion sequence');
   assert.equal(getCanonicalActivityCursor(), 0);
   assert.deepEqual(getCanonicalActivityRecords(), []);
+});
+
+test('a delayed snapshot cannot regress a newer realtime revision or lifecycle summary', () => {
+  setCanonicalActivityPrincipal('activity-snapshot-race');
+  const snapshot = (activityRecord: unknown, cursor: number, active: number) => ({
+    schema_version: 'activity.v1', records: [activityRecord], focus_records: [activityRecord],
+    focus_truncated: false, snapshot_cursor: cursor, latest_sequence: 1,
+    next_before: null, has_more: false,
+    summary: { active_objectives: active, operation_count: active ? 12 : 0, pending_decisions: 0 },
+  });
+  const running = record({ delivery_sequence: 2, revision: 2 });
+  assert.ok(ingestCanonicalActivitySnapshot(snapshot(running, 2, 1)));
+  const completed = record({
+    delivery_sequence: 3, revision: 3, kind: 'objective.completed',
+    state: 'completed', summary: 'Objective completed.',
+  });
+  assert.ok(ingestCanonicalActivityPage({
+    ...page([completed], 3),
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  assert.ok(ingestCanonicalActivitySnapshot(snapshot(running, 2, 1)));
+  assert.equal(getCanonicalActivityRecords()[0].state, 'completed');
+  assert.equal(getCanonicalActivityRecords()[0].revision, 3);
+  assert.equal(getCanonicalActivitySnapshot().summary.activeObjectives, 0);
+});
+
+test('a current complete focus projection clears a stale cached pending decision without inventing an outcome', () => {
+  setCanonicalActivityPrincipal('activity-focus-prune');
+  const pending = record({
+    id: 'ca_pending', kind: 'decision.requested', state: 'awaiting-user',
+    task_id: 'soak-task', decision_key: 'release-channel',
+  });
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [pending], focus_records: [pending], focus_truncated: false,
+    snapshot_cursor: 1, latest_sequence: 1, next_before: null, has_more: false,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 1 },
+  }));
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
+    snapshot_cursor: 2, latest_sequence: 1, next_before: null, has_more: false,
+    summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+  }));
+  assert.deepEqual(getCanonicalActivityRecords(), []);
+  assert.equal(getCanonicalActivitySnapshot().summary.pendingDecisions, 0);
+});
+
+test('working state and decision routing use only canonical identities', () => {
+  setCanonicalActivityPrincipal('activity-working-state');
+  const rows = [record({ id: 'ca_objective', kind: 'objective.progress' }), ...Array.from(
+    { length: 12 },
+    (_, index) => record({
+      id: `ca_operation_${index + 1}`, sequence: index + 2, delivery_sequence: index + 2,
+      kind: 'worker.message', state: 'completed', summary: `Operation ${index + 1}.`,
+    }),
+  )];
+  assert.ok(ingestCanonicalActivitySnapshot({
+    schema_version: 'activity.v1', records: rows, focus_records: [rows[0]],
+    focus_truncated: false, snapshot_cursor: 13, latest_sequence: 13,
+    next_before: null, has_more: false,
+    summary: { active_objectives: 1, operation_count: 12, pending_decisions: 0 },
+  }));
+  markCanonicalActivityFresh();
+  const work = deriveCanonicalWorkState(getCanonicalActivitySnapshot(), [{
+    canonicalId: 'cm_user', objectiveId: 'obj_soak', lifecycleState: 'active', progress: 'working',
+  }]);
+  assert.deepEqual([work.active, work.phase, work.operationCount], [true, 'active', 12]);
+  assert.equal(decisionAttentionItemId('release-channel'), 'captain-question-release-channel');
+  assert.equal(decisionAttentionItemId('../unsafe'), null);
+  setCanonicalActivityPrincipal('activity-local-only');
+  assert.equal(deriveCanonicalWorkState(getCanonicalActivitySnapshot(), [{ progress: 'working' }]).active, false,
+    'component-local progress without a Gateway identity cannot activate lifecycle UI');
 });
 
 test('safe references and more than ten ordered activity rows survive bounded catch-up', () => {

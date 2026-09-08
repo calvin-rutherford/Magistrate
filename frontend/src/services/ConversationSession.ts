@@ -1,7 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCallback, useSyncExternalStore } from 'react';
 import { MAGI_MAX_FALLBACK_TEXT_CHARS, MagiResponseV1, normalizeMagiResponse } from './MagiResponse';
-import { setCanonicalActivityPrincipal } from './CanonicalActivity';
+import {
+  setCanonicalActivityPrincipal, settleCanonicalActivityPrincipal,
+} from './CanonicalActivity';
 
 export interface ConversationAttachment {
   name: string;
@@ -147,7 +149,10 @@ export async function setConversationPrincipal(principal: string | null): Promis
   messagesByTarget.clear();
   listenersByTarget.forEach(listeners => listeners.forEach(listener => listener()));
   const transition = principalTransition.catch(() => {}).then(async () => {
-    await Promise.all(pendingWrites.map(write => write.catch(() => {})));
+    await Promise.all([
+      ...pendingWrites.map(write => write.catch(() => {})),
+      settleCanonicalActivityPrincipal().catch(() => {}),
+    ]);
     if (activePrincipalId !== principal) return;
     try {
       const keys = await AsyncStorage.getAllKeys();
