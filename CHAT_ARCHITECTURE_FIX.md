@@ -37,7 +37,7 @@ terminal parsing is demoted to an ingestion adapter.
 - `POST /api/v1/captain/prompt` creates **exactly one turn and one canonical user
   message**, keyed by the frontend's existing `message_id`. Replaying the same
   `message_id` reuses both.
-- An opt-in Pi ownership dispatch is prepared in the same transaction as the
+- The default-on Pi ownership dispatch is prepared in the same transaction as the
   turn and reservation. Its authenticated local extension binds exact native
   user/final assistant entries and updates only that primary row with complete
   visible text. Ownership disables fallback immediately, before adapter work.
@@ -104,7 +104,7 @@ Two constraints carry the whole guarantee:
 
 ```
 composer ──POST /captain/prompt {message_id}──► record_prompt() → turn + user + reservation
-                opt-in owned path             └► atomic capability prepare
+                default Pi-owned path          └► atomic capability prepare
                                                 → authenticated local Pi adapter
                                                 → native user/bind/final entries
                                                 → reserved canonical primary row

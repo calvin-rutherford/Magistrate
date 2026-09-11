@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createHmac } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -133,6 +133,43 @@ function mockPi(
   return { pi, handlers, context, entries, completed: () => completion };
 }
 
+test('unset feature flag activates the adapter and false literals disable it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'magistrate-pi-default-'));
+  const runtime = join(directory, 'runtime');
+  await mkdir(runtime, { mode: 0o700 });
+  const keyPath = join(runtime, 'channel.key');
+  const socketPath = join(runtime, 'channel.sock');
+  const journalPath = join(runtime, 'channel.journal');
+  await writeFile(keyPath, `${'U'.repeat(48)}\n`, { mode: 0o600 });
+  await chmod(keyPath, 0o600);
+  Object.assign(process.env, {
+    MAGISTRATE_PI_RUNTIME_DIR: runtime,
+    MAGISTRATE_PI_IPC_KEY_PATH: keyPath,
+    MAGISTRATE_PI_ADAPTER_SOCKET: socketPath,
+    MAGISTRATE_PI_ADAPTER_JOURNAL: journalPath,
+    MAGISTRATE_PI_ADAPTER_UID: String(process.geteuid()),
+  });
+  delete process.env.MAGISTRATE_PI_OWNERSHIP_ENABLED;
+
+  const { default: extension } = await import('../.test-dist/index.js');
+  const active = mockPi('session_default_enabled');
+  extension(active.pi);
+  assert.ok(active.handlers.has('session_start'));
+  await active.handlers.get('session_start')({ type: 'session_start' }, active.context);
+  const socketInfo = await lstat(socketPath);
+  assert.equal(socketInfo.isSocket(), true);
+  assert.equal(socketInfo.mode & 0o7777, 0o600);
+  await active.handlers.get('session_shutdown')({ type: 'session_shutdown' }, active.context);
+
+  for (const literal of ['0', 'false', 'no', 'off']) {
+    process.env.MAGISTRATE_PI_OWNERSHIP_ENABLED = literal;
+    const disabled = mockPi(`session_disabled_${literal}`);
+    extension(disabled.pi);
+    assert.equal(disabled.handlers.size, 0);
+  }
+  await rm(directory, { recursive: true, force: true });
+});
+
 const fixedExpiry = Date.now() + 5 * 60_000;
 
 function request(capability, prompt, nonce, messageType = 'dispatch', acceptedHash) {
@@ -175,6 +212,18 @@ test('native Pi dispatch binds exact entries, redacts internals, and recovers fr
   const first = mockPi('session_exact_1');
   extension(first.pi);
   await first.handlers.get('session_start')({ type: 'session_start' }, first.context);
+
+  const ready = await exchange(socketPath, key, {
+    schema_version: 'magistrate.pi.ipc.v1',
+    message_type: 'probe',
+    request_nonce: 'nonce_probe_12345678901',
+    issued_at: Date.now(),
+  });
+  assert.deepEqual(ready, {
+    schema_version: 'magistrate.pi.ipc.v1',
+    event_type: 'ready',
+    request_nonce: 'nonce_probe_12345678901',
+  });
 
   const capability = `pic_${'A'.repeat(43)}`;
   const prompt = 'dispatch exactly, including 🙂 and trailing space ';
@@ -352,9 +401,53 @@ test('a matching non-native Pi input cannot bind the prepared ownership', async 
 
 test('unknown feature flag values fail closed before extension activation', async () => {
   const { default: extension } = await import('../.test-dist/index.js');
-  process.env.MAGISTRATE_PI_OWNERSHIP_ENABLED = 'tru';
-  assert.throws(() => extension(mockPi('invalid_flag_session').pi), /invalid-feature-flag/);
+  for (const literal of ['', ' ', 'tru', 'enabled', '2']) {
+    process.env.MAGISTRATE_PI_OWNERSHIP_ENABLED = literal;
+    assert.throws(() => extension(mockPi('invalid_flag_session').pi), /invalid-feature-flag/);
+  }
   process.env.MAGISTRATE_PI_OWNERSHIP_ENABLED = 'true';
+});
+
+test('extension rejects malformed runtime, endpoint boundary, UID, and journal metadata', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'magistrate-pi-config-'));
+  const runtime = join(directory, 'runtime');
+  await mkdir(runtime, { mode: 0o755 });
+  const keyPath = join(runtime, 'channel.key');
+  const socketPath = join(runtime, 'channel.sock');
+  const journalPath = join(runtime, 'channel.journal');
+  await writeFile(keyPath, `${'V'.repeat(48)}\n`, { mode: 0o600 });
+  await chmod(keyPath, 0o600);
+  Object.assign(process.env, {
+    MAGISTRATE_PI_OWNERSHIP_ENABLED: 'true',
+    MAGISTRATE_PI_RUNTIME_DIR: runtime,
+    MAGISTRATE_PI_IPC_KEY_PATH: keyPath,
+    MAGISTRATE_PI_ADAPTER_SOCKET: socketPath,
+    MAGISTRATE_PI_ADAPTER_JOURNAL: journalPath,
+    MAGISTRATE_PI_ADAPTER_UID: String(process.geteuid()),
+  });
+  const { default: extension } = await import('../.test-dist/index.js');
+
+  process.env.MAGISTRATE_PI_IPC_KEY_PATH = ' ';
+  assert.throws(() => extension(mockPi('empty_key_path').pi), /invalid-local-path/);
+  process.env.MAGISTRATE_PI_IPC_KEY_PATH = keyPath;
+  assert.throws(() => extension(mockPi('unsafe_runtime').pi), /untrusted-local-runtime/);
+  await chmod(runtime, 0o700);
+
+  process.env.MAGISTRATE_PI_ADAPTER_UID = String(process.geteuid() + 1);
+  assert.throws(() => extension(mockPi('wrong_uid').pi), /invalid-adapter-uid/);
+  process.env.MAGISTRATE_PI_ADAPTER_UID = String(process.geteuid());
+
+  process.env.MAGISTRATE_PI_ADAPTER_SOCKET = join(directory, 'outside.sock');
+  assert.throws(() => extension(mockPi('outside_socket').pi), /invalid-local-boundary/);
+  process.env.MAGISTRATE_PI_ADAPTER_SOCKET = socketPath;
+
+  await writeFile(journalPath, 'not trusted', { mode: 0o644 });
+  await chmod(journalPath, 0o644);
+  assert.throws(() => extension(mockPi('unsafe_journal').pi), /untrusted-adapter-journal/);
+  await rm(journalPath);
+  await symlink(keyPath, journalPath);
+  assert.throws(() => extension(mockPi('linked_journal').pi), /untrusted-adapter-journal/);
+  await rm(directory, { recursive: true, force: true });
 });
 
 test('restart status closes an abnormal persisted assistant without exposing its text', async () => {

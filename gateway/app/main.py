@@ -63,9 +63,9 @@ from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BY
                          associate_uploads, save_upload, get_upload, validate_upload_metadata)
 from app.pi_adapter_ipc import PI_IPC_SCHEMA, PiAdapterClient, PiAdapterIPCError
 from app.pi_ownership import (
-    PiOwnershipError, apply_pi_ownership_envelope, get_recoverable_dispatches,
-    has_terminal_fallback_candidates, mark_pi_adapter_acknowledged,
-    mark_pi_dispatch_attempt,
+    PiOwnershipError, apply_pi_ownership_envelope, get_pi_ownership_diagnostics,
+    get_recoverable_dispatches, has_terminal_fallback_candidates,
+    mark_pi_adapter_acknowledged, mark_pi_dispatch_attempt,
 )
 
 init_db()
@@ -161,9 +161,15 @@ _activity_reconciler_task = None
 _pi_ownership_reconciler_task = None
 
 
+PI_OWNERSHIP_DEFAULT_ENABLED = True
+
+
 def _pi_ownership_enabled() -> bool:
-    raw = os.getenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', '').strip().lower()
-    if raw in {'', '0', 'false', 'no', 'off'}:
+    configured = os.getenv('MAGISTRATE_PI_OWNERSHIP_ENABLED')
+    if configured is None:
+        return PI_OWNERSHIP_DEFAULT_ENABLED
+    raw = configured.strip().lower()
+    if raw in {'0', 'false', 'no', 'off'}:
         return False
     if raw in {'1', 'true', 'yes', 'on'}:
         return True
@@ -171,13 +177,82 @@ def _pi_ownership_enabled() -> bool:
 
 
 def _pi_capability_ttl_ms() -> int:
+    raw = os.getenv('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS')
     try:
-        seconds = int(os.getenv('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS', '120'))
+        seconds = 120 if raw is None else int(raw)
     except ValueError as exc:
         raise RuntimeError('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS must be an integer.') from exc
     if seconds < 5 or seconds > 600:
         raise RuntimeError('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS must be between 5 and 600.')
     return seconds * 1000
+
+
+def _pi_recovery_seconds() -> int:
+    raw = os.getenv('MAGISTRATE_PI_RECOVERY_SECONDS')
+    try:
+        seconds = 3 if raw is None else int(raw)
+    except ValueError as exc:
+        raise RuntimeError('MAGISTRATE_PI_RECOVERY_SECONDS must be an integer.') from exc
+    if seconds < 1 or seconds > 60:
+        raise RuntimeError('MAGISTRATE_PI_RECOVERY_SECONDS must be between 1 and 60.')
+    return seconds
+
+
+def _validate_pi_ownership_startup() -> bool:
+    """Validate every local boundary before an enabled Gateway serves."""
+    enabled = _pi_ownership_enabled()
+    if not enabled:
+        return False
+    _pi_capability_ttl_ms()
+    _pi_recovery_seconds()
+    PiAdapterClient.from_environment().ensure_key()
+    return True
+
+
+async def _verify_pi_adapter_startup_readiness() -> None:
+    """Authenticate an existing adapter; allow only genuine delayed arrival."""
+    try:
+        await PiAdapterClient.from_environment().probe()
+    except PiAdapterIPCError as exc:
+        if str(exc) == 'adapter-unavailable':
+            return
+        # An existing/responding endpoint that cannot prove the shared key and
+        # peer contract is a trust failure, not a readiness condition.
+        raise RuntimeError(f'Pi adapter startup trust check failed: {exc}') from None
+
+
+async def _pi_ownership_diagnostics(user_id: str, target: str) -> Dict[str, Any]:
+    """Bounded, content-free ownership readiness for one authenticated tenant."""
+    enabled = _pi_ownership_enabled()
+    ready = False
+    if enabled:
+        try:
+            ready = await PiAdapterClient.from_environment().is_ready()
+        except PiAdapterIPCError:
+            # Startup rejects configuration defects. Keep this route free of
+            # local paths and collapse a later filesystem/runtime drift to one
+            # truthful availability state.
+            ready = False
+    durable = get_pi_ownership_diagnostics(user_id, target)
+    return {
+        'schema_version': 'pi-semantic-ownership-diagnostics.v1',
+        'enabled': enabled,
+        'default_enabled': PI_OWNERSHIP_DEFAULT_ENABLED,
+        'defaulted': os.getenv('MAGISTRATE_PI_OWNERSHIP_ENABLED') is None,
+        'selection': {
+            'new_captain_turns': 'pi-semantic' if enabled else 'compatibility',
+            'pi_semantic_selected': enabled,
+        },
+        'adapter': {
+            'status': 'ready' if ready else ('unavailable' if enabled else 'disabled'),
+            'ready': ready,
+        },
+        **durable,
+        'terminal_fallback': {
+            'policy': 'unowned-legacy-only',
+            'eligible_legacy_turns': has_terminal_fallback_candidates(user_id, target),
+        },
+    }
 
 
 async def _exchange_pi_dispatch(dispatch: Dict[str, Any]) -> Dict[str, Any]:
@@ -242,21 +317,23 @@ async def _exchange_pi_dispatch(dispatch: Dict[str, Any]) -> Dict[str, Any]:
     return applied
 
 
+async def _reconcile_pi_ownership_once() -> None:
+    """Run one bounded recovery pass without consulting display transport."""
+    for dispatch in get_recoverable_dispatches():
+        try:
+            await _exchange_pi_dispatch(dispatch)
+        except (PiAdapterIPCError, PiOwnershipError, LookupError, ValueError):
+            # Durable state remains retryable/fail-closed. Do not print an
+            # exception that could contain local paths or payloads.
+            continue
+
+
 async def _reconcile_pi_ownership() -> None:
     """Recover prepared/bound adapter state from authenticated local evidence."""
-    try:
-        interval = max(1, min(int(os.getenv('MAGISTRATE_PI_RECOVERY_SECONDS', '3')), 60))
-    except ValueError:
-        interval = 3
+    interval = _pi_recovery_seconds()
     while True:
         try:
-            for dispatch in get_recoverable_dispatches():
-                try:
-                    await _exchange_pi_dispatch(dispatch)
-                except (PiAdapterIPCError, PiOwnershipError, LookupError, ValueError):
-                    # Durable state remains retryable/fail-closed. Do not print
-                    # an exception that could contain local paths or payloads.
-                    continue
+            await _reconcile_pi_ownership_once()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -317,6 +394,11 @@ async def _reconcile_firstmate_activity() -> None:
 @app.on_event('startup')
 async def start_notification_reconciler():
     global _notification_reconciler_task, _activity_reconciler_task, _pi_ownership_reconciler_task
+    # Validate the default captain trust boundary before launching any
+    # background side effect. A securely absent adapter alone may arrive later.
+    pi_enabled = _validate_pi_ownership_startup()
+    if pi_enabled:
+        await _verify_pi_adapter_startup_readiness()
     # Optional by default for owner/Friend compatibility. Once an operator
     # explicitly requires the pinned producer, startup must not serve a runtime
     # whose reviewed call sites or home-local activation are absent.
@@ -326,13 +408,8 @@ async def start_notification_reconciler():
     activity_disabled = os.getenv('MAGISTRATE_DISABLE_ACTIVITY_RECONCILER', '').lower() in {'1', 'true', 'yes'}
     if os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'} and not activity_disabled:
         _activity_reconciler_task = asyncio.create_task(_reconcile_firstmate_activity())
-    if _pi_ownership_enabled():
-        # Explicit activation is fail-closed for credential/path configuration;
-        # the adapter itself may arrive later and recovery will reconnect.
-        _pi_capability_ttl_ms()
-        PiAdapterClient.from_environment().ensure_key()
-        if os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'}:
-            _pi_ownership_reconciler_task = asyncio.create_task(_reconcile_pi_ownership())
+    if pi_enabled and os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'}:
+        _pi_ownership_reconciler_task = asyncio.create_task(_reconcile_pi_ownership())
 
 
 @app.on_event('shutdown')
@@ -698,6 +775,9 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
     herdr_connected = bool(snapshot.get('version'))
     firstmate_available = fm_snapshot.get('available') is True
     producer = fm_client.get_producer_readiness()
+    pi_ownership = await _pi_ownership_diagnostics(
+        principal.user_id, CANONICAL_CONVERSATION_TARGET,
+    )
     # The gateway process answering is not the same claim as the product being
     # healthy. Degrade explicitly when a live source is missing, and never
     # substitute a placeholder Herdr version for one we did not observe. A
@@ -706,6 +786,8 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
     degraded = [name for name, ok in (('herdr', herdr_connected), ('firstmate', firstmate_available)) if not ok]
     if producer['required'] and producer['status'] != 'ready':
         degraded.append('firstmate-producer')
+    if pi_ownership['enabled'] and not pi_ownership['adapter']['ready']:
+        degraded.append('pi-ownership-adapter')
     return {
         'status': 'degraded' if degraded else 'healthy',
         'degraded_sources': degraded,
@@ -717,6 +799,7 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         'firstmate_available': firstmate_available,
         'firstmate_tasks_count': len(fm_snapshot.get('tasks', [])),
         'firstmate_producer': producer,
+        'pi_semantic_ownership': pi_ownership,
     }
 
 
@@ -731,6 +814,9 @@ async def get_soak_diagnostics(principal: Principal = Depends(require_scope('rea
         'turn_lifecycle': get_lifecycle_diagnostics(principal.user_id, target),
         'activity_sources': source_diagnostics(principal.user_id),
         'firstmate_producer': fm_client.get_producer_readiness(),
+        'pi_semantic_ownership': await _pi_ownership_diagnostics(
+            principal.user_id, target,
+        ),
     }
 
 # ACCOUNT PROFILE ENDPOINTS
@@ -1261,7 +1347,7 @@ async def create_voice_move(request: VoiceMoveRequest, principal: Principal = De
     if _pi_ownership_enabled():
         # This legacy voice service dispatches through Herdr before it creates a
         # canonical captain turn. It cannot truthfully manufacture Pi ownership,
-        # so the opt-in channel disables this seam rather than silently bypassing
+        # so the default semantic channel disables this seam rather than silently bypassing
         # source-native correlation. Typed captain prompts remain available.
         raise HTTPException(
             status_code=503,

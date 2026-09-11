@@ -13,6 +13,18 @@ TEST_DB_PATH = Path(__file__).parent / '.gateway-test.sqlite3'
 TEST_DB_PATH.unlink(missing_ok=True)
 os.environ.setdefault('MAGISTRATE_DB_PATH', str(TEST_DB_PATH))
 os.environ.setdefault('MAGISTRATE_BOOTSTRAP_SECRET', 'test-bootstrap-secret')
+# Most Gateway integration fixtures exercise the explicit legacy compatibility
+# mode. Keep them hermetic from an operator's local Pi runtime; focused Pi tests
+# remove/override these values and supply private temporary boundaries.
+for name in (
+    'MAGISTRATE_PI_RUNTIME_DIR', 'MAGISTRATE_PI_IPC_KEY_PATH',
+    'MAGISTRATE_PI_ADAPTER_SOCKET', 'MAGISTRATE_PI_ADAPTER_JOURNAL',
+    'MAGISTRATE_PI_ADAPTER_UID', 'MAGISTRATE_PI_CAPABILITY_TTL_SECONDS',
+    'MAGISTRATE_PI_CONNECT_TIMEOUT_SECONDS', 'MAGISTRATE_PI_RESPONSE_TIMEOUT_SECONDS',
+    'MAGISTRATE_PI_RECOVERY_SECONDS',
+):
+    os.environ.pop(name, None)
+os.environ['MAGISTRATE_PI_OWNERSHIP_ENABLED'] = 'false'
 
 from app.auth import issue_session
 

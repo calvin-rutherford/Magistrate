@@ -24,6 +24,10 @@ def test_health_authorized():
     assert data["service"] == "magistrate-gateway"
     assert data["firstmate_producer"]["schema_version"] == "firstmate-producer-readiness.v1"
     assert "fm_home" not in data["firstmate_producer"]
+    assert data["pi_semantic_ownership"]["default_enabled"] is True
+    assert data["pi_semantic_ownership"]["defaulted"] is False
+    assert data["pi_semantic_ownership"]["enabled"] is False
+    assert data["pi_semantic_ownership"]["adapter"]["status"] == "disabled"
 
 
 def test_health_reports_healthy_only_when_every_source_is_observed(monkeypatch):
@@ -102,6 +106,20 @@ def test_health_keeps_failed_firstmate_unavailable_with_configured_home(monkeypa
     assert data["degraded_sources"] == ["firstmate"]
     assert data["firstmate_home"] == "/tmp/fm"
     assert data["firstmate_available"] is False
+
+
+def test_soak_diagnostics_include_only_bounded_pi_ownership_state():
+    response = client.get('/api/v1/diagnostics/soak', headers=TEST_HEADERS)
+    assert response.status_code == 200
+    ownership = response.json()['pi_semantic_ownership']
+    assert ownership['schema_version'] == 'pi-semantic-ownership-diagnostics.v1'
+    assert set(ownership['dispatch_state_counts']) == {
+        'prepared', 'bound', 'finalized', 'failed',
+    }
+    assert isinstance(ownership['recovery_backlog_count'], int)
+    serialized = str(ownership)
+    for secret_field in ('capability_enc', 'prompt_enc', 'assistant_content', 'source_sequence'):
+        assert secret_field not in serialized
 
 
 def test_runtime():

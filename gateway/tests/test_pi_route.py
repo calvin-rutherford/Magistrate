@@ -7,10 +7,11 @@ from fastapi import HTTPException
 
 from app.auth import Principal
 from app.contracts import UniversalInputContract, VoiceMoveRequest
-from app.conversation_store import list_messages
+from app.conversation_store import list_messages, record_prompt
 import app.main as main_module
 from app.main import (
-    _exchange_pi_dispatch, _ingest_target_snapshot, create_voice_move,
+    _exchange_pi_dispatch, _ingest_target_snapshot, _pi_ownership_diagnostics,
+    _pi_ownership_enabled, _reconcile_pi_ownership_once, create_voice_move,
     send_captain_prompt,
 )
 from app.pi_adapter_ipc import PiAdapterIPCError
@@ -25,11 +26,11 @@ def principal():
 
 
 @pytest.mark.asyncio
-async def test_owned_prompt_uses_only_local_pi_adapter_and_exposes_no_capability(monkeypatch):
+async def test_unset_flag_defaults_owned_prompt_to_only_local_pi_adapter(monkeypatch):
     owner = principal()
     exchange = AsyncMock(return_value={'state': 'bound', 'status': 'applied'})
     legacy_prompt = AsyncMock(side_effect=AssertionError('legacy provider must not be called'))
-    monkeypatch.setenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', 'true')
+    monkeypatch.delenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', raising=False)
     monkeypatch.setattr('app.main._exchange_pi_dispatch', exchange)
     monkeypatch.setattr('app.main.herdr_client.prompt_agent', legacy_prompt)
 
@@ -47,6 +48,18 @@ async def test_owned_prompt_uses_only_local_pi_adapter_and_exposes_no_capability
     assert dispatched['capability'] not in encoded
     assert dispatched['dispatch_incarnation'] not in encoded
     assert response['transport'] == 'pi-semantic'
+
+
+@pytest.mark.parametrize('literal', ['1', 'true', 'yes', 'on', ' TRUE '])
+def test_explicit_true_feature_flag_literals_enable(literal, monkeypatch):
+    monkeypatch.setenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', literal)
+    assert _pi_ownership_enabled() is True
+
+
+@pytest.mark.parametrize('literal', ['0', 'false', 'no', 'off', ' FALSE '])
+def test_explicit_false_feature_flag_literals_disable(literal, monkeypatch):
+    monkeypatch.setenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', literal)
+    assert _pi_ownership_enabled() is False
 
 
 @pytest.mark.asyncio
@@ -89,9 +102,22 @@ async def test_adapter_absence_keeps_prepared_ownership_and_never_falls_back(mon
         owner.user_id, 'captain',
         # Ownership is intentionally not returned to the HTTP client, so join
         # through the canonical turn for this test only.
-        next_dispatch_for_turn(message['turn_id']),
+        next_dispatch_for_turn(message['turn_id']), include_secret=True,
     )
     assert state['state'] == 'prepared'
+
+    recovered_exchange = AsyncMock(return_value={'state': 'bound', 'status': 'applied'})
+    monkeypatch.setattr('app.main._exchange_pi_dispatch', recovered_exchange)
+    retried = await send_captain_prompt(UniversalInputContract(
+        text='survive adapter restart', message_id=message_id,
+    ), owner)
+    recovered_exchange.assert_awaited_once()
+    replayed = recovered_exchange.await_args.args[0]
+    assert replayed['dispatch_incarnation'] == state['dispatch_incarnation']
+    assert replayed['capability'] == state['capability']
+    assert retried['conversation']['turn_id'] == message['turn_id']
+    assert len(list_messages(owner.user_id, 'captain')['messages']) == 1
+    legacy_prompt.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -155,10 +181,10 @@ async def test_owned_poll_does_not_read_display_transport(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_voice_cannot_bypass_enabled_pi_ownership(monkeypatch):
+async def test_voice_cannot_bypass_default_enabled_pi_ownership(monkeypatch):
     owner = principal()
     legacy_move = AsyncMock(side_effect=AssertionError('voice must fail before legacy dispatch'))
-    monkeypatch.setenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', 'true')
+    monkeypatch.delenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', raising=False)
     monkeypatch.setattr('app.main.voice_move_service.handle', legacy_move)
     with pytest.raises(HTTPException) as captured:
         await create_voice_move(VoiceMoveRequest(
@@ -167,6 +193,87 @@ async def test_voice_cannot_bypass_enabled_pi_ownership(monkeypatch):
     assert captured.value.status_code == 503
     legacy_move.assert_not_awaited()
     assert list_messages(owner.user_id, 'captain')['messages'] == []
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_expose_truthful_bounded_ownership_state(monkeypatch):
+    owner = principal()
+    monkeypatch.setenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', 'true')
+    turn = record_prompt(
+        owner.user_id, 'captain', f'msg-{uuid.uuid4().hex}', 'diagnose ownership',
+        submitted_text='diagnose ownership', pi_semantic=True,
+    )
+
+    class ReadyClient:
+        @classmethod
+        def from_environment(cls):
+            return cls()
+
+        async def is_ready(self):
+            return True
+
+    monkeypatch.setattr(main_module, 'PiAdapterClient', ReadyClient)
+    diagnostics = await _pi_ownership_diagnostics(owner.user_id, 'captain')
+    assert diagnostics == {
+        'schema_version': 'pi-semantic-ownership-diagnostics.v1',
+        'enabled': True,
+        'default_enabled': True,
+        'defaulted': False,
+        'selection': {
+            'new_captain_turns': 'pi-semantic',
+            'pi_semantic_selected': True,
+        },
+        'adapter': {'status': 'ready', 'ready': True},
+        'dispatch_state_counts': {
+            'prepared': 1, 'bound': 0, 'finalized': 0, 'failed': 0,
+        },
+        'recovery_backlog_count': 1,
+        'terminal_fallback': {
+            'policy': 'unowned-legacy-only', 'eligible_legacy_turns': False,
+        },
+    }
+    serialized = json.dumps(diagnostics)
+    assert turn['pi_dispatch']['capability'] not in serialized
+    assert 'prompt_sha256' not in serialized
+    assert 'dispatch_incarnation' not in serialized
+
+    monkeypatch.delenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', raising=False)
+    defaulted = await _pi_ownership_diagnostics(owner.user_id, 'captain')
+    assert defaulted['enabled'] is True
+    assert defaulted['defaulted'] is True
+
+    monkeypatch.setenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', 'false')
+    disabled = await _pi_ownership_diagnostics(owner.user_id, 'captain')
+    assert disabled['adapter'] == {'status': 'disabled', 'ready': False}
+    assert disabled['selection']['pi_semantic_selected'] is False
+    assert disabled['dispatch_state_counts']['prepared'] == 1
+    assert disabled['terminal_fallback']['eligible_legacy_turns'] is False
+
+    legacy_owner = principal()
+    record_prompt(
+        legacy_owner.user_id, 'captain', f'msg-{uuid.uuid4().hex}', 'legacy only',
+    )
+    legacy = await _pi_ownership_diagnostics(legacy_owner.user_id, 'captain')
+    assert legacy['terminal_fallback']['eligible_legacy_turns'] is True
+
+
+@pytest.mark.asyncio
+async def test_semantic_recovery_does_not_consult_herdr(monkeypatch):
+    dispatch = {'dispatch_incarnation': 'pdi_recovery_without_herdr'}
+    exchange = AsyncMock(return_value={'state': 'bound'})
+    monkeypatch.setattr(main_module, 'get_recoverable_dispatches', lambda: [dispatch])
+    monkeypatch.setattr(main_module, '_exchange_pi_dispatch', exchange)
+    monkeypatch.setattr(
+        main_module.herdr_client, 'read_typed_rows',
+        AsyncMock(side_effect=AssertionError('semantic recovery cannot read Herdr')),
+    )
+    monkeypatch.setattr(
+        main_module.herdr_client, 'prompt_agent',
+        AsyncMock(side_effect=AssertionError('semantic recovery cannot send through Herdr')),
+    )
+
+    await _reconcile_pi_ownership_once()
+    exchange.assert_awaited_once_with(dispatch)
 
 
 @pytest.mark.asyncio
