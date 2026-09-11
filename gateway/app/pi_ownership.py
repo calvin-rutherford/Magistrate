@@ -294,6 +294,39 @@ def has_terminal_fallback_candidates(user_id: str, target: str) -> bool:
         ).fetchone() is not None
 
 
+def get_pi_ownership_diagnostics(user_id: str, target: str) -> dict[str, Any]:
+    """Return tenant-bounded state counts without dispatch/source material."""
+    states = ('prepared', 'bound', 'finalized', 'failed')
+    with _session() as conn:
+        conn.execute('BEGIN')
+        rows = conn.execute(
+            '''SELECT d.state, COUNT(*) AS count
+               FROM pi_semantic_dispatches d
+               JOIN conversations c ON c.id = d.conversation_id
+               WHERE d.user_id = ? AND c.user_id = ? AND c.target = ?
+                 AND d.state IN ('prepared', 'bound', 'finalized', 'failed')
+               GROUP BY d.state''',
+            (user_id, user_id, target),
+        ).fetchall()
+        counts = {state: 0 for state in states}
+        for row in rows:
+            counts[row['state']] = int(row['count'])
+        backlog = conn.execute(
+            '''SELECT COUNT(*) AS count
+               FROM pi_semantic_dispatches d
+               JOIN conversations c ON c.id = d.conversation_id
+               WHERE d.user_id = ? AND c.user_id = ? AND c.target = ?
+                 AND (d.state IN ('prepared', 'bound')
+                      OR (d.state IN ('finalized', 'failed')
+                          AND d.adapter_acknowledged_at IS NULL))''',
+            (user_id, user_id, target),
+        ).fetchone()
+    return {
+        'dispatch_state_counts': counts,
+        'recovery_backlog_count': int(backlog['count']),
+    }
+
+
 def get_recoverable_dispatches(limit: int = PI_MAX_RECOVERY_BATCH) -> list[dict[str, Any]]:
     """Return open work plus completed evidence awaiting an adapter receipt."""
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= PI_MAX_RECOVERY_BATCH:

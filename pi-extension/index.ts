@@ -10,7 +10,6 @@ import {
   chmodSync,
   closeSync,
   constants as fsConstants,
-  existsSync,
   fsyncSync,
   fstatSync,
   lstatSync,
@@ -33,7 +32,6 @@ import {
 } from 'node:crypto';
 import { createServer, createConnection, type Server, type Socket } from 'node:net';
 import { dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 
 const IPC_SCHEMA = 'magistrate.pi.ipc.v1';
@@ -58,6 +56,8 @@ const DISPATCH_ID = /^pdi_[A-Za-z0-9_-]{16,96}$/;
 const CAPABILITY = /^pic_[A-Za-z0-9_-]{40,96}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
+const LOCAL_PATH_MAX_BYTES = 4096;
+const UNIX_SOCKET_PATH_MAX_BYTES = 107;
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Stage = 'prepared' | 'dispatching' | 'bound' | 'finalized' | 'failed';
@@ -86,6 +86,15 @@ interface DispatchRequest extends DispatchIdentity {
   prompt?: string;
   accepted_envelope_sha256?: string;
 }
+
+interface ProbeRequest {
+  schema_version: typeof IPC_SCHEMA;
+  message_type: 'probe';
+  request_nonce: string;
+  issued_at: number;
+}
+
+type IpcRequest = DispatchRequest | ProbeRequest;
 
 interface AdapterRecord extends DispatchIdentity {
   stage: Stage;
@@ -158,11 +167,52 @@ function currentUid(): number {
   return process.geteuid();
 }
 
+function absoluteLocalPath(path: string, socketPath = false): string {
+  const maximum = socketPath ? UNIX_SOCKET_PATH_MAX_BYTES : LOCAL_PATH_MAX_BYTES;
+  if (!path || path.includes('\0') || !isAbsolute(path)
+    || resolvePath(path) !== path || Buffer.byteLength(path, 'utf8') > maximum) {
+    throw new ProtocolError('invalid-local-path');
+  }
+  return path;
+}
+
+function validateDirectoryChain(path: string): void {
+  const chain: string[] = [];
+  let current = path;
+  while (true) {
+    chain.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  for (const candidate of chain.reverse()) {
+    let info;
+    try { info = lstatSync(candidate); } catch { throw new ProtocolError('local-runtime-unavailable'); }
+    const permissions = info.mode & 0o7777;
+    if (!info.isDirectory() || info.isSymbolicLink()
+      || ![0, currentUid()].includes(info.uid)
+      || ((permissions & 0o022) !== 0
+        && (candidate === path || (permissions & 0o1000) === 0))) {
+      throw new ProtocolError('untrusted-local-runtime');
+    }
+  }
+}
+
 function requirePrivateDirectory(path: string): void {
+  path = absoluteLocalPath(path);
   try {
-    mkdirSync(path, { recursive: true, mode: 0o700 });
+    let present = true;
+    try { lstatSync(path); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') present = false;
+      else throw error;
+    }
+    if (!present) {
+      validateDirectoryChain(dirname(path));
+      mkdirSync(path, { recursive: false, mode: 0o700 });
+    }
+    validateDirectoryChain(path);
     const info = lstatSync(path);
-    if (realpathSync(path) !== resolvePath(path)
+    if (realpathSync(path) !== path
       || !info.isDirectory() || info.isSymbolicLink() || info.uid !== currentUid()
       || (info.mode & 0o7777) !== 0o700) throw new ProtocolError('untrusted-local-runtime');
   } catch (error) {
@@ -171,14 +221,42 @@ function requirePrivateDirectory(path: string): void {
   }
 }
 
-function configuredPath(variable: string, fallback: string): string {
-  const runtime = process.env.MAGISTRATE_PI_RUNTIME_DIR?.trim()
-    || (process.env.XDG_RUNTIME_DIR?.trim()
-      ? join(process.env.XDG_RUNTIME_DIR.trim(), 'magistrate')
-      : join(tmpdir(), `magistrate-${currentUid()}`));
-  const path = process.env[variable]?.trim() || join(runtime, fallback);
-  if (!isAbsolute(path)) throw new ProtocolError('invalid-local-path');
-  return path;
+interface LocalPaths {
+  key: string;
+  socket: string;
+  journal: string;
+}
+
+function configuredPaths(): LocalPaths {
+  const configuredRuntime = process.env.MAGISTRATE_PI_RUNTIME_DIR;
+  const configuredXdg = process.env.XDG_RUNTIME_DIR?.trim();
+  const runtime = absoluteLocalPath(configuredRuntime !== undefined
+    ? configuredRuntime.trim()
+    : (configuredXdg ? join(configuredXdg, 'magistrate')
+      : join('/run/user', String(currentUid()), 'magistrate')));
+  const configuredKey = process.env.MAGISTRATE_PI_IPC_KEY_PATH;
+  const configuredSocket = process.env.MAGISTRATE_PI_ADAPTER_SOCKET;
+  const configuredJournal = process.env.MAGISTRATE_PI_ADAPTER_JOURNAL;
+  const key = absoluteLocalPath(
+    configuredKey !== undefined ? configuredKey.trim() : join(runtime, 'pi-ownership.key'),
+  );
+  const socket = absoluteLocalPath(
+    configuredSocket !== undefined ? configuredSocket.trim() : join(runtime, 'pi-ownership.sock'), true,
+  );
+  const journal = absoluteLocalPath(
+    configuredJournal !== undefined ? configuredJournal.trim() : join(runtime, 'pi-ownership.journal'),
+  );
+  if ([key, socket, journal].some(path => dirname(path) !== runtime)
+    || new Set([key, socket, journal]).size !== 3) {
+    throw new ProtocolError('invalid-local-boundary');
+  }
+  const configuredUid = process.env.MAGISTRATE_PI_ADAPTER_UID;
+  const uidLiteral = configuredUid === undefined ? String(currentUid()) : configuredUid.trim();
+  if (!/^[0-9]+$/.test(uidLiteral) || Number(uidLiteral) !== currentUid()) {
+    throw new ProtocolError('invalid-adapter-uid');
+  }
+  requirePrivateDirectory(runtime);
+  return { key, socket, journal };
 }
 
 function readKey(path: string): Buffer {
@@ -281,7 +359,10 @@ class EncryptedJournal {
   }
 
   private load(): void {
-    if (!existsSync(this.path)) return;
+    try { lstatSync(this.path); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw new ProtocolError('untrusted-adapter-journal');
+    }
     const noFollow = fsConstants.O_NOFOLLOW ?? 0;
     let descriptor: number;
     try {
@@ -424,7 +505,7 @@ function safeVisibleText(value: string): boolean {
   });
 }
 
-function parseRequest(raw: Buffer, sharedKey: Buffer, seenNonces: Map<string, number>): DispatchRequest {
+function parseRequest(raw: Buffer, sharedKey: Buffer, seenNonces: Map<string, number>): IpcRequest {
   if (!raw.length || raw.length > MAX_FRAME_BYTES || raw[raw.length - 1] !== 10) {
     throw new ProtocolError('invalid-request-frame');
   }
@@ -445,21 +526,26 @@ function parseRequest(raw: Buffer, sharedKey: Buffer, seenNonces: Map<string, nu
     throw new ProtocolError('unauthenticated-request');
   }
   if (body.schema_version !== IPC_SCHEMA
-    || !['dispatch', 'status', 'ack'].includes(String(body.message_type))) {
+    || !['dispatch', 'status', 'ack', 'probe'].includes(String(body.message_type))) {
     throw new ProtocolError('unsupported-request');
   }
-  const required = [
-    'schema_version', 'message_type', 'request_nonce', 'issued_at',
-    'dispatch_incarnation', 'capability', 'capability_sha256', 'tenant_id', 'principal_id',
-    'conversation_id', 'turn_id', 'assistant_message_id', 'objective_id',
-    'run_id', 'prompt_sha256', 'expires_at',
-    ...(body.message_type === 'dispatch' ? ['prompt']
-      : body.message_type === 'ack' ? ['accepted_envelope_sha256'] : []),
-  ];
+  const required = body.message_type === 'probe'
+    ? ['schema_version', 'message_type', 'request_nonce', 'issued_at']
+    : [
+      'schema_version', 'message_type', 'request_nonce', 'issued_at',
+      'dispatch_incarnation', 'capability', 'capability_sha256', 'tenant_id', 'principal_id',
+      'conversation_id', 'turn_id', 'assistant_message_id', 'objective_id',
+      'run_id', 'prompt_sha256', 'expires_at',
+      ...(body.message_type === 'dispatch' ? ['prompt']
+        : body.message_type === 'ack' ? ['accepted_envelope_sha256'] : []),
+    ];
   if (!exactKeys(body, required)) throw new ProtocolError('invalid-request-shape');
   if (typeof body.request_nonce !== 'string' || !NONCE.test(body.request_nonce)
     || typeof body.issued_at !== 'number' || !Number.isSafeInteger(body.issued_at)
     || Math.abs(Date.now() - body.issued_at) > CLOCK_SKEW_MS) throw new ProtocolError('stale-request');
+  // Probes are read-only and nonce-correlated at the caller; do not let health
+  // polling consume the bounded dispatch replay window.
+  if (body.message_type === 'probe') return body as unknown as ProbeRequest;
   if (seenNonces.has(body.request_nonce)) throw new ProtocolError('replayed-request');
   const observedAt = Date.now();
   for (const [nonce, observed] of seenNonces) {
@@ -1302,9 +1388,15 @@ class LocalServer {
   async start(): Promise<void> {
     if (this.server?.listening) return;
     requirePrivateDirectory(dirname(this.path));
-    if (existsSync(this.path)) {
+    let existing = true;
+    try { lstatSync(this.path); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') existing = false;
+      else throw new ProtocolError('untrusted-adapter-socket');
+    }
+    if (existing) {
       const info = lstatSync(this.path);
-      if (!info.isSocket() || info.isSymbolicLink() || info.uid !== currentUid()) {
+      if (!info.isSocket() || info.isSymbolicLink() || info.uid !== currentUid()
+        || (info.mode & 0o7777) !== 0o600) {
         throw new ProtocolError('untrusted-adapter-socket');
       }
       if (await probeSocket(this.path)) throw new ProtocolError('adapter-already-running');
@@ -1317,6 +1409,11 @@ class LocalServer {
         this.server!.listen(this.path, () => resolve());
       });
       chmodSync(this.path, 0o600);
+      const info = lstatSync(this.path);
+      if (!info.isSocket() || info.isSymbolicLink() || info.uid !== currentUid()
+        || (info.mode & 0o7777) !== 0o600) {
+        throw new ProtocolError('untrusted-adapter-socket');
+      }
     } catch {
       try { this.server.close(); } catch { /* not listening */ }
       throw new ProtocolError('adapter-socket-unavailable');
@@ -1356,6 +1453,14 @@ class LocalServer {
     try {
       const request = parseRequest(raw, this.key, this.nonces);
       nonce = request.request_nonce;
+      if (request.message_type === 'probe') {
+        socket.end(signed({
+          schema_version: IPC_SCHEMA,
+          event_type: 'ready',
+          request_nonce: request.request_nonce,
+        }, this.key));
+        return;
+      }
       const response = await this.coordinator.dispatch(request);
       socket.end(signed(response, this.key));
     } catch (error) {
@@ -1374,15 +1479,19 @@ class LocalServer {
 }
 
 export default function magistratePiOwnership(pi: ExtensionAPI): void {
-  const enabled = (process.env.MAGISTRATE_PI_OWNERSHIP_ENABLED ?? '').trim().toLowerCase();
-  if (['', '0', 'false', 'no', 'off'].includes(enabled)) return;
-  if (!['1', 'true', 'yes', 'on'].includes(enabled)) {
+  const configuredFlag = process.env.MAGISTRATE_PI_OWNERSHIP_ENABLED;
+  const enabled = configuredFlag?.trim().toLowerCase();
+  if (enabled !== undefined && ['0', 'false', 'no', 'off'].includes(enabled)) return;
+  if (enabled !== undefined && !['1', 'true', 'yes', 'on'].includes(enabled)) {
     throw new ProtocolError('invalid-feature-flag');
   }
 
-  const keyPath = configuredPath('MAGISTRATE_PI_IPC_KEY_PATH', 'pi-ownership.key');
-  const socketPath = configuredPath('MAGISTRATE_PI_ADAPTER_SOCKET', 'pi-ownership.sock');
-  const journalPath = configuredPath('MAGISTRATE_PI_ADAPTER_JOURNAL', 'pi-ownership.journal');
+  // Unset is intentionally enabled. Configuration is validated synchronously
+  // so Pi cannot appear active while the ownership extension is inert.
+  const paths = configuredPaths();
+  const keyPath = paths.key;
+  const socketPath = paths.socket;
+  const journalPath = paths.journal;
   const key = readKey(keyPath);
   const journal = new EncryptedJournal(journalPath, key);
   const coordinator = new OwnershipCoordinator(pi, journal);

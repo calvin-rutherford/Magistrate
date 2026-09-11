@@ -11,7 +11,7 @@ the checkout, `MAGISTRATE_BOOTSTRAP_SECRET`, `MAGISTRATE_SECRET_KEY`, and
 `MAGISTRATE_CORS_ORIGINS` (HTTPS origins only). The SQLite file and its
 rollback/backup copies therefore survive frontend exports and Git updates.
 
-A minimal deployment-only configuration is:
+The base production settings (followed by the required Pi block below) are:
 
 ```dotenv
 MAGISTRATE_ENV=production
@@ -21,46 +21,134 @@ MAGISTRATE_SECRET_KEY=<generated-fernet-key>
 MAGISTRATE_CORS_ORIGINS=https://magistrate.example
 ```
 
-Set restrictive permissions on the env file and database directory. Rotate the
-bootstrap and Fernet keys through the approved secret-management procedure;
-never commit them or put them in a frontend build.
+The guard requires the environment file to be a service-owned, non-symlink
+regular file with mode `0600`; keep the database directory restrictive as well.
+Rotate the bootstrap and Fernet keys through the approved secret-management
+procedure; never commit them or put them in a frontend build.
 
-## Optional Pi semantic captain channel
+## Default-on Pi semantic captain channel
 
-The exact Pi ownership path is disabled by default and has a separate local
-secret boundary. Enable it only after following
-[`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md), installing and
-testing `pi-extension/`, and arranging for the dedicated captain Pi process and
-Gateway to share one private same-UID runtime directory:
+Pi semantic ownership is the captain default. Unset and `1|true|yes|on` enable
+it; only `0|false|no|off` selects compatibility/recovery mode. An explicitly
+empty or unknown literal fails startup. Production should be explicit and must
+replace `<uid>` with `id -u` for the actual Gateway/dedicated-Pi service user:
 
 ```dotenv
 MAGISTRATE_PI_OWNERSHIP_ENABLED=true
-MAGISTRATE_PI_RUNTIME_DIR=/run/user/1000/magistrate
-MAGISTRATE_PI_IPC_KEY_PATH=/run/user/1000/magistrate/pi-ownership.key
-MAGISTRATE_PI_ADAPTER_SOCKET=/run/user/1000/magistrate/pi-ownership.sock
-MAGISTRATE_PI_ADAPTER_JOURNAL=/run/user/1000/magistrate/pi-ownership.journal
-MAGISTRATE_PI_ADAPTER_UID=1000
+MAGISTRATE_PI_RUNTIME_DIR=/run/user/<uid>/magistrate
+MAGISTRATE_PI_IPC_KEY_PATH=/run/user/<uid>/magistrate/pi-ownership.key
+MAGISTRATE_PI_ADAPTER_SOCKET=/run/user/<uid>/magistrate/pi-ownership.sock
+MAGISTRATE_PI_ADAPTER_JOURNAL=/run/user/<uid>/magistrate/pi-ownership.journal
+MAGISTRATE_PI_ADAPTER_UID=<uid>
 MAGISTRATE_PI_CAPABILITY_TTL_SECONDS=120
+MAGISTRATE_PI_CONNECT_TIMEOUT_SECONDS=1
+MAGISTRATE_PI_RESPONSE_TIMEOUT_SECONDS=20
 MAGISTRATE_PI_RECOVERY_SECONDS=3
 ```
 
-Use the deployment UID, not the illustrative `1000`. These absolute paths and
-the enable flag must match in Pi's environment. Gateway startup creates or
-validates the HMAC key and fails closed on unsafe mode/ownership; start Gateway
-before the adapter on first activation. The runtime directory must be `0700` and
-the key/socket plus any pending-evidence journal `0600` (the journal is absent
-when empty). They are runtime secrets/state, never release
-assets, and must not enter frontend configuration, Git, logs, or a shared
-backup. Adapter unavailability may produce HTTP 503 **after** the canonical
-turn is safely prepared. Do not resend through another provider: restart the
-same adapter and allow recovery to converge.
+Put the same values in Gateway's environment and the dedicated captain Pi
+service environment. Never put them in frontend configuration. The paths must
+be distinct direct children of one service-owned mode-`0700` runtime boundary;
+the key, listening socket, and present journal are mode `0600` and owned by the
+same effective UID. Gateway startup validates path normalization/length,
+ancestor symlinks and replaceable writable boundaries, actual UID, key and
+present socket/journal metadata, TTL, and all timeouts. It creates only a
+missing final runtime directory and key below an existing trusted parent. A
+missing socket means “adapter unavailable,” not a configuration success claim:
+Gateway may start for delayed Pi arrival, but all new prompts are durably owned
+and return recoverable HTTP 503 without a Herdr send.
 
-Before rollback, quiesce submissions and resolve every open owned dispatch;
-then disable the flag in both processes. Existing ownership is intentionally
-not released by feature disablement. Back up SQLite before activation and use a
-whole-database restore for emergency rollback rather than deleting ownership
-rows. The dedicated document contains the complete crash-boundary and operator
-verification matrix.
+Keep four claims separate: **product policy** selects Pi by default;
+**configuration** means the startup trust checks passed; **activation** means
+the restarted dedicated Pi `MainPID` answered the authenticated probe; and
+**durable source ownership** is the per-turn database state fixed at atomic
+prepare. Configuration is not activation, and later unavailability or explicit
+false mode never releases an already owned turn.
+
+### Guarded activation
+
+The normal `scripts/deploy_magistrate.sh` path now treats an absent flag as
+enabled and refuses incomplete or duplicate/ambiguous production environment
+assignments. For enabled rollout it performs these additional guards without
+reading secret contents:
+
+1. verifies the configured adapter UID is the executing service UID and refuses
+   any Pi service name that is the Gateway, Herdr, or Firstmate;
+2. invokes Gateway's local filesystem validator, creating/validating the key
+   without printing it;
+3. requires a normalized, symlink-free, service-owned mode-`0600` persistent
+   SQLite file, takes an online backup in a likewise normalized service-owned
+   mode-`0700` directory outside the checkout, integrity-checks it, and
+   writes a mode-`0600` companion containing the exact pre-restart commit;
+4. runs `npm ci`, `npm run typecheck`, and `npm test` in `pi-extension/`, then
+   builds and checks the frontend before changing Pi package activation;
+5. runs `pi install "$(pwd)"`, restarts only
+   `magistrate-captain-pi.service` (or the explicit
+   `MAGISTRATE_PI_SERVICE`), and proves it loaded the extension with a
+   same-UID, signed nonce-bound readiness probe, exact socket peer/MainPID
+   match, and an `ss -xl` listener check;
+6. only after the fresh adapter is authenticated, restarts
+   `magistrate-gateway.service` (or the explicit `MAGISTRATE_SERVICE`), waits
+   for HTTP readiness, and prints only fixed prepared/bound/finalized/failed
+   and recovery-backlog counts.
+
+The dedicated captain Pi unit is an operator-managed prerequisite because its
+model/session launch arguments are deployment-specific. It must load the same
+environment file and installed package. `pi install` writes to the selected Pi
+configuration scope; use a dedicated service account or a dedicated
+`PI_CODING_AGENT_DIR` shared by the install command and that unit. If other Pi
+runtimes share the scope, explicitly set
+`MAGISTRATE_PI_OWNERSHIP_ENABLED=false` in every non-captain runtime before its
+next start—process environment, never pane/workspace naming, selects the one
+adapter. Do not point `MAGISTRATE_PI_SERVICE` at a Herdr/Firstmate fleet unit,
+and do not use a global Herdr restart as a substitute. Installation does not
+affect an existing Pi process; the post-restart authenticated, PID-bound
+listener is the activation proof.
+
+Before running the guard, record `git rev-parse HEAD`, `id -u`, both exact unit
+names, and the environment variable **names/presence only**. Never print the
+environment file, key, capabilities, encrypted dispatch columns, prompts,
+credentials, or native entries. After activation verify metadata and the
+listener without reading files:
+
+```sh
+uid="$(id -u)"
+test "$MAGISTRATE_PI_ADAPTER_UID" = "$uid"
+stat -c '%a %u %F %n' \
+  "$MAGISTRATE_PI_RUNTIME_DIR" \
+  "$MAGISTRATE_PI_IPC_KEY_PATH" \
+  "$MAGISTRATE_PI_ADAPTER_SOCKET"
+test ! -e "$MAGISTRATE_PI_ADAPTER_JOURNAL" || \
+  stat -c '%a %u %F %n' "$MAGISTRATE_PI_ADAPTER_JOURNAL"
+ss -xl | grep --fixed-strings "$MAGISTRATE_PI_ADAPTER_SOCKET"
+sqlite3 "$MAGISTRATE_DB_PATH" \
+  "select state,count(*) from pi_semantic_dispatches group by state order by state;"
+```
+
+Expected metadata is directory `700`, key/socket/journal `600`, actual UID,
+regular key/journal, and Unix socket. The authenticated
+`/api/v1/diagnostics/soak` result must say ownership enabled/default-enabled,
+whether the flag was defaulted, adapter ready, new captain selection
+`pi-semantic`, show fixed bounded state counts/backlog, and report terminal
+eligibility only for an actual unowned
+legacy turn.
+
+### Rollback without releasing ownership
+
+Stop new submissions first. Wait until every prepared/bound row reaches
+`finalized` or explicit `failed` and every final/failed row has
+`adapter_acknowledged_at`; an existing journal means receipts have not settled.
+Then set `MAGISTRATE_PI_OWNERSHIP_ENABLED=false` in **both** unit environments
+and restart only Gateway and the dedicated captain Pi unit. Preserve the
+SQLite rows, key, and journal. Never delete ownership state or replay an owned
+client message through Herdr. Compatibility mode permits terminal fallback only
+for turns that were genuinely unowned before dispatch. Restore the verified
+whole-database backup only for an emergency whole-deployment rollback, never to
+surgically remove dispatch rows.
+
+The full protocol/recovery matrix is
+[`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md); physical-device
+proof uses [`pi-ownership-live-acceptance.md`](./pi-ownership-live-acceptance.md).
 
 The read-only Firstmate snapshot also needs the service account's trusted tool
 directories (including the installed `herdr`, `tasks-axi`, and `quota-axi`) on
@@ -100,14 +188,19 @@ inherit Gateway credentials or unrestricted environment variables.
 
 Run `scripts/deploy_magistrate.sh` from a trusted shell for a manual update. The
 script fetches `origin/main`, refuses dirty or divergent checkouts, performs a
-fast-forward-only update, runs the supported `npx expo export -p web` build,
-checks that `index.html`, `chat.html`, and `voice.html` exist, restarts
-`magistrate-gateway.service`, and polls the HTTP process for up to 30 seconds
-(the local URL defaults to `http://127.0.0.1:8000/api/v1/health` and can be
-overridden with `MAGISTRATE_READINESS_URL`; timeout, poll interval, and
-per-request timeout are configurable with `MAGISTRATE_READINESS_TIMEOUT_SECONDS`,
+fast-forward-only update, applies the enabled Pi guards above, runs the
+supported `npx expo export -p web` build, and checks that `index.html`,
+`chat.html`, and `voice.html` exist. When Pi ownership is enabled it first
+restarts and proves only the configured dedicated captain Pi unit/socket; it
+then restarts `magistrate-gateway.service` and polls the HTTP process for up to
+30 seconds. This order ensures a newly introduced authenticated probe never
+meets an old loaded extension during an upgrade. The local URL
+defaults to `http://127.0.0.1:8000/api/v1/health` and can be overridden with
+`MAGISTRATE_READINESS_URL`; timeout, poll interval, and per-request timeout are
+configurable with `MAGISTRATE_READINESS_TIMEOUT_SECONDS`,
 `MAGISTRATE_READINESS_INTERVAL_SECONDS`, and
-`MAGISTRATE_READINESS_CURL_TIMEOUT_SECONDS`). Connection refusal (`HTTP
+`MAGISTRATE_READINESS_CURL_TIMEOUT_SECONDS`; Pi arrival uses
+`MAGISTRATE_PI_READINESS_TIMEOUT_SECONDS`. Connection refusal (`HTTP
 000`) during the expected systemd restart window is retried; timeout output
 includes the last HTTP response and systemd state. Readiness accepts 2xx,
 401, or 403 responses, so it verifies application reachability rather than

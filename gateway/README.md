@@ -13,7 +13,10 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 
 ## Pi semantic ownership channel
 
-When `MAGISTRATE_PI_OWNERSHIP_ENABLED=true`, captain prompt creation atomically
+Pi ownership is the default captain path: an unset
+`MAGISTRATE_PI_OWNERSHIP_ENABLED` or an explicit true literal enables it;
+explicit false literals select compatibility/recovery mode, and every other
+literal fails Gateway startup. Enabled captain prompt creation atomically
 prepares an encrypted, one-use dispatch for the local Magistrate Pi extension.
 The prompt route then uses authenticated mode-`0600` Unix IPC instead of the
 legacy provider/display path. A prepared turn is never terminal-fallback
@@ -22,10 +25,15 @@ session/user/final-assistant entry IDs and returns only complete visible text;
 Gateway commits that text into the pre-reserved canonical primary row as
 `content_source: "pi-semantic"`.
 
-This is an operator-activated current-session channel, not a public callback or
-model router. Its socket/key/journal must remain local and private, and
-capabilities must never be returned to HTTP clients or logs. Installation,
-protocol, threat model, recovery matrix, and rollback are documented in
+This is a guarded current-session channel, not a public callback or model
+router. Startup validates the same-UID runtime, key, socket/journal metadata,
+and bounded timeout configuration; readiness requires a signed nonce-bound
+probe, while a genuinely missing adapter is reported unavailable without
+releasing prepared ownership. Authenticated health/soak responses expose only
+policy/defaulting, readiness, fixed state/backlog counts, and legacy eligibility.
+The socket/key/journal must remain local and private, and capabilities must
+never be returned to HTTP clients or logs. Installation, protocol, threat
+model, recovery matrix, and rollback are documented in
 [`../docs/pi-semantic-ownership-v1.md`](../docs/pi-semantic-ownership-v1.md).
 
 ## Magi structured response API

@@ -1,8 +1,10 @@
 # Pi semantic ownership channel v1
 
-Status: production contract, opt-in (`MAGISTRATE_PI_OWNERSHIP_ENABLED=false` by
-default). Unknown boolean values fail startup/activation closed rather than
-silently selecting the legacy path.
+Status: production contract, default-on. An unset
+`MAGISTRATE_PI_OWNERSHIP_ENABLED` and `1|true|yes|on` enable ownership;
+`0|false|no|off` selects explicit compatibility/recovery mode. Every other
+literal, including an explicitly empty value, fails Gateway/Pi activation
+instead of silently selecting a legacy path.
 
 This channel gives Magistrate a source-native correlation path for the canonical
 captain. It does not infer identity from a terminal, viewport, pane, process
@@ -56,11 +58,15 @@ captain prompts remain available.
   remains replayable even if Pi has since opened another session. An exact
   Gateway receipt is the only boundary that permits fsynced evidence deletion.
 
-The two processes should run as the same dedicated OS user. The runtime
-directory is `0700`; the socket, shared key, and adapter journal are `0600`.
-Gateway checks socket type, owner, mode, and Linux `SO_PEERCRED`. The adapter
-checks every local file against owner/type/mode/no-symlink requirements. Both
-sides authenticate canonical JSON frames with HMAC-SHA-256 and compare MACs in
+The two processes run as the same dedicated OS user. The runtime directory is
+`0700`; the socket, shared key, and adapter journal are `0600`. All three
+endpoints are distinct direct children of that configured runtime boundary;
+relative/non-normalized/oversized paths, symlinked components, mismatched UIDs,
+and replaceable world/group-writable boundaries are rejected. A sticky system
+temporary ancestor is accepted only when it contains the service-owned private
+boundary. Gateway checks socket type, owner, mode, and Linux `SO_PEERCRED`. The
+adapter checks every local file against owner/type/mode/no-symlink requirements.
+Both sides authenticate canonical JSON frames with HMAC-SHA-256 and compare MACs in
 constant time. The dedicated Pi process/extension is part of the trusted
 computing base: a compromise of that same UID/key can forge evidence. The
 channel protects against unrelated local users, stale/cross-turn data, and
@@ -167,10 +173,14 @@ connection, each at most 1,250,000 bytes:
 Canonical JSON recursively sorts object keys, uses UTF-8, and has no insignificant
 whitespace. A dispatch body includes a random request nonce, bounded issue/expiry
 times, capability and capability hash, exact canonical/tenant identities,
-prompt hash, and prompt. A status request omits the prompt. Nonces are
-single-use within the adapter replay window. Responses echo the nonce and are
-either a closed `magistrate.pi.ownership.v1` envelope or a bounded signed error.
-After a final/failed envelope commits, Gateway sends a separate authenticated
+prompt hash, and prompt. A status request omits the prompt. A minimal signed
+`probe` carries only schema, type, nonce, and issue time and must receive an
+exact signed `ready` response; socket connectability alone is never readiness.
+Dispatch/status/ack nonces are single-use within the adapter replay window;
+read-only probes do not consume that bounded state. Responses echo the nonce
+and are either a closed `magistrate.pi.ownership.v1` envelope, exact IPC
+readiness/acknowledgement, or a bounded signed error. After a final/failed
+envelope commits, Gateway sends a separate authenticated
 `ack` bound to the accepted semantic-envelope hash. Until that receipt is
 stored, Gateway keeps the completed dispatch in its bounded recovery query and
 the adapter cannot evict its encrypted evidence. If the adapter deletes evidence
@@ -236,6 +246,40 @@ Pi session entries or the adapter journal. If an indeterminate boundary cannot
 be proven, failure is intentional: availability never wins over duplicate input
 or cross-turn attribution.
 
+## Startup configuration
+
+Ownership configuration is validated before Gateway serves. Gateway validates
+the actual effective service UID, private runtime chain and mode, shared key
+regular-file identity/mode, adapter UID, capability TTL, connection/response/
+recovery timeout ranges, Unix socket path boundary and (when present) socket
+metadata, plus journal path and present-file metadata. A secure but absent
+socket is the sole delayed-arrival condition: startup may complete while the
+dedicated Pi runtime starts, but every new captain prompt is still atomically
+owned and returns recoverable HTTP 503 rather than using Herdr. An existing
+accepting endpoint must pass same-UID peer validation and the signed probe; a
+key mismatch or malformed/unsafe present socket or journal fails startup.
+
+Use the actual deployment UID in both process environments:
+
+```dotenv
+MAGISTRATE_PI_OWNERSHIP_ENABLED=true
+MAGISTRATE_PI_RUNTIME_DIR=/run/user/<uid>/magistrate
+MAGISTRATE_PI_IPC_KEY_PATH=/run/user/<uid>/magistrate/pi-ownership.key
+MAGISTRATE_PI_ADAPTER_SOCKET=/run/user/<uid>/magistrate/pi-ownership.sock
+MAGISTRATE_PI_ADAPTER_JOURNAL=/run/user/<uid>/magistrate/pi-ownership.journal
+MAGISTRATE_PI_ADAPTER_UID=<uid>
+MAGISTRATE_PI_CAPABILITY_TTL_SECONDS=120
+MAGISTRATE_PI_CONNECT_TIMEOUT_SECONDS=1
+MAGISTRATE_PI_RESPONSE_TIMEOUT_SECONDS=20
+MAGISTRATE_PI_RECOVERY_SECONDS=3
+```
+
+Do not quote `<uid>` literally. Gateway may create the final runtime directory
+and missing key only below an existing trusted parent when no socket/journal
+state exists; a missing key beside either endpoint fails rather than rotating
+identity. It never recursively manufactures a missing trust chain and never
+creates, replaces, or repairs the socket/journal.
+
 ## Installation and operation
 
 The Pi package is local to this repository and pins the reviewed Pi `0.84.4`
@@ -247,17 +291,21 @@ cd /absolute/path/to/Magistrate/pi-extension
 npm ci
 npm run typecheck
 npm test
-pi install /absolute/path/to/Magistrate/pi-extension
+pi install "$(pwd)"
 ```
 
-Configure the same absolute runtime/key/socket paths and
-`MAGISTRATE_PI_OWNERSHIP_ENABLED=true` in both Gateway and the dedicated captain
-Pi environment. In Chat, select **Current backend session** so requests carry no
+Configure the same absolute runtime/key/socket/journal paths and actual UID in
+both Gateway and the dedicated captain Pi environment. In Chat, select
+**Current backend session** so requests carry no
 per-request profile/harness/model fields; the ownership channel rejects those
 fields because it does not claim to migrate the running Pi session. A saved
 server default is not applied on this path. Start Gateway once to
-create/validate the `0600` key, then start
-Pi with the installed extension. Do not copy the key into a repository, shell
+create/validate the `0600` key, then restart only the dedicated captain Pi
+service with the installed extension. A fresh listening socket with the
+configured UID/mode, a signed nonce-bound response, and an exact authenticated
+peer PID/unit `MainPID` match after that restart are activation proof;
+installation alone does not modify an already-running Pi process. Do not copy
+the key into a repository, shell
 history, logs, backup shared with another service, or frontend environment.
 
 Quiesce submissions and resolve/acknowledge all dispatches before rotating or
@@ -280,8 +328,12 @@ ss -xl | grep --fixed-strings "$MAGISTRATE_PI_ADAPTER_SOCKET"
 
 Expected modes are `700` for the directory and `600` for all files/socket, with
 the configured service UID. The journal is absent when no evidence is pending.
-Inspect open state without selecting encrypted
-columns or source identities:
+The authenticated `/api/v1/diagnostics/soak` response exposes only adapter
+`ready|unavailable|disabled`, ownership enabled/default policy, whether the
+flag was defaulted, selected path, fixed dispatch-state counts, recovery backlog
+count, and legacy fallback eligibility. It never
+returns paths, capabilities, prompts, entries, hashes, or ciphertext. Inspect
+open state without selecting encrypted columns or source identities:
 
 ```sh
 sqlite3 "$MAGISTRATE_DB_PATH" \
@@ -306,6 +358,13 @@ conversation and its acknowledged ownership rows atomically. Restore from the
 pre-change SQLite backup only as a whole-database emergency rollback, never by
 deleting individual ownership rows.
 
+The guarded host procedure (backup, extension install, dedicated-service
+restart, readiness proof, and rollback) is in
+[`deployment.md`](./deployment.md). The required 25+ item physical-device gate
+is [`pi-ownership-live-acceptance.md`](./pi-ownership-live-acceptance.md).
+Automated success remains **PARTIAL pending physical-iPhone verification** and can
+never by itself produce ADOPT.
+
 ## Verification
 
 Focused checks:
@@ -322,8 +381,6 @@ npm test
 
 cd ../frontend
 npm run typecheck
-npm run test:magi-response
-# Release gate:
 npm test
 ```
 

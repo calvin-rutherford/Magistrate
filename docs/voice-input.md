@@ -11,6 +11,19 @@ Input selection is device-local (`magistrate.voice.input-mode`) and intentionall
 
 `GET /api/v1/voice/capabilities` reports gateway configuration without returning credentials. Browser and native capabilities are determined locally. An unavailable locally-detectable persisted mode falls back to Automatic with a visible notice in Voice Mode; an unavailable gateway provider is reported as an authenticated transcription error. The chat composer reports a clear error and leaves existing text intact.
 
+## Pi ownership compatibility
+
+Chat microphone capture remains usable with Pi ownership: transcription only
+populates the ordinary composer, and the captain's explicit send uses the same
+default-on `/api/v1/captain/prompt` semantic dispatch as typed text. The
+continuous Voice Mode is different: it still calls the legacy
+`/api/v1/voice/moves` flow, which can dispatch through Herdr before canonical
+prepare. Gateway therefore returns HTTP 503 for that route whenever Pi
+ownership is enabled (including when the flag is unset). This is an explicit
+safety disable, not voice parity. An operator may recover the legacy Voice Mode
+only by deliberately selecting false compatibility mode; existing Pi-owned
+turns remain owned and cannot become terminal-fallback eligible.
+
 ## Verification
 
 The authenticated local loop was exercised by the existing Puppeteer web suites with fake media capture, including mic-to-composer, no implicit send, permissions/error handling, mode persistence, and continuous Voice Mode. Gateway STT adapter, capability, authentication-boundary, and voice-move tests run under `uv run pytest`.
