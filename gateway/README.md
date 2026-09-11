@@ -11,6 +11,23 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 `v1`. Do not commit either value. `MAGISTRATE_ENV=development` or
 `MAGISTRATE_ENV=test` permits an in-memory ephemeral key for local-only use.
 
+## Pi semantic ownership channel
+
+When `MAGISTRATE_PI_OWNERSHIP_ENABLED=true`, captain prompt creation atomically
+prepares an encrypted, one-use dispatch for the local Magistrate Pi extension.
+The prompt route then uses authenticated mode-`0600` Unix IPC instead of the
+legacy provider/display path. A prepared turn is never terminal-fallback
+eligible, including when the adapter is absent. The extension binds native Pi
+session/user/final-assistant entry IDs and returns only complete visible text;
+Gateway commits that text into the pre-reserved canonical primary row as
+`content_source: "pi-semantic"`.
+
+This is an operator-activated current-session channel, not a public callback or
+model router. Its socket/key/journal must remain local and private, and
+capabilities must never be returned to HTTP clients or logs. Installation,
+protocol, threat model, recovery matrix, and rollback are documented in
+[`../docs/pi-semantic-ownership-v1.md`](../docs/pi-semantic-ownership-v1.md).
+
 ## Magi structured response API
 
 `POST /api/v1/conversations/captain/events` accepts the strict,
@@ -89,10 +106,12 @@ python -m scripts.rotate_credentials --db-path /path/to/magistrate.db
 ```
 
 After reviewing the count, repeat with `--apply`. The tool has a hard
-1,000-row batch limit, verifies current ciphertext while scanning, accepts
-only the explicitly configured previous version for rewrite, and commits
-atomically. Run it again without the previous-key settings to verify that no
-old values remain, then remove the previous key and rotation flag and restart
+1,000-row combined batch limit, verifies current ciphertext while scanning,
+rewrites OAuth tokens and any live Pi dispatch prompt/capability columns in one
+transaction, accepts only the explicitly configured previous version for
+rewrite, and commits atomically. Acknowledged Pi rows have already cleared those
+live ciphertext columns. Run the tool again without the previous-key settings
+to verify that no old values remain, then remove the previous key and rotation flag and restart
 the service. Never pass plaintext tokens to the tool or log key values.
 
 For unversioned legacy rows, use the same dry-run/`--apply` sequence with

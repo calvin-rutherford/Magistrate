@@ -25,6 +25,43 @@ Set restrictive permissions on the env file and database directory. Rotate the
 bootstrap and Fernet keys through the approved secret-management procedure;
 never commit them or put them in a frontend build.
 
+## Optional Pi semantic captain channel
+
+The exact Pi ownership path is disabled by default and has a separate local
+secret boundary. Enable it only after following
+[`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md), installing and
+testing `pi-extension/`, and arranging for the dedicated captain Pi process and
+Gateway to share one private same-UID runtime directory:
+
+```dotenv
+MAGISTRATE_PI_OWNERSHIP_ENABLED=true
+MAGISTRATE_PI_RUNTIME_DIR=/run/user/1000/magistrate
+MAGISTRATE_PI_IPC_KEY_PATH=/run/user/1000/magistrate/pi-ownership.key
+MAGISTRATE_PI_ADAPTER_SOCKET=/run/user/1000/magistrate/pi-ownership.sock
+MAGISTRATE_PI_ADAPTER_JOURNAL=/run/user/1000/magistrate/pi-ownership.journal
+MAGISTRATE_PI_ADAPTER_UID=1000
+MAGISTRATE_PI_CAPABILITY_TTL_SECONDS=120
+MAGISTRATE_PI_RECOVERY_SECONDS=3
+```
+
+Use the deployment UID, not the illustrative `1000`. These absolute paths and
+the enable flag must match in Pi's environment. Gateway startup creates or
+validates the HMAC key and fails closed on unsafe mode/ownership; start Gateway
+before the adapter on first activation. The runtime directory must be `0700` and
+the key/socket plus any pending-evidence journal `0600` (the journal is absent
+when empty). They are runtime secrets/state, never release
+assets, and must not enter frontend configuration, Git, logs, or a shared
+backup. Adapter unavailability may produce HTTP 503 **after** the canonical
+turn is safely prepared. Do not resend through another provider: restart the
+same adapter and allow recovery to converge.
+
+Before rollback, quiesce submissions and resolve every open owned dispatch;
+then disable the flag in both processes. Existing ownership is intentionally
+not released by feature disablement. Back up SQLite before activation and use a
+whole-database restore for emergency rollback rather than deleting ownership
+rows. The dedicated document contains the complete crash-boundary and operator
+verification matrix.
+
 The read-only Firstmate snapshot also needs the service account's trusted tool
 directories (including the installed `herdr`, `tasks-axi`, and `quota-axi`) on
 its subprocess `PATH`. By default the Gateway derives that path from the

@@ -1,0 +1,38 @@
+name: Pi ownership adapter
+
+on:
+  pull_request:
+    paths:
+      - 'pi-extension/**'
+      - '.github/workflows/pi-extension.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'pi-extension/**'
+      - '.github/workflows/pi-extension.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: pi-extension
+
+jobs:
+  test:
+    name: Typecheck and native lifecycle tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: pi-extension/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Tests leave no generated repository files
+        working-directory: .
+        run: test -z "$(git status --porcelain --untracked-files=all)"

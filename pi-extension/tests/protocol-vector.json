@@ -1,0 +1,137 @@
+{
+  "source_sequence": [
+    {
+      "order": 7,
+      "entry_id": "prep_vector",
+      "parent_id": "root_vector",
+      "entry_type": "custom",
+      "role": null,
+      "custom_type": "magistrate.pi.dispatch.prepare.v1",
+      "stop_reason": null
+    },
+    {
+      "order": 8,
+      "entry_id": "user_vector",
+      "parent_id": "prep_vector",
+      "entry_type": "message",
+      "role": "user",
+      "custom_type": null,
+      "stop_reason": null
+    },
+    {
+      "order": 9,
+      "entry_id": "hidden_vector",
+      "parent_id": "user_vector",
+      "entry_type": "redacted",
+      "role": null,
+      "custom_type": null,
+      "stop_reason": null
+    }
+  ],
+  "source_sequence_sha256": "49a10f97eb619c473836bd3ee0bc0faf21048d4b95b9f5da163d4c20e1a11e0e",
+  "visible_blocks": [
+    {
+      "index": 0,
+      "text": "  exact 🙂\n"
+    },
+    {
+      "index": 1,
+      "text": "尾  "
+    }
+  ],
+  "visible_content_sha256": "1236b2b34a115fb04353559b54486c887a1adfd08813395076d7df3efeb91ac9",
+  "ownership_envelope": {
+    "schema_version": "magistrate.pi.ownership.v1",
+    "event_type": "dispatch.finalized",
+    "request_nonce": "vector_nonce_1234567890",
+    "dispatch_incarnation": "pdi_0123456789abcdef0123456789abcdef",
+    "capability_sha256": "87013b2089b5743cc92028429abf6f9a4ccb316150d254ac2df9686c285878ef",
+    "tenant_id": "vector-owner",
+    "principal_id": "vector-owner",
+    "conversation_id": "cv_0123456789abcdef",
+    "turn_id": "ct_0123456789abcdef",
+    "assistant_message_id": "cm_0123456789abcdef",
+    "objective_id": "obj_0123456789abcdef",
+    "run_id": "run_0123456789abcdef",
+    "source_revision": 2,
+    "pi_session_id": "session_vector",
+    "pi_prepare_entry_id": "prep_vector",
+    "pi_user_entry_id": "user_vector",
+    "pi_user_entry_order": 8,
+    "pi_user_content_sha256": "a23f895bf3275e28115ecfca2db36db0190c92f084f20e7dc2efdac84717bdad",
+    "pi_bind_entry_id": "bind_vector",
+    "pi_assistant_entry_id": "assistant_vector",
+    "pi_assistant_entry_order": 10,
+    "pi_finalize_entry_id": "final_vector",
+    "finality": "final",
+    "stop_reason": "stop",
+    "bound_at": 1756000000000,
+    "finalized_at": 1756000001000,
+    "source_start_order": 7,
+    "source_end_order": 11,
+    "source_cursor": "final_vector",
+    "source_sequence": [
+      {
+        "order": 7,
+        "entry_id": "prep_vector",
+        "parent_id": "root_vector",
+        "entry_type": "custom",
+        "role": null,
+        "custom_type": "magistrate.pi.dispatch.prepare.v1",
+        "stop_reason": null
+      },
+      {
+        "order": 8,
+        "entry_id": "user_vector",
+        "parent_id": "prep_vector",
+        "entry_type": "message",
+        "role": "user",
+        "custom_type": null,
+        "stop_reason": null
+      },
+      {
+        "order": 9,
+        "entry_id": "bind_vector",
+        "parent_id": "user_vector",
+        "entry_type": "custom",
+        "role": null,
+        "custom_type": "magistrate.pi.dispatch.bind.v1",
+        "stop_reason": null
+      },
+      {
+        "order": 10,
+        "entry_id": "assistant_vector",
+        "parent_id": "bind_vector",
+        "entry_type": "message",
+        "role": "assistant",
+        "custom_type": null,
+        "stop_reason": "stop"
+      },
+      {
+        "order": 11,
+        "entry_id": "final_vector",
+        "parent_id": "assistant_vector",
+        "entry_type": "custom",
+        "role": null,
+        "custom_type": "magistrate.pi.dispatch.finalize.v1",
+        "stop_reason": null
+      }
+    ],
+    "source_sequence_sha256": "351f36f68542208e8510d77bba86c26da3fa3d1949638a8e3cecfce6dab1802b",
+    "visible_content_sha256": "1236b2b34a115fb04353559b54486c887a1adfd08813395076d7df3efeb91ac9",
+    "assistant_content": [
+      {
+        "index": 0,
+        "type": "text",
+        "text": "  exact 🙂\n"
+      },
+      {
+        "index": 1,
+        "type": "text",
+        "text": "尾  "
+      }
+    ],
+    "error_code": null
+  },
+  "semantic_envelope_sha256": "6b066cb650f9ea1293dcb59c16cd5d7ea52beb747ce4cd62fa1c3e9425e77ced"
+}

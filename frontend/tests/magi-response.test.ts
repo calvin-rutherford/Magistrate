@@ -144,6 +144,34 @@ test('malformed or unsupported structured content uses bounded canonical text fa
   assert.equal(missingRevision?.structured_content, undefined);
 });
 
+test('Pi semantic canonical rows preserve exact text and fail closed on provenance mismatch', () => {
+  const semantic = normalizeCanonicalMessage({
+    id: 'cm_pi_semantic', turn_id: 'ct_pi_semantic', role: 'assistant', type: 'conversation',
+    text: '  exact Unicode 🙂\nwith trailing space  ', visible_in_chat: true,
+    sequence_index: 999, revision: 1, source: 'pi-semantic',
+    content_source: 'pi-semantic', created_at: 1756000000000, turn_status: 'answered',
+  });
+  assert.ok(semantic);
+  assert.equal(semantic.text, '  exact Unicode 🙂\nwith trailing space  ');
+  assert.equal(semantic.content_source, 'pi-semantic');
+  const [rendered] = reconcileCanonicalMessages([], [semantic]);
+  assert.equal(rendered.contentSource, 'pi-semantic');
+  assert.equal(rendered.structuredContent, undefined);
+
+  assert.equal(normalizeCanonicalMessage({ ...semantic, source: 'terminal' }), null);
+  assert.equal(normalizeCanonicalMessage({ ...semantic, content_source: 'terminal-fallback' }), null);
+  assert.equal(normalizeCanonicalMessage({
+    ...semantic, source: 'pi-semantic', content_source: 'structured',
+    structured_revision: 1, structured_content: richResponse(),
+  }), null);
+  assert.equal(normalizeCanonicalMessage({
+    ...semantic, structured_revision: 1, structured_content: richResponse(),
+  }), null);
+  assert.equal(normalizeCanonicalMessage({
+    ...semantic, source: 'pi-semantic', text: 'unsafe\u001b[31mcontrol',
+  }), null);
+});
+
 test('canonical fallback bounds preserve the existing prompt contract', () => {
   const longPrompt = normalizeCanonicalMessage({
     id: 'cm_long_prompt', turn_id: 'ct_long_prompt', client_message_id: 'u-long-prompt',

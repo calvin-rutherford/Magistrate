@@ -1,8 +1,9 @@
-"""Validate or apply a bounded rewrite of encrypted OAuth credentials.
+"""Validate or apply a bounded rewrite of encrypted Gateway secrets.
 
 The gateway's current and previous key settings must be supplied through the
-environment. This command is dry-run by default; pass --apply only after
-reviewing the reported count.
+environment. OAuth tokens and live Pi dispatch prompt/capability ciphertext are
+rewritten in one SQLite transaction. This command is dry-run by default; pass
+--apply only after reviewing the reported count.
 """
 
 import argparse

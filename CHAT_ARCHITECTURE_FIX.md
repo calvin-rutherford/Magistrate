@@ -37,9 +37,13 @@ terminal parsing is demoted to an ingestion adapter.
 - `POST /api/v1/captain/prompt` creates **exactly one turn and one canonical user
   message**, keyed by the frontend's existing `message_id`. Replaying the same
   `message_id` reuses both.
-- Terminal snapshots are folded in by `ingest_terminal_rows`, which **upserts**
-  the turn's primary reply and tool events into fixed slots. Evolving output
-  revises a row; it can never append a second one.
+- An opt-in Pi ownership dispatch is prepared in the same transaction as the
+  turn and reservation. Its authenticated local extension binds exact native
+  user/final assistant entries and updates only that primary row with complete
+  visible text. Ownership disables fallback immediately, before adapter work.
+- Only unowned terminal snapshots are folded in by `ingest_terminal_rows`, which
+  **upserts** the turn's primary reply and tool events into fixed slots.
+  Evolving output revises a row; it can never append a second one.
 - Rows that belong to no submitted turn are not recorded. An unattributed
   terminal row has no audience, so it fails closed rather than becoming chat.
 - Every message is typed: `conversation` (visible), `tool` (bounded label,
@@ -66,14 +70,18 @@ conversation_messages (id, turn_id, conversation_id, role, type, slot, text,
                        assistant_kind, created_at, updated_at)
 conversation_changes  (conversation_id, change_sequence, message_id,
                        message_revision, changed_at)
+pi_semantic_dispatches(dispatch_incarnation, encrypted capability/prompt,
+                       tenant/principal + canonical/source identities,
+                       state, ordering/hashes, expiry, recovery timestamps)
 ```
 
-Assistant reservations, structured-event ledgers, and the separate activity
-schema are additive. Their detailed contract is owned by
+Assistant reservations, semantic ownership/structured-event ledgers, and the
+separate activity schema are additive. Their detailed contracts are owned by
+[`docs/pi-semantic-ownership-v1.md`](docs/pi-semantic-ownership-v1.md) and
 [`docs/canonical-lifecycle-activity-v1.md`](docs/canonical-lifecycle-activity-v1.md).
 
-All three `created_at`/`updated_at` pairs are Unix epoch **milliseconds**. The
-Gateway authors them; the composer's `Date.now()` is only an optimistic
+The conversation, turn, and message `created_at`/`updated_at` pairs are Unix
+epoch **milliseconds**. The Gateway authors them; the composer's `Date.now()` is only an optimistic
 placeholder until the canonical user row arrives. This avoids reconciliation
 between client-millisecond and server-second values and makes reloads reproduce
 the exact canonical time.
@@ -95,14 +103,16 @@ Two constraints carry the whole guarantee:
 ## New flow
 
 ```
-composer ──POST /captain/prompt {message_id}──► record_prompt()   → turn + user message
-                                             └► herdr prompt      → provider
-                                             └► record_primary_reply() if the
-                                                harness answered synchronously
+composer ──POST /captain/prompt {message_id}──► record_prompt() → turn + user + reservation
+                opt-in owned path             └► atomic capability prepare
+                                                → authenticated local Pi adapter
+                                                → native user/bind/final entries
+                                                → reserved canonical primary row
+                legacy unowned path           └► provider/display fallback adapter
                                           ◄── {conversation: {turn_id, messages}}
 
-poll  ──GET /conversations/captain/messages──► read_typed_rows() → parse → classify
-socket ──WS /events (conversation_messages)──► ingest_terminal_rows()  → upsert
+poll  ──GET /conversations/captain/messages──► skip display read when no unowned candidate
+socket ──WS /events (conversation_messages)──► canonical append/update by stable id
                                           ◄── canonical messages (WS sends only
                                               new message/lifecycle versions)
 ```
@@ -246,6 +256,17 @@ downgrade step.
   can still remain missing; choosing the latest open turn would be worse because
   the pane has other audiences.
 
+## Exact Pi ownership remains source-native
+
+The optional `magistrate.pi.ownership.v1` channel uses a mode-`0600` Unix socket,
+HMAC-authenticated bounded frames, Linux peer credentials, opaque one-use
+capabilities, native Pi custom/message entries, and encrypted recovery ledgers.
+Only text blocks from one normally stopped finalized assistant entry become
+canonical `content_source: "pi-semantic"`; thinking, tools, internal payloads,
+telemetry, and presentation metadata cannot enter its closed envelope. Binding
+and final replays are hash- and identity-stable across process crashes. See
+[`docs/pi-semantic-ownership-v1.md`](docs/pi-semantic-ownership-v1.md).
+
 ## Structured responses remain additive
 
 A validated `magi.event.v1` stream can attach canonical `magi.response.v1`
@@ -268,7 +289,7 @@ and [`docs/canonical-lifecycle-activity-v1.md`](docs/canonical-lifecycle-activit
 
 1. Restart the gateway so `init_db()` creates the new tables, then confirm:
    `sqlite3 "$MAGISTRATE_DB_PATH" '.tables'` lists `conversations`,
-   `conversation_turns`, `conversation_messages`, and
+   `conversation_turns`, `conversation_messages`, `pi_semantic_dispatches`, and
    `magi_response_events`.
 2. Open Chat. It starts empty on the first load after the fix — terminal-era
    local arrays are discarded and the canonical record has no turns yet.

@@ -1,0 +1,26 @@
+{
+  "name": "@magistrate/pi-ownership-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@types/node": "^22.0.0",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "sh -c 'trap \"rm -rf .test-dist\" EXIT; tsc --noEmit false --outDir .test-dist && node --test tests/*.test.mjs'"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
