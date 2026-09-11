@@ -76,7 +76,7 @@ export interface ConversationMessage {
   sequenceIndex?: number;
   /** Validated semantic document; absent means render the canonical text fallback. */
   structuredContent?: MagiResponseV1;
-  contentSource?: 'structured' | 'terminal-fallback';
+  contentSource?: 'structured' | 'pi-semantic' | 'terminal-fallback';
   /** Monotonic producer revision, separate from the canonical row revision. */
   structuredRevision?: number;
   /** Process-local marker: restored cache rows yield to the first Gateway row. */
@@ -131,6 +131,11 @@ const boundedIdentity = (value: unknown, maximum = 128): value is string =>
       || (code >= 0xd800 && code <= 0xdfff) || code === 0x2028 || code === 0x2029;
   });
 const validPrincipalId = (value: unknown): value is string => boundedIdentity(value);
+const hasUnsafeVisibleControl = (value: string): boolean => Array.from(value).some(character => {
+  const code = character.codePointAt(0) ?? 0;
+  return (code < 32 && code !== 9 && code !== 10 && code !== 13)
+    || (code >= 127 && code <= 159) || (code >= 0xd800 && code <= 0xdfff);
+});
 
 /**
  * Set the server-validated principal before protected routes mount.
@@ -211,6 +216,17 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     && Number.isSafeInteger(value.structuredRevision) && value.structuredRevision >= 1;
   const structuredContent = assistantConversation && value.contentSource === 'structured' && validStructuredRevision
     ? normalizeMagiResponse(value.structuredContent) : null;
+  if (assistantConversation && value.contentSource !== undefined
+    && value.contentSource !== 'structured'
+    && value.contentSource !== 'pi-semantic'
+    && value.contentSource !== 'terminal-fallback') return null;
+  if (assistantConversation && value.contentSource === 'pi-semantic'
+    && (value.structuredContent != null || value.structuredRevision != null)) return null;
+  const contentSource = structuredContent
+    ? 'structured' as const
+    : assistantConversation && value.contentSource === 'pi-semantic'
+      ? 'pi-semantic' as const
+      : assistantConversation ? 'terminal-fallback' as const : undefined;
   // Invalid/unknown structured JSON still retains a bounded plain-text
   // fallback. Other cache rows keep the smaller historical bound.
   const maxText = assistantConversation
@@ -220,6 +236,7 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     || (value.role !== 'user' && value.role !== 'assistant')
     || (value.role === 'assistant' && value.id !== value.canonicalId)
     || typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText
+    || (contentSource === 'pi-semantic' && hasUnsafeVisibleControl(value.text))
     || (value.kind !== 'conversation' && value.kind !== 'tool')
     || (value.kind === 'tool' && value.role !== 'assistant')
     || (value.source !== 'text' && value.source !== 'voice')
@@ -268,8 +285,8 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     decisionKey,
     assistantKind,
     structuredContent: structuredContent || undefined,
-    contentSource: structuredContent ? 'structured' : assistantConversation ? 'terminal-fallback' : undefined,
-    structuredRevision,
+    contentSource,
+    structuredRevision: structuredContent ? structuredRevision : undefined,
     fromCanonicalCache: true,
   };
 };

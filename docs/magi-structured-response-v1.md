@@ -138,6 +138,7 @@ Ordering and identity rules:
 - fixed assistant slots order progress/decision/outcome rows before the primary final row;
 - revisions start at 1 and increase by exactly one per reserved message;
 - `(message_id, revision)` and globally unique `event_id` are durable uniqueness boundaries (the original primary ledger retains its compatible `(turn_id, revision)` constraint);
+- a turn atomically prepared for the separate Pi ownership channel rejects structured events; source ownership is never retroactively changed;
 - replaying the same event id and payload is a no-op and returns `status: duplicate`;
 - reusing an event id for different content, skipping/reusing a revision, changing the message id, or writing after a terminal event returns HTTP 409;
 - completion is authoritative; no later semantic or terminal revision can mutate it;
@@ -152,7 +153,7 @@ The event body requires an authenticated principal with least-privilege `respons
 - `conversation_turns.assistant_message_id` reserves primary identity before output exists;
 - additive turn lifecycle/revision/decision and distinct objective/run identity columns preserve existing rows;
 - `conversation_assistant_reservations` stores bounded per-objective message slots;
-- `conversation_messages.content_source` is `structured` or `terminal-fallback` for assistant prose;
+- `conversation_messages.content_source` is `structured`, `pi-semantic`, or `terminal-fallback` for assistant prose;
 - `conversation_messages.structured_content_json` stores the validated canonical document;
 - `conversation_messages.structured_revision` stores the producer revision represented by that document;
 - `magi_response_events` preserves the primary ledger and `magi_additional_response_events` stores independent additional-message streams.
@@ -189,7 +190,7 @@ Investigation was performed against the installed runtime on 2026-09-03:
 - **Pi 0.84.4:** extensions can observe `input`, `message_start`/`message_update`/`message_end`, `turn_end`, `agent_end`, and `agent_settled`; sessions persist stable entry/message/tool-call ids in JSONL; JSON/RPC modes and typed terminating tools are available. Ordinary assistant output is still prose/tool content, so lifecycle hooks alone cannot truthfully invent heading/list semantics.
 - **Firstmate:** currently routes normal text through Herdr and reads process/pane state. It exposes no Magistrate conversation API in this repository.
 
-Therefore this repository implements the receiving side but does not pretend the missing producer exists. The smallest upstream integration is:
+The repository now also has a separate exact-text Pi ownership channel (see [`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md)); that channel deliberately cannot invent this document's richer block semantics. Therefore the structured-response receiving side still does not pretend its missing rich producer exists. The smallest upstream integration for **structured blocks** is:
 
 1. Extend the Herdr prompt seam (a protocol-versioned additive field) to carry an opaque host-owned context containing `turn_id` and `assistant_message_id` beside, not inside, prompt text. Those ids must not be model-selectable or inferred from matching prose.
 2. Have Firstmate pass that context unchanged when routing the captain prompt and provide the Gateway event URL plus a least-privilege `response`-scoped service credential out of band (the existing owner `command` scope remains compatible). The credential must never enter the prompt, terminal, tool arguments, or session transcript.
@@ -197,7 +198,7 @@ Therefore this repository implements the receiving side but does not pretend the
 4. Render a plain-text projection of the explicit tool document in the terminal so normal Herdr observability remains useful. Do not parse that terminal rendering back into JSON.
 5. Add equivalent explicit adapters for non-Pi harnesses. Until an adapter is present, emit no semantic event and let the existing terminal fallback remain authoritative.
 
-Pi session/message ids are useful producer evidence but are not substitutes for the Gateway ids: they do not currently carry a reliable mapping to a Magistrate captain turn.
+Pi session/message ids are useful producer evidence but are not substitutes for Gateway ids. Only the separate ownership protocol maps them, using an atomically prepared opaque capability and exact canonical identities; they must never be inferred for this structured protocol.
 
 ## Test and rollout evidence
 

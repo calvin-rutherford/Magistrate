@@ -1,4 +1,5 @@
 import base64
+import os
 import sqlite3
 
 import pytest
@@ -135,6 +136,43 @@ def test_persistence_rewrite_is_bounded_atomic_and_does_not_log_secrets(
         ).fetchone()[0]
     assert stored.startswith('v1:')
     assert db.decrypt_token(stored) == 'persisted-secret'
+
+
+def test_rotation_includes_live_pi_dispatch_secrets_atomically(monkeypatch, tmp_path):
+    _configure_current(monkeypatch)
+    old_key = os.environ['MAGISTRATE_SECRET_KEY']
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'pi-rotation.sqlite3'))
+    from app.conversation_store import record_prompt
+    from app.pi_ownership import get_pi_dispatch
+
+    db.init_db()
+    turn = record_prompt(
+        'pi-rotation-owner', 'captain', 'pi-rotation-message', 'rotate me',
+        submitted_text='rotate me exactly', pi_semantic=True,
+    )
+    capability = turn['pi_dispatch']['capability']
+    new_key = Fernet.generate_key().decode('ascii')
+    monkeypatch.setenv('MAGISTRATE_SECRET_KEY', new_key)
+    monkeypatch.setenv('MAGISTRATE_SECRET_KEY_VERSION', 'v2')
+    monkeypatch.setenv('MAGISTRATE_PREVIOUS_SECRET_KEY', old_key)
+    monkeypatch.setenv('MAGISTRATE_PREVIOUS_SECRET_KEY_VERSION', 'v1')
+    monkeypatch.setenv('MAGISTRATE_KEY_ROTATION_ENABLED', 'true')
+
+    report = db.rotate_oauth_credentials(limit=10, apply=True)
+    assert report.scanned == report.rewritten == 1
+    recovered = get_pi_dispatch(
+        'pi-rotation-owner', 'captain', turn['pi_dispatch']['dispatch_incarnation'],
+        include_secret=True,
+    )
+    assert recovered['capability'] == capability
+    assert recovered['prompt'] == 'rotate me exactly'
+    with sqlite3.connect(db.DB_PATH) as conn:
+        prefixes = conn.execute(
+            '''SELECT capability_enc, prompt_enc FROM pi_semantic_dispatches
+               WHERE dispatch_incarnation = ?''',
+            (turn['pi_dispatch']['dispatch_incarnation'],),
+        ).fetchone()
+    assert all(value.startswith('v2:') for value in prefixes)
 
 
 def test_legacy_persistence_migration_is_atomic(monkeypatch, tmp_path):

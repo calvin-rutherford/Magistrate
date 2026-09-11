@@ -61,6 +61,12 @@ from app.usage import get_usage
 from app.ar_glasses import router as ar_router
 from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BYTES,
                          associate_uploads, save_upload, get_upload, validate_upload_metadata)
+from app.pi_adapter_ipc import PI_IPC_SCHEMA, PiAdapterClient, PiAdapterIPCError
+from app.pi_ownership import (
+    PiOwnershipError, apply_pi_ownership_envelope, get_recoverable_dispatches,
+    has_terminal_fallback_candidates, mark_pi_adapter_acknowledged,
+    mark_pi_dispatch_attempt,
+)
 
 init_db()
 
@@ -152,6 +158,111 @@ stt_adapter = VoiceInputAdapter()
 voice_move_service = VoiceMoveService(herdr_client)
 _notification_reconciler_task = None
 _activity_reconciler_task = None
+_pi_ownership_reconciler_task = None
+
+
+def _pi_ownership_enabled() -> bool:
+    raw = os.getenv('MAGISTRATE_PI_OWNERSHIP_ENABLED', '').strip().lower()
+    if raw in {'', '0', 'false', 'no', 'off'}:
+        return False
+    if raw in {'1', 'true', 'yes', 'on'}:
+        return True
+    raise RuntimeError('MAGISTRATE_PI_OWNERSHIP_ENABLED has an invalid boolean value.')
+
+
+def _pi_capability_ttl_ms() -> int:
+    try:
+        seconds = int(os.getenv('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS', '120'))
+    except ValueError as exc:
+        raise RuntimeError('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS must be an integer.') from exc
+    if seconds < 5 or seconds > 600:
+        raise RuntimeError('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS must be between 5 and 600.')
+    return seconds * 1000
+
+
+async def _exchange_pi_dispatch(dispatch: Dict[str, Any]) -> Dict[str, Any]:
+    """Exchange one opaque dispatch without exposing local secret material."""
+    mark_pi_dispatch_attempt(dispatch['dispatch_incarnation'])
+    client = PiAdapterClient.from_environment()
+    try:
+        response = await client.exchange(dispatch)
+    except PiAdapterIPCError as exc:
+        accepted_hash = dispatch.get('accepted_envelope_sha256')
+        if (
+            exc.code == 'unknown-dispatch'
+            and dispatch.get('state') in {'finalized', 'failed'}
+            and isinstance(accepted_hash, str)
+        ):
+            mark_pi_adapter_acknowledged(
+                dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
+                dispatch['dispatch_incarnation'], accepted_hash,
+            )
+            return {'state': dispatch['state'], 'status': 'retired'}
+        raise
+    if response.get('schema_version') == PI_IPC_SCHEMA:
+        accepted_hash = dispatch.get('accepted_envelope_sha256')
+        if (
+            response.get('event_type') != 'acknowledged'
+            or dispatch.get('state') not in {'finalized', 'failed'}
+            or response.get('dispatch_incarnation') != dispatch.get('dispatch_incarnation')
+            or response.get('accepted_envelope_sha256') != accepted_hash
+            or not isinstance(accepted_hash, str)
+        ):
+            raise PiAdapterIPCError('ipc-acknowledgement-mismatch')
+        mark_pi_adapter_acknowledged(
+            dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
+            dispatch['dispatch_incarnation'], accepted_hash,
+        )
+        return {'state': dispatch['state'], 'status': 'retired'}
+    applied = apply_pi_ownership_envelope(
+        dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
+        dispatch['capability'], response,
+    )
+    accepted_hash = applied.get('accepted_envelope_sha256')
+    if isinstance(accepted_hash, str):
+        try:
+            await client.acknowledge(dispatch, accepted_hash)
+            mark_pi_adapter_acknowledged(
+                dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
+                dispatch['dispatch_incarnation'], accepted_hash,
+            )
+        except PiAdapterIPCError as exc:
+            # If acknowledged evidence has already been pruned, canonical
+            # final/failed state is sufficient to retire this cleanup pass.
+            # Other failures remain retryable; no accepted content is at risk.
+            if exc.code == 'unknown-dispatch' and applied.get('state') in {'finalized', 'failed'}:
+                mark_pi_adapter_acknowledged(
+                    dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
+                    dispatch['dispatch_incarnation'], accepted_hash,
+                )
+        except (PiOwnershipError, LookupError):
+            # Canonical acceptance already committed. The completed state remains
+            # in the bounded recovery set until this receipt converges.
+            pass
+    return applied
+
+
+async def _reconcile_pi_ownership() -> None:
+    """Recover prepared/bound adapter state from authenticated local evidence."""
+    try:
+        interval = max(1, min(int(os.getenv('MAGISTRATE_PI_RECOVERY_SECONDS', '3')), 60))
+    except ValueError:
+        interval = 3
+    while True:
+        try:
+            for dispatch in get_recoverable_dispatches():
+                try:
+                    await _exchange_pi_dispatch(dispatch)
+                except (PiAdapterIPCError, PiOwnershipError, LookupError, ValueError):
+                    # Durable state remains retryable/fail-closed. Do not print
+                    # an exception that could contain local paths or payloads.
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A corrupt recovery candidate cannot kill later bounded passes.
+            pass
+        await asyncio.sleep(interval)
 
 
 async def _reconcile_registered_notifications() -> None:
@@ -205,7 +316,7 @@ async def _reconcile_firstmate_activity() -> None:
 
 @app.on_event('startup')
 async def start_notification_reconciler():
-    global _notification_reconciler_task, _activity_reconciler_task
+    global _notification_reconciler_task, _activity_reconciler_task, _pi_ownership_reconciler_task
     # Optional by default for owner/Friend compatibility. Once an operator
     # explicitly requires the pinned producer, startup must not serve a runtime
     # whose reviewed call sites or home-local activation are absent.
@@ -215,18 +326,31 @@ async def start_notification_reconciler():
     activity_disabled = os.getenv('MAGISTRATE_DISABLE_ACTIVITY_RECONCILER', '').lower() in {'1', 'true', 'yes'}
     if os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'} and not activity_disabled:
         _activity_reconciler_task = asyncio.create_task(_reconcile_firstmate_activity())
+    if _pi_ownership_enabled():
+        # Explicit activation is fail-closed for credential/path configuration;
+        # the adapter itself may arrive later and recovery will reconnect.
+        _pi_capability_ttl_ms()
+        PiAdapterClient.from_environment().ensure_key()
+        if os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'}:
+            _pi_ownership_reconciler_task = asyncio.create_task(_reconcile_pi_ownership())
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
-    global _notification_reconciler_task, _activity_reconciler_task
-    tasks = [task for task in (_notification_reconciler_task, _activity_reconciler_task) if task]
+    global _notification_reconciler_task, _activity_reconciler_task, _pi_ownership_reconciler_task
+    tasks = [
+        task for task in (
+            _notification_reconciler_task, _activity_reconciler_task,
+            _pi_ownership_reconciler_task,
+        ) if task
+    ]
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _notification_reconciler_task = None
     _activity_reconciler_task = None
+    _pi_ownership_reconciler_task = None
 
 
 # The captain thread is the conversation Magistrate owns end to end, and the
@@ -249,6 +373,11 @@ async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_
     returned rather than swallowed so the caller reports it instead of
     presenting a stale transcript as a current one.
     """
+    # Avoid even a cosmetic Herdr read when every candidate already has a
+    # semantic owner. Mixed histories still retain fallback for genuinely
+    # unowned legacy turns.
+    if not has_terminal_fallback_candidates(user_id, target):
+        return None
     try:
         snapshot = await herdr_client.read_typed_rows(target, lines=lines)
         status = str(snapshot.get('agent_status') or '').strip().lower()
@@ -1129,6 +1258,15 @@ async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source
 
 @app.post('/api/v1/voice/moves')
 async def create_voice_move(request: VoiceMoveRequest, principal: Principal = Depends(require_scope('voice'))):
+    if _pi_ownership_enabled():
+        # This legacy voice service dispatches through Herdr before it creates a
+        # canonical captain turn. It cannot truthfully manufacture Pi ownership,
+        # so the opt-in channel disables this seam rather than silently bypassing
+        # source-native correlation. Typed captain prompts remain available.
+        raise HTTPException(
+            status_code=503,
+            detail='Voice moves are unavailable while Pi semantic ownership is enabled.',
+        )
     try:
         result = await voice_move_service.handle(request, principal.user_id)
     except ValueError as exc:
@@ -1378,6 +1516,22 @@ async def get_agent_history(
 
 @app.post('/api/v1/captain/prompt')
 async def send_captain_prompt(contract: UniversalInputContract, principal: Principal = Depends(require_scope('command'))):
+    use_pi_ownership = (
+        _pi_ownership_enabled() and contract.target == CANONICAL_CONVERSATION_TARGET
+    )
+    explicit_execution_selection = any(
+        value is not None for value in (
+            contract.profile_id, contract.harness, contract.provider,
+            contract.model, contract.variant,
+        )
+    )
+    if use_pi_ownership and explicit_execution_selection:
+        # This channel binds the already-running, explicitly activated Pi
+        # captain session. Per-request model routing is a separate contract.
+        raise HTTPException(
+            status_code=409,
+            detail='The Pi ownership channel uses the current captain session and cannot apply a per-request execution profile.',
+        )
     selection = None
     if contract.profile_id:
         try:
@@ -1402,7 +1556,7 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
                 selection = None
             else:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-    elif 'profile_id' not in contract.model_fields_set:
+    elif 'profile_id' not in contract.model_fields_set and not use_pi_ownership:
         preference = get_execution_preferences(principal.user_id)
         if preference['profile_id']:
             try:
@@ -1433,10 +1587,10 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
                 associate_uploads(principal.user_id, contract.message_id, [item['upload_id'] for item in stored_uploads])
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # Herdr's current prompt contract is text-only. Forward a bounded,
-        # human-readable manifest through the normal Herdr -> Firstmate path;
-        # never put bytes, local paths, credentials, or bearer tokens in the
-        # prompt/history. A provider that cannot accept even this manifest must
+        # The current prompt contracts are text-only. Forward a bounded,
+        # human-readable manifest through the selected provider path; never put
+        # bytes, local paths, credentials, or bearer tokens in prompt history.
+        # A provider that cannot accept even this manifest must
         # return its real error, which the client surfaces instead of claiming
         # delivery.
         attachment_summary = ', '.join(
@@ -1446,34 +1600,76 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
     # The canonical turn is created before the provider sees the prompt: the
     # frontend's message_id is the submission identity, so a retry or replay
     # reuses this turn instead of minting a second user message, and the
-    # terminal adapter can attribute the reply even when it arrives much later.
+    # selected source can finish the reserved reply even when it arrives later.
     client_message_id = contract.message_id or 'srv-' + secrets.token_hex(8)
-    turn = record_prompt(
-        principal.user_id, contract.target, client_message_id, contract.text or '',
-        source='text', submitted_text=prompt_text, attachments=stored_uploads,
-    )
-    # A browser refresh can cancel this request while Herdr is still producing
-    # the answer. Shield the producer and finish the canonical slot in a
-    # process-local task instead of losing a synchronous completion at the POST
-    # boundary. The normal snapshot poll remains the fallback for terminal-only
-    # producers.
-    provider_task = asyncio.create_task(
-        herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
-    )
     try:
-        result = await asyncio.shield(provider_task)
-    except asyncio.CancelledError:
-        _schedule_detached_prompt(
-            principal.user_id, contract.target, client_message_id, turn['turn_id'], provider_task,
+        turn = record_prompt(
+            principal.user_id, contract.target, client_message_id, contract.text or '',
+            source='text', submitted_text=prompt_text, attachments=stored_uploads,
+            pi_semantic=use_pi_ownership,
+            pi_capability_ttl_ms=_pi_capability_ttl_ms() if use_pi_ownership else 120_000,
         )
-        raise
-    except Exception:
-        set_turn_status(
-            principal.user_id, contract.target, client_message_id, 'failed',
-            terminal_fallback_only=True,
+    except PiOwnershipError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if use_pi_ownership:
+        # The adapter invokes Pi's native message API. Herdr is deliberately not
+        # called on this path and cannot supply or repair semantic ownership.
+        durable_state = turn['pi_dispatch']['state']
+        if durable_state == 'finalized':
+            applied = {'state': 'finalized', 'status': 'duplicate'}
+        elif durable_state == 'failed':
+            raise HTTPException(
+                status_code=409,
+                detail='This Pi-owned captain turn already ended without an accepted response.',
+            )
+        else:
+            try:
+                applied = await _exchange_pi_dispatch(turn['pi_dispatch'])
+            except PiAdapterIPCError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail='The local Pi captain adapter is unavailable; the prepared turn remains recoverable.',
+                ) from exc
+            except (PiOwnershipError, LookupError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail='The local Pi captain adapter returned invalid ownership evidence.',
+                ) from exc
+        if applied['state'] == 'failed':
+            raise HTTPException(
+                status_code=502,
+                detail='The local Pi captain adapter ended this dispatch without an accepted response.',
+            )
+        if applied['state'] not in {'bound', 'finalized'}:
+            raise HTTPException(
+                status_code=503,
+                detail='The local Pi captain adapter has not durably bound the prompt; recovery will continue.',
+            )
+        result: Dict[str, Any] = {
+            'status': 'accepted',
+            'transport': 'pi-semantic',
+        }
+    else:
+        # A browser refresh can cancel this legacy request while Herdr is still
+        # producing the answer. Owned Pi turns never enter this branch.
+        provider_task = asyncio.create_task(
+            herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
         )
-        raise
-    _record_prompt_result(principal.user_id, contract.target, client_message_id, turn['turn_id'], result)
+        try:
+            result = await asyncio.shield(provider_task)
+        except asyncio.CancelledError:
+            _schedule_detached_prompt(
+                principal.user_id, contract.target, client_message_id, turn['turn_id'], provider_task,
+            )
+            raise
+        except Exception:
+            set_turn_status(
+                principal.user_id, contract.target, client_message_id, 'failed',
+                terminal_fallback_only=True,
+            )
+            raise
+        _record_prompt_result(principal.user_id, contract.target, client_message_id, turn['turn_id'], result)
     return {
         **result,
         'message_id': client_message_id,
@@ -1577,7 +1773,10 @@ async def post_magi_response_event(
 @app.post('/api/v1/conversations/{target}/reset')
 async def post_conversation_reset(target: str, principal: Principal = Depends(require_scope('command'))):
     """Discard this conversation's canonical record for a genuinely fresh thread."""
-    return reset_conversation(principal.user_id, target)
+    try:
+        return reset_conversation(principal.user_id, target)
+    except MagiEventConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post('/api/v1/conversations/{target}/turns/{client_message_id}/cancel')

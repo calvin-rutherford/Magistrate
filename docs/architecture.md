@@ -26,14 +26,18 @@ records bounded evidence. It does not authorize GitHub review/merge, deploy,
 destructive, irreversible, credential, security-sensitive, or external-public
 operations. Notification acknowledgement is never a decision.
 
-The native path is `physical iPhone -> HTTPS/WSS Gateway -> private Herdr ->
-Firstmate/harnesses`. See [`deskless-operator-alpha.md`](./deskless-operator-alpha.md)
-and [`DEAT-001.md`](./DEAT-001.md) for the current slice and its unexecuted
-physical acceptance gate.
+The legacy native path is `physical iPhone -> HTTPS/WSS Gateway -> private Herdr
+-> Firstmate/harnesses`. An opt-in captain path is `Gateway -> authenticated
+local IPC -> Magistrate Pi extension -> Pi native message/session APIs`; it does
+not traverse or inspect the legacy display transport. See
+[`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md),
+[`deskless-operator-alpha.md`](./deskless-operator-alpha.md), and
+[`DEAT-001.md`](./DEAT-001.md) for the current slices and physical acceptance
+status.
 
 ## Canonical captain state
 
-Captain chat is Gateway-owned `conversation.v1`, not terminal history. A prompt is durably saved before provider work and carries distinct turn, objective, run, and reserved assistant-message identities. Authenticated `magi.event.v1` streams may publish multiple stable progress/decision/outcome messages; once any semantic stream starts, terminal parsing remains only a legacy fallback and cannot race that objective.
+Captain chat is Gateway-owned `conversation.v1`, not terminal history. A prompt is durably saved before provider work and carries distinct turn, objective, run, and reserved assistant-message identities. A turn may atomically prepare opaque Pi ownership, binding those identities to exact native Pi user/final assistant entries and ingesting only the latter's complete visible text. Otherwise authenticated `magi.event.v1` streams may publish multiple stable progress/decision/outcome messages. Pi ownership disables fallback from prepare; any other semantic stream disables it from its first accepted event. Only genuinely unowned turns remain eligible for legacy terminal ingestion. See [`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md).
 
 The additive `activity.v1` ledger consumes only structured Firstmate snapshot, append-only supervision, and explicit `fm-captain-event.v1` facts. It has principal-scoped rows, source-native ids, independent cursor/prefix hashes, restart reconciliation, HTTP replay, opt-in WebSocket catch-up, and bounded diagnostics. It never derives an audience or lifecycle from terminal prose. See [`canonical-lifecycle-activity-v1.md`](./canonical-lifecycle-activity-v1.md) and the program traceability baseline in [`opus/soak-p0-day1-baseline.md`](./opus/soak-p0-day1-baseline.md).
 

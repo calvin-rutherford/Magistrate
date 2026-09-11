@@ -47,6 +47,7 @@ from app.contracts import (
     magi_response_plain_text,
 )
 from app.herdr_client import classify_history_rows, is_pi_status_footer, tool_call_preview
+from app.pi_ownership import PiOwnershipError, prepare_pi_dispatch, turn_has_pi_ownership
 
 CONVERSATION_SCHEMA = 'conversation.v1'
 
@@ -185,12 +186,14 @@ def _public_message(row: sqlite3.Row, client_message_id: Optional[str]) -> Dict[
                 # render instruction. The already-bounded plain text remains a
                 # safe legacy fallback.
                 structured = None
-        if structured is None:
-            message['content_source'] = 'terminal-fallback'
-        else:
+        if structured is not None:
             message['content_source'] = 'structured'
             message['structured_content'] = structured.model_dump(mode='json')
             message['structured_revision'] = row['structured_revision']
+        elif row['content_source'] == 'pi-semantic' and row['source'] == 'pi-semantic':
+            message['content_source'] = 'pi-semantic'
+        else:
+            message['content_source'] = 'terminal-fallback'
     return message
 
 
@@ -357,7 +360,7 @@ def _upsert_message(
     # Semantic content is authoritative once accepted. Terminal snapshots and
     # late synchronous text may still arrive, but they can no longer revise the
     # primary row's document or its plain-text projection.
-    if slot == _PRIMARY_SLOT and existing['content_source'] == 'structured':
+    if slot == _PRIMARY_SLOT and existing['content_source'] in {'structured', 'pi-semantic'}:
         return None
     repairing_poison = (
         slot == _PRIMARY_SLOT
@@ -544,6 +547,8 @@ def record_prompt(
     user_id: str, target: str, client_message_id: str, text: str, *, source: str = 'text',
     submitted_text: Optional[str] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
+    pi_semantic: bool = False,
+    pi_capability_ttl_ms: int = 120_000,
 ) -> Dict[str, Any]:
     """Record one canonical user turn, idempotent on ``client_message_id``.
 
@@ -553,8 +558,11 @@ def record_prompt(
     ``text`` is what the captain wrote and is what chat renders.
     ``submitted_text`` is what the provider actually received (it can carry an
     attachment manifest or routing prefix), and is stored separately as the key
-    the terminal adapter matches its snapshot rows against.
+    the legacy fallback adapter matches against. For an owned Pi turn it is also
+    encrypted inside the atomic dispatch ledger for restart recovery.
     """
+    if pi_semantic and target != 'captain':
+        raise ValueError('Pi semantic ownership is available only for the canonical captain target.')
     if not client_message_id:
         raise ValueError('A client message id is required to record a conversation turn.')
     with _session() as conn:
@@ -565,6 +573,10 @@ def record_prompt(
             (conversation_id, client_message_id),
         ).fetchone()
         created = turn is None
+        if turn is not None and turn_has_pi_ownership(conn, turn['id']) and not pi_semantic:
+            raise PiOwnershipError(
+                'This canonical turn already requires the Pi semantic ownership path.'
+            )
         if turn is None:
             now = _now()
             turn_id = 'ct_' + secrets.token_hex(8)
@@ -584,16 +596,42 @@ def record_prompt(
         else:
             turn_id, turn_index = turn['id'], turn['sequence_index']
             assistant_message_id = _reserve_assistant_message_id(conn, turn_id)
-            # An edited resubmission keeps its turn but replaces both the text
-            # chat shows and the key the terminal adapter matches against.
-            conn.execute(
-                'UPDATE conversation_turns SET prompt_key = ?, updated_at = ? WHERE id = ?',
-                (prompt_match_key(submitted_text if submitted_text is not None else text), _now(), turn_id),
-            )
         # Materialize the reservation in the additive stream table as part of
         # the same prompt transaction. The legacy column remains the public
         # compatibility identity.
         assistant_message_id = _reserve_assistant_message_id(conn, turn_id)
+        current_turn = conn.execute(
+            '''SELECT objective_id, run_id, lifecycle_state, lifecycle_revision
+               FROM conversation_turns WHERE id = ?''', (turn_id,),
+        ).fetchone()
+        dispatch = None
+        if pi_semantic:
+            if not created and not turn_has_pi_ownership(conn, turn_id):
+                raise PiOwnershipError(
+                    'Pi ownership must be selected when the canonical turn is first created.'
+                )
+            # This call shares the BEGIN IMMEDIATE transaction above. A prompt,
+            # all canonical identities, and its random one-use capability are
+            # therefore committed together before the adapter can see input.
+            dispatch = prepare_pi_dispatch(
+                conn,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                assistant_message_id=assistant_message_id,
+                objective_id=current_turn['objective_id'],
+                run_id=current_turn['run_id'],
+                prompt=submitted_text if submitted_text is not None else text,
+                visible_prompt=text,
+                ttl_ms=pi_capability_ttl_ms,
+            )
+        if not created:
+            # An unowned legacy resubmission may edit its prompt. An owned Pi
+            # replay reaches this only after exact prompt hashes were verified.
+            conn.execute(
+                'UPDATE conversation_turns SET prompt_key = ?, updated_at = ? WHERE id = ?',
+                (prompt_match_key(submitted_text if submitted_text is not None else text), _now(), turn_id),
+            )
         # A turn always carries a user message: the client's transcript row is
         # keyed to it, so a prompt with no typed text falls back to what the
         # provider actually received rather than leaving the turn headless.
@@ -604,11 +642,7 @@ def record_prompt(
             attachments=attachments,
         )
         _touch_conversation(conn, conversation_id)
-        current_turn = conn.execute(
-            '''SELECT objective_id, run_id, lifecycle_state, lifecycle_revision
-               FROM conversation_turns WHERE id = ?''', (turn_id,),
-        ).fetchone()
-        return {
+        result = {
             'conversation_id': conversation_id, 'turn_id': turn_id,
             'objective_id': current_turn['objective_id'], 'run_id': current_turn['run_id'],
             'assistant_message_id': assistant_message_id, 'created': created,
@@ -616,6 +650,9 @@ def record_prompt(
             'lifecycle_revision': current_turn['lifecycle_revision'],
             'messages': _turn_messages(conn, turn_id, client_message_id),
         }
+        if dispatch is not None:
+            result['pi_dispatch'] = dispatch
+        return result
 
 
 def reserve_assistant_message(
@@ -648,6 +685,8 @@ def reserve_assistant_message(
         ).fetchone()
         if turn is None:
             raise LookupError('Conversation turn not found.')
+        if turn_has_pi_ownership(conn, turn_id):
+            raise MagiEventConflict('This turn is owned by an exact Pi semantic dispatch.')
         _reserve_assistant_message_id(conn, turn_id)
         existing = conn.execute(
             '''SELECT * FROM conversation_assistant_reservations
@@ -729,6 +768,10 @@ def record_primary_reply(
         # provider work), and that late synchronous result must not resurrect
         # the turn or appear beside the stopped partial response.
         if turn is None or turn['lifecycle_state'] in ('completed', 'cancelled', 'failed'):
+            return []
+        # Prepared Pi ownership outranks every display/legacy source. It stays
+        # authoritative even before a visible assistant entry has finalized.
+        if turn_has_pi_ownership(conn, turn_id):
             return []
         # Any explicit semantic stream owns the objective. A synchronous
         # terminal-era result must not race a progress/outcome message merely
@@ -889,6 +932,8 @@ def apply_magi_event(user_id: str, target: str, event: Any) -> Dict[str, Any]:
         ).fetchone()
         if turn is None:
             raise LookupError('Conversation turn not found.')
+        if turn_has_pi_ownership(conn, event.turn_id):
+            raise MagiEventConflict('This turn is owned by an exact Pi semantic dispatch.')
         _reserve_assistant_message_id(conn, event.turn_id)
         reservation = conn.execute(
             '''SELECT * FROM conversation_assistant_reservations
@@ -1162,7 +1207,10 @@ def set_turn_status(
             (conversation_id, client_message_id),
         ).fetchone()
         if turn and not (
-            terminal_fallback_only and _semantic_event_exists(conn, turn['id'])
+            terminal_fallback_only and (
+                _semantic_event_exists(conn, turn['id'])
+                or turn_has_pi_ownership(conn, turn['id'])
+            )
         ):
             _set_turn_status(conn, turn['id'], status)
 
@@ -1686,7 +1734,7 @@ def _apply_segment(
     # An accepted semantic lifecycle owns this turn from assistant.started
     # onward. Snapshot rows remain available in Herdr, but are fallback only and
     # must not race the structured stream's content or terminal outcome.
-    if _semantic_event_exists(conn, turn['id']):
+    if turn_has_pi_ownership(conn, turn['id']) or _semantic_event_exists(conn, turn['id']):
         return []
     changed: List[Dict[str, Any]] = []
     turn_index = turn['sequence_index']
@@ -1889,14 +1937,28 @@ def reset_conversation(user_id: str, target: str) -> Dict[str, Any]:
 
     Poisoned local state is invalidated client-side by the storage version (see
     ConversationSession.ts); this is the server-side equivalent for an operator
-    or a test that needs a clean thread.
+    or a test that needs a clean thread. Unacknowledged Pi evidence blocks reset
+    so the adapter cannot be orphaned at a crash boundary.
     """
     with _session() as conn:
         conn.execute('BEGIN IMMEDIATE')
         conversation_id = _ensure_conversation(conn, user_id, target)
+        unresolved_pi = conn.execute(
+            '''SELECT 1 FROM pi_semantic_dispatches
+               WHERE conversation_id = ? AND adapter_acknowledged_at IS NULL LIMIT 1''',
+            (conversation_id,),
+        ).fetchone()
+        if unresolved_pi is not None:
+            raise MagiEventConflict(
+                'The conversation has Pi dispatch evidence awaiting a durable adapter receipt.'
+            )
         conn.execute(
             '''DELETE FROM magi_response_events
                WHERE turn_id IN (SELECT id FROM conversation_turns WHERE conversation_id = ?)''',
+            (conversation_id,),
+        )
+        conn.execute(
+            'DELETE FROM pi_semantic_dispatches WHERE conversation_id = ?',
             (conversation_id,),
         )
         conn.execute(

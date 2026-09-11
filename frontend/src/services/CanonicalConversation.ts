@@ -45,7 +45,7 @@ export interface CanonicalMessage {
   objective_id?: string;
   run_id?: string;
   assistant_kind?: 'response' | 'progress' | 'decision' | 'outcome';
-  content_source?: 'structured' | 'terminal-fallback';
+  content_source?: 'structured' | 'pi-semantic' | 'terminal-fallback';
   structured_content?: MagiResponseV1;
   structured_revision?: number;
 }
@@ -58,6 +58,12 @@ export interface CanonicalConversation {
 
 const isCanonicalType = (value: unknown): value is CanonicalMessageType =>
   typeof value === 'string' && (CANONICAL_MESSAGE_TYPES as readonly string[]).includes(value);
+
+const hasUnsafeVisibleControl = (value: string): boolean => Array.from(value).some(character => {
+  const code = character.codePointAt(0) ?? 0;
+  return (code < 32 && code !== 9 && code !== 10 && code !== 13)
+    || (code >= 127 && code <= 159) || (code >= 0xd800 && code <= 0xdfff);
+});
 
 const normalizeCanonicalAttachments = (raw: unknown): ConversationAttachment[] | undefined => {
   if (!Array.isArray(raw)) return undefined;
@@ -101,10 +107,14 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     || (value.type === 'conversation'
       ? value.visible_in_chat !== true
       : value.role !== 'assistant' || value.visible_in_chat !== false)
-    || !['text', 'voice', 'terminal', 'magi-event'].includes(String(value.source))
+    || !['text', 'voice', 'terminal', 'magi-event', 'pi-semantic'].includes(String(value.source))
     || (value.type === 'tool' && value.source !== 'terminal')
     || (value.role === 'user' && value.source !== 'text' && value.source !== 'voice')
-    || (value.content_source === 'structured' && value.source !== 'magi-event')) return null;
+    || (value.content_source === 'structured' && value.source !== 'magi-event')
+    || (value.content_source === 'pi-semantic' && value.source !== 'pi-semantic')
+    || (value.source === 'pi-semantic' && value.content_source !== 'pi-semantic')
+    || (value.content_source === 'pi-semantic'
+      && (value.structured_content != null || value.structured_revision != null))) return null;
   const structuredRevision = typeof value.structured_revision === 'number'
     && Number.isSafeInteger(value.structured_revision) && value.structured_revision >= 1
     ? value.structured_revision : undefined;
@@ -113,10 +123,13 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     ? normalizeMagiResponse(value.structured_content) : null;
   if (value.role === 'assistant' && value.type === 'conversation'
     && value.content_source !== undefined
-    && value.content_source !== 'structured' && value.content_source !== 'terminal-fallback') return null;
+    && value.content_source !== 'structured'
+    && value.content_source !== 'pi-semantic'
+    && value.content_source !== 'terminal-fallback') return null;
   const maxText = value.role === 'assistant' && value.type === 'conversation'
     ? MAGI_MAX_FALLBACK_TEXT_CHARS : value.role === 'user' ? 100_000 : 20_000;
-  if (typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText) return null;
+  if (typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText
+    || (value.content_source === 'pi-semantic' && hasUnsafeVisibleControl(value.text))) return null;
   if (typeof value.sequence_index !== 'number' || !Number.isSafeInteger(value.sequence_index) || value.sequence_index < 0) return null;
   if (!boundedIdentity(value.turn_id)) return null;
   if (typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision) || value.revision < 1) return null;
@@ -165,7 +178,11 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     objective_id: boundedIdentity(value.objective_id) ? value.objective_id : undefined,
     run_id: boundedIdentity(value.run_id) ? value.run_id : undefined,
     assistant_kind: assistantKind,
-    content_source: structuredContent ? 'structured' : value.role === 'assistant' && value.type === 'conversation' ? 'terminal-fallback' : undefined,
+    content_source: structuredContent
+      ? 'structured'
+      : value.role === 'assistant' && value.type === 'conversation'
+        ? value.content_source === 'pi-semantic' ? 'pi-semantic' : 'terminal-fallback'
+        : undefined,
     structured_content: structuredContent || undefined,
     structured_revision: structuredContent ? structuredRevision : undefined,
   };

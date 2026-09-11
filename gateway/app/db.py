@@ -252,6 +252,7 @@ def _rewrite_oauth_credentials(
     limit: int = MAX_ROTATION_ROWS,
     apply: bool = False,
 ) -> CredentialRewriteReport:
+    """Atomically rewrite every live application-encrypted secret column."""
     if limit < 1 or limit > MAX_ROTATION_ROWS:
         raise SecretRotationError(f'limit must be between 1 and {MAX_ROTATION_ROWS}')
     init_db()
@@ -261,7 +262,15 @@ def _rewrite_oauth_credentials(
             'SELECT id, access_token_enc, refresh_token_enc FROM oauth_credentials LIMIT ?',
             (limit + 1,),
         ).fetchall()
-        if len(rows) > limit:
+        remaining = max(0, limit + 1 - len(rows))
+        pi_rows = conn.execute(
+            '''SELECT dispatch_incarnation, capability_enc, prompt_enc
+               FROM pi_semantic_dispatches
+               WHERE capability_enc != '' OR prompt_enc != '' LIMIT ?''',
+            (remaining,),
+        ).fetchall()
+        scanned = len(rows) + len(pi_rows)
+        if scanned > limit:
             raise SecretRotationError(
                 f'credential rewrite exceeds the bounded limit of {limit} rows'
             )
@@ -272,18 +281,32 @@ def _rewrite_oauth_credentials(
             new_refresh = transform(refresh_token_enc) if refresh_token_enc else refresh_token_enc
             if new_access != access_token_enc or new_refresh != refresh_token_enc:
                 updates.append((new_access, new_refresh, credential_id))
+        pi_updates = []
+        for dispatch_incarnation, capability_enc, prompt_enc in pi_rows:
+            new_capability = transform(capability_enc) if capability_enc else capability_enc
+            new_prompt = transform(prompt_enc) if prompt_enc else prompt_enc
+            if new_capability != capability_enc or new_prompt != prompt_enc:
+                pi_updates.append((new_capability, new_prompt, dispatch_incarnation))
 
         if apply:
-            # sqlite rolls this transaction back automatically if the batch
-            # write fails, so a partial rotation cannot be committed.
+            # sqlite rolls this transaction back automatically if either table's
+            # batch write fails, so a partial rotation cannot be committed.
             with conn:
                 conn.executemany(
                     'UPDATE oauth_credentials SET access_token_enc = ?, refresh_token_enc = ? WHERE id = ?',
                     updates,
                 )
+                conn.executemany(
+                    '''UPDATE pi_semantic_dispatches
+                       SET capability_enc = ?, prompt_enc = ?
+                       WHERE dispatch_incarnation = ?''',
+                    pi_updates,
+                )
         else:
             conn.rollback()
-        return CredentialRewriteReport(scanned=len(rows), rewritten=len(updates))
+        return CredentialRewriteReport(
+            scanned=scanned, rewritten=len(updates) + len(pi_updates),
+        )
     finally:
         conn.close()
 
@@ -295,6 +318,7 @@ def migrate_legacy_oauth_credentials(
     limit: int = MAX_ROTATION_ROWS,
     apply: bool = False,
 ) -> CredentialRewriteReport:
+    """Migrate OAuth and live Pi ciphertext; retain the historical API name."""
     return _rewrite_oauth_credentials(
         lambda value: migrate_legacy_ciphertext(
             value, legacy_key=legacy_key, allow_legacy=allow_legacy
@@ -309,6 +333,7 @@ def rotate_oauth_credentials(
     limit: int = MAX_ROTATION_ROWS,
     apply: bool = False,
 ) -> CredentialRewriteReport:
+    """Rotate OAuth and live Pi ciphertext; retain the historical API name."""
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 def init_db():
@@ -667,6 +692,79 @@ def init_db():
           )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_assistant_reservations_turn ON conversation_assistant_reservations(turn_id, ordinal)')
+
+    # Opaque Pi ownership is prepared in the same transaction as the captain
+    # turn and its reserved primary message.  The capability and exact prompt
+    # are encrypted for restart-safe local IPC; source/canonical identities stay
+    # in distinct columns and no Pi transcript is copied into this ledger.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS pi_semantic_dispatches (
+        dispatch_incarnation TEXT PRIMARY KEY,
+        capability_sha256 TEXT NOT NULL UNIQUE,
+        capability_enc TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL UNIQUE,
+        assistant_message_id TEXT NOT NULL UNIQUE,
+        objective_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        prompt_sha256 TEXT NOT NULL,
+        prompt_enc TEXT NOT NULL,
+        visible_prompt_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        capability_used_at INTEGER,
+        pi_session_id TEXT,
+        pi_prepare_entry_id TEXT,
+        pi_user_entry_id TEXT,
+        pi_user_entry_order INTEGER,
+        pi_user_entry_sha256 TEXT,
+        pi_bind_entry_id TEXT,
+        binding_sequence_json TEXT,
+        binding_sequence_sha256 TEXT,
+        binding_envelope_sha256 TEXT,
+        bound_at INTEGER,
+        pi_assistant_entry_id TEXT,
+        pi_assistant_entry_order INTEGER,
+        pi_finalize_entry_id TEXT,
+        source_start_order INTEGER,
+        source_end_order INTEGER,
+        source_cursor TEXT,
+        source_sequence_sha256 TEXT,
+        visible_content_sha256 TEXT,
+        visible_content_bytes INTEGER,
+        final_envelope_sha256 TEXT,
+        finalized_at INTEGER,
+        failure_code TEXT,
+        failure_envelope_sha256 TEXT,
+        adapter_acknowledged_at INTEGER,
+        last_attempt_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(turn_id) REFERENCES conversation_turns(id),
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+        FOREIGN KEY(assistant_message_id) REFERENCES conversation_assistant_reservations(message_id)
+    )
+    ''')
+    pi_dispatch_columns = {
+        row[1] for row in cursor.execute('PRAGMA table_info(pi_semantic_dispatches)').fetchall()
+    }
+    if 'pi_user_entry_sha256' not in pi_dispatch_columns:
+        cursor.execute('ALTER TABLE pi_semantic_dispatches ADD COLUMN pi_user_entry_sha256 TEXT')
+    if 'failure_envelope_sha256' not in pi_dispatch_columns:
+        cursor.execute('ALTER TABLE pi_semantic_dispatches ADD COLUMN failure_envelope_sha256 TEXT')
+    if 'adapter_acknowledged_at' not in pi_dispatch_columns:
+        cursor.execute('ALTER TABLE pi_semantic_dispatches ADD COLUMN adapter_acknowledged_at INTEGER')
+    cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_pi_dispatch_user_entry
+                      ON pi_semantic_dispatches(pi_session_id, pi_user_entry_id)
+                      WHERE pi_session_id IS NOT NULL AND pi_user_entry_id IS NOT NULL''')
+    cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_pi_dispatch_assistant_entry
+                      ON pi_semantic_dispatches(pi_session_id, pi_assistant_entry_id)
+                      WHERE pi_session_id IS NOT NULL AND pi_assistant_entry_id IS NOT NULL''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS idx_pi_dispatch_recovery
+                      ON pi_semantic_dispatches(state, updated_at)''')
 
     # Accepted semantic lifecycle events form the durable ordering/idempotency
     # ledger. Their documents live additively on the canonical assistant row;
