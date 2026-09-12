@@ -1,4 +1,4 @@
-import { GATEWAY_URL, getGatewaySessionToken } from '../api/client';
+import { GATEWAY_URL, getGatewaySessionToken, MAGI_NATIVE_CHAT_ENABLED } from '../api/client';
 
 export type EventCallback = (data: any) => void;
 
@@ -52,6 +52,7 @@ export class RealtimeClient {
         // query parameter and cannot leak through proxy access logs.
         this.socket?.send(JSON.stringify({
           type: 'auth', token, target: this.target,
+          chat_mode: this.target === 'captain' && MAGI_NATIVE_CHAT_ENABLED ? 'native' : 'legacy',
           ...(this.activityAfter !== null ? { activity_after: this.activityAfter } : {}),
         }));
       };

@@ -44,13 +44,26 @@ function stopServer(child) {
  * `readyPath` is the route the probe requests, so a suite can wait on the page
  * it is about to drive rather than only on the server socket.
  */
-async function startWebServer({ readyPath = '/' } = {}) {
+async function startWebServer({ readyPath = '/', environment = {} } = {}) {
   const port = Number(process.env.MAGISTRATE_WEB_TEST_PORT) || await reserveFreePort();
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(
     path.join(process.cwd(), 'node_modules', '.bin', 'expo'),
     ['start', '--web', '--port', String(port)],
-    { cwd: process.cwd(), env: { ...process.env, CI: '1', BROWSER: 'none' }, stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      cwd: process.cwd(),
+      // Existing compatibility suites remain explicit legacy coverage. Native
+      // chat suites override these two values and production exports rely on
+      // the application's native-on/legacy-off defaults.
+      env: {
+        ...process.env,
+        EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED: 'false',
+        EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED: 'true',
+        ...environment,
+        CI: '1', BROWSER: 'none',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
   );
   let output = '';
   const collect = chunk => { output = (output + chunk).slice(-4000); };

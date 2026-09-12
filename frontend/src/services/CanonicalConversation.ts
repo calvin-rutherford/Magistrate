@@ -45,7 +45,7 @@ export interface CanonicalMessage {
   objective_id?: string;
   run_id?: string;
   assistant_kind?: 'response' | 'progress' | 'decision' | 'outcome';
-  content_source?: 'structured' | 'pi-semantic' | 'terminal-fallback';
+  content_source?: 'magi-native' | 'structured' | 'pi-semantic' | 'terminal-fallback';
   structured_content?: MagiResponseV1;
   structured_revision?: number;
 }
@@ -107,12 +107,13 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     || (value.type === 'conversation'
       ? value.visible_in_chat !== true
       : value.role !== 'assistant' || value.visible_in_chat !== false)
-    || !['text', 'voice', 'terminal', 'magi-event', 'pi-semantic'].includes(String(value.source))
+    || !['text', 'voice', 'magi-native', 'terminal', 'magi-event', 'pi-semantic'].includes(String(value.source))
     || (value.type === 'tool' && value.source !== 'terminal')
     || (value.role === 'user' && value.source !== 'text' && value.source !== 'voice')
     || (value.content_source === 'structured' && value.source !== 'magi-event')
     || (value.content_source === 'pi-semantic' && value.source !== 'pi-semantic')
     || (value.source === 'pi-semantic' && value.content_source !== 'pi-semantic')
+    || (value.source === 'magi-native' && value.content_source !== 'magi-native')
     || (value.content_source === 'pi-semantic'
       && (value.structured_content != null || value.structured_revision != null))) return null;
   const structuredRevision = typeof value.structured_revision === 'number'
@@ -123,13 +124,17 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     ? normalizeMagiResponse(value.structured_content) : null;
   if (value.role === 'assistant' && value.type === 'conversation'
     && value.content_source !== undefined
+    && value.content_source !== 'magi-native'
     && value.content_source !== 'structured'
     && value.content_source !== 'pi-semantic'
     && value.content_source !== 'terminal-fallback') return null;
   const maxText = value.role === 'assistant' && value.type === 'conversation'
     ? MAGI_MAX_FALLBACK_TEXT_CHARS : value.role === 'user' ? 100_000 : 20_000;
-  if (typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText
-    || (value.content_source === 'pi-semantic' && hasUnsafeVisibleControl(value.text))) return null;
+  const emptyNativeState = value.role === 'assistant' && value.source === 'magi-native'
+    && value.text === '' && ['awaiting_reply', 'failed', 'cancelled'].includes(String(value.turn_status));
+  if (typeof value.text !== 'string' || (!value.text.trim() && !emptyNativeState) || Array.from(value.text).length > maxText
+    || ((value.content_source === 'pi-semantic' || value.content_source === 'magi-native')
+      && hasUnsafeVisibleControl(value.text))) return null;
   if (typeof value.sequence_index !== 'number' || !Number.isSafeInteger(value.sequence_index) || value.sequence_index < 0) return null;
   if (!boundedIdentity(value.turn_id)) return null;
   if (typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision) || value.revision < 1) return null;
@@ -181,7 +186,8 @@ export function normalizeCanonicalMessage(raw: unknown): CanonicalMessage | null
     content_source: structuredContent
       ? 'structured'
       : value.role === 'assistant' && value.type === 'conversation'
-        ? value.content_source === 'pi-semantic' ? 'pi-semantic' : 'terminal-fallback'
+        ? value.content_source === 'magi-native' ? 'magi-native'
+          : value.content_source === 'pi-semantic' ? 'pi-semantic' : 'terminal-fallback'
         : undefined,
     structured_content: structuredContent || undefined,
     structured_revision: structuredContent ? structuredRevision : undefined,
@@ -194,6 +200,56 @@ export function normalizeCanonicalMessages(raw: unknown): CanonicalMessage[] {
     .map(normalizeCanonicalMessage)
     .filter((message): message is CanonicalMessage => message !== null)
     .sort((left, right) => left.sequence_index - right.sequence_index);
+}
+
+/** Convert the additive native-chat wire shape into the shared render shape. */
+export function normalizeNativeMagiMessages(raw: unknown): CanonicalMessage[] {
+  if (!Array.isArray(raw)) return [];
+  const turnStatuses = new Map<string, string>();
+  raw.forEach(item => {
+    if (!item || typeof item !== 'object') return;
+    const value = item as Record<string, unknown>;
+    if (value.role === 'assistant' && typeof value.turn_id === 'string' && typeof value.status === 'string') {
+      turnStatuses.set(value.turn_id, value.status);
+    }
+  });
+  const turnStatus = (status: unknown): string => status === 'pending' ? 'awaiting_reply'
+    : status === 'completed' ? 'answered' : status === 'failed' ? 'failed'
+      : status === 'cancelled' ? 'cancelled' : 'failed';
+  return normalizeCanonicalMessages(raw.map(item => {
+    if (!item || typeof item !== 'object') return item;
+    const value = item as Record<string, unknown>;
+    const validStatus = ['pending', 'completed', 'failed', 'cancelled'].includes(String(value.status));
+    const validSource = value.role === 'user'
+      ? value.source === 'text' || value.source === 'voice'
+      : value.role === 'assistant' && value.source === 'magi-native';
+    if (!validStatus || !validSource
+      || typeof value.conversation_id !== 'string' || !/^mgc_[A-Za-z0-9_-]+$/.test(value.conversation_id)
+      || (value.role === 'user' && (value.status !== 'completed' || typeof value.client_message_id !== 'string'
+        || value.reply_to_message_id !== null))
+      || (value.role === 'assistant' && (value.client_message_id !== null
+        || typeof value.reply_to_message_id !== 'string'))
+      || typeof value.updated_at !== 'number' || !Number.isSafeInteger(value.updated_at)
+      || typeof value.created_at !== 'number' || value.updated_at < value.created_at) return null;
+    const pairStatus = typeof value.turn_id === 'string' ? turnStatuses.get(value.turn_id) : value.status;
+    return {
+      id: value.id,
+      turn_id: value.turn_id,
+      client_message_id: value.role === 'user' ? value.client_message_id : null,
+      role: value.role,
+      type: 'conversation',
+      text: value.content,
+      visible_in_chat: true,
+      sequence_index: value.sequence_index,
+      revision: value.revision,
+      source: value.role === 'assistant' ? 'magi-native' : value.source,
+      attachments: value.attachments,
+      created_at: value.created_at,
+      updated_at: value.updated_at,
+      turn_status: turnStatus(pairStatus),
+      ...(value.role === 'assistant' ? { content_source: 'magi-native', assistant_kind: 'response' } : {}),
+    };
+  }));
 }
 
 /**
@@ -214,7 +270,7 @@ const progressFor = (message: CanonicalMessage): ConversationMessage['progress']
       : message.lifecycle_state === 'awaiting-user' ? 'complete'
         : message.lifecycle_state === 'active'
           ? (message.role === 'assistant' ? 'streaming' : 'working')
-          : message.turn_status === 'awaiting_reply' && message.role === 'user' ? 'working'
+          : message.turn_status === 'awaiting_reply' ? 'working'
           : message.turn_status === 'streaming' ? (message.role === 'assistant' ? 'streaming' : 'working')
             : 'complete';
 

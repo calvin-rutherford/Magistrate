@@ -8,7 +8,7 @@ import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRe
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
-import { AgentHistoryMessage, AgentInfo, AgentMigration, AuthProviderInfo, cancelConversationTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgentMigration, fetchAgents, fetchCanonicalActivity, fetchCanonicalActivitySnapshot, fetchCanonicalConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, RecentActivityItem, renameAgent, requestAgentMigration, sendCaptainPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
+import { AgentHistoryMessage, AgentInfo, AgentMigration, AuthProviderInfo, cancelMagiChatTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgentMigration, fetchAgents, fetchCanonicalActivity, fetchCanonicalActivitySnapshot, fetchMagiChatConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, MAGI_NATIVE_CHAT_ENABLED, RecentActivityItem, renameAgent, requestAgentMigration, sendMagiChatPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
 import { CanonicalActivitySurface } from '../../src/components/CanonicalActivitySurface';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ComposeIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, InfoIcon, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
@@ -18,7 +18,7 @@ import { StructuredAssistantMessage } from '../../src/components/StructuredAssis
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
-import { CanonicalMessage, normalizeCanonicalMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
+import { CanonicalMessage, normalizeCanonicalMessages, normalizeNativeMagiMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
 import { canonicalActivityResponseIsDegraded, CanonicalActivityRecoveryCoordinator, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
 import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
 import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
@@ -267,8 +267,8 @@ function ExecutionSheet({ dark, profiles, loading, error, open, selection, onClo
       <ScrollView style={styles.executionScroll} contentContainerStyle={styles.executionScrollContent} keyboardShouldPersistTaps="handled">
         <Text style={[styles.groupLabel, { color: muted }]}>RECOMMENDED</Text>
         <View style={[styles.group, { backgroundColor: groupSurface }]}>
-          <TouchableOpacity testID="model-option-current" accessibilityRole="button" accessibilityLabel="Magi, automatic routing. Uses the model already running on the backend." accessibilityState={{ selected: selection === null }} onPress={() => onSelect(null)} style={styles.groupRow}>
-            <View style={styles.groupRowCopy}><Text style={[styles.groupRowTitle, { color: text }]}>Magi · Automatic</Text><Text style={[styles.groupRowMeta, { color: muted }]}>Uses the model already running on the backend</Text></View>
+          <TouchableOpacity testID="model-option-current" accessibilityRole="button" accessibilityLabel="Magi, automatic. Uses the Gateway-configured model." accessibilityState={{ selected: selection === null }} onPress={() => onSelect(null)} style={styles.groupRow}>
+            <View style={styles.groupRowCopy}><Text style={[styles.groupRowTitle, { color: text }]}>Magi · Automatic</Text><Text style={[styles.groupRowMeta, { color: muted }]}>Uses the Gateway-configured model</Text></View>
             {selection === null ? <Text testID="model-option-current-check" style={[styles.groupCheck, { color: dark ? brand.cyan : brand.violet }]}>✓</Text> : null}
           </TouchableOpacity>
         </View>
@@ -373,6 +373,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   // reading terminal history until they get a submission path of their own; see
   // CHAT_ARCHITECTURE_FIX.md.
   const canonicalTarget = target === 'captain';
+  const nativeTarget = canonicalTarget && MAGI_NATIVE_CHAT_ENABLED;
   const canonicalActivity = useCanonicalActivity();
   const [activityBefore, setActivityBefore] = useState<number | undefined>();
   const [activityPageLimit, setActivityPageLimit] = useState(CANONICAL_ACTIVITY_PAGE_SIZE);
@@ -404,6 +405,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const [micStatus, setMicStatus] = useState<'idle' | 'requesting' | 'listening' | 'transcribing' | 'ready' | 'error'>('idle');
   const [waveSamples, setWaveSamples] = useState<number[]>(() => new Array(48).fill(0.04));
   const [modelSelection, setModelSelection] = useState<ModelSelection>(() => {
+    if (target === 'captain' && MAGI_NATIVE_CHAT_ENABLED) return null;
     const profile = profiles.find(item => item.id === selectedProfileId);
     return profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null;
   });
@@ -549,9 +551,10 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
 
   useEffect(() => {
+    if (nativeTarget) { setModelSelection(null); return; }
     const profile = profiles.find(item => item.id === selectedProfileId);
     setModelSelection(profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null);
-  }, [profiles, selectedProfileId]);
+  }, [nativeTarget, profiles, selectedProfileId]);
 
   useEffect(() => {
     const request = ++historyRequestRef.current;
@@ -627,7 +630,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       if (!sameRenderedTranscript(current, restored)) resetConversationMessages(target, restored);
       setConversationSync({ status: 'loading', cachedRows: canonical.length });
       try {
-        const result = await fetchCanonicalConversation(target);
+        const result = await fetchMagiChatConversation(target);
         if (request !== historyRequestRef.current || requestPrincipal !== getConversationPrincipal()) return;
         applyCanonicalMessages(result.messages, { replace: true, pending: [...pending.values()] });
         setConversationSync({ status: 'fresh', cachedRows: 0 });
@@ -965,7 +968,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   const syncCanonicalConversation = async (): Promise<boolean> => {
     const requestPrincipal = getConversationPrincipal();
     try {
-      const result = await fetchCanonicalConversation(target);
+      const result = await fetchMagiChatConversation(target);
       if (requestPrincipal !== getConversationPrincipal()) return false;
       const answered = applyCanonicalMessages(result.messages, { replace: true });
       setConversationSync(current => current.status === 'fresh' ? current : { status: 'fresh', cachedRows: 0 });
@@ -1174,7 +1177,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           return;
         }
         if (!Array.isArray(event?.messages)) return;
-        const canonical = event.type === 'conversation_messages';
+        const canonical = event.type === 'conversation_messages' || event.type === 'magi_messages';
         if (canonical !== canonicalTarget
           || (canonical && activityPrincipal !== getConversationPrincipal())) return;
         // In development React may mount, clean up, and mount effects again. Do
@@ -1183,7 +1186,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
           if (!active || (canonical && activityPrincipal !== getConversationPrincipal())) return;
           // Canonical events are revision deltas keyed by message id, so they
           // merge into the rows already rendered rather than replacing them.
-          if (canonical) applyCanonicalMessages(normalizeCanonicalMessages(event.messages));
+          if (canonical) applyCanonicalMessages(event.type === 'magi_messages'
+            ? normalizeNativeMagiMessages(event.messages) : normalizeCanonicalMessages(event.messages));
           else if (appendHistoryMessages(event.messages)) setIsThinking(false);
         });
       });
@@ -1207,22 +1211,21 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       realtime?.disconnect();
     };
   }, [target]);
-  // Live auto-refresh: whichever agent is behind `target` may produce new
-  // terminal output without this device having sent the prompt (Herdr has no
-  // push channel, see AGENTS.md), so poll on an interval independent of the
-  // faster post-send poll below.
+  // Live auto-refresh is transport-neutral: native captain state comes from
+  // SQLite, while retained worker/legacy targets may still read a terminal.
+  // Poll independently of the faster post-send reconciliation below.
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       try {
         await historyReadyRef.current;
         if (!cancelled && await syncFromHistory()) setIsThinking(false);
-      } catch { /* Transient network/Herdr hiccup: retry on the next tick. */ }
+      } catch { /* Transient transport hiccup: retry on the next tick. */ }
     };
     const interval = setInterval(() => void poll(), 3000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [target]);
-  const submitPrompt = async (trimmed: string, editId: string | null = null, pendingAttachments: ComposerAttachment[] = [], queuedMessageId?: string) => {
+  const submitPrompt = async (trimmed: string, editId: string | null = null, pendingAttachments: ComposerAttachment[] = [], queuedMessageId?: string, retryFailed = false) => {
     const messageId = editId || queuedMessageId || `u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const token = ++promptTokenRef.current;
     const controller = new AbortController();
@@ -1242,7 +1245,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     try {
       await historyReadyRef.current;
       if (!isCurrent()) return;
-      if (modelSelection && !modelSelection.available) throw new Error(modelSelection.availabilityReason || 'The selected execution profile is unavailable.');
+      if (!nativeTarget && modelSelection && !modelSelection.available) throw new Error(modelSelection.availabilityReason || 'The selected execution profile is unavailable.');
       const uploaded: ChatUpload[] = [];
       for (const attachment of pendingAttachments) {
         if (!isCurrent()) return;
@@ -1254,9 +1257,9 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         // Reflect each confirmed upload as it lands rather than after the whole batch.
         updateConversationMessageState(target, messageId, { attachments: attachmentSummaries.map(summary => summary.name === result.filename && !summary.uploadId ? { ...summary, status: 'stored', uploadId: result.upload_id } : summary) });
       }
-      const response = await sendCaptainPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded, messageId, controller.signal);
+      const response = await sendMagiChatPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded, messageId, controller.signal, retryFailed);
       if (!isCurrent()) return;
-      if (response?.status === 'error' || response?.error) throw new Error(response.error || 'The message was not accepted.');
+      if (response?.status === 'error' || (!nativeTarget && response?.error)) throw new Error(response.error || 'The message was not accepted.');
       // Only the server-confirmed records are kept, and 'attached' is claimed
       // solely because the gateway accepted the prompt carrying this manifest.
       updateConversationMessageState(target, messageId, { delivery: 'sent', progress: 'complete', attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size, status: 'attached' as const, uploadId: item.upload_id })) });
@@ -1268,7 +1271,14 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         // so there is no local row for a later read to reconcile or duplicate.
         const canonical = response?.conversation?.messages || [];
         if (activePromptRef.current?.token === token) activePromptRef.current = { ...activePromptRef.current, turnId: response?.conversation?.turn_id };
-        if (canonical.length && applyCanonicalMessages(canonical)) return;
+        const answered = canonical.length ? applyCanonicalMessages(canonical) : false;
+        if (response.status === 'failed') {
+          setPromptText(trimmed);
+          setSendError(response.error || 'Magi could not complete this response. Retry when ready.');
+          setIsThinking(false);
+          return;
+        }
+        if (answered) return;
       } else {
         const reply = conversationalPromptResponse(response?.response);
         if (reply) {
@@ -1309,7 +1319,12 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
       // Cancel the canonical turn as well, so harness output produced after the
       // captain stopped it is never recorded as that turn's reply.
       const cancelled = [active.messageId, ...queuedPrompts.map(prompt => prompt.messageId)];
-      await Promise.allSettled(cancelled.map(messageId => cancelConversationTurn(target, messageId)));
+      await Promise.allSettled(cancelled.map(messageId => cancelMagiChatTurn(target, messageId)));
+      if (nativeTarget) {
+        setSendError('Response stopped.');
+        void syncCanonicalConversation().catch(() => {});
+        return;
+      }
     }
     try {
       const result = await interruptAgent(target);
@@ -1357,7 +1372,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
     if (attachments.length && !trimmed) { setSendError('Add a message describing the attached file before sending.'); return; }
     // Current-session prompts remain usable while optional routing metadata
     // loads; only an explicit profile choice needs the inventory to be ready.
-    if (!routingReady && modelSelection) { setSendError('Execution settings are still unavailable; your message was not sent.'); return; }
+    if (!nativeTarget && !routingReady && modelSelection) { setSendError('Execution settings are still unavailable; your message was not sent.'); return; }
     if (!trimmed) { if (!isThinking) router.push('/voice' as any); return; }
     if (isThinking) {
       const sentAt = Date.now();
@@ -1372,8 +1387,8 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   };
   const retryMessage = (message: ConversationMessage) => {
     const pending = pendingAttachmentsByMessageRef.current.get(message.id);
-    if (!pending) { setSendError('Reattach the file to retry this message; the local file is no longer available.'); return; }
-    void submitPrompt(message.text, message.id, pending);
+    if (!pending && message.attachments?.length) { setSendError('Reattach the file to retry this message; the local file is no longer available.'); return; }
+    void submitPrompt(message.text, message.id, pending || [], undefined, true);
   };
   const activeMessage = messages.find(message => message.id === messageActionsId);
   const editMessage = () => {
@@ -1463,7 +1478,7 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
         router.push({ pathname: '/attention', params: { item: itemId, source: 'activity' } } as any);
       }}
     />
-    <ExecutionSheet dark={dark} profiles={profiles} loading={capabilityLoading} error={capabilityError} open={modelMenuOpen} selection={modelSelection} onClose={() => setModelMenuOpen(false)} onSelect={selection => { setModelSelection(selection); onProfileChange(selection?.profileId || null); setModelMenuOpen(false); setSendError(null); }} />
+    <ExecutionSheet dark={dark} profiles={nativeTarget ? [] : profiles} loading={nativeTarget ? false : capabilityLoading} error={nativeTarget ? null : capabilityError} open={modelMenuOpen} selection={nativeTarget ? null : modelSelection} onClose={() => setModelMenuOpen(false)} onSelect={selection => { if (!nativeTarget) { setModelSelection(selection); onProfileChange(selection?.profileId || null); } setModelMenuOpen(false); setSendError(null); }} />
   </KeyboardAvoidingView>;
 }
 

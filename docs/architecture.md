@@ -26,29 +26,33 @@ records bounded evidence. It does not authorize GitHub review/merge, deploy,
 destructive, irreversible, credential, security-sensitive, or external-public
 operations. Notification acknowledgement is never a decision.
 
-The compatibility native path is `physical iPhone -> HTTPS/WSS Gateway ->
-private Herdr -> Firstmate/harnesses`. The default captain path is `Gateway ->
-authenticated local IPC -> Magistrate Pi extension -> Pi native message/session
-APIs`; it does not traverse or inspect the legacy display transport. See
-[`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md),
-[`deskless-operator-alpha.md`](./deskless-operator-alpha.md),
-[`pi-ownership-live-acceptance.md`](./pi-ownership-live-acceptance.md), and
-[`DEAT-001.md`](./DEAT-001.md) for the current slices and physical acceptance
-status.
+The Phase 1 normal chat path is `iPhone/web -> HTTPS/WSS Gateway -> one
+non-streamed model provider -> additive native SQLite transcript`. Gateway
+owns authentication, principal isolation, idempotency, bounded context, and the
+exact returned bytes. It does **not** route normal chat through Herdr,
+Firstmate, terminal snapshots, Pi ownership, a harness, or tool execution. The
+older `conversation.v1` / terminal / semantic-producer stack remains readable
+behind an explicit mutually exclusive rollback flag. See
+[`magi-native-chat-phase1.md`](./magi-native-chat-phase1.md) and
+[`deskless-operator-alpha.md`](./deskless-operator-alpha.md). This phase does
+not claim physical-iPhone acceptance.
 
 ## Canonical captain state
 
-Captain chat is Gateway-owned `conversation.v1`, not terminal history. A prompt
-is durably saved before provider work and carries distinct turn, objective, run,
-and reserved assistant-message identities. By default a new captain turn
-atomically prepares opaque Pi ownership, binding those identities to exact
-native Pi user/final assistant entries and ingesting only the latter's complete
-visible text. Otherwise authenticated `magi.event.v1` streams may publish
-multiple stable progress/decision/outcome messages. Pi ownership disables
-fallback from prepare; any other semantic stream disables it from its first
-accepted event. Only genuinely unowned turns remain eligible for legacy
-terminal ingestion. See
-[`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md).
+Phase 1 native chat is Gateway-owned `magi.native-chat.v1`. Each turn reserves
+one user and one assistant id before provider work; the principal plus client
+message id has a database uniqueness constraint, so retries and reconnects
+return the same pair. Pending, failed, cancelled, and completed states are
+persisted truthfully. Completion writes the provider text without trimming,
+chunking, Markdown reconstruction, or terminal parsing. History/replay is
+principal-scoped and consumed by both Chat and Voice Mode.
+
+The former Gateway-owned `conversation.v1` ledger is still an additive,
+readable compatibility subsystem. Its objective/run/Pi ownership,
+`magi.event.v1`, and terminal-fallback behavior is unchanged when operators
+explicitly select rollback mode; normal native chat never enters it. See
+[`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md) for that retained
+contract.
 
 The additive `activity.v1` ledger consumes only structured Firstmate snapshot, append-only supervision, and explicit `fm-captain-event.v1` facts. It has principal-scoped rows, source-native ids, independent cursor/prefix hashes, restart reconciliation, HTTP replay, opt-in WebSocket catch-up, and bounded diagnostics. It never derives an audience or lifecycle from terminal prose. See [`canonical-lifecycle-activity-v1.md`](./canonical-lifecycle-activity-v1.md) and the program traceability baseline in [`opus/soak-p0-day1-baseline.md`](./opus/soak-p0-day1-baseline.md).
 

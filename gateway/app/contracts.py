@@ -334,6 +334,32 @@ class ActivityCatchUpContract(BaseModel):
     reconcile: bool = True
 
 
+class NativeMagiMessageContract(BaseModel):
+    """Authenticated native-chat submission; ownership comes only from auth."""
+
+    model_config = ConfigDict(extra='forbid', strict=True)
+    conversation_id: Optional[str] = Field(
+        default=None, min_length=8, max_length=128,
+        pattern=r'^mgc_[A-Za-z0-9_-]+$',
+    )
+    client_message_id: str = Field(
+        min_length=8, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9_-]+$',
+    )
+    content: str = Field(min_length=1, max_length=100_000)
+    source: Literal['text', 'voice'] = 'text'
+    attachments: List[UploadedAttachmentContract] = Field(default_factory=list, max_length=10)
+    retry_failed: bool = False
+
+    @field_validator('content')
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError('A native Magi message cannot be blank.')
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise ValueError('A native Magi message must contain valid Unicode scalar values.')
+        return value
+
+
 class UniversalInputContract(BaseModel):
     source: str = 'iphone'
     modality: str = 'text'

@@ -19,6 +19,7 @@ Magistrate acts as the integration layer between the human operator (via mobile 
 ```mermaid
 graph TD
     Client[Client Interfaces] --> Gateway[Magistrate API Gateway]
+    Gateway --> Model[Non-streamed Magi Model Provider]
     Gateway --> Multiplexer[Herdr Tmux Multiplexer]
     Gateway --> GitHub[GitHub API]
     Multiplexer --> Firstmate[Firstmate Central Agent]
@@ -31,9 +32,14 @@ graph TD
 | Component | Technology | Responsibility |
 |-----------|------------|----------------|
 | **Frontend** | React Native / Expo | Provides the cross-platform UI (iOS/Web) for observing agent state, reviewing PRs, and issuing commands. |
-| **Gateway** | FastAPI / Python | Serves as the central API, routing requests, handling authentication, and polling backend systems. |
+| **Gateway** | FastAPI / Python | Authenticates requests, owns native Magi chat persistence/provider calls, and exposes governed fleet data. |
 | **Multiplexer** | Herdr / Tmux | Manages the lifecycle and terminal sessions of the background agents, allowing Magistrate to read standard output and inject keystrokes. |
 | **Agents** | Claude Code / Codex | The actual autonomous entities executing commands, orchestrated by the primary `firstmate` agent. |
+
+Phase 1 normal Chat and Voice do not route through the multiplexer or agents;
+they use the direct provider edge and additive native SQLite transcript above.
+Herdr/Firstmate remain for fleet surfaces and explicit legacy rollback. See
+[`docs/magi-native-chat-phase1.md`](docs/magi-native-chat-phase1.md).
 
 ## Getting Started
 

@@ -11,7 +11,7 @@ the checkout, `MAGISTRATE_BOOTSTRAP_SECRET`, `MAGISTRATE_SECRET_KEY`, and
 `MAGISTRATE_CORS_ORIGINS` (HTTPS origins only). The SQLite file and its
 rollback/backup copies therefore survive frontend exports and Git updates.
 
-The base production settings (followed by the required Pi block below) are:
+The base Phase 1 production settings are:
 
 ```dotenv
 MAGISTRATE_ENV=production
@@ -19,17 +19,31 @@ MAGISTRATE_DB_PATH=/var/lib/magistrate/magistrate.sqlite3
 MAGISTRATE_BOOTSTRAP_SECRET=<operator-generated-secret>
 MAGISTRATE_SECRET_KEY=<generated-fernet-key>
 MAGISTRATE_CORS_ORIGINS=https://magistrate.example
+OPENAI_API_KEY=<server-side-provider-secret>
+MAGISTRATE_MAGI_MODEL=gpt-4o-mini
+MAGISTRATE_NATIVE_CHAT_ENABLED=true
+MAGISTRATE_LEGACY_CHAT_ENABLED=false
+MAGISTRATE_PI_OWNERSHIP_ENABLED=false
 ```
+
+`OPENAI_API_KEY` must exist only in the mode-`0600` Gateway environment; there
+is no `EXPO_PUBLIC_` provider key. The guarded exporter derives the two public
+transport booleans from the server flags, preventing a native frontend/legacy
+server split. Native defaults to on and legacy defaults to off, but production
+deployment still validates that exactly one is enabled. See
+[`magi-native-chat-phase1.md`](./magi-native-chat-phase1.md).
 
 The guard requires the environment file to be a service-owned, non-symlink
 regular file with mode `0600`; keep the database directory restrictive as well.
 Rotate the bootstrap and Fernet keys through the approved secret-management
 procedure; never commit them or put them in a frontend build.
 
-## Default-on Pi semantic captain channel
+## Retained Pi semantic captain channel (rollback only)
 
-Pi semantic ownership is the captain default. Unset and `1|true|yes|on` enable
-it; only `0|false|no|off` selects compatibility/recovery mode. An explicitly
+Native Phase 1 chat does not invoke Pi ownership. This section documents the
+retained legacy rollback subsystem. Within that subsystem, unset and
+`1|true|yes|on` enable Pi ownership; only `0|false|no|off` selects terminal
+compatibility/recovery mode. An explicitly
 empty or unknown literal fails startup. Production should be explicit and must
 replace `<uid>` with `id -u` for the actual Gateway/dedicated-Pi service user:
 
@@ -65,9 +79,9 @@ the restarted dedicated Pi `MainPID` answered the authenticated probe; and
 prepare. Configuration is not activation, and later unavailability or explicit
 false mode never releases an already owned turn.
 
-### Guarded activation
+### Guarded legacy activation
 
-The normal `scripts/deploy_magistrate.sh` path now treats an absent flag as
+When Pi rollback is deliberately enabled, `scripts/deploy_magistrate.sh` treats an absent Pi flag as
 enabled and refuses incomplete or duplicate/ambiguous production environment
 assignments. For enabled rollout it performs these additional guards without
 reading secret contents:
@@ -250,9 +264,19 @@ chmod 600 "$BACKUP"
 sqlite3 "$BACKUP" 'pragma integrity_check;'
 ```
 
+The guarded deployment performs this online backup automatically before every
+enabled native rollout (and before retained Pi activation), verifies integrity
+and every table's row count, records the exact deployment commit, and writes a
+SHA-256 sidecar before build or restart. Missing, symlinked, checkout-local, or
+wrong-mode databases refuse deployment. The test harness restores that artifact
+and reads a pre-existing legacy conversation row.
+
 The gateway's `init_db()` uses additive `CREATE TABLE IF NOT EXISTS` schema
-initialization, so restarting it with the same absolute path preserves profiles,
-provider credentials, execution settings, and bearer-session rows. Verify
+initialization. Phase 1 adds `magi_conversations`, `magi_messages`,
+`magi_replay_changes`, and `magi_chat_metrics`; it does not rename, rewrite, or
+delete `conversation_turns` / `conversation_messages`. Restarting with the same
+absolute path therefore preserves legacy conversations, profiles, provider
+credentials, execution settings, and bearer-session rows. Verify
 expiry/revocation and restart persistence with the gateway suite and trusted
 smoke. To restore, stop the user unit, preserve the failed database, copy the
 selected backup back to `MAGISTRATE_DB_PATH`, restore ownership/mode, start the

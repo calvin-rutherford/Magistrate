@@ -14,6 +14,9 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.auth import Principal, issue_session, revoke_session, require_any_scope, require_scope, verify_token
+from app.chat_features import (LEGACY_CHAT_DEFAULT_ENABLED, NATIVE_CHAT_DEFAULT_ENABLED,
+                               legacy_chat_enabled, native_chat_enabled,
+                               validate_chat_feature_configuration)
 from app.herdr_client import DEFAULT_HISTORY_LINES, HERDR_MAX_READ_LINES, HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
@@ -67,13 +70,16 @@ from app.pi_ownership import (
     get_recoverable_dispatches, has_terminal_fallback_candidates,
     mark_pi_adapter_acknowledged, mark_pi_dispatch_attempt,
 )
+from app.magi_chat_api import (magi_chat_service, router as magi_chat_router,
+                               validate_magi_chat_configuration)
+from app.magi_chat_store import MagiChatStore, record_compatibility_read
 
 init_db()
 
 app = FastAPI(
     title='Magistrate Gateway API',
-    description='Universal cockpit adapter for Firstmate and Herdr',
-    version='1.0.0'
+    description='Authenticated Gateway for provider-native Magi chat and governed execution',
+    version='1.1.0'
 )
 
 def _cors_origins() -> list[str]:
@@ -105,6 +111,7 @@ UPLOADS_DIR = GATEWAY_DIR / 'uploads' / 'avatars'
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
 app.include_router(ar_router)
+app.include_router(magi_chat_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -123,7 +130,7 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
     if request.url.path == '/api/v1/uploads' and length > MAX_UPLOAD_REQUEST_BYTES:
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
-    if request.url.path == '/api/v1/captain/prompt' and length > MAX_PROMPT_REQUEST_BYTES:
+    if request.url.path in {'/api/v1/captain/prompt', '/api/v1/magi/messages'} and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
     bounded_contract_path = request.method == 'POST' and (
         request.url.path == '/api/v1/activity/catch-up'
@@ -165,6 +172,10 @@ PI_OWNERSHIP_DEFAULT_ENABLED = True
 
 
 def _pi_ownership_enabled() -> bool:
+    # Pi ownership belongs exclusively to the explicit legacy compatibility
+    # path. Native Magi chat never probes or dispatches to Pi.
+    if not legacy_chat_enabled():
+        return False
     configured = os.getenv('MAGISTRATE_PI_OWNERSHIP_ENABLED')
     if configured is None:
         return PI_OWNERSHIP_DEFAULT_ENABLED
@@ -394,15 +405,24 @@ async def _reconcile_firstmate_activity() -> None:
 @app.on_event('startup')
 async def start_notification_reconciler():
     global _notification_reconciler_task, _activity_reconciler_task, _pi_ownership_reconciler_task
-    # Validate the default captain trust boundary before launching any
-    # background side effect. A securely absent adapter alone may arrive later.
-    pi_enabled = _validate_pi_ownership_startup()
+    # Resolve both strict flags at startup. Native is production-default-on;
+    # legacy must be explicitly enabled for rollback/readability.
+    native_enabled, legacy_enabled = validate_chat_feature_configuration()
+    if native_enabled:
+        validate_magi_chat_configuration()
+        # A process cannot resume an in-flight provider socket. Preserve the
+        # reserved pair and expose a truthful, explicitly retryable failure.
+        await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
+    # Native normal chat must not initialize its retained Pi/Firstmate captain
+    # transport. Those trust checks run only in explicit legacy rollback mode.
+    pi_enabled = legacy_enabled and _validate_pi_ownership_startup()
     if pi_enabled:
         await _verify_pi_adapter_startup_readiness()
-    # Optional by default for owner/Friend compatibility. Once an operator
-    # explicitly requires the pinned producer, startup must not serve a runtime
-    # whose reviewed call sites or home-local activation are absent.
-    await firstmate_activity.require_captain_producer_ready()
+    if legacy_enabled:
+        # Optional by default for owner/Friend compatibility. Once an operator
+        # explicitly requires the pinned producer, startup must fail closed if
+        # its reviewed call sites or activation are absent.
+        await firstmate_activity.require_captain_producer_ready()
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
     activity_disabled = os.getenv('MAGISTRATE_DISABLE_ACTIVITY_RECONCILER', '').lower() in {'1', 'true', 'yes'}
@@ -441,6 +461,18 @@ CANONICAL_CONVERSATION_TARGET = 'captain'
 _detached_prompt_tasks: set[asyncio.Task[Any]] = set()
 
 
+def _require_legacy_chat_api() -> None:
+    try:
+        _, enabled = validate_chat_feature_configuration()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail='Legacy chat configuration is invalid.') from exc
+    if not enabled:
+        raise HTTPException(
+            status_code=404,
+            detail='Legacy captain chat is disabled. Use the native Magi chat API.',
+        )
+
+
 async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_MAX_READ_LINES) -> Optional[str]:
     """Fold the current terminal snapshot into the canonical record.
 
@@ -450,12 +482,13 @@ async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_
     returned rather than swallowed so the caller reports it instead of
     presenting a stale transcript as a current one.
     """
-    # Avoid even a cosmetic Herdr read when every candidate already has a
-    # semantic owner. Mixed histories still retain fallback for genuinely
-    # unowned legacy turns.
-    if not has_terminal_fallback_candidates(user_id, target):
+    # Avoid even a cosmetic Herdr read when legacy compatibility is disabled or
+    # every candidate already has a semantic owner. Native turns never reach
+    # this function.
+    if not legacy_chat_enabled() or not has_terminal_fallback_candidates(user_id, target):
         return None
     try:
+        record_compatibility_read(user_id, 'terminal_chat_reads')
         snapshot = await herdr_client.read_typed_rows(target, lines=lines)
         status = str(snapshot.get('agent_status') or '').strip().lower()
         response_complete: Optional[bool]
@@ -546,6 +579,7 @@ async def agent_events(websocket: WebSocket):
             message = json.loads(raw)
             token = message.get('token') if isinstance(message, dict) and message.get('type') == 'auth' else None
             requested_target = message.get('target') if isinstance(message, dict) else None
+            requested_chat_mode = message.get('chat_mode') if isinstance(message, dict) else None
             if not isinstance(token, str):
                 await websocket.close(code=1008)
                 return
@@ -571,6 +605,17 @@ async def agent_events(websocket: WebSocket):
             await websocket.close(code=1008)
             return
         target = requested_target if principal is not None and isinstance(requested_target, str) and requested_target else 'captain'
+        if requested_chat_mode is None:
+            chat_mode = 'native' if native_chat_enabled() else 'legacy'
+        elif requested_chat_mode in {'native', 'legacy'}:
+            chat_mode = requested_chat_mode
+        else:
+            await websocket.close(code=1008)
+            return
+        if ((chat_mode == 'native' and not native_chat_enabled())
+                or (chat_mode == 'legacy' and target == CANONICAL_CONVERSATION_TARGET and not legacy_chat_enabled())):
+            await websocket.close(code=1008)
+            return
         activity_after_present = isinstance(message, dict) and 'activity_after' in message
         activity_after = message.get('activity_after') if isinstance(message, dict) else None
         activity_enabled = type(activity_after) is int and 0 <= activity_after <= 9_007_199_254_740_991
@@ -579,7 +624,7 @@ async def agent_events(websocket: WebSocket):
             return
         activity_cursor = activity_after if activity_enabled else 0
         seen: set[str] = set()
-        revisions: Dict[str, tuple[int, str, str, int]] = {}
+        revisions: Dict[str, tuple[Any, ...]] = {}
         await websocket.send_json({'type': 'connected', 'target': target})
         while True:
             try:
@@ -611,6 +656,21 @@ async def agent_events(websocket: WebSocket):
                             await websocket.close(code=1008)
                             return
                         target = requested
+                        if (target == CANONICAL_CONVERSATION_TARGET and chat_mode == 'legacy'
+                                and not legacy_chat_enabled()):
+                            await websocket.close(code=1008)
+                            return
+                        subscription_changed = True
+                    if 'chat_mode' in message:
+                        requested_mode = message['chat_mode']
+                        if requested_mode not in {'native', 'legacy'}:
+                            await websocket.close(code=1008)
+                            return
+                        if ((requested_mode == 'native' and not native_chat_enabled())
+                                or (requested_mode == 'legacy' and target == CANONICAL_CONVERSATION_TARGET and not legacy_chat_enabled())):
+                            await websocket.close(code=1008)
+                            return
+                        chat_mode = requested_mode
                         subscription_changed = True
                     if 'activity_after' in message:
                         if not (
@@ -628,8 +688,40 @@ async def agent_events(websocket: WebSocket):
                         await websocket.send_json({'type': 'subscribed', 'target': target})
             except asyncio.TimeoutError:
                 pass
+            if target == CANONICAL_CONVERSATION_TARGET and chat_mode == 'native':
+                # Native delivery reads only additive Magi SQLite rows. It has
+                # no terminal ingestion or execution-infrastructure fallback.
+                payload = await magi_chat_service.current_conversation(principal.user_id)
+                fresh = [
+                    item for item in payload['messages']
+                    if revisions.get(item['id']) != (item['revision'], item['status'])
+                ]
+                revisions = {
+                    item['id']: (item['revision'], item['status'])
+                    for item in payload['messages']
+                }
+                if fresh:
+                    await websocket.send_json({
+                        'type': 'magi_messages',
+                        'schema_version': payload['schema_version'],
+                        'target': target,
+                        'conversation_id': payload['conversation_id'],
+                        'messages': fresh,
+                    })
+                if activity_enabled:
+                    try:
+                        activity_page = list_activity(
+                            principal.user_id, after=activity_cursor, limit=100,
+                        )
+                    except ValueError:
+                        await websocket.close(code=1008)
+                        return
+                    if activity_page['records']:
+                        activity_cursor = activity_page['next_cursor']
+                        await websocket.send_json({'type': 'activity_records', **activity_page})
+                continue
             if target == CANONICAL_CONVERSATION_TARGET:
-                # Canonical delivery: ingest the snapshot, then send only the
+                # Legacy canonical delivery: ingest the snapshot, then send only the
                 # messages whose revision this connection has not seen. A
                 # re-read that changed nothing sends nothing, and a revised
                 # message arrives with the id the client already rendered.
@@ -792,7 +884,7 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         'status': 'degraded' if degraded else 'healthy',
         'degraded_sources': degraded,
         'service': 'magistrate-gateway',
-        'version': '1.0.0',
+        'version': '1.1.0',
         'herdr_version': snapshot.get('version') if herdr_connected else None,
         'herdr_socket_connected': herdr_connected,
         'firstmate_home': fm_snapshot.get('fm_home'),
@@ -817,6 +909,13 @@ async def get_soak_diagnostics(principal: Principal = Depends(require_scope('rea
         'pi_semantic_ownership': await _pi_ownership_diagnostics(
             principal.user_id, target,
         ),
+        'chat_features': {
+            'native_enabled': native_chat_enabled(),
+            'native_default_enabled': NATIVE_CHAT_DEFAULT_ENABLED,
+            'legacy_enabled': legacy_chat_enabled(),
+            'legacy_default_enabled': LEGACY_CHAT_DEFAULT_ENABLED,
+        },
+        'native_chat': await magi_chat_service.diagnostics(principal.user_id),
     }
 
 # ACCOUNT PROFILE ENDPOINTS
@@ -1344,6 +1443,7 @@ async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source
 
 @app.post('/api/v1/voice/moves')
 async def create_voice_move(request: VoiceMoveRequest, principal: Principal = Depends(require_scope('voice'))):
+    _require_legacy_chat_api()
     if _pi_ownership_enabled():
         # This legacy voice service dispatches through Herdr before it creates a
         # canonical captain turn. It cannot truthfully manufacture Pi ownership,
@@ -1579,6 +1679,9 @@ async def get_captain_output(
     lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
     principal: Principal = Depends(require_scope('read')),
 ):
+    _require_legacy_chat_api()
+    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
+    record_compatibility_read(principal.user_id, 'terminal_chat_reads')
     output = await herdr_client.read_agent_output('captain', lines=lines)
     return {'output': output}
 
@@ -1592,6 +1695,10 @@ async def get_agent_history(
 ):
     if before and after:
         raise HTTPException(status_code=422, detail='Use only one history cursor.')
+    if agent_id == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
+        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
+        record_compatibility_read(principal.user_id, 'terminal_chat_reads')
     try:
         history_kwargs = {'lines': lines}
         if before is not None: history_kwargs['before'] = before
@@ -1602,6 +1709,8 @@ async def get_agent_history(
 
 @app.post('/api/v1/captain/prompt')
 async def send_captain_prompt(contract: UniversalInputContract, principal: Principal = Depends(require_scope('command'))):
+    if contract.target == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
     use_pi_ownership = (
         _pi_ownership_enabled() and contract.target == CANONICAL_CONVERSATION_TARGET
     )
@@ -1699,6 +1808,7 @@ async def send_captain_prompt(contract: UniversalInputContract, principal: Princ
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if use_pi_ownership:
+        record_compatibility_read(principal.user_id, 'pi_ownership_chat_reads')
         # The adapter invokes Pi's native message API. Herdr is deliberately not
         # called on this path and cannot supply or repair semantic ownership.
         durable_state = turn['pi_dispatch']['state']
@@ -1781,6 +1891,9 @@ async def get_conversation_messages(
     limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
     principal: Principal = Depends(require_scope('read')),
 ):
+    if target == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
+        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
     # Canonical ingestion always asks for every row Herdr still retains. A
     # caller-controlled viewport limit cannot be allowed to erase context.
     ingest_error = await _ingest_target_snapshot(principal.user_id, target)
@@ -1796,7 +1909,10 @@ async def replay_conversation(
     limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
     principal: Principal = Depends(require_scope('read')),
 ):
-    """Catch up canonical rows after a durable change cursor without terminal reads."""
+    """Catch up legacy canonical rows after a durable change cursor."""
+    if target == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
+        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
     try:
         return replay_messages(principal.user_id, target, after=after, limit=limit)
     except ValueError as exc:
@@ -1809,6 +1925,9 @@ async def inspect_conversation_turn(
     turn_id: str,
     principal: Principal = Depends(require_scope('read')),
 ):
+    if target == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
+        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
     try:
         return get_turn_lifecycle(principal.user_id, target, turn_id)
     except LookupError as exc:
@@ -1824,6 +1943,7 @@ async def reserve_conversation_assistant_message(
 ):
     if target != CANONICAL_CONVERSATION_TARGET:
         raise HTTPException(status_code=422, detail='Semantic assistant messages are supported only for captain chat.')
+    _require_legacy_chat_api()
     try:
         return reserve_assistant_message(
             principal.user_id, target, turn_id, contract.idempotency_key,
@@ -1846,6 +1966,7 @@ async def post_magi_response_event(
     """Accept one authenticated, strictly validated semantic response event."""
     if target != CANONICAL_CONVERSATION_TARGET:
         raise HTTPException(status_code=422, detail='Structured response events are supported only for captain chat.')
+    _require_legacy_chat_api()
     try:
         return apply_magi_event(principal.user_id, target, event)
     except LookupError as exc:
@@ -1858,7 +1979,9 @@ async def post_magi_response_event(
 
 @app.post('/api/v1/conversations/{target}/reset')
 async def post_conversation_reset(target: str, principal: Principal = Depends(require_scope('command'))):
-    """Discard this conversation's canonical record for a genuinely fresh thread."""
+    """Discard this legacy conversation's canonical record for a fresh thread."""
+    if target == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
     try:
         return reset_conversation(principal.user_id, target)
     except MagiEventConflict as exc:
@@ -1869,15 +1992,21 @@ async def post_conversation_reset(target: str, principal: Principal = Depends(re
 async def post_conversation_turn_cancel(
     target: str, client_message_id: str, principal: Principal = Depends(require_scope('command')),
 ):
+    if target == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
     set_turn_status(principal.user_id, target, client_message_id, 'cancelled')
     return {'status': 'cancelled', 'target': target, 'client_message_id': client_message_id}
 
 @app.post('/api/v1/agents/{agent_id}/send-key')
 async def send_agent_key(agent_id: str, key: str = Query('Enter'), principal: Principal = Depends(require_scope('command'))):
+    if agent_id == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
     return await herdr_client.send_agent_key(agent_id, key=key)
 
 @app.post('/api/v1/agents/{agent_id}/interrupt')
 async def interrupt_agent(agent_id: str, principal: Principal = Depends(require_scope('command'))):
+    if agent_id == CANONICAL_CONVERSATION_TARGET:
+        _require_legacy_chat_api()
     return await herdr_client.interrupt_agent(agent_id)
 
 @app.post('/api/v1/agents/{agent_id}/rename')
