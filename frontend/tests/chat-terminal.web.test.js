@@ -1357,12 +1357,17 @@ test('cold start retains an account-scoped decision when observability is interr
 
 test('pending response shows activity only after canonical polling observes the recorded turn', async () => {
   const page = await openChat({ width: 900, height: 700 }, false, '', URL, 0, false, false, 'light', [], false, {
-    turnPhases: [{ reply: 'late response must stay hidden' }], promptDelay: 5000,
+    // Keep the socket quiet: this case proves that the periodic canonical read,
+    // rather than the local send promise, is the lifecycle source of truth.
+    manual: true, turnPhases: [{ status: 'awaiting_reply' }], promptDelay: 5000,
   });
+  const readsBeforeSubmit = await page.evaluate(() => Number(window.__canonicalReads || 0));
   await submit(page, 'first request');
   const pendingState = await page.evaluate(() => ({ history: document.querySelector('[data-testid="chat-history"]')?.innerText, stop: Boolean(document.querySelector('[data-testid="stop-captain-response"]')), thinking: Boolean(document.querySelector('[data-testid="agent-thinking-message"]')) }));
   assert.equal(pendingState.stop, true, `expected pending control; state=${JSON.stringify(pendingState)}`);
-  assert.equal(pendingState.thinking, true, `the Gateway-recorded turn should drive lifecycle UI; state=${JSON.stringify(pendingState)}`);
+  assert.equal(pendingState.thinking, false, `activity must wait for a canonical read; state=${JSON.stringify(pendingState)}`);
+  await page.waitForFunction(initialReads => Number(window.__canonicalReads || 0) > initialReads
+    && Boolean(document.querySelector('[data-testid="agent-thinking-message"]')), {}, readsBeforeSubmit);
   assert.equal(await page.$('[data-testid="composer-status"] [data-testid="thinking-dots"]'), null, 'thinking must not sit under the composer');
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => !document.querySelector('[data-testid="agent-thinking-message"]'));
