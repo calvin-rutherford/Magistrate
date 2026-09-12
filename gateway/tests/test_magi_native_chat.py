@@ -1,7 +1,5 @@
 import asyncio
-import shutil
 import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -346,9 +344,7 @@ async def test_deterministic_native_reliability_gate_is_perfect(monkeypatch, tmp
 
 
 def test_old_gateway_database_migrates_additively_without_deleting_rows(monkeypatch, tmp_path):
-    source = Path(__file__).parents[1] / 'magistrate.db'
     migrated = tmp_path / 'old-gateway.sqlite3'
-    shutil.copy2(source, migrated)
     monkeypatch.setattr(db, 'DB_PATH', str(migrated))
     # Bring all pre-native additive migrations to their baseline state, then
     # remove only the four new native tables to model an immediately prior DB.

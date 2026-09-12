@@ -165,9 +165,9 @@ SQLite's online backup API into a service-owned mode-`0700` directory, validates
 `PRAGMA integrity_check`, compares every source/backup table row count, sets the
 artifact mode to `0600`, and writes exact-commit and SHA-256 sidecars before any
 build or restart. `scripts/test_deploy_magistrate.sh` restores/opens that
-artifact and reads a pre-existing legacy conversation row. The gateway migration
-test starts from an old schema snapshot, runs current `init_db()`, verifies every
-legacy value byte-for-byte, and exercises a new native turn afterward.
+artifact and reads a pre-existing legacy conversation row. The hermetic gateway migration test constructs an immediate-pre-native database,
+runs current `init_db()`, verifies every legacy value byte-for-byte, and
+exercises a new native turn afterward.
 
 Emergency restore remains whole-database restore: stop Gateway, preserve the
 failed database, verify the selected backup/hash/commit, copy it to the same
