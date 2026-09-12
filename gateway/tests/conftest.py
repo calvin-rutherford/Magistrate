@@ -25,6 +25,10 @@ for name in (
 ):
     os.environ.pop(name, None)
 os.environ['MAGISTRATE_PI_OWNERSHIP_ENABLED'] = 'false'
+# The pre-migration suites exercise the retained captain compatibility API.
+# Native-chat tests opt back into the production defaults explicitly.
+os.environ['MAGISTRATE_NATIVE_CHAT_ENABLED'] = 'false'
+os.environ['MAGISTRATE_LEGACY_CHAT_ENABLED'] = 'true'
 
 from app.auth import issue_session
 

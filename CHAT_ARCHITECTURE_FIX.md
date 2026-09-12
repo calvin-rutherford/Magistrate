@@ -1,5 +1,12 @@
 # Chat architecture fix: the terminal is not the chat database
 
+> **Phase 1 native-chat update:** This document remains authoritative for the
+> retained `conversation.v1` compatibility subsystem and worker panes. Normal
+> captain Chat and Voice now use the separate additive `magi.native-chat.v1`
+> store and direct non-streamed provider API; production defaults disable the
+> captain terminal/Pi path. Do not reintroduce this legacy ledger into normal
+> native chat. See [`docs/magi-native-chat-phase1.md`](docs/magi-native-chat-phase1.md).
+
 ## Root cause
 
 Captain chat derived its visible transcript from Herdr terminal output and then

@@ -4,10 +4,10 @@ import { AccessibilityInfo, Animated, Platform, ScrollView, StyleSheet, Text, To
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Defs, G, LinearGradient as SvgLinearGradient, Path, Polygon, Stop } from 'react-native-svg';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
-import { submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
+import { fetchMagiChatConversation, MAGI_NATIVE_CHAT_ENABLED, sendMagiChatPrompt, submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
 import { reconcileCanonicalMessages } from '../src/services/CanonicalConversation';
-import { appendConversationMessage, getConversationMessages, resetConversationMessages, useConversationMessages } from '../src/services/ConversationSession';
+import { appendConversationMessage, getConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../src/services/ConversationSession';
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
 import { loadChatPreferences } from '../src/services/ChatPreferences';
@@ -37,7 +37,7 @@ const stateCopy: Record<VoiceState, { title: string; detail: string }> = {
   STARTING: { title: 'Starting', detail: 'Connecting to your microphone' },
   LISTENING: { title: 'Listening', detail: 'Speak naturally — your turn ends when you pause' },
   TRANSCRIBING: { title: 'Transcribing', detail: 'Finishing your words' },
-  THINKING: { title: 'Thinking', detail: 'Firstmate is responding' },
+  THINKING: { title: 'Thinking', detail: 'Magi is responding' },
   CONFIRMING: { title: 'Confirm action', detail: 'Voice control is paused for your review' },
   SPEAKING: { title: 'Speaking', detail: 'Tap the mark to interrupt' },
   ERROR: { title: 'Voice paused', detail: 'Tap the mark to try again' },
@@ -135,6 +135,16 @@ export default function VoiceScreen() {
   const [, setBackgroundReady] = useState(false);
   const messages = useConversationMessages('captain');
   useEffect(() => { void loadChatPreferences().then(() => setBackgroundReady(true)); }, []);
+  useEffect(() => {
+    if (!MAGI_NATIVE_CHAT_ENABLED) return;
+    let mounted = true;
+    void fetchMagiChatConversation('captain').then(result => {
+      if (mounted) resetConversationMessages(
+        'captain', reconcileCanonicalMessages(getConversationMessages('captain'), result.messages, { authoritative: true }),
+      );
+    }).catch(() => { /* A voice submission can retry the authenticated path. */ });
+    return () => { mounted = false; };
+  }, []);
   const capture = useVoiceInputAdapter(setIntermediate, voiceMode);
   const captureRef = useRef(capture);
   const stateRef = useRef<VoiceState>(voiceState);
@@ -246,10 +256,22 @@ export default function VoiceScreen() {
     ttsService.speakChunk(responseText, () => { if (!endingRef.current) void beginListening(); });
   }, [beginListening]);
 
+  const deliverNativeResponse = useCallback((result: Awaited<ReturnType<typeof sendMagiChatPrompt>>) => {
+    const canonical = result.conversation?.messages || [];
+    if (canonical.length) resetConversationMessages('captain', reconcileCanonicalMessages(getConversationMessages('captain'), canonical));
+    if (result.status !== 'completed') throw new Error(result.error || 'Magi did not complete the response.');
+    const assistant = [...canonical].reverse().find(message => message.role === 'assistant' && message.text.trim());
+    if (!assistant) throw new Error('Magi returned no complete response.');
+    setVoiceState('SPEAKING');
+    turnInFlightRef.current = false;
+    ttsService.speakChunk(assistant.text, () => { if (!endingRef.current) void beginListening(); });
+  }, [beginListening]);
+
   const finishTurn = useCallback(async () => {
     if (endingRef.current || stateRef.current !== 'LISTENING' || turnInFlightRef.current) return;
     turnInFlightRef.current = true;
     setVoiceState('TRANSCRIBING');
+    let submittedMessageId = '';
     try {
       const recording = await captureRef.current.stop();
       if (recording.durationMillis < MIN_TURN_MS) {
@@ -270,9 +292,18 @@ export default function VoiceScreen() {
       // This id is the submission identity the gateway records the turn under,
       // so the optimistic row and the canonical user message are one row.
       const clientMessageId = `voice-u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      submittedMessageId = clientMessageId;
       clientMessageIdRef.current = clientMessageId;
       appendConversationMessage('captain', { id: clientMessageId, role: 'user', text: utterance, sentAt: Date.now(), source: 'voice', audience: 'captain', delivery: 'sending' });
       setVoiceState('THINKING');
+      if (MAGI_NATIVE_CHAT_ENABLED) {
+        const result = await sendMagiChatPrompt(
+          utterance, 'voice', 'captain', undefined, undefined, undefined,
+          undefined, clientMessageId,
+        );
+        deliverNativeResponse(result);
+        return;
+      }
       sequenceRef.current += 1;
       const key = `voice-${sessionId}-${sequenceRef.current}`;
       const move = await submitVoiceMove(utterance, 'captain', key, false, undefined, clientMessageId);
@@ -284,8 +315,11 @@ export default function VoiceScreen() {
       if (move.status !== 'ready') throw new Error(move.error || 'The voice request could not be prepared.');
       const result = await submitVoiceMove(utterance, 'captain', key, true, undefined, clientMessageId);
       deliverResponse(result);
-    } catch (cause) { fail(cause); }
-  }, [beginListening, deliverResponse, fail, sessionId, voiceMode]);
+    } catch (cause) {
+      if (submittedMessageId) updateConversationMessageState('captain', submittedMessageId, { delivery: 'failed', progress: 'failed' });
+      fail(cause);
+    }
+  }, [beginListening, deliverNativeResponse, deliverResponse, fail, sessionId, voiceMode]);
 
   useEffect(() => {
     if (voiceState !== 'LISTENING') return;
@@ -360,7 +394,7 @@ export default function VoiceScreen() {
   return <EnvironmentBackground hideBottomControls voiceMode>
     <SafeAreaView style={styles.safeArea}>
       <View style={[styles.header, compact && styles.headerCompact]}>
-        <View><Text style={[styles.eyebrow, { color: brand.cyan }]}>FIRSTMATE / VOICE</Text><Text style={[styles.continuity, { color: mutedColor }]}>One continuous thread</Text></View>
+        <View><Text style={[styles.eyebrow, { color: brand.cyan }]}>MAGI / VOICE</Text><Text style={[styles.continuity, { color: mutedColor }]}>One continuous thread</Text></View>
         <TouchableOpacity testID="end-voice-conversation" accessibilityRole="button" accessibilityLabel="End voice conversation and return to chat" onPress={endConversation} style={[styles.endButton, { borderColor, backgroundColor: surfaceColor }]}>
           <View style={styles.endIcon} /><Text style={[styles.endText, { color: textColor }]}>End conversation</Text>
         </TouchableOpacity>
@@ -400,8 +434,8 @@ export default function VoiceScreen() {
 
         {visibleMessages.length ? <View testID="voice-conversation" style={[styles.conversation, { borderTopColor: borderColor }]}>
           {visibleMessages.map(message => <View key={message.id} style={styles.turn}>
-            <Text style={[styles.turnRole, { color: message.role === 'user' ? brand.cyan : brand.violet }]}>{message.role === 'user' ? 'YOU' : 'FIRSTMATE'}</Text>
-            <Text style={[styles.turnText, { color: textColor }]} numberOfLines={3}>{message.text}</Text>
+            <Text style={[styles.turnRole, { color: message.role === 'user' ? brand.cyan : brand.violet }]}>{message.role === 'user' ? 'YOU' : 'MAGI'}</Text>
+            <Text style={[styles.turnText, { color: textColor }]}>{message.text}</Text>
           </View>)}
         </View> : null}
       </ScrollView>

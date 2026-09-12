@@ -11,12 +11,31 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 `v1`. Do not commit either value. `MAGISTRATE_ENV=development` or
 `MAGISTRATE_ENV=test` permits an in-memory ephemeral key for local-only use.
 
-## Pi semantic ownership channel
+## Native Magi chat (Phase 1)
 
-Pi ownership is the default captain path: an unset
+Normal captain chat is now `POST /api/v1/magi/messages`: authenticated FastAPI
+calls one non-streamed OpenAI-compatible provider adapter and atomically retains
+the user/assistant pair in additive `magi_conversations` / `magi_messages`
+tables. `client_message_id` is unique per authenticated principal, including
+under concurrent retries. Reads, replay, retry, cancel, diagnostics, and the
+native WebSocket feed are owner-scoped and fail closed; clients cannot submit an
+owner identity. Provider keys remain server-only. See
+[`../docs/magi-native-chat-phase1.md`](../docs/magi-native-chat-phase1.md) for
+the API, limits, reliability evidence, backup, and rollback contract.
+
+`MAGISTRATE_NATIVE_CHAT_ENABLED` defaults true and
+`MAGISTRATE_LEGACY_CHAT_ENABLED` defaults false. Deployment requires exactly one
+to be enabled and requires `OPENAI_API_KEY` before native activation. A native
+request never calls Herdr, Firstmate, terminal parsers, Pi ownership, or tool
+execution.
+
+## Retained Pi semantic ownership compatibility channel
+
+When legacy chat is explicitly re-enabled, Pi ownership retains its prior
+default within that compatibility path: an unset
 `MAGISTRATE_PI_OWNERSHIP_ENABLED` or an explicit true literal enables it;
-explicit false literals select compatibility/recovery mode, and every other
-literal fails Gateway startup. Enabled captain prompt creation atomically
+explicit false literals select terminal compatibility/recovery mode, and every
+other literal fails Gateway startup. Enabled legacy captain prompt creation atomically
 prepares an encrypted, one-use dispatch for the local Magistrate Pi extension.
 The prompt route then uses authenticated mode-`0600` Unix IPC instead of the
 legacy provider/display path. A prepared turn is never terminal-fallback
@@ -36,7 +55,7 @@ never be returned to HTTP clients or logs. Installation, protocol, threat
 model, recovery matrix, and rollback are documented in
 [`../docs/pi-semantic-ownership-v1.md`](../docs/pi-semantic-ownership-v1.md).
 
-## Magi structured response API
+## Retained structured-response compatibility API
 
 `POST /api/v1/conversations/captain/events` accepts the strict,
 authenticated `magi.event.v1` lifecycle and writes a validated

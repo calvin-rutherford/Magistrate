@@ -76,7 +76,7 @@ export interface ConversationMessage {
   sequenceIndex?: number;
   /** Validated semantic document; absent means render the canonical text fallback. */
   structuredContent?: MagiResponseV1;
-  contentSource?: 'structured' | 'pi-semantic' | 'terminal-fallback';
+  contentSource?: 'magi-native' | 'structured' | 'pi-semantic' | 'terminal-fallback';
   /** Monotonic producer revision, separate from the canonical row revision. */
   structuredRevision?: number;
   /** Process-local marker: restored cache rows yield to the first Gateway row. */
@@ -217,6 +217,7 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
   const structuredContent = assistantConversation && value.contentSource === 'structured' && validStructuredRevision
     ? normalizeMagiResponse(value.structuredContent) : null;
   if (assistantConversation && value.contentSource !== undefined
+    && value.contentSource !== 'magi-native'
     && value.contentSource !== 'structured'
     && value.contentSource !== 'pi-semantic'
     && value.contentSource !== 'terminal-fallback') return null;
@@ -224,9 +225,11 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     && (value.structuredContent != null || value.structuredRevision != null)) return null;
   const contentSource = structuredContent
     ? 'structured' as const
-    : assistantConversation && value.contentSource === 'pi-semantic'
-      ? 'pi-semantic' as const
-      : assistantConversation ? 'terminal-fallback' as const : undefined;
+    : assistantConversation && value.contentSource === 'magi-native'
+      ? 'magi-native' as const
+      : assistantConversation && value.contentSource === 'pi-semantic'
+        ? 'pi-semantic' as const
+        : assistantConversation ? 'terminal-fallback' as const : undefined;
   // Invalid/unknown structured JSON still retains a bounded plain-text
   // fallback. Other cache rows keep the smaller historical bound.
   const maxText = assistantConversation
@@ -235,8 +238,10 @@ const normalizeCachedCanonicalMessage = (raw: unknown, cacheKey: string): Conver
     || !boundedIdentity(value.id, 160)
     || (value.role !== 'user' && value.role !== 'assistant')
     || (value.role === 'assistant' && value.id !== value.canonicalId)
-    || typeof value.text !== 'string' || !value.text.trim() || Array.from(value.text).length > maxText
-    || (contentSource === 'pi-semantic' && hasUnsafeVisibleControl(value.text))
+    || typeof value.text !== 'string'
+    || (!value.text.trim() && !(contentSource === 'magi-native' && (value.progress === 'working' || value.progress === 'failed' || value.progress === 'cancelled')))
+    || Array.from(value.text).length > maxText
+    || ((contentSource === 'pi-semantic' || contentSource === 'magi-native') && hasUnsafeVisibleControl(value.text))
     || (value.kind !== 'conversation' && value.kind !== 'tool')
     || (value.kind === 'tool' && value.role !== 'assistant')
     || (value.source !== 'text' && value.source !== 'voice')

@@ -36,6 +36,8 @@ MAGISTRATE_BOOTSTRAP_SECRET=test-bootstrap
 MAGISTRATE_SECRET_KEY=test-secret
 MAGISTRATE_CORS_ORIGINS=https://demo.example.invalid
 MAGISTRATE_PI_OWNERSHIP_ENABLED=false
+MAGISTRATE_NATIVE_CHAT_ENABLED=false
+MAGISTRATE_LEGACY_CHAT_ENABLED=true
 EOF
 printf '{}\n' > "$SEED/frontend/package-lock.json"
 printf '{}\n' > "$SEED/frontend/package.json"
@@ -57,6 +59,7 @@ exit 0
 EOF
 cat > "$STUBS/npx" <<'EOF'
 #!/usr/bin/env bash
+printf '%s|%s\n' "${EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED:-unset}" "${EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED:-unset}" >> "${MAGISTRATE_TEST_EXPO_ENV_LOG:?}"
 mkdir -p dist
 printf '<!DOCTYPE html>Magistrate\n' > dist/index.html
 printf '<!DOCTYPE html>Magistrate chat\n' > dist/chat.html
@@ -94,7 +97,9 @@ printf '0\n' > "$ROOT/curl.count"
 : > "$ROOT/npm.log"
 : > "$ROOT/systemctl.log"
 : > "$ROOT/pi.log"
-# The enabled rollout test backs up a real minimal SQLite ownership ledger.
+: > "$ROOT/expo-env.log"
+# Rollout tests back up a real minimal SQLite ledger with one retained legacy
+# row, proving additive native migration has a recoverable source artifact.
 python3 - "$ROOT/state/magistrate.sqlite3" <<'PY'
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
@@ -102,6 +107,8 @@ with sqlite3.connect(sys.argv[1]) as connection:
         'CREATE TABLE pi_semantic_dispatches ('
         'state TEXT NOT NULL, adapter_acknowledged_at INTEGER)'
     )
+    connection.execute('CREATE TABLE conversation_turns (id TEXT PRIMARY KEY, prompt_text TEXT NOT NULL)')
+    connection.execute('INSERT INTO conversation_turns VALUES (?, ?)', ('legacy-proof', 'preserved'))
 PY
 chmod 600 "$ROOT/state/magistrate.sqlite3"
 
@@ -114,6 +121,7 @@ run_update() {
     MAGISTRATE_TEST_NPM_LOG="$ROOT/npm.log" \
     MAGISTRATE_TEST_SYSTEMCTL_LOG="$ROOT/systemctl.log" \
     MAGISTRATE_TEST_PI_LOG="$ROOT/pi.log" \
+    MAGISTRATE_TEST_EXPO_ENV_LOG="$ROOT/expo-env.log" \
     MAGISTRATE_TEST_PI_SERVER_PID="${TEST_PI_MAIN_PID:-${PI_SERVER_PID:-1}}" \
     MAGISTRATE_BACKUP_DIR="${TEST_BACKUP_DIR:-}" \
     bash scripts/deploy_magistrate.sh
@@ -125,6 +133,48 @@ DELAYED_OUTPUT="$(run_update 2>&1)"
 test "$(cat "$ROOT/curl.count")" -ge 2
 grep -Fq 'gateway readiness verified' <<<"$DELAYED_OUTPUT"
 test "$(git -C "$DEPLOY" rev-parse HEAD)" = "$(git -C "$REMOTE" rev-parse refs/heads/main)"
+
+# Native is the deployment default, but this fixture begins in explicit legacy
+# rollback mode. Switching to native must require a server-side provider secret
+# and create a verified pre-migration backup before any restart.
+sed -i 's/MAGISTRATE_NATIVE_CHAT_ENABLED=false/MAGISTRATE_NATIVE_CHAT_ENABLED=true/' "$DEPLOY/gateway/.env"
+sed -i 's/MAGISTRATE_LEGACY_CHAT_ENABLED=true/MAGISTRATE_LEGACY_CHAT_ENABLED=false/' "$DEPLOY/gateway/.env"
+git -C "$DEPLOY" config user.email test@example.invalid
+git -C "$DEPLOY" config user.name deployment-test
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m native-without-provider >/dev/null
+if NATIVE_MISSING_PROVIDER="$(TEST_BACKUP_DIR="$ROOT/state/native-missing" run_update 2>&1)"; then
+  echo 'native rollout without provider credentials was not rejected' >&2
+  exit 1
+fi
+grep -Fq 'enabled native chat requires OPENAI_API_KEY' <<<"$NATIVE_MISSING_PROVIDER"
+printf 'OPENAI_API_KEY=test-provider-secret\n' >> "$DEPLOY/gateway/.env"
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m configure-native-provider >/dev/null
+NATIVE_OUTPUT="$(TEST_BACKUP_DIR="$ROOT/state/native-backups" run_update 2>&1)"
+grep -Fq 'Native Magi backup verified for deployed commit' <<<"$NATIVE_OUTPUT"
+if grep -Fq 'test-provider-secret' <<<"$NATIVE_OUTPUT"; then
+  echo 'native deployment output exposed the provider credential' >&2
+  exit 1
+fi
+NATIVE_BACKUP="$(find "$ROOT/state/native-backups" -type f -name '*.sqlite3')"
+test -n "$NATIVE_BACKUP"
+test "$(sha256sum "$NATIVE_BACKUP" | awk '{print $1}')" = "$(cat "$NATIVE_BACKUP.sha256")"
+test "$(cat "$NATIVE_BACKUP.commit")" = "$(git -C "$DEPLOY" rev-parse HEAD)"
+python3 - "$NATIVE_BACKUP" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    assert connection.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+    assert connection.execute(
+        'SELECT prompt_text FROM conversation_turns WHERE id=?', ('legacy-proof',)
+    ).fetchone() == ('preserved',)
+PY
+grep -Fxq 'true|false' "$ROOT/expo-env.log"
+sed -i 's/MAGISTRATE_NATIVE_CHAT_ENABLED=true/MAGISTRATE_NATIVE_CHAT_ENABLED=false/' "$DEPLOY/gateway/.env"
+sed -i 's/MAGISTRATE_LEGACY_CHAT_ENABLED=false/MAGISTRATE_LEGACY_CHAT_ENABLED=true/' "$DEPLOY/gateway/.env"
+sed -i '/^OPENAI_API_KEY=/d' "$DEPLOY/gateway/.env"
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m restore-legacy-test-mode >/dev/null
 
 # A connection refusal must be retried, then fail with bounded diagnostics if
 # the service never recovers. The synthetic secret must not enter the output.

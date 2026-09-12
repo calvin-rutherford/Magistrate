@@ -7,7 +7,7 @@ import {
   removeLegacyGatewaySessionPayload,
   setGatewaySessionPayload,
 } from '../services/GatewaySessionStorage';
-import { CanonicalMessage, normalizeCanonicalMessages } from '../services/CanonicalConversation';
+import { CanonicalMessage, normalizeCanonicalMessages, normalizeNativeMagiMessages } from '../services/CanonicalConversation';
 import { setConversationPrincipal } from '../services/ConversationSession';
 import { parseAgentHistory } from '../services/ChatHistory';
 import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
@@ -16,6 +16,24 @@ import { OperatingPermissionMode } from '../services/OperatingPermissionModes';
 // Production builds must provide an HTTPS gateway (usually same-origin on web).
 // HTTP localhost is intentionally limited to local development.
 const configuredGatewayUrl = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim();
+
+const publicChatFlag = (name: string, value: string | undefined, fallback: boolean): boolean => {
+  if (value === undefined || value.trim() === '') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(`${name} must be a supported boolean literal.`);
+};
+/** Production defaults: provider-native Magi on, captain compatibility off. */
+export const MAGI_NATIVE_CHAT_ENABLED = publicChatFlag(
+  'EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED', process.env.EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED, true,
+);
+export const MAGI_LEGACY_CHAT_ENABLED = publicChatFlag(
+  'EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED', process.env.EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED, false,
+);
+if (MAGI_NATIVE_CHAT_ENABLED === MAGI_LEGACY_CHAT_ENABLED) {
+  throw new Error('Exactly one Magi chat transport must be enabled in this build.');
+}
 
 // A native release must be pointed at the public TLS gateway at build time.
 // The localhost default is deliberately limited to local development and web;
@@ -375,6 +393,56 @@ export interface CanonicalConversationResult {
   lifecycle_state?: 'active' | 'awaiting-user' | 'completed' | 'failed' | 'cancelled';
   lifecycle_revision?: number;
   messages: CanonicalMessage[];
+}
+
+export type NativeMagiMessageStatus = 'pending' | 'completed' | 'failed' | 'cancelled';
+export interface NativeMagiMessage {
+  id: string;
+  conversation_id: string;
+  turn_id: string;
+  client_message_id?: string | null;
+  reply_to_message_id?: string | null;
+  role: 'user' | 'assistant';
+  content: string;
+  status: NativeMagiMessageStatus;
+  source: 'text' | 'voice' | 'magi-native';
+  sequence_index: number;
+  revision: number;
+  attachments?: unknown[];
+  created_at: number;
+  updated_at: number;
+}
+export interface NativeMagiConversationResult {
+  schema_version: 'magi.native-chat.v1';
+  status?: NativeMagiMessageStatus;
+  conversation: { id: string; created_at: number; updated_at: number };
+  conversation_id?: string;
+  user_message?: NativeMagiMessage;
+  assistant_message?: NativeMagiMessage;
+  messages: CanonicalMessage[];
+  duplicate?: boolean;
+  retry?: boolean;
+  attempt?: number;
+  error?: string;
+  retryable?: boolean;
+  has_more?: boolean;
+  next_before?: number | null;
+  latest_change?: number;
+}
+
+export interface MagiChatPromptResult {
+  status: string;
+  error?: string;
+  retryable?: boolean;
+  message_id?: string;
+  native?: boolean;
+  response?: string;
+  conversation?: Partial<CanonicalConversationResult> & { turn_id?: string; messages: CanonicalMessage[] };
+  sources?: AgentHistorySource[];
+  thinkingSummary?: { provider: string; text: string };
+  runId?: string;
+  regenerateSafe?: boolean;
+  progress?: AgentHistoryMessage['progress'];
 }
 
 export interface AgentHistoryResult {
@@ -1220,8 +1288,66 @@ export async function fetchAgentHistory(agentId: string, lines: number = CHAT_HI
   return data;
 }
 
+function normalizeNativeMagiResult(raw: unknown): NativeMagiConversationResult {
+  if (!raw || typeof raw !== 'object') throw new Error('Gateway returned an invalid native Magi record.');
+  const value = raw as Record<string, unknown>;
+  const conversation = value.conversation as Record<string, unknown> | undefined;
+  if (value.schema_version !== 'magi.native-chat.v1' || !conversation
+    || typeof conversation.id !== 'string' || !/^mgc_[A-Za-z0-9_-]+$/.test(conversation.id)
+    || typeof conversation.created_at !== 'number' || !Number.isSafeInteger(conversation.created_at)
+    || typeof conversation.updated_at !== 'number' || !Number.isSafeInteger(conversation.updated_at)
+    || !Array.isArray(value.messages)) throw new Error('Gateway returned an invalid native Magi record.');
+  const wireMessages = value.messages as Record<string, unknown>[];
+  if (wireMessages.some(message => !message || typeof message !== 'object'
+    || message.conversation_id !== conversation.id)) throw new Error('Gateway returned a cross-attributed native Magi message.');
+  const messages = normalizeNativeMagiMessages(wireMessages);
+  if (messages.length !== wireMessages.length) throw new Error('Gateway returned an invalid native Magi message.');
+  const status = ['pending', 'completed', 'failed', 'cancelled'].includes(String(value.status))
+    ? value.status as NativeMagiMessageStatus : undefined;
+  return { ...(value as unknown as NativeMagiConversationResult), status, conversation: conversation as NativeMagiConversationResult['conversation'], messages };
+}
+
+/** Read the provider-native default thread or one explicitly owned thread. */
+export async function fetchNativeMagiConversation(conversationId?: string): Promise<NativeMagiConversationResult> {
+  const path = conversationId
+    ? `/magi/conversations/${encodeURIComponent(conversationId)}`
+    : '/magi/conversations/current';
+  const res = await authorizedFetch(GATEWAY_URL + path);
+  return normalizeNativeMagiResult(await checkedJson<unknown>(res));
+}
+
+/** Submit one complete non-streamed native Magi turn. */
+export async function sendNativeMagiMessage(
+  content: string,
+  clientMessageId: string,
+  source: 'text' | 'voice' = 'text',
+  attachments?: ChatUpload[],
+  options: { conversationId?: string; retryFailed?: boolean; signal?: AbortSignal } = {},
+): Promise<NativeMagiConversationResult> {
+  if (attachments?.some(item => item.status !== 'stored')) throw new Error('An attachment was not confirmed as stored by the gateway.');
+  const res = await authorizedFetch(GATEWAY_URL + '/magi/messages', {
+    method: 'POST', signal: options.signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_message_id: clientMessageId,
+      content,
+      source,
+      ...(options.conversationId ? { conversation_id: options.conversationId } : {}),
+      ...(attachments?.length ? { attachments: attachmentManifest(attachments) } : {}),
+      ...(options.retryFailed ? { retry_failed: true } : {}),
+    }),
+  });
+  return normalizeNativeMagiResult(await checkedJson<unknown>(res));
+}
+
+export async function cancelNativeMagiMessage(clientMessageId: string): Promise<NativeMagiConversationResult> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/magi/messages/${encodeURIComponent(clientMessageId)}/cancel`, { method: 'POST' });
+  return normalizeNativeMagiResult(await checkedJson<unknown>(res));
+}
+
 /**
- * The captain transcript, straight from the gateway's canonical record.
+ * The retained legacy captain transcript, straight from its compatibility
+ * record. New normal Magi chat uses fetchNativeMagiConversation instead.
  *
  * This replaces reading captain chat out of terminal history: every message
  * here has a durable id, a turn, and a type, so the client appends or updates
@@ -1271,6 +1397,70 @@ export async function sendCaptainPrompt(text: string, source: string = 'iphone',
   // composer renders server identity immediately instead of a local guess that
   // a later read would have to reconcile.
   return { ...data, conversation: data.conversation ? { ...data.conversation, target: data.conversation.target || target, messages: normalizeCanonicalMessages(data.conversation.messages) } : undefined };
+}
+
+export async function fetchMagiChatConversation(target: string = 'captain'): Promise<CanonicalConversationResult> {
+  if (target === 'captain' && MAGI_NATIVE_CHAT_ENABLED) {
+    const native = await fetchNativeMagiConversation();
+    return {
+      schema_version: native.schema_version,
+      target,
+      conversation_id: native.conversation.id,
+      messages: native.messages,
+    };
+  }
+  if (target === 'captain' && !MAGI_LEGACY_CHAT_ENABLED) {
+    throw new Error('No Magi chat transport is enabled in this build.');
+  }
+  return fetchCanonicalConversation(target);
+}
+
+export async function sendMagiChatPrompt(
+  text: string,
+  source: string = 'iphone',
+  target: string = 'captain',
+  harness?: string,
+  model?: string,
+  profileId?: string | null,
+  attachments?: ChatUpload[],
+  messageId?: string,
+  signal?: AbortSignal,
+  retryFailed = false,
+): Promise<MagiChatPromptResult> {
+  if (target === 'captain' && MAGI_NATIVE_CHAT_ENABLED) {
+    if (!messageId) throw new Error('Native Magi chat requires a client message id.');
+    const native = await sendNativeMagiMessage(
+      text, messageId, source === 'voice' ? 'voice' : 'text', attachments,
+      { retryFailed, signal },
+    );
+    return {
+      status: native.status || 'pending',
+      error: native.error,
+      retryable: native.retryable,
+      message_id: messageId,
+      native: true,
+      conversation: {
+        schema_version: native.schema_version,
+        target,
+        conversation_id: native.conversation.id,
+        turn_id: native.assistant_message?.turn_id,
+        messages: native.messages,
+      },
+    };
+  }
+  if (target === 'captain' && !MAGI_LEGACY_CHAT_ENABLED) {
+    throw new Error('No Magi chat transport is enabled in this build.');
+  }
+  return sendCaptainPrompt(text, source, target, harness, model, profileId, attachments, messageId, signal);
+}
+
+export async function cancelMagiChatTurn(target: string, clientMessageId: string): Promise<void> {
+  if (target === 'captain' && MAGI_NATIVE_CHAT_ENABLED) {
+    await cancelNativeMagiMessage(clientMessageId);
+    return;
+  }
+  if (target === 'captain' && !MAGI_LEGACY_CHAT_ENABLED) return;
+  await cancelConversationTurn(target, clientMessageId);
 }
 
 export async function interruptAgent(agentId: string): Promise<AgentControlResult> {

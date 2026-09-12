@@ -802,6 +802,90 @@ def init_db():
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_additional_events_turn ON magi_additional_response_events(turn_id, message_id, revision)')
 
+    # Native Magi chat is an additive authority, deliberately separate from
+    # legacy captain turns and terminal/semantic ownership reconstruction. A
+    # deployment restart creates these tables without rewriting or deleting any
+    # existing conversation row.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_conversations (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(id, owner_user_id)
+    )
+    ''')
+    cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_magi_default_conversation
+                      ON magi_conversations(owner_user_id) WHERE is_default = 1''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_conversations_owner ON magi_conversations(owner_user_id, updated_at)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_messages (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        content TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed', 'cancelled')),
+        source TEXT NOT NULL,
+        client_message_id TEXT,
+        reply_to_message_id TEXT,
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        sequence_index INTEGER NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        error_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, client_message_id),
+        UNIQUE(conversation_id, turn_id, role),
+        UNIQUE(conversation_id, sequence_index),
+        FOREIGN KEY(conversation_id, owner_user_id)
+            REFERENCES magi_conversations(id, owner_user_id),
+        FOREIGN KEY(reply_to_message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_messages_history ON magi_messages(owner_user_id, conversation_id, sequence_index)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_messages_submission ON magi_messages(owner_user_id, client_message_id)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_message_changes (
+        conversation_id TEXT NOT NULL,
+        change_sequence INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        message_revision INTEGER NOT NULL,
+        changed_at INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, change_sequence),
+        UNIQUE(conversation_id, message_id, message_revision),
+        FOREIGN KEY(conversation_id) REFERENCES magi_conversations(id),
+        FOREIGN KEY(message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_message_changes_replay ON magi_message_changes(conversation_id, change_sequence)')
+    # Content-free counters are tenant scoped. Latency and response-size
+    # aggregates never retain prompts, responses, model metadata, or secrets.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_chat_diagnostics (
+        owner_user_id TEXT PRIMARY KEY,
+        magi_messages_submitted INTEGER NOT NULL DEFAULT 0,
+        magi_messages_completed INTEGER NOT NULL DEFAULT 0,
+        magi_messages_failed INTEGER NOT NULL DEFAULT 0,
+        magi_duplicate_submissions INTEGER NOT NULL DEFAULT 0,
+        magi_completion_latency_ms INTEGER NOT NULL DEFAULT 0,
+        magi_completion_latency_total_ms INTEGER NOT NULL DEFAULT 0,
+        magi_completion_latency_max_ms INTEGER NOT NULL DEFAULT 0,
+        magi_response_characters INTEGER NOT NULL DEFAULT 0,
+        magi_response_characters_last INTEGER NOT NULL DEFAULT 0,
+        magi_response_characters_max INTEGER NOT NULL DEFAULT 0,
+        magi_retries INTEGER NOT NULL DEFAULT 0,
+        magi_tool_calls INTEGER NOT NULL DEFAULT 0,
+        legacy_chat_reads INTEGER NOT NULL DEFAULT 0,
+        terminal_chat_reads INTEGER NOT NULL DEFAULT 0,
+        pi_ownership_chat_reads INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+    )
+    ''')
+
     # The Firstmate adapter has its own non-destructive consumer position. It
     # never reads or mutates Firstmate/Pi cursor sidecars. Source rows are
     # immutable by native identity and hash; canonical activity is a bounded,

@@ -136,15 +136,40 @@ for origin in "${cors_origins[@]}"; do
   fi
 done
 
-# Pi ownership is default-on. An absent flag therefore enters the guarded
-# activation path; an explicitly empty or unknown literal must never downgrade.
+# Native provider chat and the compatibility captain transport are deliberately
+# mutually exclusive. Defaults are the production cutover state; rollback sets
+# the first false and the second true without reverting schema or data.
+env_boolean() {
+  local key=$1 fallback=$2 present=false value
+  grep -Eq "^${key}=" "$ENV_FILE" && present=true
+  value="$(env_value "$key")"
+  if [[ "$present" == false ]]; then printf '%s' "$fallback"; return; fi
+  case "${value,,}" in
+    1|true|yes|on) printf 'true' ;;
+    0|false|no|off) printf 'false' ;;
+    *) echo "refusing deploy: $key must be a supported boolean literal" >&2; return 1 ;;
+  esac
+}
+NATIVE_CHAT_ENABLED="$(env_boolean MAGISTRATE_NATIVE_CHAT_ENABLED true)"
+LEGACY_CHAT_ENABLED="$(env_boolean MAGISTRATE_LEGACY_CHAT_ENABLED false)"
+if [[ "$NATIVE_CHAT_ENABLED" == "$LEGACY_CHAT_ENABLED" ]]; then
+  echo "refusing deploy: exactly one of native chat and legacy chat must be enabled" >&2
+  exit 1
+fi
+if [[ "$NATIVE_CHAT_ENABLED" == true && -z "$(env_value OPENAI_API_KEY)" ]]; then
+  echo "refusing deploy: enabled native chat requires OPENAI_API_KEY" >&2
+  exit 1
+fi
+
+# Pi remains default-on only *inside* explicit legacy rollback. Native normal
+# operation treats an absent Pi flag as off and refuses an inconsistent true.
 PI_FLAG_PRESENT=false
 if grep -Eq '^MAGISTRATE_PI_OWNERSHIP_ENABLED=' "$ENV_FILE"; then
   PI_FLAG_PRESENT=true
 fi
 PI_FLAG="$(env_value MAGISTRATE_PI_OWNERSHIP_ENABLED)"
 if [[ "$PI_FLAG_PRESENT" == false ]]; then
-  PI_ENABLED=true
+  PI_ENABLED="$LEGACY_CHAT_ENABLED"
 else
   case "${PI_FLAG,,}" in
     1|true|yes|on) PI_ENABLED=true ;;
@@ -154,6 +179,10 @@ else
       exit 1
       ;;
   esac
+fi
+if [[ "$LEGACY_CHAT_ENABLED" == false && "$PI_ENABLED" == true ]]; then
+  echo "refusing deploy: Pi ownership cannot be enabled while legacy chat is disabled" >&2
+  exit 1
 fi
 
 if [[ "$PI_ENABLED" == true ]]; then
@@ -256,8 +285,13 @@ except PiAdapterIPCError as exc:
     raise SystemExit(f'Pi ownership preflight failed: {exc.code}') from None
 PY
 
+fi
+
+# Any schema-affecting native rollout requires an integrity-checked online
+# SQLite backup first. The same guard continues to protect Pi-only rollouts.
+if [[ "$NATIVE_CHAT_ENABLED" == true || "$PI_ENABLED" == true ]]; then
   if [[ ! -f "$DB_PATH" || -L "$DB_PATH" ]]; then
-    echo "refusing deploy: enabled Pi ownership requires an existing regular persistent SQLite database" >&2
+    echo "refusing deploy: native/Pi rollout requires an existing regular persistent SQLite database" >&2
     exit 1
   fi
   DB_REAL_PATH="$(realpath -e -- "$DB_PATH" 2>/dev/null || true)"
@@ -296,24 +330,46 @@ PY
     exit 1
   fi
   BACKUP_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-  BACKUP_PATH="$BACKUP_DIR/magistrate-pre-pi-${BACKUP_STAMP}-${head:0:12}.sqlite3"
-  if [[ -e "$BACKUP_PATH" || -e "$BACKUP_PATH.commit" ]]; then
-    echo "refusing deploy: the Pi ownership backup destination already exists" >&2
+  if [[ "$NATIVE_CHAT_ENABLED" == true ]]; then
+    BACKUP_PREFIX="magistrate-pre-native"
+    BACKUP_REASON="Native Magi"
+  else
+    BACKUP_PREFIX="magistrate-pre-pi"
+    BACKUP_REASON="Pi ownership"
+  fi
+  BACKUP_PATH="$BACKUP_DIR/${BACKUP_PREFIX}-${BACKUP_STAMP}-${head:0:12}.sqlite3"
+  if [[ -e "$BACKUP_PATH" || -e "$BACKUP_PATH.commit" || -e "$BACKUP_PATH.sha256" ]]; then
+    echo "refusing deploy: the SQLite backup destination already exists" >&2
     exit 1
   fi
   python3 - "$DB_PATH" "$BACKUP_PATH" <<'PY'
 import sqlite3
 import sys
+
+def counts(connection):
+    tables = [row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    )]
+    return {name: connection.execute(
+        'SELECT COUNT(*) FROM "' + name.replace('"', '""') + '"'
+    ).fetchone()[0] for name in tables}
+
 with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as backup:
     source.backup(backup)
+    source_counts = counts(source)
 with sqlite3.connect(sys.argv[2]) as backup:
     if backup.execute('PRAGMA integrity_check').fetchone() != ('ok',):
-        raise SystemExit('Pi ownership backup integrity check failed')
+        raise SystemExit('SQLite backup integrity check failed')
+    if counts(backup) != source_counts:
+        raise SystemExit('SQLite backup row-count verification failed')
 PY
   chmod 600 "$BACKUP_PATH"
   (umask 077; printf '%s\n' "$head" > "$BACKUP_PATH.commit")
-  echo "Pi ownership backup verified for deployed commit $head"
+  (umask 077; sha256sum "$BACKUP_PATH" | awk '{print $1}' > "$BACKUP_PATH.sha256")
+  echo "$BACKUP_REASON backup verified for deployed commit $head"
+fi
 
+if [[ "$PI_ENABLED" == true ]]; then
   command -v pi >/dev/null 2>&1 || {
     echo "refusing deploy: pi CLI is required to install the ownership extension" >&2
     exit 1
@@ -338,7 +394,9 @@ command -v curl >/dev/null 2>&1 || {
 (
   cd "$DEPLOY_DIR/frontend"
   npm ci
-  npx expo export -p web
+  EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED="$NATIVE_CHAT_ENABLED" \
+    EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED="$LEGACY_CHAT_ENABLED" \
+    npx expo export -p web
 )
 
 for asset in index.html chat.html voice.html; do
