@@ -28,7 +28,7 @@ The frontend establishes the server-validated principal before protected routes 
 
 ## Firstmate structured adapter
 
-`gateway/app/firstmate_activity.py` is the only source adapter. It does not import Herdr, inspect panes, read terminal output, parse ANSI, or infer an audience from prose. It consumes three semantic sources:
+`gateway/app/firstmate_activity.py` owns the snapshot/journal source adapter. It does not import Herdr, inspect panes, read terminal output, parse ANSI, or infer an audience from prose. It consumes three semantic sources:
 
 1. `fm-fleet-snapshot.sh --json`: current structured task/completion and exact keyed-decision facts. Runtime state is accepted only with allowlisted semantic provenance. Missing, `pane`, terminal, and unknown provenance fail closed.
 2. `state/branch-outcomes.jsonl`: append-only supervision outcomes. The independent Magistrate cursor never reads or writes Pi/Firstmate cursor sidecars. `wake` and optional endpoint provenance are hashed but never exported.
@@ -62,6 +62,25 @@ The field set is exact, with no aliases. Source role and kind must agree: `prima
 Canonical activity preserves the four source message kinds and `summary_truncated` truth directly. Their record state is `completed` because publication happens only after Pi persisted that assistant turn; `primary.final` / `worker.final` describe Pi's per-turn `stopReason=stop` and **never** assert that a Firstmate task or objective completed. Task lifecycle remains owned by validated fleet/branch facts.
 
 The adapter normalizes source-native identity into `(source_instance, stream, event_id, source_sequence, payload_hash)`. It writes the immutable source event, canonical activity projection, activity change-ledger row, and new source cursor in one SQLite transaction. Only after commit does it call Firstmate `ack` with that exact sequence/event id; before a later read it may reassert only that already-durable pair so Firstmate can finish an interrupted atomic acknowledgement. Parsed-but-uncommitted input is never acknowledged. Stable objective identity derives from the bound source instance plus task/primary role; run identity additionally includes incarnation. Neither borrows an unrelated conversation turn.
+
+### Structured execution extension
+
+Step 10 adds a separate authenticated push seam in
+`gateway/app/firstmate_execution.py`. Its strict
+`firstmate.execution-event.v1` vocabulary preserves accepted, worker,
+implementation, test, review, and terminal milestones as immutable Activity
+records with exact principal/objective/task/run causality. It has no arbitrary
+summary or transcript field; display summaries are Gateway-authored. Historical
+active milestones are excluded from focus and active counts after a structured
+terminal fact for that objective.
+
+Only `objective.completed` with persisted
+`firstmate.completion-evidence.v1` may wake an additional assistant-only row in
+the provider-native Magi store. Activity events never become Chat content; the
+model receives only bounded objective/check/artifact facts and the resulting row
+uses ordinary native HTTP/replay/WebSocket delivery. See
+[`magi-firstmate-execution-v1.md`](magi-firstmate-execution-v1.md) for the event,
+evidence, retry, and restart contract.
 
 ## Bootstrap, restart, and conflict policy
 

@@ -41,6 +41,31 @@ test('native Magi wire messages preserve Unicode, identity, and one assistant re
   assert.equal(rendered[1].progress, 'complete');
 });
 
+test('a verified outcome arrives as a new assistant-only native row', () => {
+  const canonical = normalizeNativeMagiMessages([
+    message({}),
+    message({
+      id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: 'Objective accepted.', source: 'magi-native',
+      sequence_index: 1,
+    }),
+    message({
+      id: 'mgm_completion_1', turn_id: 'mgt_completion_1', role: 'assistant',
+      client_message_id: null, reply_to_message_id: 'mgm_user_1',
+      content: 'The objective is complete and verified.', source: 'magi-native',
+      sequence_index: 2,
+    }),
+  ]);
+  assert.equal(canonical.filter(item => item.role === 'user').length, 1);
+  assert.deepEqual(canonical.map(item => item.id), [
+    'mgm_user_1', 'mgm_assistant_1', 'mgm_completion_1',
+  ]);
+  const rendered = reconcileCanonicalMessages([], canonical);
+  assert.equal(rendered.length, 3);
+  assert.equal(rendered[2].text, 'The objective is complete and verified.');
+  assert.equal(rendered[2].progress, 'complete');
+});
+
 test('malformed native provenance, status, and control text fail closed', () => {
   assert.deepEqual(normalizeNativeMagiMessages([
     message({ id: 'mgm_assistant_bad', role: 'assistant', client_message_id: null,

@@ -4,7 +4,9 @@ import { useCallback, useSyncExternalStore } from 'react';
 export const ACTIVITY_SCHEMA = 'activity.v1' as const;
 
 export type CanonicalActivityKind =
-  | 'objective.started' | 'objective.progress'
+  | 'objective.started' | 'objective.progress' | 'objective.accepted'
+  | 'worker.started' | 'implementation.started'
+  | 'tests.started' | 'tests.passed' | 'tests.failed' | 'review.started'
   | 'decision.requested' | 'decision.resolved'
   | 'objective.completed' | 'objective.failed' | 'objective.cancelled'
   | 'supervision.outcome'
@@ -65,7 +67,10 @@ export interface CanonicalWorkState {
 }
 
 const KINDS = new Set<CanonicalActivityKind>([
-  'objective.started', 'objective.progress', 'decision.requested', 'decision.resolved',
+  'objective.started', 'objective.progress', 'objective.accepted',
+  'worker.started', 'implementation.started',
+  'tests.started', 'tests.passed', 'tests.failed', 'review.started',
+  'decision.requested', 'decision.resolved',
   'objective.completed', 'objective.failed', 'objective.cancelled', 'supervision.outcome',
   'primary.message', 'primary.final', 'worker.message', 'worker.final',
 ]);
@@ -75,6 +80,13 @@ const STATES = new Set<CanonicalActivityState>([
 const KIND_STATES: Record<CanonicalActivityKind, ReadonlySet<CanonicalActivityState>> = {
   'objective.started': new Set(['active']),
   'objective.progress': new Set(['active', 'awaiting-user']),
+  'objective.accepted': new Set(['active']),
+  'worker.started': new Set(['active']),
+  'implementation.started': new Set(['active']),
+  'tests.started': new Set(['active']),
+  'tests.passed': new Set(['completed']),
+  'tests.failed': new Set(['failed']),
+  'review.started': new Set(['active']),
   'decision.requested': new Set(['awaiting-user']),
   'decision.resolved': new Set(['resolved']),
   'objective.completed': new Set(['completed']),
@@ -321,14 +333,28 @@ const sortedRecords = (): CanonicalActivityRecord[] =>
   [...records.values()].sort((left, right) => left.sequence - right.sequence);
 const isFocusRecord = (activity: CanonicalActivityRecord): boolean => (
   (activity.kind === 'objective.started' || activity.kind === 'objective.progress'
-    || activity.kind === 'decision.requested')
+    || activity.kind === 'objective.accepted' || activity.kind === 'decision.requested')
   && (activity.state === 'active' || activity.state === 'awaiting-user')
+);
+const terminalObjectiveIds = (
+  activities: Iterable<CanonicalActivityRecord>,
+): ReadonlySet<string> => new Set([...activities].filter(activity =>
+  activity.objectiveId && (
+    activity.kind === 'objective.completed' || activity.kind === 'objective.failed'
+    || activity.kind === 'objective.cancelled'
+  )).map(activity => activity.objectiveId as string));
+const isEffectiveFocusRecord = (
+  activity: CanonicalActivityRecord, terminalIds: ReadonlySet<string>,
+): boolean => isFocusRecord(activity) && !(
+  activity.kind.startsWith('objective.')
+  && !!activity.objectiveId && terminalIds.has(activity.objectiveId)
 );
 const retainedRecords = (
   source: ReadonlyMap<string, CanonicalActivityRecord>,
 ): CanonicalActivityRecord[] | null => {
   const ordered = [...source.values()].sort((left, right) => left.sequence - right.sequence);
-  const focus = ordered.filter(isFocusRecord);
+  const terminalIds = terminalObjectiveIds(ordered);
+  const focus = ordered.filter(activity => isEffectiveFocusRecord(activity, terminalIds));
   if (focus.length > MAX_FOCUS_RECORDS) return null;
   const focusedIds = new Set(focus.map(activity => activity.id));
   const recent = ordered.filter(activity => !focusedIds.has(activity.id))
@@ -606,8 +632,11 @@ export function ingestCanonicalActivitySnapshot(
   if ([...normalizedRecords, ...normalizedFocus].some(record => record === null)) return null;
   const pageRecords = normalizedRecords as CanonicalActivityRecord[];
   const delivered = [...pageRecords, ...normalizedFocus as CanonicalActivityRecord[]];
+  const terminalIdsBefore = terminalObjectiveIds(records.values());
   const retainedHistoryIdsBefore = new Set(
-    [...records.values()].filter(activity => !isFocusRecord(activity)).map(activity => activity.id),
+    [...records.values()]
+      .filter(activity => !isEffectiveFocusRecord(activity, terminalIdsBefore))
+      .map(activity => activity.id),
   );
   const staged = new Map(records);
   const authoritativeAtCursor = (value.snapshot_cursor as number) >= deliveryCursor;
@@ -615,7 +644,8 @@ export function ingestCanonicalActivitySnapshot(
     const represented = new Set(delivered.map(activity => activity.id));
     for (const [id, activity] of staged) {
       const isRecoverableFocus = (activity.kind === 'objective.started'
-        || activity.kind === 'objective.progress' || activity.kind === 'decision.requested')
+        || activity.kind === 'objective.progress' || activity.kind === 'objective.accepted'
+        || activity.kind === 'decision.requested')
         && (activity.state === 'active' || activity.state === 'awaiting-user');
       if (isRecoverableFocus && !represented.has(id)) staged.delete(id);
     }
@@ -642,8 +672,9 @@ export function ingestCanonicalActivitySnapshot(
   if (!retained) return null;
   const retainedIds = new Set(retained.map(activity => activity.id));
   if (requireCompletePage && pageRecords.some(activity => !retainedIds.has(activity.id))) return null;
+  const retainedTerminalIds = terminalObjectiveIds(retained);
   const addedHistoryRecords = pageRecords.filter(activity =>
-    !isFocusRecord(activity) && retainedIds.has(activity.id)
+    !isEffectiveFocusRecord(activity, retainedTerminalIds) && retainedIds.has(activity.id)
     && !retainedHistoryIdsBefore.has(activity.id)).length;
   records.clear();
   retained.forEach(activity => records.set(activity.id, activity));
@@ -661,7 +692,7 @@ export function ingestCanonicalActivitySnapshot(
   publish();
   persist();
   const remainingHistoryCapacity = MAX_RECENT_ACTIVITY_RECORDS
-    - retained.filter(activity => !isFocusRecord(activity)).length;
+    - retained.filter(activity => !isEffectiveFocusRecord(activity, retainedTerminalIds)).length;
   // Focus rows are repeated in every snapshot so they remain recoverable, but
   // overlap does not consume the separate history budget. Continue while any
   // history capacity remains and cap the next request so a complete page can
@@ -715,9 +746,12 @@ export function deriveCanonicalWorkState(
     }
     if (awaiting) messageAwaiting = true;
   }
+  const terminalIds = terminalObjectiveIds(activity.records);
   for (const record of activity.records) {
-    if ((record.kind === 'objective.started' || record.kind === 'objective.progress')
-      && (record.state === 'active' || record.state === 'awaiting-user')) {
+    if ((record.kind === 'objective.started' || record.kind === 'objective.progress'
+      || record.kind === 'objective.accepted')
+      && (record.state === 'active' || record.state === 'awaiting-user')
+      && (!record.objectiveId || !terminalIds.has(record.objectiveId))) {
       recordActive = true;
       if (record.objectiveId) objectiveIds.add(record.objectiveId);
       if (record.runId) runIds.add(record.runId);

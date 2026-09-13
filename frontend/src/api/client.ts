@@ -753,7 +753,7 @@ export interface CanonicalActivityRecord {
   /** Append-only replay cursor for this insertion or in-place revision. */
   delivery_sequence: number;
   revision: number;
-  kind: 'objective.started' | 'objective.progress' | 'decision.requested' | 'decision.resolved' | 'objective.completed' | 'objective.failed' | 'objective.cancelled' | 'supervision.outcome' | 'primary.message' | 'primary.final' | 'worker.message' | 'worker.final';
+  kind: 'objective.started' | 'objective.progress' | 'objective.accepted' | 'worker.started' | 'implementation.started' | 'tests.started' | 'tests.passed' | 'tests.failed' | 'review.started' | 'decision.requested' | 'decision.resolved' | 'objective.completed' | 'objective.failed' | 'objective.cancelled' | 'supervision.outcome' | 'primary.message' | 'primary.final' | 'worker.message' | 'worker.final';
   state: 'active' | 'awaiting-user' | 'completed' | 'failed' | 'cancelled' | 'resolved';
   importance: 'routine' | 'attention';
   title: string;

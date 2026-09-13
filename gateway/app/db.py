@@ -959,6 +959,26 @@ def init_db():
     )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_message_changes_replay ON magi_message_changes(conversation_id, change_sequence)')
+    # Model-authored messages triggered by a verified asynchronous outcome are
+    # still ordinary native-chat rows. This ledger supplies a distinct,
+    # principal-scoped idempotency key without inventing a user message.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_generated_messages (
+        owner_user_id TEXT NOT NULL,
+        generation_key TEXT NOT NULL,
+        facts_sha256 TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        reply_to_message_id TEXT NOT NULL,
+        message_id TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(owner_user_id, generation_key),
+        FOREIGN KEY(conversation_id, owner_user_id)
+            REFERENCES magi_conversations(id, owner_user_id),
+        FOREIGN KEY(reply_to_message_id) REFERENCES magi_messages(id),
+        FOREIGN KEY(message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_generated_conversation ON magi_generated_messages(owner_user_id, conversation_id, created_at)')
     # Content-free counters are tenant scoped. Latency and response-size
     # aggregates never retain prompts, responses, model metadata, or secrets.
     cursor.execute('''
@@ -1091,6 +1111,62 @@ def init_db():
             FROM activity_records
         ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_changes_record ON activity_changes(user_id, record_id, record_revision)')
+
+    # Structured Firstmate execution events are a separate immutable producer
+    # ledger. They project into canonical Activity, while only a verified
+    # completion row may wake generation of an additional native Magi message.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS firstmate_execution_objectives (
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        accepted_event_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        origin_message_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        project TEXT,
+        terminal_event_id TEXT,
+        terminal_phase TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(owner_user_id, objective_id),
+        UNIQUE(owner_user_id, task_id),
+        UNIQUE(owner_user_id, accepted_event_id),
+        FOREIGN KEY(conversation_id, owner_user_id)
+            REFERENCES magi_conversations(id, owner_user_id),
+        FOREIGN KEY(origin_message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_task ON firstmate_execution_objectives(owner_user_id, task_id)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS firstmate_execution_events (
+        owner_user_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        evidence_json TEXT,
+        activity_record_id TEXT NOT NULL,
+        generation_state TEXT,
+        generation_attempt_count INTEGER NOT NULL DEFAULT 0,
+        assistant_message_id TEXT,
+        error_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(owner_user_id, event_id),
+        FOREIGN KEY(owner_user_id, objective_id)
+            REFERENCES firstmate_execution_objectives(owner_user_id, objective_id),
+        FOREIGN KEY(activity_record_id) REFERENCES activity_records(id),
+        FOREIGN KEY(assistant_message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_objective ON firstmate_execution_events(owner_user_id, objective_id, occurred_at, created_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_wake ON firstmate_execution_events(generation_state, updated_at)')
 
     # Bounded counters make the soak's known loss mode observable without
     # retaining terminal bytes, prompts, replies, tool payloads, or identifiers

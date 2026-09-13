@@ -47,6 +47,46 @@ const page = (records: unknown[], nextCursor: number, latestCursor = nextCursor)
   has_more: false,
 });
 
+test('structured execution milestones retain their typed Activity kinds', () => {
+  const milestones = [
+    ['objective.accepted', 'active'],
+    ['worker.started', 'active'],
+    ['implementation.started', 'active'],
+    ['tests.started', 'active'],
+    ['tests.passed', 'completed'],
+    ['tests.failed', 'failed'],
+    ['review.started', 'active'],
+  ];
+  milestones.forEach(([kind, state], index) => {
+    const normalized = normalizeCanonicalActivityRecord(record({
+      id: `ca_execution_${index}`,
+      sequence: index + 1,
+      delivery_sequence: index + 1,
+      kind,
+      state,
+    }));
+    assert.equal(normalized?.kind, kind);
+    assert.equal(normalized?.state, state);
+  });
+});
+
+test('a terminal execution fact closes an immutable accepted milestone locally', () => {
+  setCanonicalActivityPrincipal('activity-execution-terminal');
+  const accepted = record({
+    id: 'ca_execution_accepted', kind: 'objective.accepted',
+    source: { instance_id: 'firstmate:execution', event_id: 'event-accepted' },
+  });
+  const completed = record({
+    id: 'ca_execution_completed', sequence: 2, delivery_sequence: 2,
+    kind: 'objective.completed', state: 'completed',
+    source: { instance_id: 'firstmate:execution', event_id: 'event-completed' },
+  });
+  assert.ok(ingestCanonicalActivityPage(page([accepted, completed], 2)));
+  const work = deriveCanonicalWorkState(getCanonicalActivitySnapshot(), []);
+  assert.equal(work.active, false);
+  assert.equal(work.phase, 'idle');
+});
+
 test('canonical activity appends, revises by stable id, and advances a change cursor', () => {
   setCanonicalActivityPrincipal('activity-user-a');
   assert.ok(ingestCanonicalActivityPage(page([record()], 1)));

@@ -28,6 +28,13 @@ SOURCE_EVENT_KINDS = frozenset({
 ACTIVITY_KINDS = frozenset({
     'objective.started',
     'objective.progress',
+    'objective.accepted',
+    'worker.started',
+    'implementation.started',
+    'tests.started',
+    'tests.passed',
+    'tests.failed',
+    'review.started',
     'decision.requested',
     'decision.resolved',
     'objective.completed',
@@ -40,6 +47,13 @@ ACTIVITY_IMPORTANCE = frozenset({'routine', 'attention'})
 _ACTIVITY_KIND_STATES = {
     'objective.started': frozenset({'active'}),
     'objective.progress': frozenset({'active', 'awaiting-user'}),
+    'objective.accepted': frozenset({'active'}),
+    'worker.started': frozenset({'active'}),
+    'implementation.started': frozenset({'active'}),
+    'tests.started': frozenset({'active'}),
+    'tests.passed': frozenset({'completed'}),
+    'tests.failed': frozenset({'failed'}),
+    'review.started': frozenset({'active'}),
     'decision.requested': frozenset({'awaiting-user'}),
     'decision.resolved': frozenset({'resolved'}),
     'objective.completed': frozenset({'completed'}),
@@ -817,9 +831,18 @@ def mark_source_fault(
 
 def _activity_summary(conn: sqlite3.Connection, user_id: str) -> Dict[str, int]:
     active_objective_count = int(conn.execute(
-        '''SELECT COUNT(DISTINCT objective_id) FROM activity_records
-           WHERE user_id = ? AND kind IN ('objective.started', 'objective.progress')
-             AND state IN ('active', 'awaiting-user') AND objective_id IS NOT NULL''',
+        '''SELECT COUNT(DISTINCT active.objective_id) FROM activity_records AS active
+           WHERE active.user_id = ?
+             AND active.kind IN ('objective.started', 'objective.progress', 'objective.accepted')
+             AND active.state IN ('active', 'awaiting-user')
+             AND active.objective_id IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM activity_records AS terminal
+               WHERE terminal.user_id = active.user_id
+                 AND terminal.objective_id = active.objective_id
+                 AND terminal.kind IN ('objective.completed', 'objective.failed', 'objective.cancelled')
+                 AND terminal.state IN ('completed', 'failed', 'cancelled')
+             )''',
         (user_id,),
     ).fetchone()[0])
     operation_count = int(conn.execute(
@@ -831,8 +854,15 @@ def _activity_summary(conn: sqlite3.Connection, user_id: str) -> Dict[str, int]:
                SELECT 1 FROM activity_records AS objective
                WHERE objective.user_id = operation.user_id
                  AND objective.objective_id = operation.objective_id
-                 AND objective.kind IN ('objective.started', 'objective.progress')
+                 AND objective.kind IN ('objective.started', 'objective.progress', 'objective.accepted')
                  AND objective.state IN ('active', 'awaiting-user')
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM activity_records AS terminal
+               WHERE terminal.user_id = operation.user_id
+                 AND terminal.objective_id = operation.objective_id
+                 AND terminal.kind IN ('objective.completed', 'objective.failed', 'objective.cancelled')
+                 AND terminal.state IN ('completed', 'failed', 'cancelled')
              )''',
         (user_id,),
     ).fetchone()[0])
@@ -900,8 +930,15 @@ def snapshot_activity(
                        WHERE c.user_id = r.user_id AND c.record_id = r.id) AS delivery_sequence
                FROM activity_records r
                WHERE r.user_id = ? AND (
-                    (r.kind IN ('objective.started', 'objective.progress')
-                     AND r.state IN ('active', 'awaiting-user'))
+                    (r.kind IN ('objective.started', 'objective.progress', 'objective.accepted')
+                     AND r.state IN ('active', 'awaiting-user')
+                     AND NOT EXISTS (
+                       SELECT 1 FROM activity_records AS terminal
+                       WHERE terminal.user_id = r.user_id
+                         AND terminal.objective_id = r.objective_id
+                         AND terminal.kind IN ('objective.completed', 'objective.failed', 'objective.cancelled')
+                         AND terminal.state IN ('completed', 'failed', 'cancelled')
+                     ))
                     OR (r.kind = 'decision.requested' AND r.state = 'awaiting-user')
                )
                ORDER BY r.sequence_index DESC LIMIT ?''',
