@@ -58,6 +58,12 @@ def test_lock_names_the_reviewed_source_commit_tree_and_all_runtime_call_sites()
         'bin/fm-captain-event.sh',
         'bin/fm-fleet-snapshot.sh',
         'bin/fm-spawn.sh',
+        'bin/fm-captain-hold.sh',
+        'bin/fm-classify-lib.sh',
+        'bin/fm-tasks-axi-lib.sh',
+        'bin/fm-backlog-transition-lib.sh',
+        'bin/fm-wake-lib.sh',
+        'bin/fm-parent-channel-lib.sh',
         '.pi/extensions/fm-captain-event.ts',
         '.pi/extensions/lib/fm-captain-event.ts',
     }

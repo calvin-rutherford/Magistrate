@@ -23,6 +23,42 @@
       "executable": true
     },
     {
+      "path": "bin/fm-captain-hold.sh",
+      "sha256": "923976eaec2aa3a0e100d6cb2c6517ee2fb17b3b4577540d4a9b358a273969bd",
+      "bytes": 80172,
+      "executable": true
+    },
+    {
+      "path": "bin/fm-classify-lib.sh",
+      "sha256": "d1d32ddae7ceb031a655187e68c57908ea7881818e002b38d237c3c109434fac",
+      "bytes": 87029,
+      "executable": true
+    },
+    {
+      "path": "bin/fm-tasks-axi-lib.sh",
+      "sha256": "cc36b881dba35ec020a0c512cdaa20596d6cb7a90a339344ca863924f7204056",
+      "bytes": 6580,
+      "executable": false
+    },
+    {
+      "path": "bin/fm-backlog-transition-lib.sh",
+      "sha256": "83a60e6c329acf09aa747bab4ab81eae9af7a101d74229dabe326f0d530f54c4",
+      "bytes": 41610,
+      "executable": false
+    },
+    {
+      "path": "bin/fm-wake-lib.sh",
+      "sha256": "3c305d18608a3443da650e314245e0e18c28009e06db7d14dc1f8096def48c5c",
+      "bytes": 87349,
+      "executable": true
+    },
+    {
+      "path": "bin/fm-parent-channel-lib.sh",
+      "sha256": "0df00ed53b6b4b4229cc365fdf43b44009a5bf06ee73c5853fd6e9a0d230456b",
+      "bytes": 7238,
+      "executable": false
+    },
+    {
       "path": ".pi/extensions/fm-captain-event.ts",
       "sha256": "3db603601ac60f5537284bbbeb16023894c9864bd55c791c71b06e3abfb98e78",
       "bytes": 1048,

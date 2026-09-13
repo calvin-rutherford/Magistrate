@@ -486,6 +486,103 @@ def init_db():
     if "item_id" not in columns:
         cursor.execute("ALTER TABLE attention_action_outcomes ADD COLUMN item_id TEXT NOT NULL DEFAULT ''")
 
+    # Structured Firstmate captain holds are a separate, principal-owned
+    # decision source. Stable lifecycle identity comes from Firstmate's
+    # read-only captain-hold command; answers retain hashes/evidence only and
+    # point back to the canonical Native Chat user row that supplied the bytes.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS firstmate_decision_sources (
+        owner_user_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        last_observed_at INTEGER,
+        snapshot_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(owner_user_id, source_instance_id)
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS firstmate_decisions (
+        decision_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        lifecycle_identity TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'answering', 'answered', 'resolved')),
+        title TEXT NOT NULL,
+        question TEXT NOT NULL,
+        project TEXT,
+        source_event_id TEXT NOT NULL,
+        source_payload_sha256 TEXT NOT NULL,
+        source_observed_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, source_instance_id, task_id, lifecycle_identity)
+    )
+    ''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS idx_firstmate_decisions_pending
+                      ON firstmate_decisions(owner_user_id, state, source_observed_at)''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS firstmate_decision_events (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK(event_type IN ('decision.required', 'decision.resolved')),
+        decision_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        ingested_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, source_instance_id, source_event_id)
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS firstmate_decision_answer_confirmations (
+        confirmation_hash TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        decision_revision INTEGER NOT NULL,
+        native_user_message_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        answer_sha256 TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(decision_id) REFERENCES firstmate_decisions(decision_id),
+        FOREIGN KEY(native_user_message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS firstmate_decision_answers (
+        answer_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        decision_revision INTEGER NOT NULL,
+        native_user_message_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        answer_sha256 TEXT NOT NULL,
+        answer_bytes INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'succeeded', 'failed')),
+        error_code TEXT,
+        execution_claim_id TEXT NOT NULL,
+        lease_expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key),
+        FOREIGN KEY(decision_id) REFERENCES firstmate_decisions(decision_id),
+        FOREIGN KEY(native_user_message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS idx_firstmate_decision_answers_target
+                      ON firstmate_decision_answers(owner_user_id, decision_id, decision_revision, status)''')
+    cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_firstmate_decision_answers_active
+                      ON firstmate_decision_answers(owner_user_id, decision_id, decision_revision)
+                      WHERE status IN ('pending', 'succeeded')''')
+
     # The canonical conversation record. Herdr terminal output is an ingestion
     # adapter into these tables, never the chat database itself; see
     # app/conversation_store.py and CHAT_ARCHITECTURE_FIX.md. Migrations are

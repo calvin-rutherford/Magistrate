@@ -1,6 +1,7 @@
-import asyncio
-from typing import Dict, Any, List
+import os
+from typing import Dict, Any, List, Optional
 from app.firstmate_client import FirstmateClient
+from app.firstmate_decisions import FirstmateDecisionService, firstmate_decisions
 from app.herdr_client import HerdrClient
 from app.github_service import github_service
 from app.providers.jira import JiraProviderAdapter
@@ -13,7 +14,11 @@ jira_adapter = JiraProviderAdapter()
 teams_adapter = TeamsProviderAdapter()
 
 class AttentionService:
-    async def get_unified_attention_items(self) -> List[Dict[str, Any]]:
+    def __init__(self, decision_service: FirstmateDecisionService = firstmate_decisions):
+        self.decision_service = decision_service
+
+    async def get_unified_attention_items(self, owner_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        owner_user_id = owner_user_id or os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
         items = []
 
         # 1. FIRSTMATE & HERDR BLOCKERS
@@ -43,6 +48,22 @@ class AttentionService:
                 items.append(item)
         except Exception as e:
             print('Error fetching Firstmate attention:', e)
+
+        # Structured captain holds use stable lifecycle identities and remain
+        # owner-qualified; unlike legacy pane/status hints they are answerable
+        # only through the isolated Native Chat decision handler.
+        try:
+            decisions = await self.decision_service.reconcile(owner_user_id)
+            items.extend(self.decision_service.attention_items(owner_user_id, decisions=decisions))
+        except Exception:
+            # Source exceptions can carry local paths; Attention logs only a
+            # fixed availability signal and falls back to previously validated
+            # owner-qualified rows.
+            print('Firstmate decisions unavailable')
+            try:
+                items.extend(self.decision_service.attention_items(owner_user_id, stale=True))
+            except Exception:
+                print('Cached Firstmate decisions unavailable')
 
         # 2. GITHUB PULL REQUESTS
         try:

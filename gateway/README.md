@@ -29,6 +29,19 @@ to be enabled and requires `OPENAI_API_KEY` before native activation. A native
 request never calls Herdr, Firstmate, terminal parsers, Pi ownership, or tool
 execution.
 
+## Firstmate decisions for Magi
+
+Structured live captain holds now project into owner-scoped Attention cards and
+an isolated `firstmate.decision-context.v1` model-context seam. The exported
+`firstmate.answer_decision` handler accepts only an opaque decision id/revision;
+it loads answer bytes out of band from the authenticated owner's completed
+canonical Native Chat user row, requires a bound explicit confirmation, and
+uses Firstmate's pinned non-terminal decision-file intake. Exact retries are
+idempotent; duplicate, stale, resolved, malformed, and foreign-principal
+answers fail closed. Track C exports a registry-native tool definition and
+handler without editing the generic model-selection/orchestration path. See
+[`../docs/magi-firstmate-decisions-v1.md`](../docs/magi-firstmate-decisions-v1.md).
+
 ## Retained Pi semantic ownership compatibility channel
 
 When legacy chat is explicitly re-enabled, Pi ownership retains its prior
