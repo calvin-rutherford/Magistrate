@@ -152,12 +152,17 @@ env_boolean() {
 }
 NATIVE_CHAT_ENABLED="$(env_boolean MAGISTRATE_NATIVE_CHAT_ENABLED true)"
 LEGACY_CHAT_ENABLED="$(env_boolean MAGISTRATE_LEGACY_CHAT_ENABLED false)"
+FRIEND_BETA_ENABLED="$(env_boolean MAGISTRATE_FRIEND_BETA_ENABLED false)"
 if [[ "$NATIVE_CHAT_ENABLED" == "$LEGACY_CHAT_ENABLED" ]]; then
   echo "refusing deploy: exactly one of native chat and legacy chat must be enabled" >&2
   exit 1
 fi
 if [[ "$NATIVE_CHAT_ENABLED" == true && -z "$(env_value OPENAI_API_KEY)" ]]; then
   echo "refusing deploy: enabled native chat requires OPENAI_API_KEY" >&2
+  exit 1
+fi
+if [[ "$FRIEND_BETA_ENABLED" == true && "$NATIVE_CHAT_ENABLED" != true ]]; then
+  echo "refusing deploy: Friend Beta access requires provider-native Magi chat" >&2
   exit 1
 fi
 

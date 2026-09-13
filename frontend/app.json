@@ -10,7 +10,7 @@
     "ios": {
       "icon": "./assets/expo.icon",
       "bundleIdentifier": "io.magistrate.cockpit",
-      "supportsTablet": true,
+      "supportsTablet": false,
       "buildNumber": "1",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Magistrate requires microphone access for voice interactions.",
@@ -18,10 +18,11 @@
         "NSPhotoLibraryUsageDescription": "Magistrate allows uploading profile photos.",
         "NSCameraUsageDescription": "Magistrate allows taking profile photos.",
         "UIBackgroundModes": [
-          "remote-notification",
           "remote-notification"
-        ],
-        "ITSAppUsesNonExemptEncryption": false
+        ]
+      },
+      "config": {
+        "usesNonExemptEncryption": false
       }
     },
     "android": {

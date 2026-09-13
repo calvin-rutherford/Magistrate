@@ -10,7 +10,9 @@ import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import {
   createGatewaySession,
   invalidateGatewaySession,
+  logoutGatewaySession,
   restoreGatewaySession,
+  updateUserProfile,
   useGatewaySession,
   validateGatewaySession,
 } from '../src/api/client';
@@ -29,6 +31,9 @@ export default function RootLayout() {
   const [bootstrapSecret, setBootstrapSecret] = useState('');
   const [sessionError, setSessionError] = useState('');
   const [sessionSubmitting, setSessionSubmitting] = useState(false);
+  const [displayName, setDisplayName] = useState('');
+  const [onboardingError, setOnboardingError] = useState('');
+  const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
 
   useEffect(() => {
     notificationManager.installNotificationRouting();
@@ -44,7 +49,7 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
-    if (session.status !== 'authenticated' || !pendingIntent) return;
+    if (session.status !== 'authenticated' || session.session?.onboardingRequired || !pendingIntent) return;
     const intent = consumePendingIntent();
     if (!intent) return;
     // A cold push can arrive before authentication, so the initial
@@ -53,7 +58,7 @@ export default function RootLayout() {
     if (intent.targetType === 'attention') void notificationManager.markViewed(intent.params.item);
     if (intent.targetType === 'pull-request') void notificationManager.markViewed(`github-pr-${intent.params.number}`);
     router.push(pendingIntentPath(intent) as never);
-  }, [pendingIntent, router, session.status]);
+  }, [pendingIntent, router, session.session?.onboardingRequired, session.status]);
 
   useEffect(() => {
     if (session.status === 'authenticated' && Platform.OS === 'web') {
@@ -65,13 +70,13 @@ export default function RootLayout() {
   useEffect(() => {
     // Nothing protected is mounted until the session has been validated. This
     // effect therefore also provides the single cleanup boundary for polling.
-    if (session.status !== 'authenticated') return;
+    if (session.status !== 'authenticated' || session.session?.onboardingRequired) return;
     // Voice has its own permission-sensitive lifecycle and deliberately does
     // not poll attention events while the microphone screen is active.
     if (pathname === '/voice') return;
     notificationManager.startMonitoring();
     return () => notificationManager.stopMonitoring();
-  }, [pathname, session.status]);
+  }, [pathname, session.session?.onboardingRequired, session.status]);
 
   useEffect(() => {
     // Without this, a horizontal right-swipe near the left edge (e.g. to open
@@ -103,7 +108,69 @@ export default function RootLayout() {
     }
   };
 
+  const submitProfile = async () => {
+    const name = displayName.trim();
+    if (!name || Array.from(name).length > 80) {
+      setOnboardingError('Enter a display name of 80 characters or fewer.');
+      return;
+    }
+    setOnboardingSubmitting(true);
+    setOnboardingError('');
+    try {
+      await updateUserProfile({ name });
+      await validateGatewaySession();
+      setDisplayName('');
+    } catch (error) {
+      setOnboardingError(error instanceof Error ? error.message : 'Your account profile could not be saved.');
+    } finally {
+      setOnboardingSubmitting(false);
+    }
+  };
+
   const viewportHead = Platform.OS === 'web' ? <Head><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" /></Head> : null;
+
+  if (session.status === 'authenticated' && session.session?.onboardingRequired) {
+    return (
+      <>
+        {viewportHead}
+        <View style={styles.sessionOverlay} accessibilityViewIsModal>
+          <View style={styles.sessionCard}>
+            <Text testID="friend-beta-onboarding-title" style={styles.sessionTitle}>WELCOME TO MAGI</Text>
+            <Text style={styles.sessionCopy}>Your access code is verified. Choose the name Magi should use for this beta account.</Text>
+            <TextInput
+              testID="friend-beta-display-name"
+              value={displayName}
+              onChangeText={setDisplayName}
+              autoCapitalize="words"
+              autoCorrect={false}
+              maxLength={80}
+              placeholder="Display name"
+              placeholderTextColor="#899"
+              style={styles.sessionInput}
+              onSubmitEditing={() => void submitProfile()}
+            />
+            {onboardingError ? <Text testID="friend-beta-onboarding-error" accessibilityRole="alert" style={styles.sessionError}>{onboardingError}</Text> : null}
+            <TouchableOpacity
+              testID="friend-beta-complete-onboarding"
+              disabled={onboardingSubmitting || !displayName.trim()}
+              onPress={() => void submitProfile()}
+              style={[styles.sessionButton, (onboardingSubmitting || !displayName.trim()) && styles.sessionButtonDisabled]}
+            >
+              <Text style={styles.sessionButtonText}>{onboardingSubmitting ? 'SAVING…' : 'CONTINUE'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="friend-beta-cancel-onboarding"
+              disabled={onboardingSubmitting}
+              onPress={() => void logoutGatewaySession()}
+              style={styles.retryButton}
+            >
+              <Text style={styles.retryText}>USE A DIFFERENT ACCESS CODE</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </>
+    );
+  }
 
   if (session.status !== 'authenticated') {
     const checking = session.status === 'checking';
@@ -119,7 +186,7 @@ export default function RootLayout() {
           <Text style={styles.sessionCopy}>
             {checking
               ? 'Validating the saved server session. Protected routes stay closed until validation succeeds.'
-              : 'Enter the beta bootstrap credential supplied by the deployment operator. It is never stored in the app bundle.'}
+              : 'Enter the Friend Beta access code supplied for this device. Deployment operators can also use their owner credential. Neither is stored in the app bundle.'}
           </Text>
           {!checking ? <>
             <TextInput
@@ -129,9 +196,10 @@ export default function RootLayout() {
               secureTextEntry
               autoCapitalize="none"
               autoCorrect={false}
-              placeholder="Bootstrap credential"
+              placeholder="Friend Beta access code"
               placeholderTextColor="#899"
               style={styles.sessionInput}
+              onSubmitEditing={() => void submitSession()}
             />
             {error ? <Text testID="session-error" style={styles.sessionError}>{error}</Text> : null}
             <TouchableOpacity

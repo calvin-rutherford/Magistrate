@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, Header, Response, Request, WebSocket, WebSocketDisconnect, Query, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -9,11 +9,14 @@ import asyncio
 import secrets
 import time
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from app.auth import Principal, issue_session, revoke_session, require_any_scope, require_scope, verify_token
+from app.auth import (Principal, friend_beta_onboarding_required, issue_friend_beta_session,
+                      issue_session, revoke_session, require_any_scope, require_scope,
+                      validate_friend_beta_configuration, verify_token)
 from app.chat_features import (LEGACY_CHAT_DEFAULT_ENABLED, NATIVE_CHAT_DEFAULT_ENABLED,
                                legacy_chat_enabled, native_chat_enabled,
                                validate_chat_feature_configuration)
@@ -429,6 +432,7 @@ async def start_notification_reconciler():
     # Resolve both strict flags at startup. Native is production-default-on;
     # legacy must be explicitly enabled for rollback/readability.
     native_enabled, legacy_enabled = validate_chat_feature_configuration()
+    validate_friend_beta_configuration()
     if native_enabled:
         validate_magi_chat_configuration()
         # A process cannot resume an in-flight provider socket. Preserve the
@@ -815,7 +819,13 @@ async def agent_events(websocket: WebSocket):
 
 
 class SessionRequest(BaseModel):
-    bootstrap_secret: Optional[str] = None
+    model_config = ConfigDict(extra='forbid')
+    bootstrap_secret: Optional[str] = Field(None, max_length=512)
+
+
+class FriendBetaSessionRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    access_code: str = Field(min_length=1, max_length=128)
 
 
 @app.post('/api/v1/auth/session')
@@ -823,6 +833,13 @@ async def create_session(request: SessionRequest, response: Response):
     # Bearer issuance must never be cached by a browser, proxy, or shared CDN.
     response.headers['Cache-Control'] = 'no-store'
     return issue_session(request.bootstrap_secret)
+
+
+@app.post('/api/v1/auth/friend-beta/session')
+async def create_friend_beta_session(request: FriendBetaSessionRequest, response: Response):
+    """Exchange one operator-issued beta grant; never echo its access code."""
+    response.headers['Cache-Control'] = 'no-store'
+    return issue_friend_beta_session(request.access_code)
 
 
 @app.get('/api/v1/auth/session')
@@ -834,6 +851,8 @@ async def inspect_session(response: Response, principal: Principal = Depends(ver
         'user_id': principal.user_id,
         'scopes': sorted(principal.scopes),
         'expires_at': principal.expires_at,
+        'auth_method': 'friend-beta-access' if principal.access_grant_id else 'operator-bootstrap',
+        'onboarding_required': friend_beta_onboarding_required(principal),
     }
 
 
@@ -950,12 +969,20 @@ async def get_account_profile(principal: Principal = Depends(require_scope('acco
 
 @app.post('/api/v1/account/profile')
 async def post_account_profile(
-    name: Optional[str] = Form(None),
-    email: Optional[str] = Form(None),
-    bio: Optional[str] = Form(None),
-    active_theme: Optional[str] = Form(None),
+    name: Optional[str] = Form(None, max_length=80),
+    email: Optional[str] = Form(None, max_length=254),
+    bio: Optional[str] = Form(None, max_length=1000),
+    active_theme: Optional[str] = Form(None, max_length=64),
     principal: Principal = Depends(require_scope('account'))
 ):
+    if name is not None:
+        name = name.strip()
+        if not name or any(
+            unicodedata.category(character).startswith('C')
+            or unicodedata.category(character) in {'Zl', 'Zp'}
+            for character in name
+        ):
+            raise HTTPException(status_code=422, detail='Display name is invalid.')
     return update_profile(user_id=principal.user_id, name=name, email=email, bio=bio, active_theme=active_theme)
 
 @app.post('/api/v1/account/avatar')

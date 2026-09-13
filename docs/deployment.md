@@ -19,6 +19,7 @@ MAGISTRATE_DB_PATH=/var/lib/magistrate/magistrate.sqlite3
 MAGISTRATE_BOOTSTRAP_SECRET=<operator-generated-secret>
 MAGISTRATE_SECRET_KEY=<generated-fernet-key>
 MAGISTRATE_CORS_ORIGINS=https://magistrate.example
+MAGISTRATE_FRIEND_BETA_ENABLED=false
 OPENAI_API_KEY=<server-side-provider-secret>
 MAGISTRATE_MAGI_MODEL=gpt-4o-mini
 MAGISTRATE_NATIVE_CHAT_ENABLED=true
@@ -37,6 +38,41 @@ The guard requires the environment file to be a service-owned, non-symlink
 regular file with mode `0600`; keep the database directory restrictive as well.
 Rotate the bootstrap and Fernet keys through the approved secret-management
 procedure; never commit them or put them in a frontend build.
+
+## Restricted Friend Beta provisioning
+
+Friend access is default-off and independent of the owner bootstrap credential.
+After the explicit cohort/scope decision in
+[`friend-beta-release-readiness.md`](./friend-beta-release-readiness.md), set
+`MAGISTRATE_FRIEND_BETA_ENABLED=true`, keep provider-native chat enabled, deploy,
+and issue one digest-only grant per person/device with:
+
+```sh
+cd gateway
+PYTHONPATH=. uv run python -m scripts.friend_beta_access issue \
+  --user-id friend-<person>-<device> --ttl-hours 168 \
+  --output /absolute/operator-only/new-access-file.json
+```
+
+The output file must be absolute, new, outside the repository checkout, and
+mode `0600`. A principal can hold only one active grant; revoke it before
+reissue or use a new device principal. Default scopes are
+`read,account,notifications`; command/voice issuance requires the CLI's explicit
+shared-runtime acknowledgement and remains non-isolated. Use `list` for
+content-free metadata and `revoke --grant-id ...` to retire the grant, every
+derived bearer, and that principal's push registration. A successful online
+app logout does the same; after an offline
+logout the operator must revoke the recorded grant id. Setting the feature flag
+false immediately rejects existing friend bearers and excludes friend push
+delivery, but recorded grants should still be revoked for durable retirement.
+Access codes never belong in the
+service environment, deployment logs, Git, or a frontend bundle.
+
+Before device enrollment, run `scripts/smoke_friend_beta.sh` against the public
+HTTPS endpoint with a separate smoke grant. It verifies HTTPS session/health,
+native conversation read, authenticated WSS, and final grant revocation without
+sending a provider prompt. If it fails before revocation, revoke that grant with
+the operator CLI. It is not a physical-device or TestFlight result.
 
 ## Retained Pi semantic captain channel (rollback only)
 

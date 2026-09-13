@@ -9,6 +9,8 @@ on:
       - 'scripts/test_deploy_magistrate.sh'
       - 'scripts/test_deployment_workflow.sh'
       - 'scripts/smoke_magistrate.sh'
+      - 'scripts/smoke_friend_beta.sh'
+      - 'scripts/test_smoke_friend_beta.sh'
       - '.github/workflows/deploy-demo.yml'
       - '.github/workflows/deployment-contract.yml'
   push:
@@ -20,6 +22,8 @@ on:
       - 'scripts/test_deploy_magistrate.sh'
       - 'scripts/test_deployment_workflow.sh'
       - 'scripts/smoke_magistrate.sh'
+      - 'scripts/smoke_friend_beta.sh'
+      - 'scripts/test_smoke_friend_beta.sh'
       - '.github/workflows/deploy-demo.yml'
       - '.github/workflows/deployment-contract.yml'
 
@@ -35,3 +39,5 @@ jobs:
         run: bash scripts/test_deployment_workflow.sh
       - name: Exercise clean fast-forward and refusal safeguards
         run: bash scripts/test_deploy_magistrate.sh
+      - name: Exercise external Friend Beta smoke safeguards
+        run: bash scripts/test_smoke_friend_beta.sh

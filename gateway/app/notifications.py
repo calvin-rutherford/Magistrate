@@ -133,16 +133,60 @@ def revoke_push_token(user_id: str, push_token: Optional[str] = None) -> Dict[st
 
 def get_registered_push_token(user_id: str) -> Optional[Dict[str, Any]]:
     init_notification_db()
+    enabled_value = os.getenv("MAGISTRATE_FRIEND_BETA_ENABLED", "false").strip().lower()
+    friend_enabled = enabled_value in {"1", "true", "yes", "on"}
+    now = int(time.time())
     with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute("SELECT push_token, platform, timezone_offset_minutes FROM push_tokens WHERE user_id=? AND revoked_at IS NULL", (user_id,)).fetchone()
+        row = conn.execute(
+            "SELECT push_token, platform, timezone_offset_minutes FROM push_tokens WHERE user_id=? AND revoked_at IS NULL",
+            (user_id,),
+        ).fetchone()
+        known_grant = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='friend_beta_access_grants'",
+        ).fetchone() and conn.execute(
+            "SELECT 1 FROM friend_beta_access_grants WHERE user_id = ? LIMIT 1", (user_id,),
+        ).fetchone()
+        active_grant = known_grant and friend_enabled and conn.execute(
+            """SELECT 1 FROM friend_beta_access_grants
+               WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? LIMIT 1""",
+            (user_id, now),
+        ).fetchone()
+    if known_grant and not active_grant:
+        return None
     return {"push_token": row[0], "platform": row[1], "timezone_offset_minutes": row[2]} if row else None
 
 
 def list_registered_push_users() -> List[str]:
-    """Return users eligible for the gateway's background reconciler."""
+    """Return users eligible for background delivery, excluding closed grants."""
     init_notification_db()
+    enabled_value = os.getenv("MAGISTRATE_FRIEND_BETA_ENABLED", "false").strip().lower()
+    friend_enabled = enabled_value in {"1", "true", "yes", "on"}
+    now = int(time.time())
     with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute("SELECT user_id FROM push_tokens WHERE revoked_at IS NULL AND push_token != ''").fetchall()
+        has_grants = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='friend_beta_access_grants'",
+        ).fetchone()
+        if not has_grants:
+            rows = conn.execute(
+                "SELECT user_id FROM push_tokens WHERE revoked_at IS NULL AND push_token != ''",
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT p.user_id FROM push_tokens AS p
+                   WHERE p.revoked_at IS NULL AND p.push_token != ''
+                     AND (
+                       NOT EXISTS (
+                         SELECT 1 FROM friend_beta_access_grants AS known
+                         WHERE known.user_id = p.user_id
+                       )
+                       OR (? = 1 AND EXISTS (
+                         SELECT 1 FROM friend_beta_access_grants AS active
+                         WHERE active.user_id = p.user_id
+                           AND active.revoked_at IS NULL AND active.expires_at > ?
+                       ))
+                     )""",
+                (1 if friend_enabled else 0, now),
+            ).fetchall()
     return [str(row[0]) for row in rows]
 
 

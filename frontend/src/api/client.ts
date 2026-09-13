@@ -60,6 +60,11 @@ export interface GatewaySession {
   expiresAt: number;
   scopes: string[];
   userId: string;
+  authMethod?: 'operator-bootstrap' | 'friend-beta-access';
+  onboardingRequired?: boolean;
+  /** Native-only renewal credential; persisted only through SecureStore. */
+  renewalCode?: string;
+  renewableUntil?: number;
 }
 export interface GatewaySessionSnapshot {
   status: GatewaySessionStatus;
@@ -79,8 +84,15 @@ let sessionToken: string | null = null;
 let sessionInfo: GatewaySession | null = null;
 let expiryTimer: ReturnType<typeof setTimeout> | null = null;
 let restorePromise: Promise<GatewaySession | null> | null = null;
+let renewalPromise: Promise<GatewaySession | null> | null = null;
 let invalidationPromise: Promise<void> | null = null;
+let sessionRevision = 0;
+let friendRetirementRevision = 0;
+let sessionStorageMutation: Promise<void> = Promise.resolve();
 let sessionSnapshot: GatewaySessionSnapshot = { status: 'checking', session: null, error: null };
+const ACCOUNT_DISPLAY_NAME_STORAGE_KEY = 'magistrate.account.display-name';
+const FRIEND_BETA_ACCESS_CODE = /^mgb_[A-Za-z0-9_-]{32,64}$/;
+const SAFE_SESSION_TOKEN = /^[A-Za-z0-9_-]{32,64}$/;
 const sessionListeners = new Set<() => void>();
 
 function publish(snapshot: GatewaySessionSnapshot): void {
@@ -112,20 +124,38 @@ const validGatewayScopes = (value: unknown): string[] | null => {
   return new Set(scopes).size === scopes.length ? scopes : null;
 };
 
-function sessionFromPayload(payload: unknown): GatewaySession | null {
+function sessionFromPayload(payload: unknown, allowExpiredAccess = false): GatewaySession | null {
   if (!payload || typeof payload !== 'object') return null;
   const value = payload as Record<string, unknown>;
   const token = typeof value.session_token === 'string' ? value.session_token : typeof value.token === 'string' ? value.token : null;
   const expiresAt = typeof value.expires_at === 'number' ? value.expires_at : null;
   const userId = value.user_id;
   const scopes = validGatewayScopes(value.scopes);
-  if (!token || !token.trim() || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)
-    || !validGatewayUserId(userId) || !scopes) return null;
-  return { token, expiresAt, scopes, userId };
+  const now = Math.floor(Date.now() / 1000);
+  if (!token || !token.trim() || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= 0
+    || (!allowExpiredAccess && expiresAt <= now) || !validGatewayUserId(userId) || !scopes) return null;
+  const authMethod = value.auth_method === 'friend-beta-access' || value.auth_method === 'operator-bootstrap'
+    ? value.auth_method : undefined;
+  const onboardingRequired = value.onboarding_required === true;
+  const renewalCode = typeof value.renewal_code === 'string' ? value.renewal_code : undefined;
+  const renewableUntil = typeof value.renewable_until === 'number' && Number.isSafeInteger(value.renewable_until)
+    ? value.renewable_until : undefined;
+  if (renewalCode && (Platform.OS === 'web' || !FRIEND_BETA_ACCESS_CODE.test(renewalCode)
+    || !renewableUntil || renewableUntil <= now)) return null;
+  if (renewableUntil !== undefined && renewableUntil <= now) return null;
+  return { token, expiresAt, scopes, userId, authMethod, onboardingRequired, renewalCode, renewableUntil };
 }
 
 function storedSessionPayload(session: GatewaySession): Record<string, unknown> {
-  return { token: session.token, expires_at: session.expiresAt, scopes: session.scopes, user_id: session.userId };
+  return {
+    token: session.token,
+    expires_at: session.expiresAt,
+    scopes: session.scopes,
+    user_id: session.userId,
+    ...(session.authMethod ? { auth_method: session.authMethod } : {}),
+    ...(session.onboardingRequired ? { onboarding_required: true } : {}),
+    ...(session.renewalCode ? { renewal_code: session.renewalCode, renewable_until: session.renewableUntil } : {}),
+  };
 }
 
 function clearExpiryTimer(): void {
@@ -136,19 +166,41 @@ function clearExpiryTimer(): void {
 function scheduleExpiry(session: GatewaySession): void {
   clearExpiryTimer();
   const delay = session.expiresAt * 1000 - Date.now();
-  if (delay <= 0) { void invalidateGatewaySession('Your session has expired.'); return; }
+  if (delay <= 0) {
+    if (session.renewalCode && (session.renewableUntil || 0) * 1000 > Date.now()) {
+      void renewGatewaySession(session).catch(() => undefined);
+    }
+    else void invalidateGatewaySession('Your session has expired.');
+    return;
+  }
   // Browsers clamp delays above the signed 32-bit timer limit. Re-arm for
   // distant test/development expiries instead of allowing an immediate wrap.
   expiryTimer = setTimeout(() => {
-    if (sessionInfo?.token === session.token && sessionInfo.expiresAt === session.expiresAt) scheduleExpiry(session);
+    if (sessionInfo?.token !== session.token || sessionInfo.expiresAt !== session.expiresAt) return;
+    if (delay > 2_147_000_000) scheduleExpiry(session);
+    else if (session.renewalCode) void renewGatewaySession(session).catch(() => undefined);
+    else void invalidateGatewaySession('Your session has expired.');
   }, Math.min(delay, 2_147_000_000));
 }
 
-async function persistSession(session: GatewaySession): Promise<void> {
+function mutateSessionStorage(operation: () => Promise<void>): Promise<void> {
+  const mutation = sessionStorageMutation.then(operation, operation);
+  sessionStorageMutation = mutation.catch(() => undefined);
+  return mutation;
+}
+
+async function persistSession(session: GatewaySession, revision: number): Promise<boolean> {
+  if (revision !== sessionRevision) return false;
   sessionToken = session.token;
   sessionInfo = session;
-  await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(session)));
+  await mutateSessionStorage(async () => {
+    if (revision === sessionRevision) {
+      await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(session)));
+    }
+  });
+  if (revision !== sessionRevision || sessionInfo?.token !== session.token) return false;
   scheduleExpiry(session);
+  return true;
 }
 
 function setSessionCandidate(session: GatewaySession): void {
@@ -182,21 +234,106 @@ async function fetchRaw(input: RequestInfo | URL, init: RequestInit = {}): Promi
   catch { throw new GatewayNetworkError(); }
 }
 
-export async function createGatewaySession(bootstrapSecret?: string): Promise<GatewaySession> {
-  const response = await fetchRaw(`${GATEWAY_URL}/auth/session`, {
+export async function createGatewaySession(accessCredential?: string): Promise<GatewaySession> {
+  const revision = ++sessionRevision;
+  const friendAccess = typeof accessCredential === 'string' && accessCredential.startsWith('mgb_');
+  const response = await fetchRaw(`${GATEWAY_URL}/auth/${friendAccess ? 'friend-beta/session' : 'session'}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(bootstrapSecret ? { bootstrap_secret: bootstrapSecret } : {})
+    body: JSON.stringify(friendAccess ? { access_code: accessCredential } : accessCredential ? { bootstrap_secret: accessCredential } : {})
   });
   const payload = await readResponsePayload(response);
   if (!response.ok) throw responseError(response, payload);
   const session = sessionFromPayload(payload);
   if (!session) throw new Error('Gateway returned an invalid session.');
-  await persistSession(session);
+  if (friendAccess) {
+    const value = payload as Record<string, unknown>;
+    if (session.authMethod !== 'friend-beta-access' || typeof value.renewable_until !== 'number'
+      || !Number.isSafeInteger(value.renewable_until) || value.renewable_until <= Math.floor(Date.now() / 1000)) {
+      throw new Error('Gateway returned an invalid Friend Beta session.');
+    }
+    session.renewableUntil = value.renewable_until;
+    // Browsers have no Keychain-equivalent in this app. They retain only the
+    // short bearer; native stores the grant as a renewal credential in
+    // SecureStore and never AsyncStorage.
+    if (Platform.OS !== 'web') session.renewalCode = accessCredential;
+  }
+  if (!(await persistSession(session, revision))) {
+    throw new GatewayAuthError('Session issuance was superseded.');
+  }
   setSessionCandidate(session);
   return session;
 }
 
+async function revokeSupersededFriendSession(token: string): Promise<void> {
+  if (!SAFE_SESSION_TOKEN.test(token)) return;
+  await fetchRaw(`${GATEWAY_URL}/auth/session/revoke`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => undefined);
+}
+
+async function renewGatewaySession(expected: GatewaySession): Promise<GatewaySession | null> {
+  if (renewalPromise) return renewalPromise;
+  if (!expected.renewalCode || !expected.renewableUntil || expected.renewableUntil * 1000 <= Date.now()) {
+    await invalidateGatewaySession('Your Friend Beta access has expired.');
+    return null;
+  }
+  const revision = sessionRevision;
+  const stillCurrent = () => revision === sessionRevision && sessionInfo?.token === expected.token;
+  renewalPromise = (async () => {
+    if (!stillCurrent()) return null;
+    publish({ status: 'checking', session: expected, error: null });
+    let response: Response;
+    try {
+      response = await fetchRaw(`${GATEWAY_URL}/auth/friend-beta/session`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access_code: expected.renewalCode }),
+      });
+    } catch (error) {
+      if (!stillCurrent()) return null;
+      publish({ status: 'authentication-required', session: expected, error: error instanceof Error ? error.message : 'Gateway session could not be renewed.' });
+      throw error;
+    }
+    const payload = await readResponsePayload(response);
+    if (!stillCurrent()) {
+      const stale = sessionFromPayload(payload);
+      if (stale?.authMethod === 'friend-beta-access' && friendRetirementRevision > revision) {
+        await revokeSupersededFriendSession(stale.token);
+      }
+      return null;
+    }
+    if (!response.ok) {
+      if (response.status === 401) {
+        await invalidateGatewaySession('Your Friend Beta access is no longer valid.');
+        throw new GatewayAuthError('Your Friend Beta access is no longer valid.');
+      }
+      publish({ status: 'authentication-required', session: expected, error: responseDetail(payload) || 'Gateway session could not be renewed.' });
+      throw responseError(response, payload);
+    }
+    const renewed = sessionFromPayload(payload);
+    const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+    if (!renewed || renewed.authMethod !== 'friend-beta-access' || renewed.userId !== expected.userId
+      || typeof value.renewable_until !== 'number' || !Number.isSafeInteger(value.renewable_until)
+      || value.renewable_until !== expected.renewableUntil) {
+      await invalidateGatewaySession('The gateway returned an invalid renewed identity.');
+      throw new GatewayAuthError('Gateway returned an invalid Friend Beta renewal response.');
+    }
+    renewed.renewalCode = expected.renewalCode;
+    renewed.renewableUntil = expected.renewableUntil;
+    if (!(await persistSession(renewed, revision))
+      || revision !== sessionRevision || sessionInfo?.token !== renewed.token) {
+      if (friendRetirementRevision > revision) {
+        await revokeSupersededFriendSession(renewed.token);
+      }
+      return null;
+    }
+    setSessionCandidate(renewed);
+    return validateGatewaySession();
+  })().finally(() => { renewalPromise = null; });
+  return renewalPromise;
+}
+
 export async function validateGatewaySession(): Promise<GatewaySession> {
+  const revision = sessionRevision;
   const session = sessionInfo;
   if (!session || (session.expiresAt > 0 && session.expiresAt * 1000 <= Date.now())) {
     await invalidateGatewaySession('Your session has expired.');
@@ -204,6 +341,9 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
   }
   const response = await fetchRaw(`${GATEWAY_URL}/auth/session`, { headers: { Authorization: `Bearer ${session.token}` } });
   const payload = await readResponsePayload(response);
+  if (revision !== sessionRevision || sessionInfo?.token !== session.token) {
+    throw new GatewayAuthError('Session validation was superseded.');
+  }
   if (response.status === 401) {
     await invalidateGatewaySession('Your session is no longer valid.');
     throw new GatewayAuthError('Your session is no longer valid.');
@@ -217,15 +357,49 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
     await invalidateGatewaySession('The gateway returned an invalid session identity.');
     throw new GatewayAuthError('Gateway returned an invalid session validation response.');
   }
-  const validated = { ...session, expiresAt: value.expires_at, scopes: validatedScopes, userId: value.user_id };
+  if (revision !== sessionRevision || sessionInfo?.token !== session.token) {
+    throw new GatewayAuthError('Session validation was superseded.');
+  }
+  const authMethod = value.auth_method === 'friend-beta-access' || value.auth_method === 'operator-bootstrap'
+    ? value.auth_method : session.authMethod;
+  if (session.authMethod && authMethod && session.authMethod !== authMethod) {
+    await invalidateGatewaySession('The gateway returned an invalid session identity.');
+    throw new GatewayAuthError('Gateway returned an invalid session validation response.');
+  }
+  const previousPrincipal = session.userId;
+  const validated: GatewaySession = {
+    ...session,
+    expiresAt: value.expires_at,
+    scopes: validatedScopes,
+    userId: value.user_id,
+    authMethod,
+    onboardingRequired: value.onboarding_required === true,
+  };
   if (serverSession?.token) validated.token = serverSession.token;
   // Principal isolation is established before publishing authenticated state,
   // so protected routes can never mount with another account's in-memory or
-  // persisted conversation cache.
+  // persisted conversation cache. Cosmetic personalization also fails closed
+  // instead of showing the previous account's name.
   await setConversationPrincipal(validated.userId);
+  if (revision !== sessionRevision || sessionInfo?.token !== session.token) {
+    throw new GatewayAuthError('Session validation was superseded.');
+  }
+  if (previousPrincipal !== validated.userId) {
+    await AsyncStorage.removeItem(ACCOUNT_DISPLAY_NAME_STORAGE_KEY).catch(() => undefined);
+  }
+  if (revision !== sessionRevision || sessionInfo?.token !== session.token) {
+    throw new GatewayAuthError('Session validation was superseded.');
+  }
   sessionToken = validated.token;
   sessionInfo = validated;
-  await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(validated))).catch(() => {});
+  await mutateSessionStorage(async () => {
+    if (revision === sessionRevision && sessionInfo?.token === validated.token) {
+      await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(validated)));
+    }
+  }).catch(() => {});
+  if (revision !== sessionRevision || sessionInfo?.token !== validated.token) {
+    throw new GatewayAuthError('Session validation was superseded.');
+  }
   scheduleExpiry(validated);
   publish({ status: 'authenticated', session: validated, error: null });
   return validated;
@@ -235,6 +409,8 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
   if (sessionSnapshot.status === 'authenticated' && sessionInfo) return sessionInfo;
   if (restorePromise) return restorePromise;
   restorePromise = (async () => {
+    if (invalidationPromise) await invalidationPromise;
+    await sessionStorageMutation;
     publish({ status: 'checking', session: sessionInfo, error: null });
     let stored: string | null = null;
     try {
@@ -250,7 +426,7 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
         const parsed = JSON.parse(stored) as Record<string, unknown>;
         const storedPrincipal = validGatewayUserId(parsed.user_id) ? parsed.user_id : null;
         if (storedPrincipal) await setConversationPrincipal(storedPrincipal);
-        candidate = sessionFromPayload({ session_token: parsed.token, expires_at: parsed.expires_at, scopes: parsed.scopes, user_id: parsed.user_id });
+        candidate = sessionFromPayload(parsed, true);
       } catch { candidate = null; }
     }
     if (stored && !candidate) {
@@ -267,11 +443,18 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
     // rather than letting that stale restore attempt reopen the gate.
     if (!candidate && sessionInfo) candidate = sessionInfo;
     if (!candidate) {
-      await setConversationPrincipal(null);
+      await Promise.all([
+        setConversationPrincipal(null),
+        AsyncStorage.removeItem(ACCOUNT_DISPLAY_NAME_STORAGE_KEY).catch(() => undefined),
+      ]);
       publish({ status: 'authentication-required', session: null, error: null });
       return null;
     }
     if (stored) setSessionCandidate(candidate);
+    if (candidate.expiresAt * 1000 <= Date.now() && candidate.renewalCode) {
+      try { return await renewGatewaySession(candidate); }
+      catch { return null; }
+    }
     try { return await validateGatewaySession(); }
     catch (error) {
       if (!(error instanceof GatewayAuthError)) publish({ status: 'authentication-required', session: candidate, error: error instanceof Error ? error.message : 'Gateway session could not be validated.' });
@@ -281,23 +464,35 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
   return restorePromise;
 }
 
-export async function invalidateGatewaySession(message = 'Authentication required'): Promise<void> {
-  if (invalidationPromise) return invalidationPromise;
+export async function invalidateGatewaySession(
+  message = 'Authentication required', retireFriendGrant = false,
+): Promise<void> {
+  if (invalidationPromise) {
+    if (retireFriendGrant) friendRetirementRevision = Math.max(friendRetirementRevision, sessionRevision);
+    return invalidationPromise;
+  }
+  sessionRevision += 1;
+  if (retireFriendGrant) friendRetirementRevision = sessionRevision;
+  sessionToken = null;
+  sessionInfo = null;
+  clearExpiryTimer();
+  publish({ status: 'authentication-required', session: null, error: message });
   invalidationPromise = (async () => {
-    sessionToken = null;
-    sessionInfo = null;
-    clearExpiryTimer();
     await Promise.all([
-      clearGatewaySessionPayload().catch(() => {}),
+      mutateSessionStorage(() => clearGatewaySessionPayload()).catch(() => {}),
+      AsyncStorage.removeItem(ACCOUNT_DISPLAY_NAME_STORAGE_KEY).catch(() => {}),
       setConversationPrincipal(null).catch(() => {}),
     ]);
-    publish({ status: 'authentication-required', session: null, error: message });
   })().finally(() => { invalidationPromise = null; });
   return invalidationPromise;
 }
 
 export async function logoutGatewaySession(): Promise<void> {
   const token = sessionToken;
+  // Close protected UI and cancel any in-flight renewal before waiting on the
+  // network. A renewal that has already minted a bearer detects the revision
+  // change and retires that superseded grant instead of reopening the app.
+  const localLogout = invalidateGatewaySession('You have been signed out.', true);
   if (token) {
     try {
       // Revoke the device's server-side delivery registration before ending
@@ -308,7 +503,7 @@ export async function logoutGatewaySession(): Promise<void> {
       await fetchRaw(`${GATEWAY_URL}/auth/session/revoke`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
     } catch { /* Local logout must complete even if the gateway is unavailable. */ }
   }
-  await invalidateGatewaySession('You have been signed out.');
+  await localLogout;
 }
 
 export async function clearGatewaySession(): Promise<void> {
@@ -316,8 +511,15 @@ export async function clearGatewaySession(): Promise<void> {
 }
 
 export async function getGatewaySessionToken(): Promise<string | null> {
+  if (renewalPromise) {
+    try { return (await renewalPromise)?.token || null; } catch { return null; }
+  }
   if (!sessionToken || sessionSnapshot.status !== 'authenticated') return null;
   if (sessionInfo && sessionInfo.expiresAt * 1000 <= Date.now()) {
+    if (sessionInfo.renewalCode) {
+      try { return (await renewGatewaySession(sessionInfo))?.token || null; }
+      catch { return null; }
+    }
     await invalidateGatewaySession('Your session has expired.');
     return null;
   }
@@ -1008,7 +1210,7 @@ export async function fetchRecentActivity(limit = 20): Promise<RecentActivityFee
   return data;
 }
 
-export const ACCOUNT_DISPLAY_NAME_KEY = 'magistrate.account.display-name';
+export const ACCOUNT_DISPLAY_NAME_KEY = ACCOUNT_DISPLAY_NAME_STORAGE_KEY;
 
 export async function fetchUserProfile(): Promise<UserProfile> {
   const res = await authorizedFetch(GATEWAY_URL + '/account/profile', {
@@ -1029,7 +1231,9 @@ export async function updateUserProfile(profile: Partial<UserProfile>): Promise<
   const res = await authorizedFetch(GATEWAY_URL + '/account/profile', {
     method: 'POST', body: formData
   });
-  return checkedJson<UserProfile>(res);
+  const updated = await checkedJson<UserProfile>(res);
+  try { await AsyncStorage.setItem(ACCOUNT_DISPLAY_NAME_KEY, updated.name || ''); } catch { /* personalization is optional */ }
+  return updated;
 }
 
 export const CHAT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;

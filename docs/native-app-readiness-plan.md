@@ -1,26 +1,43 @@
 # Magistrate native iPhone readiness plan
 
-**Audit point:** `8d3cb38` (`origin/main`, 2026-08-30)
+**Historical audit point:** `8d3cb38` (`origin/main`, 2026-08-30)
 
-> **Deskless Operator Alpha update:** The current implementation slice is
-> documented in [`deskless-operator-alpha.md`](./deskless-operator-alpha.md).
-> It establishes the owner foundation (EAS configuration seam, native secure
-> session storage, versioned pending intents, and explicit push registration)
-> without claiming an EAS project link, signed build, physical iPhone result,
-> native App Intent, Action Button, or APNs delivery. This document's inventory
-> below is the historical baseline used to scope that slice; re-run the stated
-> checks before treating any older absence as current state.
+> **Current implementation:** The owner foundation is documented in
+> [`deskless-operator-alpha.md`](./deskless-operator-alpha.md), and the subsequent
+> invited-account/distribution gate is
+> [`friend-beta-release-readiness.md`](./friend-beta-release-readiness.md). The
+> repository now has an EAS project link, native secure session storage,
+> per-person beta access grants/profile onboarding, pending intents, explicit
+> push registration, release preflight, and external HTTPS/WSS smoke support.
+> A finished internal iOS preview artifact for baseline `564478a` is recorded in
+> the current release gate; it was not inspected or installed and does not cover
+> the current Friend Beta changes. No TestFlight install, physical iPhone result,
+> native App Intent/Action Button, or APNs delivery is claimed. The inventory below is the
+> historical baseline used to scope those slices; use the current readiness
+> gate rather than treating an older absence as current state.
 
 **Scope:** Expo/React Native client, active FastAPI gateway path, deployment and CI.
-**Evidence rule:** No native build, TestFlight install, Siri invocation, Action Button invocation, push delivery, Bluetooth route, or physical-device behavior was claimed or observed. This is a plan, not an implementation.
+**Evidence rule at that audit point:** no native build, TestFlight install, Siri
+invocation, Action Button invocation, push delivery, Bluetooth route, or
+physical-device behavior was claimed or observed. The banner above records
+later repository work and baseline EAS metadata; neither is device acceptance.
 
 ## Executive decision
 
-The smallest credible beta is a **restricted, single-operator deployment**: the iPhone talks only to an HTTPS gateway on the deployment host; the gateway alone reaches the local Herdr socket and Firstmate. Keep the runner and GitHub/provider credentials off testers' devices. Use EAS development builds for the owner and a TestFlight build for invited testers. Make native Voice Mode foreground-only for the first beta. Treat server-driven push and exact notification targets as required beta slices; treat true continuous background listening, streaming speech, automatic barge-in, and multi-user/isolated execution as later work unless the physical acceptance gate makes them mandatory.
+The smallest credible beta is a **restricted, single-operator deployment**:
+the iPhone talks only to an HTTPS/WSS Gateway; provider-native Magi owns normal
+chat, while private Herdr/Firstmate remains behind fleet/compatibility surfaces.
+Keep runner and provider credentials off tester devices. Use a physical EAS
+build for the owner and TestFlight for invited testers. Voice remains
+foreground-only; streaming speech and multi-tenant execution remain later work.
 
-A shared bootstrap secret and `default_user` are not a safe multi-user product. For a friends cohort, either (a) restrict access to trusted observers with `read`/`notifications` scopes and no command/voice scope, or (b) explicitly accept a trusted shared operator account for a very small cohort and document that it is not tenant isolation. The recommended beta is (a); a product owner must decide whether friends need command/voice access before implementation.
+A shared bootstrap secret and `default_user` are not a safe friends model. The
+implemented restricted grant creates distinct principals, but `read` still sees
+one shared deployment and `command`/`voice` still reaches its shared runtime.
+The current release gate therefore requires an explicit observer-only versus
+shared-runtime decision; it does not claim tenant isolation.
 
-## What exists now
+## Historical repository inventory at the audit point (superseded)
 
 ### Expo/EAS/native surface
 
@@ -70,7 +87,7 @@ A shared bootstrap secret and `default_user` are not a safe multi-user product. 
 - `docs/deployment.md` documents a persistent deployment checkout, fail-closed production settings, absolute external SQLite state, and a guarded fast-forward deploy. `FM_HOME` and the default Herdr socket are local host concerns. The deployment workflow and deploy script still use host-local/plain HTTP health probes; those are not an iPhone production endpoint.
 - There is no authenticated remote runner protocol, Tailscale ACL contract, Postgres/Redis deployment, or multi-tenant execution boundary in this repository. For a restricted beta, co-locate gateway and Herdr on the private runner and expose only the gateway through a TLS reverse proxy. Do not put a Tailscale address, Unix socket, runner credential, or provider secret in the app. A separate runner with mTLS/service identity and per-tenant routing is future production work.
 
-## Smallest implementation slices
+## Historical implementation slices (status is superseded by the current gate)
 
 1. **Choose and document the beta boundary.** Use one operator-owned gateway/runner. Prefer observer sessions with `read,notifications`; if chat/voice is required, explicitly accept trusted shared execution and limit the cohort. Keep SQLite on an absolute persistent path for this beta. Do not call this multi-user.
 2. **Create a real EAS project and device build path.** Install/pin EAS CLI in the release procedure, authenticate the Expo account, run the project link/init to obtain `owner`/`extra.eas.projectId`, add `expo-dev-client`, and change the development profile from simulator-only to a physical-device development build. Configure EAS environment `EXPO_PUBLIC_GATEWAY_URL=https://<gateway-host>/api/v1` for native builds; do not embed any secret. Build and install an EAS development build on one physical iPhone, then build an internal preview. Use TestFlight production distribution for friends rather than ad hoc UDID distribution unless the cohort is strictly device-registered.
@@ -93,7 +110,7 @@ A shared bootstrap secret and `default_user` are not a safe multi-user product. 
 
 | Area | Restricted friend beta | Future multi-user production |
 |---|---|---|
-| Identity | One operator deployment; unique short-lived session; trusted invite/observer scope | OIDC/invite accounts, refresh/revocation, device/session management, tenant authorization |
+| Identity | One operator deployment; per-principal digest-only grant and short bearer; trusted observer/shared-runtime decision | OIDC/invite accounts, recovery, device/session management, tenant authorization |
 | Runner | Gateway co-located with one private Herdr/Firstmate runner | Per-tenant isolated runner or authenticated runner service with mTLS/ACLs |
 | Data | Persistent external SQLite with backup and one operator profile | Managed Postgres, migrations, shared event/queue infrastructure, retention/audit policy |
 | Push | Expo Push Service, device rows, actionable Attention/PR events, explicit fallback | Multi-device fanout, receipts, token lifecycle, per-user preferences and event workers |
@@ -118,7 +135,7 @@ Record device model, iOS version, build number, gateway revision, network, times
 | Deep links | `/voice?autostart`; `/attention?item`; `/chat?agentId`; `/pr-detail?number`; cold launch while unauthenticated | Exact route/target preserved through auth; voice starts only after permission/session is ready; invalid targets show safe fallback |
 | Security | Inspect archive/bundle; inspect logs; test missing/expired/revoked/insufficient scopes; attempt query-token auth; provider callback replay | No bootstrap/session/provider/runner secret in bundle or logs; query-only credentials rejected; callback state one-use and principal-bound |
 
-## Current validation evidence and blockers
+## Validation evidence and blockers recorded at the historical audit point
 
 - `cd frontend && npx tsc --noEmit`: passed.
 - `cd frontend && npm test`: passed, 63 hermetic tests across agent status, ambient, history, voice, auth, chat, shell, home, GitHub, and notifications.
@@ -127,4 +144,9 @@ Record device model, iOS version, build number, gateway revision, network, times
 - Deployment contract is covered by `scripts/test_deploy_magistrate.sh`; the deployment workflow verifies plain host HTTP reachability, not an authenticated external HTTPS/WSS client path.
 - Blocking evidence gaps are the absent EAS project/CLI/build, absent physical-device host tooling, absent SecureStore, absent native push registration/server delivery worker, absent exact native target router, absent App Intent/Action Button implementation, and absent physical audio/network/background acceptance. These are not resolved by the passing web/gateway suites.
 
-**Recommended gate order:** decide beta identity/scope → produce EAS physical build → secure session storage → HTTPS/WSS external smoke → push registration/delivery/target routing → foreground voice/audio and deep-link tests → App Shortcut/Siri/Action Button proof → full matrix → only then invite 3–5 testers. Do not describe the app as a native friend beta before those gates have evidence.
+That audit recommended: identity/scope → physical build → secure storage →
+HTTPS/WSS smoke → push/target routing → foreground voice/device tests → optional
+App Shortcut work → full matrix. Several repository slices are now complete,
+but the external/device gates are not. Follow
+[`friend-beta-release-readiness.md`](./friend-beta-release-readiness.md) for the
+current ordered verdict, and do not invite testers until it closes.

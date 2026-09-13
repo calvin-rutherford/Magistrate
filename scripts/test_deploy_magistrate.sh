@@ -176,6 +176,20 @@ sed -i '/^OPENAI_API_KEY=/d' "$DEPLOY/gateway/.env"
 git -C "$DEPLOY" add gateway/.env
 git -C "$DEPLOY" commit -m restore-legacy-test-mode >/dev/null
 
+# Friend Beta issuance is an explicit release mode and cannot be paired with
+# the terminal-backed captain rollback transport.
+printf 'MAGISTRATE_FRIEND_BETA_ENABLED=true\n' >> "$DEPLOY/gateway/.env"
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m invalid-friend-beta-legacy-mode >/dev/null
+if FRIEND_LEGACY_OUTPUT="$(run_update 2>&1)"; then
+  echo 'Friend Beta deployment with legacy chat was not rejected' >&2
+  exit 1
+fi
+grep -Fq 'Friend Beta access requires provider-native Magi chat' <<<"$FRIEND_LEGACY_OUTPUT"
+sed -i 's/MAGISTRATE_FRIEND_BETA_ENABLED=true/MAGISTRATE_FRIEND_BETA_ENABLED=false/' "$DEPLOY/gateway/.env"
+git -C "$DEPLOY" add gateway/.env
+git -C "$DEPLOY" commit -m disable-friend-beta-test-mode >/dev/null
+
 # A connection refusal must be retried, then fail with bounded diagnostics if
 # the service never recovers. The synthetic secret must not enter the output.
 cat > "$STUBS/curl" <<'EOF'
