@@ -362,8 +362,8 @@ async def _reconcile_registered_notifications() -> None:
     while True:
         await asyncio.sleep(interval)
         try:
-            items = await attention_service.get_unified_attention_items()
             for user_id in list_registered_push_users():
+                items = await attention_service.get_unified_attention_items(user_id)
                 await dispatch_notification_events(user_id, items, local_hour=registered_local_hour(user_id))
         except asyncio.CancelledError:
             raise
@@ -1210,7 +1210,7 @@ async def get_teams_mentions(principal: Principal = Depends(require_scope('provi
 # UNIFIED ATTENTION ENDPOINT
 @app.get('/api/v1/attention/unified')
 async def get_unified_attention(principal: Principal = Depends(require_scope('read'))):
-    return await attention_service.get_unified_attention_items()
+    return await attention_service.get_unified_attention_items(principal.user_id)
 
 
 def _require_owner(principal: Principal) -> None:
@@ -1233,7 +1233,7 @@ async def prepare_attention_action(action_key: str, contract: AttentionActionCon
     if contract.action_key != action_key:
         raise HTTPException(status_code=409, detail={'code': 'mismatch', 'message': 'The action key in the request does not match the route.'})
     try:
-        items = await attention_service.get_unified_attention_items()
+        items = await attention_service.get_unified_attention_items(principal.user_id)
         return prepare_confirmation(items, action_key, contract.action, contract.target_id, principal.user_id, principal.session_id)
     except AttentionActionError as exc:
         raise _action_error(exc) from exc
@@ -1245,7 +1245,7 @@ async def execute_attention_action(action_key: str, contract: AttentionActionExe
     if contract.action_key != action_key:
         raise HTTPException(status_code=409, detail={'code': 'mismatch', 'message': 'The action key in the request does not match the route.'})
     try:
-        items = await attention_service.get_unified_attention_items()
+        items = await attention_service.get_unified_attention_items(principal.user_id)
         return await execute_confirmation(
             items, action_key, contract.action, contract.target_id, contract.confirmation_token,
             principal.user_id, principal.session_id, fm_client.fm_home,
@@ -1260,7 +1260,7 @@ async def get_attention_action_for_item(item_id: str, principal: Principal = Dep
     existing = outcome_for_item(item_id, principal.user_id)
     if existing:
         return _public_outcome(existing)
-    items = await attention_service.get_unified_attention_items()
+    items = await attention_service.get_unified_attention_items(principal.user_id)
     for item in items:
         if item.get('id') == item_id:
             action = action_for_item(item)
@@ -1276,7 +1276,7 @@ async def get_attention_action(action_key: str, principal: Principal = Depends(r
     existing = _outcome_row(action_key, principal.user_id)
     if existing:
         return _public_outcome(existing)
-    items = await attention_service.get_unified_attention_items()
+    items = await attention_service.get_unified_attention_items(principal.user_id)
     for item in items:
         action = action_for_item(item)
         if action and action['action_key'] == action_key:
@@ -1337,7 +1337,7 @@ async def get_notification_events(
     # must never consume a transition before the gateway has sent the remote
     # push; web clients still receive the returned feed for browser fallback.
     del foreground
-    items = await attention_service.get_unified_attention_items()
+    items = await attention_service.get_unified_attention_items(principal.user_id)
     return await dispatch_notification_events(principal.user_id, items, local_hour=local_hour)
 
 @app.post('/api/v1/notifications/events/delivered')
@@ -1672,7 +1672,7 @@ async def report_agent_migration_transition(agent_id: str, request_id: str, cont
 
 @app.get('/api/v1/attention')
 async def get_attention(principal: Principal = Depends(require_scope('read'))):
-    return await attention_service.get_unified_attention_items()
+    return await attention_service.get_unified_attention_items(principal.user_id)
 
 @app.get('/api/v1/captain/output')
 async def get_captain_output(

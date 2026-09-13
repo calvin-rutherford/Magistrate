@@ -111,7 +111,7 @@ def test_destructive_or_security_sensitive_decisions_are_not_actionable(monkeypa
 def test_gateway_requires_authenticated_command_owner_and_prepares_confirmation(monkeypatch):
     item = decision_item()
 
-    async def live_items():
+    async def live_items(_owner_user_id=None):
         return [item]
 
     monkeypatch.setattr(main.attention_service, 'get_unified_attention_items', live_items)
@@ -151,7 +151,7 @@ def test_gateway_requires_authenticated_command_owner_and_prepares_confirmation(
     assert calls == [('task-1', 'approve')]
     # A resolved source may disappear on the next snapshot; the durable
     # outcome still makes the exact retry idempotent rather than re-executing.
-    monkeypatch.setattr(main.attention_service, 'get_unified_attention_items', lambda: _empty_items())
+    monkeypatch.setattr(main.attention_service, 'get_unified_attention_items', lambda _owner_user_id=None: _empty_items())
     replay = client.post(
         f"/api/v1/attention/actions/{item['action']['action_key']}/execute",
         headers=TEST_HEADERS,

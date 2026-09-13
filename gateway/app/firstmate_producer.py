@@ -92,6 +92,8 @@ def _load_pin() -> ProducerPin:
         artifacts.append(ProducerArtifact(path, digest, size, executable))
     required = {
         'bin/fm-captain-event.sh', 'bin/fm-fleet-snapshot.sh', 'bin/fm-spawn.sh',
+        'bin/fm-captain-hold.sh', 'bin/fm-classify-lib.sh', 'bin/fm-tasks-axi-lib.sh',
+        'bin/fm-backlog-transition-lib.sh', 'bin/fm-wake-lib.sh', 'bin/fm-parent-channel-lib.sh',
         '.pi/extensions/fm-captain-event.ts', '.pi/extensions/lib/fm-captain-event.ts',
     }
     if seen != required:

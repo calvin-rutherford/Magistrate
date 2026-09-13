@@ -9,7 +9,7 @@ Magistrate consumes `fm-captain-event.v1` as source-native canonical activity. I
 - source: `https://github.com/calvin-rutherford/firstmate.git`
 - commit: `2af0d17014cb2e244aa441bfe6df16c4f630475b`
 - tree: `146c55db1fd4d9cb2edf38d384b4d2362d2041e3`
-- reviewed producer, snapshot, spawn, and Pi extension artifact hashes
+- reviewed producer, snapshot, spawn, captain-hold answer command and sourced-library, and Pi extension artifact hashes
 
 The installer fetches the locked commit directly from that single source, checks the Git tree/source/cleanliness and every runtime artifact, and only then renames the staged checkout into place. It never edits or treats `FM_HOME` as code. A failed install leaves the prior root and activation untouched.
 
