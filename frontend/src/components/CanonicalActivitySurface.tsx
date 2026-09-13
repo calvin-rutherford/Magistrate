@@ -28,6 +28,9 @@ const kindLabel = (record: CanonicalActivityRecord): string => {
   if (record.kind.startsWith('objective.')) return 'Objective';
   if (record.kind.startsWith('decision.')) return 'Decision';
   if (record.kind.startsWith('worker.')) return 'Worker operation';
+  if (record.kind.startsWith('implementation.')) return 'Implementation';
+  if (record.kind.startsWith('tests.')) return 'Verification';
+  if (record.kind.startsWith('review.')) return 'Review';
   if (record.kind.startsWith('primary.')) return 'Magi operation';
   return 'Supervision';
 };

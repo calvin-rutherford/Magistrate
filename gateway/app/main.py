@@ -73,6 +73,10 @@ from app.pi_ownership import (
 from app.magi_chat_api import (magi_chat_service, router as magi_chat_router,
                                validate_magi_chat_configuration)
 from app.magi_chat_store import MagiChatStore, record_compatibility_read
+from app.firstmate_execution import MAX_FIRSTMATE_EXECUTION_EVENT_BYTES
+from app.firstmate_execution_api import (
+    firstmate_execution_service, router as firstmate_execution_router,
+)
 
 init_db()
 
@@ -112,6 +116,7 @@ os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
 app.include_router(ar_router)
 app.include_router(magi_chat_router)
+app.include_router(firstmate_execution_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -132,8 +137,15 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
     if request.url.path in {'/api/v1/captain/prompt', '/api/v1/magi/messages'} and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
+    firstmate_execution_contract = request.method == 'POST' and bool(re.fullmatch(
+        r'/api/v1/firstmate/execution-events(?:/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/wake)?',
+        request.url.path,
+    ))
+    if firstmate_execution_contract and length > MAX_FIRSTMATE_EXECUTION_EVENT_BYTES:
+        return JSONResponse({'detail': 'The Firstmate execution event is too large.'}, status_code=413)
     bounded_contract_path = request.method == 'POST' and (
         request.url.path == '/api/v1/activity/catch-up'
+        or firstmate_execution_contract
         or bool(re.fullmatch(
             r'/api/v1/conversations/[^/]+/(?:events|turns/[^/]+/assistant-messages)',
             request.url.path,
@@ -147,12 +159,21 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'The semantic response request is too large.'}, status_code=413)
     if bounded_contract_path:
         # Content-Length is an early rejection aid, not authority: a peer can
-        # lie or send a differently framed body. Buffer only through the hard
-        # contract cap and let Starlette reuse the verified cached bytes.
+        # lie or send a differently framed body. Buffer only through this
+        # contract's hard cap and let Starlette reuse the verified cached bytes.
+        body_cap = (
+            MAX_FIRSTMATE_EXECUTION_EVENT_BYTES
+            if firstmate_execution_contract else MAGI_MAX_RESPONSE_BYTES
+        )
         body = bytearray()
         async for chunk in request.stream():
-            if len(body) + len(chunk) > MAGI_MAX_RESPONSE_BYTES:
-                return JSONResponse({'detail': 'The semantic response request is too large.'}, status_code=413)
+            if len(body) + len(chunk) > body_cap:
+                detail = (
+                    'The Firstmate execution event is too large.'
+                    if firstmate_execution_contract
+                    else 'The semantic response request is too large.'
+                )
+                return JSONResponse({'detail': detail}, status_code=413)
             body.extend(chunk)
         request._body = bytes(body)
     return await call_next(request)
@@ -413,6 +434,10 @@ async def start_notification_reconciler():
         # A process cannot resume an in-flight provider socket. Preserve the
         # reserved pair and expose a truthful, explicitly retryable failure.
         await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
+        # Completion evidence is durable independently of its generated Chat
+        # report. Requeue interrupted report claims only after native pending
+        # rows have acquired their truthful server-restart failure state.
+        await firstmate_execution_service.recover_pending()
     # Native normal chat must not initialize its retained Pi/Firstmate captain
     # transport. Those trust checks run only in explicit legacy rollback mode.
     pi_enabled = legacy_enabled and _validate_pi_ownership_startup()

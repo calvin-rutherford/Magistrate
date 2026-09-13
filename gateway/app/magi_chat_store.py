@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -39,6 +40,17 @@ class MagiChatConflict(RuntimeError):
 class PreparedSubmission:
     conversation_id: str
     user_message_id: str
+    assistant_message_id: str
+    turn_id: str
+    attempt: int
+    claimed: bool
+    duplicate: bool
+    status: str
+
+
+@dataclass(frozen=True)
+class PreparedGeneratedMessage:
+    conversation_id: str
     assistant_message_id: str
     turn_id: str
     attempt: int
@@ -281,6 +293,26 @@ def _submission_rows(connection: sqlite3.Connection, owner_user_id: str, client_
     return user, assistant
 
 
+def _generated_row(
+    connection: sqlite3.Connection, owner_user_id: str, generation_key: str,
+) -> tuple[sqlite3.Row, sqlite3.Row] | None:
+    binding = connection.execute(
+        """SELECT * FROM magi_generated_messages
+           WHERE owner_user_id = ? AND generation_key = ?""",
+        (owner_user_id, generation_key),
+    ).fetchone()
+    if binding is None:
+        return None
+    message = connection.execute(
+        """SELECT * FROM magi_messages
+           WHERE id = ? AND owner_user_id = ? AND role = 'assistant'""",
+        (binding["message_id"], owner_user_id),
+    ).fetchone()
+    if message is None:
+        raise MagiChatConflict("Generated native Magi binding has no canonical assistant message.")
+    return binding, message
+
+
 class MagiChatStore:
     """Transactional native conversation store with concurrent idempotency."""
 
@@ -406,6 +438,160 @@ class MagiChatStore:
             raise
         finally:
             connection.close()
+
+    def prepare_generated_assistant(
+        self,
+        owner_user_id: str,
+        generation_key: str,
+        facts_sha256: str,
+        *,
+        conversation_id: str,
+        reply_to_message_id: str,
+        retry_failed: bool = False,
+    ) -> PreparedGeneratedMessage:
+        """Reserve one assistant-only native row for a verified external fact.
+
+        The source fact has its own idempotency identity, so this path must not
+        mint a synthetic user row or reuse a client submission id. The reply
+        edge binds the generated update to the owner-scoped user message that
+        originally delegated the objective.
+        """
+        if (
+            not isinstance(generation_key, str)
+            or not re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$", generation_key)
+            or not isinstance(facts_sha256, str)
+            or not re.fullmatch(r"^[0-9a-f]{64}$", facts_sha256)
+            or type(retry_failed) is not bool
+        ):
+            raise ValueError("Generated native Magi identity is invalid.")
+        connection = _connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            conversation = _conversation_row(connection, owner_user_id, conversation_id)
+            origin = connection.execute(
+                """SELECT * FROM magi_messages
+                   WHERE id = ? AND owner_user_id = ? AND conversation_id = ?
+                     AND role = 'user' AND status = 'completed'""",
+                (reply_to_message_id, owner_user_id, conversation_id),
+            ).fetchone()
+            if origin is None:
+                # Do not reveal whether another principal owns either id.
+                raise MagiChatNotFound("Native Magi completion origin not found.")
+            existing = _generated_row(connection, owner_user_id, generation_key)
+            if existing is not None:
+                binding, assistant = existing
+                if (
+                    binding["facts_sha256"] != facts_sha256
+                    or binding["conversation_id"] != conversation_id
+                    or binding["reply_to_message_id"] != reply_to_message_id
+                    or assistant["conversation_id"] != conversation_id
+                    or assistant["reply_to_message_id"] != reply_to_message_id
+                    or assistant["source"] != "magi-native"
+                ):
+                    raise MagiChatConflict(
+                        "That generated message identity is already bound to different facts."
+                    )
+                claimed = False
+                if retry_failed and assistant["status"] == "failed":
+                    now = _now_ms()
+                    changed = connection.execute(
+                        """UPDATE magi_messages
+                           SET status = 'pending', content = '', error_code = NULL,
+                               attempt_count = attempt_count + 1,
+                               revision = revision + 1, updated_at = ?
+                           WHERE id = ? AND owner_user_id = ? AND status = 'failed'""",
+                        (now, assistant["id"], owner_user_id),
+                    ).rowcount
+                    if changed:
+                        assistant = connection.execute(
+                            "SELECT * FROM magi_messages WHERE id = ?", (assistant["id"],),
+                        ).fetchone()
+                        _append_change(
+                            connection, conversation_id, assistant["id"], assistant["revision"], now,
+                        )
+                        _increment_diagnostics(connection, owner_user_id, magi_retries=1)
+                        claimed = True
+                connection.commit()
+                return PreparedGeneratedMessage(
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant["id"],
+                    turn_id=assistant["turn_id"],
+                    attempt=assistant["attempt_count"],
+                    claimed=claimed,
+                    duplicate=True,
+                    status=assistant["status"],
+                )
+
+            now = _now_ms()
+            maximum = connection.execute(
+                "SELECT COALESCE(MAX(sequence_index), -1) FROM magi_messages WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()[0]
+            turn_id = _new_id("mgt")
+            assistant_id = _new_id("mgm")
+            connection.execute(
+                """INSERT INTO magi_messages
+                   (id, conversation_id, owner_user_id, turn_id, role, content, status, source,
+                    client_message_id, reply_to_message_id, attachments_json, sequence_index,
+                    revision, attempt_count, error_code, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'assistant', '', 'pending', 'magi-native',
+                           NULL, ?, '[]', ?, 1, 1, NULL, ?, ?)""",
+                (
+                    assistant_id, conversation_id, owner_user_id, turn_id,
+                    reply_to_message_id, int(maximum) + 1, now, now,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO magi_generated_messages
+                   (owner_user_id, generation_key, facts_sha256, conversation_id,
+                    reply_to_message_id, message_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    owner_user_id, generation_key, facts_sha256, conversation_id,
+                    reply_to_message_id, assistant_id, now,
+                ),
+            )
+            connection.execute(
+                "UPDATE magi_conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
+            _append_change(connection, conversation_id, assistant_id, 1, now)
+            _increment_diagnostics(connection, owner_user_id, magi_messages_submitted=1)
+            connection.commit()
+            return PreparedGeneratedMessage(
+                conversation_id=conversation_id,
+                assistant_message_id=assistant_id,
+                turn_id=turn_id,
+                attempt=1,
+                claimed=True,
+                duplicate=False,
+                status="pending",
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def generated_assistant(
+        self, owner_user_id: str, generation_key: str,
+    ) -> dict[str, Any]:
+        with _connect() as connection:
+            existing = _generated_row(connection, owner_user_id, generation_key)
+            if existing is None:
+                raise MagiChatNotFound("Generated native Magi message not found.")
+            _, assistant = existing
+            conversation = _conversation_row(
+                connection, owner_user_id, assistant["conversation_id"],
+            )
+        return {
+            "schema_version": MAGI_NATIVE_SCHEMA,
+            "status": assistant["status"],
+            "conversation": _public_conversation(conversation),
+            "conversation_id": conversation["id"],
+            "assistant_message": _public_message(assistant),
+            "messages": [_public_message(assistant)],
+        }
 
     def context_before(
         self,
