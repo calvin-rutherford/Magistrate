@@ -203,13 +203,12 @@ function ThinkingIndicator({ dark }: { dark: boolean }) {
  */
 function WorkingState({ dark, muted, operations, phase, onPress }: {
   dark: boolean; muted: string; operations: number;
-  phase: 'active' | 'awaiting-user' | 'recovering' | 'observability-interrupted';
+  phase: 'active' | 'awaiting-user' | 'recovering';
   onPress: () => void;
 }) {
   const prefix = phase === 'awaiting-user' ? 'Magi is awaiting you'
     : phase === 'recovering' ? 'Magi is recovering'
-      : phase === 'observability-interrupted' ? 'Magi observability interrupted'
-        : 'Magi is working';
+      : 'Magi is working';
   const label = `${prefix}${operations ? ` · ${operations} operation${operations === 1 ? '' : 's'}` : ''}`;
   return <TouchableOpacity
     testID="agent-thinking-message"
@@ -460,12 +459,13 @@ export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawer
   }, []);
   // Only Gateway-issued message/activity identities can drive this status.
   // Local send promises still control composer affordances, never lifecycle UI.
-  const canonicalWork = useMemo(() => {
-    const derived = deriveCanonicalWorkState(canonicalActivity, messages);
-    return canonicalTarget && conversationSync.status === 'stale' && derived.active
-      ? { ...derived, phase: 'observability-interrupted' as const }
-      : derived;
-  }, [canonicalActivity, canonicalTarget, conversationSync.status, messages]);
+  // Activity recovery is an optional operator surface. It must never
+  // reclassify the canonical conversation or an active provider turn as an
+  // interruption, including while the conversation read is reconnecting.
+  const canonicalWork = useMemo(
+    () => deriveCanonicalWorkState(canonicalActivity, messages),
+    [canonicalActivity, messages],
+  );
 
   const cancelLatestScroll = () => {
     pendingLatestScrollRef.current = false;

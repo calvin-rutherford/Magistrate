@@ -71,7 +71,11 @@ function installNativeGatewayMock() {
         has_more: false, next_before: null, latest_change: messages.length + 1,
       };
       localStorage.setItem('native-chat-browser-record', JSON.stringify(record));
-      return json({ ...record, messages: messages.slice(-2) });
+      const response = { ...record, messages: messages.slice(-2) };
+      if (localStorage.getItem('native-chat-delay-post') === '1') {
+        return new Promise(resolve => setTimeout(() => { void json(response).then(resolve); }, 1_200));
+      }
+      return json(response);
     }
     if (url.includes('/api/v1/voice/transcribe')) return json({ text: 'Native voice message', is_final: true });
     if (url.includes('/api/v1/captain/prompt') || url.includes('/api/v1/conversations/captain')
@@ -79,17 +83,23 @@ function installNativeGatewayMock() {
       increment('native-chat-forbidden-count');
       return json({ detail: 'legacy chat must not be called' }, 500);
     }
-    if (url.includes('/api/v1/activity/snapshot')) return json({
-      schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
-      snapshot_cursor: 0, latest_sequence: 0, next_before: null, has_more: false,
-      summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
-      reconciliation: 'available', sources: [],
-    });
-    if (url.includes('/api/v1/activity')) return json({
+    if (url.includes('/api/v1/activity/snapshot')) {
+      if (localStorage.getItem('native-chat-activity-unavailable') === '1') return Promise.reject(new TypeError('Activity service unavailable.'));
+      return json({
+        schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
+        snapshot_cursor: 0, latest_sequence: 0, next_before: null, has_more: false,
+        summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
+        reconciliation: 'available', sources: [],
+      });
+    }
+    if (url.includes('/api/v1/activity')) {
+      if (localStorage.getItem('native-chat-activity-unavailable') === '1') return Promise.reject(new TypeError('Activity service unavailable.'));
+      return json({
       schema_version: 'activity.v1', records: [], next_cursor: 0, latest_cursor: 0,
       has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
       reconciliation: 'not-requested', sources: [],
-    });
+      });
+    }
     if (url.includes('/api/v1/execution/capabilities')) return json({ harnesses: [], profiles: [], source: 'native', configured: false });
     if (url.includes('/api/v1/execution/settings')) return json({ profile_id: null, routing_profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
     if (url.includes('/api/v1/voice/capabilities')) return json({ schema_version: 'voice-capabilities.v1', provider: 'openai', configured: true, modes: [{ id: 'openai', label: 'Gateway OpenAI', available: true }] });
@@ -152,6 +162,52 @@ test('production-default chat composer persists and restores only through native
   await page.waitForFunction(() => document.body.innerText.includes('Native item 30 is complete.'));
   assert.equal((await page.$$('[data-testid="agent-message"]')).length, 1, 'reload must not duplicate the canonical reply');
   assert.ok(await page.evaluate(() => Number(localStorage.getItem('native-chat-get-count'))) >= 2);
+  assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-forbidden-count') || '0')), 0);
+  await page.close();
+});
+
+test('an activity outage does not interrupt an active native LLM turn', async () => {
+  const activity = {
+    id: 'ca-native-active', sequence: 1, delivery_sequence: 1, revision: 1,
+    kind: 'objective.progress', state: 'active', importance: 'routine',
+    title: 'Native LLM turn', summary: 'Provider completion is in progress.', summary_truncated: false,
+    task_id: 'native-task', decision_key: null, objective_id: 'native-objective', run_id: 'native-run',
+    project: 'Magistrate', occurred_at: null, observed_at: 1789000000000, refs: [],
+    source: { instance_id: 'firstmate:main', event_id: null },
+  };
+  const cache = {
+    schema_version: 'activity-cache.v1', principal: 'default_user', cursor: 1,
+    summary_cursor: 1, summary_authoritative: true,
+    summary: { active_objectives: 1, operation_count: 0, pending_decisions: 0 }, records: [activity],
+  };
+  const page = await browser.newPage();
+  await page.evaluateOnNewDocument(value => {
+    localStorage.removeItem('native-chat-browser-record');
+    localStorage.removeItem('native-chat-post-count');
+    localStorage.removeItem('native-chat-forbidden-count');
+    localStorage.setItem('native-chat-activity-unavailable', '1');
+    localStorage.setItem('native-chat-delay-post', '1');
+    localStorage.setItem('magistrate.activity.canonical.v1.default_user', JSON.stringify(value));
+  }, cache);
+  await page.evaluateOnNewDocument(installNativeGatewayMock);
+  await page.goto(`${server.base}/chat`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
+  await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
+  await page.waitForSelector('[data-testid="agent-thinking-message"]', { timeout: 20_000 });
+  // Let the failed optional recovery settle before checking the user-critical
+  // state. It may briefly say recovering during normal initialization.
+  await new Promise(resolve => setTimeout(resolve, 2_000));
+  let label = await page.$eval('[data-testid="working-state-label"]', element => element.textContent);
+  assert.doesNotMatch(label, /observability interrupted/i);
+
+  await page.focus('[data-testid="captain-prompt"]');
+  await page.keyboard.type('Continue through the optional activity outage');
+  await page.click('[data-testid="send-captain-prompt"]');
+  await page.waitForSelector('[data-testid="stop-captain-response"]', { timeout: 5_000 });
+  label = await page.$eval('[data-testid="working-state-label"]', element => element.textContent);
+  assert.doesNotMatch(label, /observability interrupted/i);
+  await page.waitForFunction(() => document.body.innerText.includes('Native item 30 is complete.'), { timeout: 20_000 });
+  assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-post-count'))), 1);
   assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-forbidden-count') || '0')), 0);
   await page.close();
 });
