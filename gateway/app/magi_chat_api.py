@@ -1,8 +1,8 @@
 """Authenticated HTTP API for provider-native Magi chat.
 
-The dependency graph of this router ends at auth, uploads, SQLite, and one model
-provider. It deliberately does not import execution orchestration or terminal
-infrastructure.
+Canonical conversation remains isolated from terminals and harnesses. The only
+orchestration edge is an injected, closed Firstmate objective tool whose owner
+and chat identity come from this authenticated route rather than model JSON.
 """
 from __future__ import annotations
 
@@ -22,7 +22,13 @@ from app.magi_chat_store import (
     MagiChatNotFound,
     MagiChatStore,
 )
-from app.magi_model import MagiModelMessage, MagiModelResult, OpenAIMagiModel
+from app.magi_firstmate_tools import FirstmateObjectiveTools
+from app.magi_model import (
+    MagiModelMessage,
+    MagiModelResult,
+    MagiToolDefinition,
+    OpenAIMagiModel,
+)
 from app.uploads import associate_uploads, get_upload, validate_upload_metadata
 
 
@@ -50,14 +56,18 @@ class _ConfiguredProvider:
         *,
         system_context: str,
         request_id: str,
+        tools: Sequence[MagiToolDefinition] = (),
     ) -> MagiModelResult:
         return await _configured_model().complete(
-            messages, system_context=system_context, request_id=request_id,
+            messages, system_context=system_context, request_id=request_id, tools=tools,
         )
 
 
 magi_chat_store = MagiChatStore()
-magi_chat_service = MagiChatService(_ConfiguredProvider(), store=magi_chat_store)
+magi_objective_tools = FirstmateObjectiveTools()
+magi_chat_service = MagiChatService(
+    _ConfiguredProvider(), store=magi_chat_store, tool_executor=magi_objective_tools,
+)
 router = APIRouter(prefix="/api/v1/magi", tags=["Magi native chat"])
 _SAFE_CONVERSATION_ID = re.compile(r"^mgc_[A-Za-z0-9_-]{4,124}$")
 
@@ -123,6 +133,10 @@ async def post_magi_message(
             source=contract.source,
             attachments=attachments,
             retry_failed=contract.retry_failed,
+            # Conversation is available to voice-only principals, but a model
+            # can receive an execution tool only with the existing command
+            # authority. Tool JSON can never grant that scope to itself.
+            allow_tools=principal.has("command"),
         )
     except MagiChatNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
