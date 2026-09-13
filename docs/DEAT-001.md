@@ -8,8 +8,9 @@ must not be replaced with assumptions from web tests or an Expo export.
 
 ## Objective
 
-Prove that a trusted owner can install a signed native build on a physical
-iPhone, authenticate through the public HTTPS/WSS Gateway, preserve a secure
+Prove that a trusted owner or explicitly invited Friend Beta tester can install
+a signed native build on a physical iPhone, authenticate through the public
+HTTPS/WSS Gateway, preserve a secure
 short-lived session, route exact pending targets, receive honest notification
 fallback/push behavior, and use foreground Voice Mode without exposing the
 private execution host or credentials.
@@ -38,24 +39,40 @@ Record pass/fail and evidence for each case:
 
 1. EAS development build installs on a physical iPhone; the app is not Expo
    Go or simulator-only.
-2. Fresh, wrong, valid, expired, revoked, and logged-out sessions keep
-   protected routes closed until server validation and do not leave bearer
-   values in AsyncStorage.
-3. The configured cellular and Wi-Fi endpoint is HTTPS; the events socket is
+2. Fresh, malformed, valid, renewed, expired, operator-revoked, and logged-out
+   Friend Beta grants/sessions keep protected routes closed until server
+   validation, require profile onboarding once, and leave neither the grant nor
+   bearer in AsyncStorage. Record whether the tested scopes are observer-only
+   or explicitly accepted shared-runtime access.
+3. On the owner device, prove one provider-native Magi turn persists/replays
+   without duplicate sends. For an observer grant, prove submission is denied
+   and no provider call occurs; test friend submission/Voice only if the run
+   record explicitly accepts and provisions the corresponding shared-runtime
+   scopes.
+4. The configured cellular and Wi-Fi endpoint is HTTPS; the events socket is
    WSS; no localhost, private runner address, bootstrap, provider, or harness
    credential appears in the archive or logs.
-4. Cold, background, terminated, and warm launches route valid voice,
+5. Cold, background, terminated, and warm launches route valid voice,
    attention, agent, and PR intents exactly once; malformed/external/duplicate
    intents fail safely; unauthenticated intents survive the auth gate.
-5. Native notification permission, Expo token registration, Gateway delivery,
+6. Native notification permission, Expo token registration, Gateway delivery,
    denied permission, offline/provider failure, and in-app fallback are
    observed separately. A foreground poll is not recorded as server push.
-6. Voice permission denial, foreground start/stop, final transcription, TTS,
+7. Voice permission denial, foreground start/stop, final transcription, TTS,
    cancellation, tap interruption, and background/lock behavior are recorded
    without claiming ambient listening, VAD, Siri, or Action Button support.
+
+## Repository-side preparation (not device evidence)
+
+Before beginning the physical run, pass the preview preflight and external edge
+smoke from [`friend-beta-release-readiness.md`](friend-beta-release-readiness.md).
+Use a dedicated smoke grant: redeeming it replaces that grant's prior bearer,
+and a successful smoke retires the grant. Revoke it manually if smoke fails.
+Neither command may be entered as a result in the run record; they only verify
+configuration and the HTTPS/WSS edge before a device is used.
 
 ## Evidence attachments
 
 Attach the signed build identifier, device screenshots, Gateway request/log
 redactions, push provider response/receipt, and any defect IDs here after the
-run. Do not attach secrets or raw bearer tokens.
+run. Do not attach secrets, access codes, or raw bearer tokens.

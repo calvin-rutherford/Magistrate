@@ -450,6 +450,25 @@ def init_db():
     )
     ''')
 
+    # Friend Beta access grants are operator-provisioned, per-person/device
+    # credentials. Only a digest is retained. A grant is deliberately separate
+    # from the short-lived bearer sessions it renews so the operator can revoke
+    # one tester without rotating the owner bootstrap credential.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS friend_beta_access_grants (
+        grant_id TEXT PRIMARY KEY,
+        code_hash TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        scopes TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        first_redeemed_at INTEGER,
+        last_redeemed_at INTEGER,
+        revoked_at INTEGER
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_friend_beta_grants_user ON friend_beta_access_grants(user_id, expires_at)')
+
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS gateway_sessions (
         session_id TEXT PRIMARY KEY,
@@ -458,9 +477,15 @@ def init_db():
         scopes TEXT NOT NULL,
         issued_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
-        revoked_at INTEGER
+        revoked_at INTEGER,
+        access_grant_id TEXT,
+        FOREIGN KEY(access_grant_id) REFERENCES friend_beta_access_grants(grant_id)
     )
     ''')
+    gateway_session_columns = {row[1] for row in cursor.execute("PRAGMA table_info(gateway_sessions)")}
+    if 'access_grant_id' not in gateway_session_columns:
+        cursor.execute('ALTER TABLE gateway_sessions ADD COLUMN access_grant_id TEXT')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_gateway_sessions_access_grant ON gateway_sessions(access_grant_id, revoked_at, expires_at)')
 
     # Attention actions are a separate authority from notification state.  The
     # action key binds one live source revision and exact target; outcomes are

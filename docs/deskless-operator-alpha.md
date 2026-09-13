@@ -1,6 +1,6 @@
 # Deskless Operator Alpha
 
-**Status:** repository foundation only; no physical-device or EAS service result is claimed.
+**Status:** historical owner-foundation slice. A later baseline internal EAS preview exists, but no physical-device result is claimed; current evidence is tracked in [`friend-beta-release-readiness.md`](./friend-beta-release-readiness.md).
 
 ## Product boundary
 
@@ -12,17 +12,22 @@
 - **Owner alpha** is one trusted operator using command/voice scopes against one
   operator-owned Gateway/runner. It is not a friend preview, tenant system, or
   multi-user SaaS product.
-- **Future friend/multi-user product** needs real account/invite identity,
-  per-user authorization, isolated execution, and device/session management.
-  Friends must be issued restricted `read,notifications` sessions and must
-  never receive runner, provider, bootstrap, or execution credentials. This
-  slice does not add friend issuance.
+- **Restricted Friend Beta preparation** now adds independently revocable,
+  per-principal access grants and profile onboarding after this owner-alpha
+  slice. Its safe default is `read,account,notifications`; this remains one
+  shared deployment, not tenant isolation. See
+  [`friend-beta-release-readiness.md`](./friend-beta-release-readiness.md).
+- **Future multi-user production** still needs an identity provider, recovery
+  and device administration, per-user authorization of every runtime source,
+  and isolated execution. Friends never receive runner, provider, owner
+  bootstrap, or execution credentials.
 
-The physical path is `iPhone -> HTTPS/WSS Gateway -> private Herdr ->
-Firstmate/harnesses`. The app contains only the public Gateway URL and an
-opaque, short-lived server session after bootstrap; it never contains a
-bootstrap secret, provider credential, Unix socket, runner address, or harness
-credential.
+Normal chat follows `iPhone -> HTTPS Gateway -> provider-native Magi chat`.
+Authenticated WSS carries application events; private Herdr/Firstmate remains
+only behind fleet and retained compatibility surfaces. The app contains the
+public Gateway URL, a short-lived bearer, and—only for native Friend Beta
+enrollment—a SecureStore renewal grant. It never contains an owner bootstrap
+secret, provider credential, Unix socket, runner address, or harness credential.
 
 ## Implemented foundation
 
@@ -32,7 +37,8 @@ credential.
 
 - stable `io.magistrate.cockpit` iOS and Android identifiers, app-version
   runtime versioning, and the `magistrate:` URL scheme;
-- pinned Expo SDK 57 `expo-dev-client`, `expo-secure-store`, and local EAS CLI;
+- pinned Expo SDK 57 `expo-dev-client` and `expo-secure-store`; release commands
+  invoke the explicit `eas-cli@23.0.0` version;
 - development, preview, and production channels/environments;
 - a development profile that creates an internal **physical-device** build (it
   is not simulator-only), plus internal preview and store production profiles;
@@ -40,24 +46,26 @@ credential.
   must provide an HTTPS URL ending in `/api/v1`; its derived socket endpoint is
   WSS. The URL is public configuration, not a secret.
 
-The repository cannot create or link an Expo account project without Expo/Apple
-credentials. Set `EXPO_OWNER`, `EXPO_PUBLIC_EAS_PROJECT_ID`, and the three EAS
-environment values in the authenticated EAS project before building. No project
-ID, signing result, TestFlight install, or physical-device result is fabricated
-here.
+The repository is linked to the recorded Expo owner/project. Configure the
+public Gateway URL in each authenticated EAS environment before building; the
+native/legacy selection is committed per profile. A link or successful service
+build is not signing inspection, TestFlight installation, or physical-device
+acceptance, and none is fabricated here.
 
 Example local config (do not commit a real host-specific value):
 
 ```sh
 cd frontend
 EXPO_PUBLIC_GATEWAY_URL=https://gateway.example/api/v1 \
-EXPO_PUBLIC_EAS_PROJECT_ID=<linked-eas-project-id> \
-npx expo config --type public
+EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED=true \
+EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED=false \
+npm run beta:preflight -- --profile development
 npx eas-cli@23.0.0 build --profile development --platform ios
 ```
 
-The gateway/runner stays private behind the deployment's TLS reverse proxy;
-public internet-edge hardening remains follow-up work.
+The runner stays private behind the Gateway. The cohort reaches only the
+HTTPS/WSS edge, which still requires deployment-specific access control,
+redacted monitoring, and request throttling.
 
 ### Session storage and bootstrap
 
@@ -67,13 +75,12 @@ back to AsyncStorage. The existing validated route gate, bearer Authorization
 header, expiry timer, revocation, logout, and 401 invalidation remain in place.
 The old AsyncStorage bearer is never migrated; it is removed on native restore.
 
-There is intentionally no refresh-token or one-time trusted-device pairing
-flow in this slice. Bootstrap is therefore a temporary operator-supplied
-credential entry used to obtain a short-lived server session again after
-expiry/revocation. The UI and storage seam leave room for a future pairing and
-renewal exchange; repeated bootstrap entry is not represented as solved.
-The browser retains its existing compatibility storage because browsers have
-no Keychain; this is not evidence of native secure storage.
+This owner-alpha slice intentionally had no refresh-token or one-time
+trusted-device pairing flow. The later restricted Friend Beta access grant is
+a revocable renewal credential stored by native SecureStore; the owner
+bootstrap flow remains unchanged and is never persisted. Browser beta access
+stores only the short bearer. This is still not OIDC, account recovery, tenant
+isolation, or physical Keychain evidence.
 
 ### Versioned pending intents
 
@@ -130,13 +137,14 @@ DEAT-001.
 Run the direct checks from the repository root:
 
 ```sh
-cd frontend && npx tsc --noEmit && npm test
-cd frontend && npx expo config --type public --json
-cd frontend && npx expo export -p web
-cd ../gateway && PYTHONPATH=. uv run pytest -q
-cd .. && bash scripts/test_deploy_magistrate.sh
+(cd frontend && npm run typecheck && npm test)
+(cd frontend && npx expo config --type public --json)
+(cd frontend && npx expo export -p web)
+(cd gateway && PYTHONPATH=. uv run pytest -q)
+bash scripts/test_deploy_magistrate.sh
 ```
 
-The Linux worker cannot supply Apple signing, EAS account access, a physical
-iPhone, APNs/FCM delivery, TestFlight, or cellular HTTPS/WSS evidence. Those
-are explicitly open follow-up gates, not assumed from export or web tests.
+Repository automation and read-only EAS metadata cannot supply archive/signing
+inspection, a physical iPhone result, APNs/FCM receipts, TestFlight processing,
+or cellular HTTPS/WSS evidence. Those are explicitly open gates, not assumed
+from export, web tests, or a build ticket.

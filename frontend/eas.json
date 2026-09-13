@@ -9,25 +9,39 @@
       "developmentClient": true,
       "distribution": "internal",
       "channel": "development",
-      "environment": "development"
+      "environment": "development",
+      "env": {
+        "EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED": "true",
+        "EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED": "false"
+      },
+      "ios": {
+        "simulator": false
+      }
     },
     "preview": {
       "distribution": "internal",
       "channel": "preview",
-      "environment": "preview"
+      "environment": "preview",
+      "env": {
+        "EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED": "true",
+        "EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED": "false"
+      },
+      "ios": {
+        "simulator": false
+      }
     },
     "production": {
       "distribution": "store",
       "channel": "production",
       "environment": "production",
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED": "true",
+        "EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED": "false"
+      }
     }
   },
   "submit": {
-    "production": {
-      "ios": {
-        "ascAppId": "${EXPO_ASC_APP_ID}"
-      }
-    }
+    "production": {}
   }
 }

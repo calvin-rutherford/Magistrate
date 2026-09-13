@@ -16,10 +16,16 @@ export default ({ config }: { config: ExpoConfig }): ExpoConfig => {
     if ((parsed.protocol !== 'https:' && !local) || (productionBuild && (parsed.protocol !== 'https:' || local))) {
       throw new Error('EXPO_PUBLIC_GATEWAY_URL must use a public HTTPS endpoint for production builds.');
     }
-    if (parsed.username || parsed.password) throw new Error('EXPO_PUBLIC_GATEWAY_URL must not contain credentials.');
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error('EXPO_PUBLIC_GATEWAY_URL must not contain credentials, query parameters, or a fragment.');
+    }
     if (!parsed.pathname.endsWith('/api/v1')) {
       throw new Error('EXPO_PUBLIC_GATEWAY_URL must end with /api/v1.');
     }
+  }
+
+  if (easProjectId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(easProjectId)) {
+    throw new Error('EXPO_PUBLIC_EAS_PROJECT_ID must be a UUID from the linked EAS project.');
   }
 
   return {
