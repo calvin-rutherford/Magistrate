@@ -1314,7 +1314,7 @@ test('a recovered canonical decision uses the same Attention identity as chat', 
   await page.close();
 });
 
-test('cold start retains an account-scoped decision when observability is interrupted', async () => {
+test('cold start keeps canonical work usable when activity recovery is unavailable', async () => {
   const observedAt = 1788840000000;
   const objective = {
     id: 'ca-cached-objective', sequence: 1, delivery_sequence: 1, revision: 1,
@@ -1346,11 +1346,14 @@ test('cold start retains an account-scoped decision when observability is interr
   });
   await page.waitForSelector('[data-testid="assistant-decision-captain-question-cached-release"]');
   await page.waitForSelector('[data-testid="agent-thinking-message"]');
-  assert.match(await page.$eval('[data-testid="working-state-label"]', element => element.textContent), /observability interrupted/i);
+  const workingLabel = await page.$eval('[data-testid="working-state-label"]', element => element.textContent);
+  assert.doesNotMatch(workingLabel, /observability interrupted/i);
+  assert.match(workingLabel, /awaiting you/i);
   await page.click('[data-testid="agent-thinking-message"]');
   await page.waitForSelector('[data-testid="activity-recovery-banner"]');
   const surface = await page.$eval('[data-testid="canonical-activity-surface"]', element => element.innerText);
   assert.match(surface, /Awaiting you/);
+  assert.match(surface, /Activity updates are unavailable/);
   assert.doesNotMatch(surface, /Completed/);
   await page.close();
 });

@@ -53,8 +53,7 @@ export interface CanonicalActivitySnapshot {
 }
 
 export type CanonicalWorkPhase =
-  | 'idle' | 'active' | 'awaiting-user'
-  | 'recovering' | 'observability-interrupted';
+  | 'idle' | 'active' | 'awaiting-user' | 'recovering';
 
 export interface CanonicalWorkState {
   active: boolean;
@@ -734,8 +733,10 @@ export function deriveCanonicalWorkState(
     && !record.kind.startsWith('objective.') && !record.kind.startsWith('decision.')).length;
   let phase: CanonicalWorkPhase = 'idle';
   if (active) {
-    if (activity.recoveryState === 'observability-interrupted') phase = 'observability-interrupted';
-    else if (activity.recoveryState === 'hydrating' || activity.recoveryState === 'recovering') phase = 'recovering';
+    // Activity recovery is advisory. Its outage cannot turn a canonical LLM
+    // turn into an interruption; the conversation's own lifecycle remains the
+    // source of truth for this user-critical state.
+    if (activity.recoveryState === 'hydrating' || activity.recoveryState === 'recovering') phase = 'recovering';
     else if (awaitingUser) phase = 'awaiting-user';
     else phase = 'active';
   }

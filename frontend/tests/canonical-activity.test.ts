@@ -11,6 +11,7 @@ import {
   ingestCanonicalActivityReplayPage,
   ingestCanonicalActivitySnapshot,
   markCanonicalActivityFresh,
+  markCanonicalActivityInterrupted,
   normalizeCanonicalActivityRecord,
   setCanonicalActivityPrincipal,
 } from '../src/services/CanonicalActivity';
@@ -256,6 +257,15 @@ test('working state and decision routing use only canonical identities', () => {
   setCanonicalActivityPrincipal('activity-local-only');
   assert.equal(deriveCanonicalWorkState(getCanonicalActivitySnapshot(), [{ progress: 'working' }]).active, false,
     'component-local progress without a Gateway identity cannot activate lifecycle UI');
+});
+
+test('activity outage never reclassifies an active canonical LLM turn as interrupted', () => {
+  setCanonicalActivityPrincipal('activity-llm-independent');
+  markCanonicalActivityInterrupted();
+  const work = deriveCanonicalWorkState(getCanonicalActivitySnapshot(), [{
+    canonicalId: 'magi-user', lifecycleState: 'active', progress: 'working',
+  }]);
+  assert.deepEqual([work.active, work.phase], [true, 'active']);
 });
 
 test('snapshot and replay retention preserves full focus capacity and recent revisions', () => {

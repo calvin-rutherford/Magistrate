@@ -37,7 +37,7 @@ const recoveryLabel = (snapshot: CanonicalActivitySnapshot): string | null => {
     return 'Recovering durable activity…';
   }
   if (snapshot.recoveryState === 'observability-interrupted') {
-    return 'Observability is interrupted. Last confirmed state is retained; completion is not inferred.';
+    return 'Activity updates are unavailable. Last confirmed state is retained; completion is not inferred.';
   }
   return null;
 };
