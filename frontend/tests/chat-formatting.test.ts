@@ -10,6 +10,22 @@ test('safe Markdown covers prose, headings, lists, emphasis, code, and safe link
   assert.equal(blocks[3].type, 'code');
 });
 
+test('ordered Markdown preserves its start and auto-numbers repeated markers', () => {
+  const sequential = parseSafeMarkdown('1. alpha\n2. beta\n3. gamma');
+  const repeated = parseSafeMarkdown('1. alpha\n1. beta\n1. gamma');
+  assert.equal(sequential[0].type, 'ordered-list');
+  assert.equal(repeated[0].type, 'ordered-list');
+  if (sequential[0].type === 'ordered-list' && repeated[0].type === 'ordered-list') {
+    assert.equal(sequential[0].start, 1);
+    assert.equal(repeated[0].start, 1);
+    assert.deepEqual(sequential[0].items.map(item => item[0].value), ['alpha', 'beta', 'gamma']);
+    assert.deepEqual(repeated[0].items.map(item => item[0].value), ['alpha', 'beta', 'gamma']);
+  }
+  const nonDefaultStart = parseSafeMarkdown('3. first\n4. second');
+  assert.equal(nonDefaultStart[0].type, 'ordered-list');
+  if (nonDefaultStart[0].type === 'ordered-list') assert.equal(nonDefaultStart[0].start, 3);
+});
+
 test('HTML and unsafe URL schemes never become active content', () => {
   assert.equal(sanitizeChatMarkdown('<script>alert(1)</script><b>hello</b>'), 'hello');
   assert.equal(isSafeChatUrl('https://example.com/a'), true);
