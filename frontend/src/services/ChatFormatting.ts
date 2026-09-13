@@ -6,7 +6,8 @@ export type SafeInline =
 
 export type SafeMarkdownBlock =
   | { type: 'paragraph' | 'heading'; level?: 1 | 2 | 3; inline: SafeInline[] }
-  | { type: 'unordered-list' | 'ordered-list'; items: SafeInline[][] }
+  | { type: 'unordered-list'; items: SafeInline[][] }
+  | { type: 'ordered-list'; start: number; items: SafeInline[][] }
   | { type: 'code'; language?: string; value: string };
 
 /** Chat links intentionally use the same conservative policy as externalLinks. */
@@ -77,15 +78,15 @@ export function parseSafeMarkdown(markdown: string): SafeMarkdownBlock[] {
     }
     const heading = line.match(/^\s*(#{1,3})\s+(.+?)\s*#*\s*$/);
     if (heading) { blocks.push({ type: 'heading', level: heading[1].length as 1 | 2 | 3, inline: inline(heading[2]) }); index += 1; continue; }
-    const list = line.match(/^\s*([-*+] |\d+[.)] )(.+)$/);
+    const list = line.match(/^\s*([-*+] |(\d+)[.)] )(.+)$/);
     if (list) {
-      const ordered = /^\d/.test(list[1]); const items: SafeInline[][] = [];
+      const ordered = list[2] !== undefined; const items: SafeInline[][] = [];
       while (index < lines.length) {
         const item = lines[index].match(ordered ? /^\s*\d+[.)] (.+)$/ : /^\s*[-*+] (.+)$/);
         if (!item) break;
         items.push(inline(item[1])); index += 1;
       }
-      blocks.push({ type: ordered ? 'ordered-list' : 'unordered-list', items }); continue;
+      blocks.push(ordered ? { type: 'ordered-list', start: Number(list[2]), items } : { type: 'unordered-list', items }); continue;
     }
     const paragraph: string[] = [line.trim()]; index += 1;
     while (index < lines.length && lines[index].trim() && !/^\s*(?:```|#{1,3}\s|[-*+] |\d+[.)] )/.test(lines[index])) { paragraph.push(lines[index].trim()); index += 1; }

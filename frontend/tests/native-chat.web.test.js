@@ -8,7 +8,9 @@ let browser;
 function installNativeGatewayMock() {
   const longReply = [
     '# Native Magi', '', '## Complete numbered result', '',
-    ...Array.from({ length: 30 }, (_, index) => `${index + 1}. Native item ${index + 1} is complete.`),
+    '1. alpha', '2. beta', '3. gamma',
+    ...Array.from({ length: 27 }, (_, index) => `${index + 4}. Native item ${index + 4} is complete.`),
+    '', '## Repeated markers', '', '1. alpha', '1. beta', '1. gamma',
     '', '## Details', '',
     'This paragraph proves Markdown and long-form prose stay in one canonical assistant message.',
     '', '```ts', 'const transcript = "provider-native";', '```',
@@ -156,6 +158,9 @@ test('production-default chat composer persists and restores only through native
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('native-chat-browser-record')).messages[0].source), 'text');
   assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-forbidden-count') || '0')), 0);
   assert.equal((await page.$$('[data-testid="agent-message"]')).length, 1);
+  const orderedMarkers = await page.$$eval('[data-testid^="assistant-markdown-"][data-testid*="-ordered-marker-"]', elements => elements.map(element => element.textContent));
+  assert.deepEqual(orderedMarkers.slice(0, 3), ['1.', '2.', '3.'], 'sequential source markers render as 1, 2, 3');
+  assert.deepEqual(orderedMarkers.slice(-3), ['1.', '2.', '3.'], 'CommonMark repeated markers render as 1, 2, 3');
 
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
