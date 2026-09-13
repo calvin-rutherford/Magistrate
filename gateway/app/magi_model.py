@@ -1,13 +1,16 @@
 """Provider-independent model boundary for native Magi chat.
 
-Only complete final text crosses this module. Prompt/response content is never
-logged, and provider tool/reasoning envelopes are never returned as prose.
+Complete user-visible text and closed, bounded function-call envelopes can cross
+this module. Prompt/response content is never logged, and provider reasoning or
+unknown protocol payloads are never returned as prose.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
-from typing import Protocol, Sequence, runtime_checkable
+import re
+from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
@@ -15,6 +18,13 @@ import httpx
 MAGI_MAX_RESPONSE_CHARACTERS = 200_000
 MAGI_MAX_RESPONSE_BYTES = 256 * 1024
 MAGI_DEFAULT_MAX_OUTPUT_TOKENS = 16_384
+MAGI_MAX_TOOL_CALLS = 4
+MAGI_MAX_TOOL_DEFINITIONS = 5
+MAGI_MAX_TOOL_ARGUMENT_BYTES = 32 * 1024
+MAGI_MAX_TOOL_DEFINITION_BYTES = 64 * 1024
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_OPENAI_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_TOOL_CALL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 def magi_text_has_unsafe_controls(value: str) -> bool:
@@ -27,18 +37,38 @@ def magi_text_has_unsafe_controls(value: str) -> bool:
 
 
 @dataclass(frozen=True)
+class MagiModelToolCall:
+    """One provider function call; arguments remain raw until tool validation."""
+
+    id: str
+    name: str
+    arguments_json: str
+
+
+@dataclass(frozen=True)
+class MagiToolDefinition:
+    """Closed function definition offered by the host, never by request JSON."""
+
+    name: str
+    description: str
+    parameters: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class MagiModelMessage:
     role: str
-    content: str
+    content: str | None
+    tool_calls: tuple[MagiModelToolCall, ...] = ()
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True)
 class MagiModelResult:
-    """A complete provider result; ``text`` is preserved exactly as received."""
+    """A complete provider turn; final text is preserved exactly as received."""
 
-    text: str
+    text: str | None
     finish_reason: str = "stop"
-    tool_calls: int = 0
+    tool_calls: tuple[MagiModelToolCall, ...] = ()
 
 
 class MagiModelError(RuntimeError):
@@ -61,8 +91,189 @@ class MagiModel(Protocol):
         *,
         system_context: str,
         request_id: str,
+        tools: Sequence[MagiToolDefinition] = (),
     ) -> MagiModelResult:
         ...
+
+
+def _validated_utf8(value: str, *, maximum_bytes: int, code: str) -> bytes:
+    if magi_text_has_unsafe_controls(value):
+        raise MagiModelError(code)
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise MagiModelError(code) from exc
+    if len(encoded) > maximum_bytes:
+        raise MagiModelError(code)
+    return encoded
+
+
+def _openai_tool_name(canonical_name: str) -> str:
+    """Encode a namespaced host name into OpenAI's documented name alphabet."""
+    provider_name = canonical_name.replace(".", "__")
+    if not _OPENAI_TOOL_NAME.fullmatch(provider_name):
+        raise MagiModelError("provider_invalid_tool_definition", retryable=False)
+    return provider_name
+
+
+def _validated_tool_call(call: MagiModelToolCall) -> dict[str, Any]:
+    if (
+        not isinstance(call, MagiModelToolCall)
+        or not isinstance(call.id, str) or not _TOOL_CALL_ID.fullmatch(call.id)
+        or not isinstance(call.name, str) or not _TOOL_NAME.fullmatch(call.name)
+        or not isinstance(call.arguments_json, str) or not call.arguments_json.strip()
+    ):
+        raise MagiModelError("provider_invalid_tool_call", retryable=False, tool_calls=1)
+    _validated_utf8(
+        call.arguments_json,
+        maximum_bytes=MAGI_MAX_TOOL_ARGUMENT_BYTES,
+        code="provider_invalid_tool_call",
+    )
+    return {
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": _openai_tool_name(call.name),
+            "arguments": call.arguments_json,
+        },
+    }
+
+
+def _provider_message(message: MagiModelMessage) -> dict[str, Any]:
+    if not isinstance(message, MagiModelMessage):
+        raise MagiModelError("provider_invalid_request", retryable=False)
+    if message.role == "tool":
+        if (
+            message.tool_calls
+            or not isinstance(message.tool_call_id, str)
+            or not _TOOL_CALL_ID.fullmatch(message.tool_call_id)
+            or not isinstance(message.content, str)
+            or not message.content
+        ):
+            raise MagiModelError("provider_invalid_request", retryable=False)
+        _validated_utf8(
+            message.content,
+            maximum_bytes=MAGI_MAX_TOOL_ARGUMENT_BYTES,
+            code="provider_invalid_request",
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": message.tool_call_id,
+            "content": message.content,
+        }
+    if message.role not in {"user", "assistant"} or message.tool_call_id is not None:
+        raise MagiModelError("provider_invalid_request", retryable=False)
+    if message.tool_calls:
+        if message.role != "assistant" or len(message.tool_calls) > MAGI_MAX_TOOL_CALLS:
+            raise MagiModelError("provider_invalid_request", retryable=False)
+        if message.content is not None:
+            if not isinstance(message.content, str):
+                raise MagiModelError("provider_invalid_request", retryable=False)
+            _validated_utf8(
+                message.content,
+                maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
+                code="provider_invalid_request",
+            )
+        return {
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [_validated_tool_call(call) for call in message.tool_calls],
+        }
+    if not isinstance(message.content, str):
+        raise MagiModelError("provider_invalid_request", retryable=False)
+    _validated_utf8(
+        message.content,
+        maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
+        code="provider_invalid_request",
+    )
+    return {"role": message.role, "content": message.content}
+
+
+def _provider_tools(tools: Sequence[MagiToolDefinition]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    if len(tools) > MAGI_MAX_TOOL_DEFINITIONS:
+        raise MagiModelError("provider_invalid_tool_definition", retryable=False)
+    payloads: list[dict[str, Any]] = []
+    names: set[str] = set()
+    provider_names: dict[str, str] = {}
+    for tool in tools:
+        if (
+            not isinstance(tool, MagiToolDefinition)
+            or not isinstance(tool.name, str) or not _TOOL_NAME.fullmatch(tool.name)
+            or tool.name in names
+            or not isinstance(tool.description, str) or not tool.description.strip()
+            or len(tool.description) > 1024
+            or magi_text_has_unsafe_controls(tool.description)
+            or not isinstance(tool.parameters, Mapping)
+            or tool.parameters.get("type") != "object"
+        ):
+            raise MagiModelError("provider_invalid_tool_definition", retryable=False)
+        try:
+            encoded = json.dumps(
+                dict(tool.parameters), ensure_ascii=False, separators=(",", ":"),
+                sort_keys=True, allow_nan=False,
+            ).encode("utf-8", errors="strict")
+            parameters = json.loads(encoded)
+        except (TypeError, ValueError, UnicodeEncodeError, json.JSONDecodeError) as exc:
+            raise MagiModelError("provider_invalid_tool_definition", retryable=False) from exc
+        if len(encoded) > MAGI_MAX_TOOL_DEFINITION_BYTES:
+            raise MagiModelError("provider_invalid_tool_definition", retryable=False)
+        provider_name = _openai_tool_name(tool.name)
+        if provider_name in provider_names:
+            raise MagiModelError("provider_invalid_tool_definition", retryable=False)
+        names.add(tool.name)
+        provider_names[provider_name] = tool.name
+        payloads.append({
+            "type": "function",
+            "function": {
+                "name": provider_name,
+                "description": tool.description,
+                "parameters": parameters,
+                "strict": True,
+            },
+        })
+    return payloads, provider_names
+
+
+def _parse_provider_tool_calls(
+    raw_calls: Any,
+    provider_names: Mapping[str, str],
+) -> tuple[MagiModelToolCall, ...]:
+    if (
+        not isinstance(raw_calls, list)
+        or not 1 <= len(raw_calls) <= MAGI_MAX_TOOL_CALLS
+    ):
+        count = len(raw_calls) if isinstance(raw_calls, list) else 1
+        raise MagiModelError("provider_invalid_tool_call", retryable=False, tool_calls=count)
+    parsed: list[MagiModelToolCall] = []
+    seen: set[str] = set()
+    for raw in raw_calls:
+        if (
+            not isinstance(raw, dict) or set(raw) != {"id", "type", "function"}
+            or raw.get("type") != "function"
+            or not isinstance(raw.get("function"), dict)
+            or set(raw["function"]) != {"name", "arguments"}
+        ):
+            raise MagiModelError(
+                "provider_invalid_tool_call", retryable=False, tool_calls=len(raw_calls),
+            )
+        provider_name = raw["function"].get("name")
+        if not isinstance(provider_name, str) or provider_name not in provider_names:
+            raise MagiModelError(
+                "provider_unknown_tool_call", retryable=False, tool_calls=len(raw_calls),
+            )
+        call = MagiModelToolCall(
+            id=raw.get("id"),
+            name=provider_names[provider_name],
+            arguments_json=raw["function"].get("arguments"),
+        )
+        _validated_tool_call(call)
+        if call.id in seen:
+            raise MagiModelError(
+                "provider_invalid_tool_call", retryable=False, tool_calls=len(raw_calls),
+            )
+        seen.add(call.id)
+        parsed.append(call)
+    return tuple(parsed)
 
 
 class OpenAIMagiModel:
@@ -133,17 +344,31 @@ class OpenAIMagiModel:
         *,
         system_context: str,
         request_id: str,
+        tools: Sequence[MagiToolDefinition] = (),
     ) -> MagiModelResult:
         if not self._api_key:
             raise MagiModelError("provider_not_configured", retryable=True)
+        tool_payloads, provider_tool_names = _provider_tools(tools)
         payload_messages = [{"role": "system", "content": system_context}]
-        payload_messages.extend({"role": message.role, "content": message.content} for message in messages)
+        payload_messages.extend(_provider_message(message) for message in messages)
         # The stable idempotency key lets a provider that supports that standard
         # header collapse a transport retry without exposing the client id.
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Idempotency-Key": request_id,
         }
+        request_payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": payload_messages,
+            "max_completion_tokens": self._max_output_tokens,
+            "stream": False,
+        }
+        if tool_payloads:
+            request_payload.update({
+                "tools": tool_payloads,
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+            })
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout_seconds, connect=min(10.0, self._timeout_seconds)),
@@ -152,12 +377,7 @@ class OpenAIMagiModel:
                 response = await client.post(
                     f"{self._base_url}/chat/completions",
                     headers=headers,
-                    json={
-                        "model": self.model,
-                        "messages": payload_messages,
-                        "max_completion_tokens": self._max_output_tokens,
-                        "stream": False,
-                    },
+                    json=request_payload,
                 )
         except httpx.TimeoutException as exc:
             raise MagiModelError("provider_timeout", retryable=True) from exc
@@ -174,12 +394,29 @@ class OpenAIMagiModel:
             message = choice["message"]
             text = message.get("content")
             finish_reason = choice.get("finish_reason")
-            tool_calls_raw = message.get("tool_calls") or []
-            tool_calls = len(tool_calls_raw) if isinstance(tool_calls_raw, list) else 1
+            raw_tool_calls = message.get("tool_calls")
         except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             raise MagiModelError("provider_invalid_response", retryable=True) from exc
-        if tool_calls:
-            raise MagiModelError("provider_tool_call_unsupported", retryable=False, tool_calls=tool_calls)
+        if raw_tool_calls:
+            if not tool_payloads:
+                count = len(raw_tool_calls) if isinstance(raw_tool_calls, list) else 1
+                raise MagiModelError(
+                    "provider_tool_call_unsupported", retryable=False, tool_calls=count,
+                )
+            if finish_reason != "tool_calls":
+                raise MagiModelError("provider_incomplete_response", tool_calls=1)
+            if text is not None:
+                if not isinstance(text, str):
+                    raise MagiModelError("provider_invalid_response", tool_calls=1)
+                _validated_utf8(
+                    text,
+                    maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
+                    code="provider_invalid_response",
+                )
+            calls = _parse_provider_tool_calls(raw_tool_calls, provider_tool_names)
+            return MagiModelResult(text=text, finish_reason="tool_calls", tool_calls=calls)
+        if finish_reason == "tool_calls":
+            raise MagiModelError("provider_invalid_tool_call", retryable=False)
         if finish_reason == "length":
             raise MagiModelError("response_limit_reached", retryable=True)
         if finish_reason != "stop":
@@ -194,4 +431,4 @@ class OpenAIMagiModel:
             raise MagiModelError("provider_invalid_unicode", retryable=True) from exc
         if len(text) > MAGI_MAX_RESPONSE_CHARACTERS or len(encoded) > MAGI_MAX_RESPONSE_BYTES:
             raise MagiModelError("response_too_large", retryable=True)
-        return MagiModelResult(text=text, finish_reason="stop", tool_calls=0)
+        return MagiModelResult(text=text, finish_reason="stop")

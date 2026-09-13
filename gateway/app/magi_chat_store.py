@@ -167,6 +167,7 @@ def _record_completion_metrics(
     *,
     latency_ms: int,
     response_characters: int,
+    tool_calls: int = 0,
 ) -> None:
     connection.execute(
         "INSERT OR IGNORE INTO magi_chat_diagnostics (owner_user_id, updated_at) VALUES (?, ?)",
@@ -181,12 +182,13 @@ def _record_completion_metrics(
                magi_response_characters = magi_response_characters + ?,
                magi_response_characters_last = ?,
                magi_response_characters_max = MAX(magi_response_characters_max, ?),
+               magi_tool_calls = magi_tool_calls + ?,
                updated_at = ?
            WHERE owner_user_id = ?""",
         (
             latency_ms, latency_ms, latency_ms,
             response_characters, response_characters, response_characters,
-            _now_ms(), owner_user_id,
+            max(0, int(tool_calls)), _now_ms(), owner_user_id,
         ),
     )
 
@@ -440,6 +442,7 @@ class MagiChatStore:
         content: str,
         *,
         latency_ms: int,
+        tool_calls: int = 0,
     ) -> bool:
         now = _now_ms()
         connection = _connect()
@@ -468,6 +471,7 @@ class MagiChatStore:
             _record_completion_metrics(
                 connection, owner_user_id,
                 latency_ms=max(0, int(latency_ms)), response_characters=len(content),
+                tool_calls=max(0, int(tool_calls)),
             )
             connection.commit()
             return True

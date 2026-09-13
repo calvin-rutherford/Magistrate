@@ -21,10 +21,12 @@ class FakeModel:
         self.delay = delay
         self.fail_once = set(fail_once or set())
         self.calls: list[tuple[str, str]] = []
+        self.offered_tools: list[tuple[str, ...]] = []
 
-    async def complete(self, messages, *, system_context, request_id):
+    async def complete(self, messages, *, system_context, request_id, tools=()):
         content = messages[-1].content
         self.calls.append((request_id, content))
+        self.offered_tools.append(tuple(tool.name for tool in tools))
         if self.delay:
             await asyncio.sleep(self.delay)
         if content in self.fail_once:
@@ -88,6 +90,7 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     expected = f"# Native reply\n\n{body['content']}\n\n✓ café 🚀"
     assert payload['assistant_message']['content'].encode() == expected.encode()
     assert len(fake.calls) == 1
+    assert fake.offered_tools == [('firstmate.submit_objective',)]
 
     duplicate = client.post('/api/v1/magi/messages', headers=TEST_HEADERS, json=body).json()
     assert duplicate['duplicate'] is True
@@ -111,6 +114,26 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     assert diagnostics['legacy_chat_reads'] == 0
     assert diagnostics['terminal_chat_reads'] == 0
     assert diagnostics['pi_ownership_chat_reads'] == 0
+
+
+def test_voice_only_principal_can_chat_but_is_never_offered_execution_tools(native_flags, monkeypatch):
+    import app.magi_chat_api as native_api
+
+    monkeypatch.setenv('MAGISTRATE_SESSION_SCOPES', 'read,voice')
+    monkeypatch.setenv('MAGISTRATE_BOOTSTRAP_USER_ID', 'voice_only_native_user')
+    token = issue_session('test-bootstrap-secret')['session_token']
+    headers = {'Authorization': f'Bearer {token}'}
+    fake = FakeModel()
+    monkeypatch.setattr(native_api.magi_chat_service, 'model', fake)
+
+    response = client.post('/api/v1/magi/messages', headers=headers, json={
+        'client_message_id': 'voice-scope-native-0001',
+        'content': 'Add a health endpoint to Magistrate and test it.',
+        'source': 'voice',
+    })
+    assert response.status_code == 200
+    assert response.json()['status'] == 'completed'
+    assert fake.offered_tools == [()]
 
 
 def test_native_websocket_replays_sqlite_messages_without_terminal_reads(native_flags, monkeypatch):
