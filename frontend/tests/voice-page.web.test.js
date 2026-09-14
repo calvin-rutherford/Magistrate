@@ -39,7 +39,7 @@ test('voice control keeps the compact stage and enlarged branded mark proportion
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/auth/session')) {
-        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session-token-00000001', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       return nativeFetch(resource, options);
@@ -68,7 +68,7 @@ test('voice mode surfaces a recoverable error and never leaves /voice when the m
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/auth/session')) {
-        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session-token-00000001', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/voice/')) {
@@ -99,19 +99,19 @@ test('voice mode listens continuously: transcribes a turn, answers in the thread
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/auth/session')) {
-        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session-token-00000001', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/voice/transcribe')) {
-        return Promise.resolve(new Response(JSON.stringify({ text: 'What is the fleet doing right now?', is_final: true }),
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'voice-transcription.v1', text: 'What is the fleet doing right now?', is_final: true }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
-      if (url.includes('/api/v1/voice/moves')) {
+      if (url.includes('/api/v1/magi/messages')) {
         const body = JSON.parse(options.body);
-        const move = body.execute
-          ? { schema_version: 'voice-move.v1', move_id: 'vm_test', status: 'completed', impact: 'read', target: 'captain', response: 'Two agents are live and both are idle.' }
-          : { schema_version: 'voice-move.v1', move_id: 'vm_test', status: 'ready', impact: 'read', target: 'captain', requires_confirmation: false };
-        return Promise.resolve(new Response(JSON.stringify(move), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        const conversation = { id: 'mgc_voice_page_0001', created_at: 1789000000000, updated_at: 1789000000001 };
+        const user = { id: 'mgm_voice_user_0001', conversation_id: conversation.id, turn_id: 'mgt_voice_page_0001', client_message_id: body.client_message_id, reply_to_message_id: null, role: 'user', content: body.content, status: 'completed', source: 'voice', sequence_index: 0, revision: 1, attachments: [], created_at: conversation.created_at, updated_at: conversation.created_at };
+        const assistant = { id: 'mgm_voice_assistant_0001', conversation_id: conversation.id, turn_id: user.turn_id, client_message_id: null, reply_to_message_id: user.id, role: 'assistant', content: 'Two agents are live and both are idle.', status: 'completed', source: 'magi-native', sequence_index: 1, revision: 1, attachments: [], created_at: conversation.updated_at, updated_at: conversation.updated_at };
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'magi.native-chat.v1', status: 'completed', conversation, conversation_id: conversation.id, user_message: user, assistant_message: assistant, messages: [user, assistant], duplicate: false, retry: false, attempt: 1 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/')) return Promise.resolve(new Response('{}', { status: 200 }));
       return nativeFetch(resource, options);
@@ -142,7 +142,7 @@ test('voice ripple field reacts to injected amplitude while the canonical mark s
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/auth/session')) {
-        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session-token-00000001', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/voice/capabilities')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'voice-capabilities.v1', provider: 'browser', configured: true, modes: [{ id: 'browser', label: 'Browser speech', available: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -171,7 +171,7 @@ test('ending a deep-linked voice session still lands back in chat', async () => 
     window.fetch = (resource, options) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       if (url.includes('/api/v1/auth/session')) {
-        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        const payload = options?.method === 'POST' ? { session_token: 'browser-test-session-token-00000001', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       return nativeFetch(resource, options);

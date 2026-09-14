@@ -249,61 +249,6 @@ def test_execution_credential_is_encrypted_and_changes_profile_auth(monkeypatch)
     assert profile['availability'] == 'available'
 
 
-def test_prompt_accepts_atomic_profile_selection(monkeypatch):
-    configured = inventory()
-    configured['harnesses'][0].update({'id': 'pi', 'label': 'Pi', 'provider': 'openai-codex'})
-    configured['harnesses'][0]['models'][0].update({'id': 'gpt-5.6-luna', 'label': 'GPT-5.6 Luna', 'variant': 'default', 'profile_id': 'pi:default'})
-    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(configured))
-    prompt_agent = AsyncMock(return_value={'status': 'submitted'})
-    monkeypatch.setattr(main_module.herdr_client, 'prompt_agent', prompt_agent)
-
-    response = client.post('/api/v1/captain/prompt', headers=HEADERS, json={
-        'text': 'hello', 'profile_id': 'pi:default'
-    })
-
-    assert response.status_code == 200
-    prompt_agent.assert_awaited_once_with('captain', 'hello', profile_id='pi:default', harness='pi', model='gpt-5.6-luna', provider='openai-codex', variant='default')
-
-
-def test_prompt_rejects_selection_outside_inventory(monkeypatch):
-    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
-    prompt_agent = AsyncMock()
-    monkeypatch.setattr(main_module.herdr_client, 'prompt_agent', prompt_agent)
-
-    response = client.post('/api/v1/captain/prompt', headers=HEADERS, json={
-        'text': 'hello', 'harness': 'codex', 'model': 'not-available'
-    })
-
-    assert response.status_code == 422
-    prompt_agent.assert_not_awaited()
-
-
-def test_prompt_rejects_unsafe_capability_identifier(monkeypatch):
-    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
-    prompt_agent = AsyncMock()
-    monkeypatch.setattr(main_module.herdr_client, 'prompt_agent', prompt_agent)
-
-    response = client.post('/api/v1/captain/prompt', headers=HEADERS, json={
-        'text': 'hello', 'harness': 'codex; rm -rf /', 'model': 'gpt-5'
-    })
-
-    assert response.status_code == 422
-    prompt_agent.assert_not_awaited()
-
-
-def test_prompt_passes_validated_selection_to_real_prompt_path(monkeypatch):
-    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
-    prompt_agent = AsyncMock(return_value={'status': 'submitted'})
-    monkeypatch.setattr(main_module.herdr_client, 'prompt_agent', prompt_agent)
-
-    response = client.post('/api/v1/captain/prompt', headers=HEADERS, json={
-        'text': 'hello', 'harness': 'codex', 'model': 'gpt-5'
-    })
-
-    assert response.status_code == 200
-    prompt_agent.assert_awaited_once_with('captain', 'hello', profile_id='codex:gpt-5', harness='codex', provider='unknown', model='gpt-5', variant='gpt-5')
-
-
 def test_invalid_inventory_is_reported_without_exposing_configuration(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', '{not-json')
 

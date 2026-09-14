@@ -3,32 +3,51 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, AppState, Image, ImageSourcePropType, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, Image, ImageSourcePropType, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
-import { AgentHistoryMessage, AgentInfo, AgentMigration, AuthProviderInfo, cancelMagiChatTurn, CHAT_HISTORY_LINES, CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ExecutionProfile, fetchAgentHistory, fetchAgentMigration, fetchAgents, fetchCanonicalActivity, fetchCanonicalActivitySnapshot, fetchMagiChatConversation, fetchAuthProviders, fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth, fetchRecentActivity, fetchUnifiedAttention, fetchUsage, fetchVoiceInputCapabilities, HealthInfo, interruptAgent, logoutGatewaySession, MAGI_NATIVE_CHAT_ENABLED, RecentActivityItem, renameAgent, requestAgentMigration, sendMagiChatPrompt, transcribeVoiceAudio, UnifiedAttentionRecord, updateExecutionSettings, saveExecutionCredential, ExecutionSettings, UsageProvider, uploadChatFile, ChatUpload, validateChatAttachment } from '../../src/api/client';
+import {
+  AgentInfo, AgentMigration, AuthProviderInfo, cancelMagiChatTurn,
+  CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ChatUpload,
+  ExecutionProfile, ExecutionSettings, fetchAgentMigration, fetchAgents,
+  fetchAuthProviders, fetchCanonicalActivitySnapshot,
+  fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth,
+  fetchMagiChatConversation, fetchRecentActivity, fetchUnifiedAttention,
+  replayMagiChatConversation,
+  fetchUsage, fetchVoiceInputCapabilities, getGatewaySessionRevision, HealthInfo, logoutGatewaySession,
+  RecentActivityItem, requestAgentMigration, saveExecutionCredential,
+  sendMagiChatPrompt, transcribeVoiceAudio, UnifiedAttentionRecord,
+  updateExecutionSettings, uploadChatFile, UsageProvider, validateChatAttachment,
+} from '../../src/api/client';
 import { CanonicalActivitySurface } from '../../src/components/CanonicalActivitySurface';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
-import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ComposeIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, InfoIcon, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
-import { loadMagiGreeting, magiGreeting } from '../../src/services/Greeting';
+import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
 import { SafeMarkdown } from '../../src/components/SafeMarkdown';
-import { StructuredAssistantMessage } from '../../src/components/StructuredAssistantMessage';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
-import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
-import { CanonicalMessage, normalizeCanonicalMessages, normalizeNativeMagiMessages, reconcileCanonicalMessages, sameRenderedTranscript } from '../../src/services/CanonicalConversation';
-import { canonicalActivityResponseIsDegraded, CanonicalActivityRecoveryCoordinator, decisionAttentionItemId, deriveCanonicalWorkState, getCanonicalActivityCursor, hydrateCanonicalActivity, ingestCanonicalActivityPage, ingestCanonicalActivityReplayPage, ingestCanonicalActivitySnapshot, markCanonicalActivityFresh, markCanonicalActivityInterrupted, markCanonicalActivityRecovering, useCanonicalActivity } from '../../src/services/CanonicalActivity';
-import { filterAgentHistory, filterCanonicalMessages, isHarnessArtifact, sanitizeTerminalHistory, toolCallPreview } from '../../src/services/ChatHistory';
-import { messageContentKey, messageIdentity, fallbackMessageId, revisionTargetId, terminalRevisionCandidate } from '../../src/services/ChatIdentity';
-import { appendConversationMessage, ConversationAttachment, ConversationMessage, getConversationMessages, getConversationPrincipal, hydrateConversationMessages, loadCachedCaptainConversation, prependConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../../src/services/ConversationSession';
-import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveToolCallVisibility, saveVoiceInputMode, saveVoiceCaptureBehavior, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
+import {
+  deriveCanonicalWorkState, getCanonicalActivityCursor, hydrateCanonicalActivity,
+  ingestCanonicalActivityPage, ingestCanonicalActivitySnapshot,
+  markCanonicalActivityFresh, markCanonicalActivityInterrupted,
+  useCanonicalActivity,
+} from '../../src/services/CanonicalActivity';
+import { hasMagiReconciliationConflict, MagiMessageRecord, normalizeMagiMessageRecords, reconcileMagiMessages, sameMagiTranscript } from '../../src/services/MagiConversation';
+import {
+  appendMagiMessage, getMagiConversationPrincipal, getMagiMessages,
+  loadCachedMagiConversation, MagiAttachment, MagiMessage, resetMagiMessages,
+  setMagiConversationChangeCursor,
+  updateMagiMessage, useMagiMessages,
+} from '../../src/services/MagiConversationSession';
+import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveVoiceCaptureBehavior, saveVoiceInputMode, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { setActiveBackground, TIME_IMAGES, WeatherSceneKey } from '../../src/services/environmentTheme';
-import { openExternalUrl, validatedWebUrl } from '../../src/utils/externalLinks';
-import { formatConversationTimestamp as formatChatTimestamp, formatAccessibleTimestamp, safeThinkingSummary } from '../../src/services/ChatFormatting';
-import { RealtimeClient } from '../../src/realtime/socket';
+import { loadMagiGreeting, magiGreeting } from '../../src/services/Greeting';
 import { notificationManager } from '../../src/services/NotificationManager';
+import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
+import { formatAccessibleTimestamp, formatConversationTimestamp as formatChatTimestamp } from '../../src/services/ChatFormatting';
+import { RealtimeClient } from '../../src/realtime/socket';
+import { openExternalUrl } from '../../src/utils/externalLinks';
 
 const markPaper = require('../../assets/images/magistrate-mark-paper-256.png');
 const markInk = require('../../assets/images/magistrate-mark-ink-256.png');
@@ -36,13 +55,8 @@ const markActive = require('../../assets/images/magistrate-mark-active-256.png')
 const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B', mutedDark: '#8E99AA', mutedLight: '#667180', cyan: '#24D8FF', violet: '#8B6CFF', success: '#43D17A', attention: '#FFB347', critical: '#FF625F' };
 
 type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file'; status?: 'ready' | 'uploading' | 'uploaded' | 'failed'; uploaded?: ChatUpload };
-type QueuedPrompt = { id: string; messageId: string; text: string; attachments: ComposerAttachment[]; editId: string | null };
-// The prompt this canvas is waiting on. `turnId` is the canonical turn the
-// gateway recorded for it; the transitional worker path does not consume that
-// canonical turn and leaves it unset.
-type ActivePrompt = { token: number; messageId: string; text: string; controller: AbortController; turnId?: string };
+type QueuedPrompt = { messageId: string; text: string; source: 'text' | 'voice'; attachments: ComposerAttachment[]; retryFailed?: boolean };
 type DrawerSection = 'attention' | 'fleet' | 'activity' | 'projects' | 'connections' | null;
-type ModelSelection = { profileId: string; harness: string; provider: string; model: string; variant: string; label: string; available: boolean; availabilityReason?: string | null } | null;
 type ConversationSyncState = { status: 'loading' | 'fresh' | 'stale'; cachedRows: number; error?: string };
 const FLOATING_CHROME_GAP = 12;
 const CANONICAL_ACTIVITY_PAGE_SIZE = 100;
@@ -50,7 +64,7 @@ const errorText = (error: unknown, fallback: string) => error instanceof Error ?
 const isDarkTheme = (scheme: string | null | undefined) => scheme !== 'light';
 const optionId = (harness: string, model: string) => `${harness}-${model}`.replace(/[^A-Za-z0-9_-]/g, '-');
 const providerLabel = (provider: string) => provider.toLowerCase() === 'firstmate' ? 'Magistrate' : provider;
-const profilesFromCapabilities = (data: { profiles?: ExecutionProfile[]; harnesses?: Array<{ id: string; label: string; verified: boolean; models: Array<{ id: string; label: string; provider?: string; variant?: string; profile_id?: string; available?: boolean; availability?: string; auth?: { required: boolean; credential_key: string; status: string } }> }> }): ExecutionProfile[] => {
+const profilesFromCapabilities = (data: { profiles?: ExecutionProfile[]; harnesses?: { id: string; label: string; verified: boolean; models: { id: string; label: string; provider?: string; variant?: string; profile_id?: string; available?: boolean; availability?: string; auth?: { required: boolean; credential_key: string; status: string } }[] }[] }): ExecutionProfile[] => {
   if (Array.isArray(data.profiles)) return data.profiles;
   return (data.harnesses || []).filter(harness => harness.verified).flatMap(harness => harness.models.map(model => ({
     id: model.profile_id || `${harness.id}:${model.variant || model.id}`, variant: model.variant || model.id, label: model.label,
@@ -68,1489 +82,428 @@ function statusColor(status?: string | null) {
   if (['waiting', 'paused'].includes(normalized)) return brand.attention;
   return brand.mutedDark;
 }
-
-function BrandMark({ dark, style }: { dark: boolean; style?: object }) {
-  return <Image source={dark ? markPaper : markInk} style={[styles.mark, style]} resizeMode="contain" accessibilityIgnoresInvertColors />;
-}
-
-// The chrome floats over whatever the environment happens to be, so its
-// readability cannot depend on the background. Every floating control shares
-// one adaptive glass treatment: a tonal fill dark/light enough for the glyph,
-// a hairline edge, and a real blur where the platform supports it.
-const glassFill = (dark: boolean, strength: 'control' | 'surface' = 'control') =>
-  dark
-    ? strength === 'control' ? 'rgba(12,17,26,0.52)' : 'rgba(10,14,20,0.80)'
-    : strength === 'control' ? 'rgba(255,255,255,0.66)' : 'rgba(255,255,255,0.88)';
+function BrandMark({ dark, style }: { dark: boolean; style?: object }) { return <Image source={dark ? markPaper : markInk} style={[styles.mark, style]} resizeMode="contain" accessibilityIgnoresInvertColors />; }
+const glassFill = (dark: boolean, strength: 'control' | 'surface' = 'control') => dark ? strength === 'control' ? 'rgba(12,17,26,0.52)' : 'rgba(10,14,20,0.80)' : strength === 'control' ? 'rgba(255,255,255,0.66)' : 'rgba(255,255,255,0.88)';
 const glassEdge = (dark: boolean) => dark ? 'rgba(255,255,255,0.10)' : 'rgba(17,21,27,0.08)';
 const blurStyle = (radius: number) => Platform.OS === 'web' ? { backdropFilter: `blur(${radius}px)`, WebkitBackdropFilter: `blur(${radius}px)` } as any : null;
 
-/** A circular floating control: the drawer button, the contextual action. */
-function GlassCircleButton({ dark, onPress, accessibilityLabel, accessibilityHint, accessibilityState, testID, children, badge }: {
-  dark: boolean; onPress: () => void; accessibilityLabel: string; accessibilityHint?: string;
-  accessibilityState?: object; testID?: string; children: React.ReactNode; badge?: boolean;
-}) {
-  return <TouchableOpacity testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} accessibilityState={accessibilityState} onPress={onPress} activeOpacity={0.7} style={[styles.glassCircle, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}>
-    {children}
-    {badge ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}
-  </TouchableOpacity>;
+function GlassCircleButton({ dark, onPress, accessibilityLabel, accessibilityHint, accessibilityState, testID, children, badge }: { dark: boolean; onPress: () => void; accessibilityLabel: string; accessibilityHint?: string; accessibilityState?: object; testID?: string; children: React.ReactNode; badge?: boolean }) {
+  return <TouchableOpacity testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} accessibilityState={accessibilityState} onPress={onPress} activeOpacity={0.7} style={[styles.glassCircle, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}>{children}{badge ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</TouchableOpacity>;
 }
-
-/**
- * Resting Magi surface: the canonical mark above one greeting, and nothing
- * else. It is a sibling of the transcript rather than its first row, so the
- * transition into conversation is a cross-fade instead of a scroll jump, and
- * an empty conversation stays genuinely empty.
- */
 function EmptyStateMagi({ dark, visible, greeting, active }: { dark: boolean; visible: boolean; greeting: string; active: boolean }) {
-  const progress = useSharedValue(visible ? 1 : 0);
-  const breath = useSharedValue(0);
+  const progress = useSharedValue(visible ? 1 : 0); const breath = useSharedValue(0);
   useEffect(() => { progress.value = withTiming(visible ? 1 : 0, { duration: 260, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [visible, progress]);
-  useEffect(() => {
-    if (!active) { breath.value = withTiming(0, { duration: 320 }); return; }
-    breath.value = withRepeat(withTiming(1, { duration: 2400, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }), -1, true);
-  }, [active, breath]);
+  useEffect(() => { breath.value = active ? withRepeat(withTiming(1, { duration: 2400 }), -1, true) : withTiming(0, { duration: 320 }); }, [active, breath]);
   const style = useAnimatedStyle(() => ({ opacity: progress.value, transform: [{ translateY: interpolate(progress.value, [0, 1], [10, 0]) }] }));
-  // Calm at rest, spectral when alive: the halo only exists while Magi does.
   const haloStyle = useAnimatedStyle(() => ({ opacity: interpolate(breath.value, [0, 1], [0, 0.5]), transform: [{ scale: interpolate(breath.value, [0, 1], [0.94, 1.08]) }] }));
-  const markStyle = useAnimatedStyle(() => ({ transform: [{ scale: interpolate(breath.value, [0, 1], [1, 1.02]) }] }));
-  return <Animated.View testID="chat-empty-state" pointerEvents="none" accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'} style={[styles.emptyState, style]}>
-    <View style={styles.emptyStateMarkWrap}>
-      <Animated.View testID="empty-state-halo" style={[styles.emptyStateHalo, haloStyle]} />
-      <Animated.View style={markStyle}><BrandMark dark={dark} style={styles.emptyStateMark} /></Animated.View>
-    </View>
-    <Text testID="chat-greeting" accessibilityRole="header" style={[styles.greeting, { color: dark ? '#F4F5F7' : brand.ink }]}>{greeting}</Text>
-  </Animated.View>;
+  return <Animated.View testID="chat-empty-state" pointerEvents="none" accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'} style={[styles.emptyState, style]}><View style={styles.emptyStateMarkWrap}><Animated.View testID="empty-state-halo" style={[styles.emptyStateHalo, haloStyle]} /><BrandMark dark={dark} style={styles.emptyStateMark} /></View><Text testID="chat-greeting" accessibilityRole="header" style={[styles.greeting, { color: dark ? '#F4F5F7' : brand.ink }]}>{greeting}</Text></Animated.View>;
 }
-
-function MicIcon({ color, size = 18 }: { color: string; size?: number }) {
-  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <Rect x="9" y="2.5" width="6" height="11" rx="3" stroke={color} strokeWidth={1.6} />
-    <Path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5v3M9 20.5h6" stroke={color} strokeWidth={1.6} strokeLinecap="round" fill="none" />
-  </Svg>;
-}
-
-function GearIcon({ color, size = 18 }: { color: string; size?: number }) {
-  return <Svg testID="settings-gear-icon" width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <Circle cx="12" cy="12" r="3.1" stroke={color} strokeWidth={1.6} />
-    <Path d="M9.8 3.1h4.4l.5 2.1c.5.2.9.4 1.3.7l2-.6 2.2 3.8-1.5 1.5v2.8l1.5 1.5-2.2 3.8-2-.6c-.4.3-.8.5-1.3.7l-.5 2.1H9.8l-.5-2.1c-.5-.2-.9-.4-1.3-.7l-2 .6-2.2-3.8 1.5-1.5v-2.8L3.8 9.1 6 5.3l2 .6c.4-.3.8-.5 1.3-.7z" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
-  </Svg>;
-}
-
-function SoundwaveIcon({ color, size = 18 }: { color: string; size?: number }) {
-  const bars = [0.32, 0.62, 1, 0.72, 0.42];
-  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    {bars.map((ratio, index) => {
-      const barHeight = 16 * ratio;
-      const x = 2 + index * 4.6;
-      return <Rect key={index} x={x} y={(24 - barHeight) / 2} width="2.4" height={barHeight} rx="1.2" fill={color} />;
-    })}
-  </Svg>;
-}
-
-function EllipsisIcon({ color, size = 18 }: { color: string; size?: number }) {
-  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <Circle cx="5" cy="12" r="1.5" fill={color} /><Circle cx="12" cy="12" r="1.5" fill={color} /><Circle cx="19" cy="12" r="1.5" fill={color} />
-  </Svg>;
-}
-
-function ImageIcon({ color, size = 18 }: { color: string; size?: number }) {
-  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <Rect x="3" y="4" width="18" height="16" rx="3" stroke={color} strokeWidth={1.6} />
-    <Path d="m6.5 16 3.6-3.8 2.8 2.6 2.3-2.3 2.8 3.5M15.8 9h.01" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
-  </Svg>;
-}
-
-function FileIcon({ color, size = 18 }: { color: string; size?: number }) {
-  return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <Path d="M6 3.5h7l5 5v12H6zM13 3.5v5h5" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
-  </Svg>;
-}
-
-/** Never says an attachment is done unless the gateway confirmed that state. */
-const attachmentStateLabel = (status?: ConversationAttachment['status']) => {
-  if (status === 'uploading') return ' · Uploading…';
-  if (status === 'stored') return ' · Stored, not yet sent';
-  if (status === 'attached') return ' · Attached';
-  if (status === 'failed') return ' · Upload failed';
-  return '';
-};
-
-const formatAttachmentSize = (size?: number) => {
-  if (!size) return '';
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-};
-
-function LiveWaveform({ samples, color }: { samples: number[]; color: string }) {
-  return <View style={styles.liveWaveform} pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-    {samples.map((amplitude, index) => <View key={index} style={[styles.liveWaveformBar, { height: Math.max(3, amplitude * 46), backgroundColor: color }]} />)}
-  </View>;
-}
-
-function ThinkingIndicator({ dark }: { dark: boolean }) {
-  const pulse = useSharedValue(0);
-  useEffect(() => { pulse.value = withRepeat(withTiming(1, { duration: 700 }), -1, true); }, [pulse]);
-  const style = useAnimatedStyle(() => ({ opacity: interpolate(pulse.value, [0, 0.5, 1], [0.45, 1, 0.45]), transform: [{ translateY: interpolate(pulse.value, [0, 0.5, 1], [1, -2, 1]) }] }));
-  return <Animated.Text testID="thinking-dots" style={[styles.thinkingDots, { color: dark ? brand.cyan : brand.violet }, style]}>•••</Animated.Text>;
-}
-
-/**
- * One live working state instead of a stream of intermediate events (prompt
- * section 10). The operation count is a real count of the tool events the
- * canonical record already carries for the turn in flight; it stays a compact
- * line and the detail stays behind the existing tool-call preference.
- */
-function WorkingState({ dark, muted, operations, phase, onPress }: {
-  dark: boolean; muted: string; operations: number;
-  phase: 'active' | 'awaiting-user' | 'recovering';
-  onPress: () => void;
-}) {
-  const prefix = phase === 'awaiting-user' ? 'Magi is awaiting you'
-    : phase === 'recovering' ? 'Magi is recovering'
-      : 'Magi is working';
+function MicIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Rect x="9" y="2.5" width="6" height="11" rx="3" stroke={color} strokeWidth={1.6} /><Path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5v3M9 20.5h6" stroke={color} strokeWidth={1.6} strokeLinecap="round" fill="none" /></Svg>; }
+function GearIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg testID="settings-gear-icon" width={size} height={size} viewBox="0 0 24 24" fill="none"><Circle cx="12" cy="12" r="3.1" stroke={color} strokeWidth={1.6} /><Path d="M9.8 3.1h4.4l.5 2.1c.5.2.9.4 1.3.7l2-.6 2.2 3.8-1.5 1.5v2.8l1.5 1.5-2.2 3.8-2-.6c-.4.3-.8.5-1.3.7l-.5 2.1H9.8l-.5-2.1c-.5-.2-.9-.4-1.3-.7l-2 .6-2.2-3.8 1.5-1.5v-2.8L3.8 9.1 6 5.3l2 .6c.4-.3.8-.5 1.3-.7z" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
+function SoundwaveIcon({ color, size = 18 }: { color: string; size?: number }) { const bars = [0.32, 0.62, 1, 0.72, 0.42]; return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">{bars.map((ratio, index) => { const height = 16 * ratio; return <Rect key={index} x={2 + index * 4.6} y={(24 - height) / 2} width="2.4" height={height} rx="1.2" fill={color} />; })}</Svg>; }
+function EllipsisIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Circle cx="5" cy="12" r="1.5" fill={color} /><Circle cx="12" cy="12" r="1.5" fill={color} /><Circle cx="19" cy="12" r="1.5" fill={color} /></Svg>; }
+function ImageIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Rect x="3" y="4" width="18" height="16" rx="3" stroke={color} strokeWidth={1.6} /><Path d="m6.5 16 3.6-3.8 2.8 2.6 2.3-2.3 2.8 3.5M15.8 9h.01" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
+function FileIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Path d="M6 3.5h7l5 5v12H6zM13 3.5v5h5" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
+const attachmentStateLabel = (status?: MagiAttachment['status']) => status === 'uploading' ? ' · Uploading…' : status === 'stored' ? ' · Stored, not yet sent' : status === 'attached' ? ' · Attached' : status === 'failed' ? ' · Upload failed' : '';
+const formatAttachmentSize = (size?: number) => !size ? '' : size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
+function LiveWaveform({ samples, color }: { samples: number[]; color: string }) { return <View style={styles.liveWaveform} pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">{samples.map((amplitude, index) => <View key={index} style={[styles.liveWaveformBar, { height: Math.max(3, amplitude * 46), backgroundColor: color }]} />)}</View>; }
+function WorkingState({ dark, muted, operations, phase, onPress }: { dark: boolean; muted: string; operations: number; phase: 'active' | 'awaiting-user' | 'recovering'; onPress: () => void }) {
+  const prefix = phase === 'awaiting-user' ? 'Magi is awaiting you' : phase === 'recovering' ? 'Magi is recovering activity' : 'Magi is working';
   const label = `${prefix}${operations ? ` · ${operations} operation${operations === 1 ? '' : 's'}` : ''}`;
-  return <TouchableOpacity
-    testID="agent-thinking-message"
-    accessibilityRole="button"
-    accessibilityLabel={label}
-    accessibilityHint="Opens durable Magi activity"
-    accessibilityLiveRegion="polite"
-    onPress={onPress}
-    activeOpacity={0.7}
-    style={styles.workingRow}
-  >
-    <ThinkingIndicator dark={dark} />
-    <Text testID="working-state-label" style={[styles.workingLabel, { color: muted }]}>{label}</Text>
-  </TouchableOpacity>;
+  return <TouchableOpacity testID="structured-work-state" accessibilityRole="button" accessibilityLabel={label} accessibilityHint="Opens durable Magi activity" onPress={onPress} style={styles.workingState}><BrandMark dark={dark} style={styles.workingStateMark} /><Text style={[styles.workingLabel, { color: muted }]}>{label}</Text></TouchableOpacity>;
+}
+function UserMessage({ message, dark, textColor, selectable, onLongPress, onRetry, onActions }: { message: MagiMessage; dark: boolean; textColor: string; selectable: boolean; onLongPress: () => void; onRetry?: () => void; onActions: () => void }) {
+  const timestamp = formatChatTimestamp(message.sentAt); const accessibleTimestamp = formatAccessibleTimestamp(message.sentAt);
+  return <View testID="user-message" accessibilityLabel={accessibleTimestamp ? `You, ${accessibleTimestamp}` : 'You'} style={styles.userMessageWrap}><TouchableOpacity onLongPress={onLongPress} delayLongPress={360} activeOpacity={0.85} style={[styles.userBubble, { backgroundColor: dark ? 'rgba(255,255,255,0.12)' : 'rgba(17,21,27,0.08)' }]}><Text selectable={selectable} style={[styles.messageText, { color: textColor }]}>{message.text}</Text>{message.attachments?.map((attachment, index) => <View key={`${message.id}-attachment-${index}`} style={styles.attachedFile}><FileIcon size={14} color={textColor} /><Text numberOfLines={1} style={[styles.attachedFileName, { color: textColor }]}>{attachment.name}{attachmentStateLabel(attachment.status)}</Text></View>)}{timestamp ? <Text style={styles.messageTimestamp}>{timestamp}</Text> : null}{message.delivery === 'sending' ? <Text testID={`delivery-${message.id}`} style={styles.deliverySending}>Sending…</Text> : message.delivery === 'failed' ? <View><Text testID={`delivery-${message.id}`} style={styles.deliveryFailed}>Not sent</Text>{onRetry ? <TouchableOpacity testID={`retry-${message.id}`} accessibilityRole="button" onPress={onRetry}><Text style={styles.retryText}>Retry</Text></TouchableOpacity> : null}</View> : message.delivery === 'cancelled' ? <Text style={styles.deliverySending}>Cancelled</Text> : null}</TouchableOpacity><TouchableOpacity testID={`message-actions-${message.id}`} accessibilityRole="button" accessibilityLabel="Your message actions" onPress={onActions} style={styles.inlineMessageAction}><Text style={styles.inlineMessageActionText}>•••</Text></TouchableOpacity></View>;
+}
+function AssistantMessage({ message, dark, text, muted, onActions }: { message: MagiMessage; dark: boolean; text: string; muted: string; onActions: () => void }) {
+  const timestamp = formatChatTimestamp(message.sentAt); const accessibleTimestamp = formatAccessibleTimestamp(message.sentAt);
+  return <View testID="agent-message" accessibilityLabel={accessibleTimestamp ? `Magi, ${accessibleTimestamp}` : 'Magi'} style={styles.assistantMessage}><View style={styles.assistantBody}>{message.text ? <SafeMarkdown markdown={message.text} color={text} mutedColor={muted} dark={dark} testID={`assistant-markdown-${message.id}`} /> : null}{message.progress === 'failed' ? <Text testID={`assistant-failed-${message.id}`} accessibilityRole="alert" style={styles.assistantStateFailed}>Response failed. Retry the message to try again.</Text> : message.progress === 'cancelled' ? <Text style={[styles.assistantState, { color: muted }]}>Response stopped</Text> : message.progress === 'working' || message.progress === 'queued' ? <Text testID={`assistant-working-${message.id}`} style={[styles.assistantState, { color: muted }]}>Working…</Text> : null}{timestamp && message.text ? <Text style={[styles.messageTimestamp, { color: muted }]}>{timestamp}</Text> : null}</View><TouchableOpacity testID={`message-actions-${message.id}`} accessibilityRole="button" accessibilityLabel="Assistant message actions" onPress={onActions} style={styles.inlineMessageAction}><Text style={styles.inlineMessageActionText}>•••</Text></TouchableOpacity></View>;
 }
 
-/**
- * Top-bar execution identity. The resting shell states the human-readable
- * selection only ("Magi · Automatic"); provider, harness and variant routing
- * stay inside the sheet's Advanced disclosure (prompt sections 2 and 3).
- */
-function IdentityControl({ dark, selection, open, onToggle }: { dark: boolean; selection: ModelSelection; open: boolean; onToggle: () => void }) {
-  const text = dark ? '#F4F5F7' : brand.ink;
-  const muted = dark ? brand.mutedDark : brand.mutedLight;
-  const variant = selection ? selection.label : 'Automatic';
-  return <TouchableOpacity testID="model-menu-button" accessibilityRole="button" accessibilityLabel={`Execution identity, Magi, ${variant}`} accessibilityHint="Opens the execution selector" accessibilityState={{ expanded: open }} onPress={onToggle} activeOpacity={0.7} style={styles.identityControl}>
-    <Text numberOfLines={1} style={[styles.identityName, { color: text }]}>Magi</Text>
-    <Text testID="identity-variant" numberOfLines={1} style={[styles.identityVariant, { color: muted }]}>{variant}</Text>
-    <View style={styles.identityChevron}><ChevronRightIcon size={16} color={muted} /></View>
-  </TouchableOpacity>;
-}
-
-/**
- * Native-feeling execution sheet. Rows are intent-level; the routing detail a
- * normal user never needs stays behind Advanced.
- */
-function ExecutionSheet({ dark, profiles, loading, error, open, selection, onClose, onSelect }: {
-  dark: boolean; profiles: ExecutionProfile[]; loading: boolean; error: string | null; open: boolean;
-  selection: ModelSelection; onClose: () => void; onSelect: (selection: ModelSelection) => void;
-}) {
-  const [advanced, setAdvanced] = useState(false);
-  const text = dark ? '#F4F5F7' : brand.ink;
-  const muted = dark ? brand.mutedDark : brand.mutedLight;
-  useEffect(() => { if (!open) setAdvanced(false); }, [open]); // eslint-disable-line react-hooks/set-state-in-effect
-  if (!open) return null;
-  const groupSurface = dark ? 'rgba(30,37,48,0.96)' : 'rgba(238,241,244,0.98)';
-  return <View testID="model-sheet-layer" style={styles.sheetLayer}>
-    <TouchableOpacity testID="model-menu-scrim" accessibilityRole="button" accessibilityLabel="Close the execution selector" onPress={onClose} activeOpacity={1} style={styles.sheetScrim} />
-    <View testID="model-menu" accessibilityViewIsModal style={[styles.executionSheet, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
-      <View style={[styles.sheetGrabber, { backgroundColor: muted }]} />
-      <View style={styles.sheetHeader}>
-        <Text accessibilityRole="header" style={[styles.sheetTitle, { color: text }]}>Execution</Text>
-        <TouchableOpacity testID="model-menu-close" accessibilityRole="button" accessibilityLabel="Done" onPress={onClose} style={styles.sheetDone}><Text style={[styles.sheetDoneText, { color: dark ? brand.cyan : brand.violet }]}>Done</Text></TouchableOpacity>
-      </View>
-      <ScrollView style={styles.executionScroll} contentContainerStyle={styles.executionScrollContent} keyboardShouldPersistTaps="handled">
-        <Text style={[styles.groupLabel, { color: muted }]}>RECOMMENDED</Text>
-        <View style={[styles.group, { backgroundColor: groupSurface }]}>
-          <TouchableOpacity testID="model-option-current" accessibilityRole="button" accessibilityLabel="Magi, automatic. Uses the Gateway-configured model." accessibilityState={{ selected: selection === null }} onPress={() => onSelect(null)} style={styles.groupRow}>
-            <View style={styles.groupRowCopy}><Text style={[styles.groupRowTitle, { color: text }]}>Magi · Automatic</Text><Text style={[styles.groupRowMeta, { color: muted }]}>Uses the Gateway-configured model</Text></View>
-            {selection === null ? <Text testID="model-option-current-check" style={[styles.groupCheck, { color: dark ? brand.cyan : brand.violet }]}>✓</Text> : null}
-          </TouchableOpacity>
-        </View>
-        <Text style={[styles.groupLabel, { color: muted }]}>MODELS</Text>
-        <View style={[styles.group, { backgroundColor: groupSurface }]}>
-          {profiles.map((profile, index) => {
-            const selected = selection?.profileId === profile.id;
-            const disabled = !profile.available;
-            return <TouchableOpacity key={profile.id} disabled={disabled} testID={`model-option-${optionId(profile.harness.id, profile.model.id)}`} accessibilityRole="button" accessibilityLabel={`${profile.harness.label}, ${profile.provider.label}, ${profile.model.label}`} accessibilityState={{ selected, disabled }} onPress={() => onSelect({ profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason })} style={[styles.groupRow, index ? styles.groupRowDivided : undefined, disabled ? styles.modelOptionDisabled : undefined]}>
-              <View style={styles.groupRowCopy}>
-                <Text style={[styles.groupRowTitle, { color: text }]}>{profile.label}</Text>
-                {advanced || disabled ? <Text testID={`model-option-routing-${optionId(profile.harness.id, profile.model.id)}`} style={[styles.groupRowMeta, { color: disabled ? brand.attention : muted }]}>{advanced ? `${profile.harness.label} · ${profile.provider.label} · ${profile.model.label}` : ''}{disabled ? `${advanced ? ' · ' : ''}${profile.availability_reason || 'Unavailable'}` : ''}</Text> : null}
-              </View>
-              {selected ? <Text style={[styles.groupCheck, { color: dark ? brand.cyan : brand.violet }]}>✓</Text> : null}
-            </TouchableOpacity>;
-          })}
-          {loading ? <Text style={[styles.groupRowMeta, styles.groupNotice, { color: muted }]}>Loading available variants…</Text> : null}
-          {!loading && error ? <Text style={[styles.groupNotice, styles.modelError]}>{error} Current session remains available.</Text> : null}
-          {!loading && !error && profiles.length === 0 ? <Text style={[styles.groupRowMeta, styles.groupNotice, { color: muted }]}>No compatible variants are configured. Current session remains available.</Text> : null}
-        </View>
-        <Text style={[styles.groupLabel, { color: muted }]}>ADVANCED</Text>
-        <View style={[styles.group, { backgroundColor: groupSurface }]}>
-          <TouchableOpacity testID="model-advanced-toggle" accessibilityRole="button" accessibilityLabel="Execution routing detail" accessibilityState={{ expanded: advanced }} onPress={() => setAdvanced(value => !value)} style={styles.groupRow}>
-            <View style={styles.groupRowCopy}><Text style={[styles.groupRowTitle, { color: text }]}>Execution routing</Text><Text style={[styles.groupRowMeta, { color: muted }]}>{advanced ? 'Showing harness, provider and model for each option' : 'Show harness, provider and model for each option'}</Text></View>
-            <ChevronRightIcon size={18} color={muted} />
-          </TouchableOpacity>
-        </View>
-      </ScrollView>
-    </View>
-  </View>;
-}
-
-export function formatConversationTimestamp(sentAt?: number): string | null { return formatChatTimestamp(sentAt); }
-
-function UserMessage({ message, dark, textColor, selectable, onLongPress, onRetry, onActions }: { message: ConversationMessage; dark: boolean; textColor: string; selectable: boolean; onLongPress: () => void; onRetry?: () => void; onActions: () => void }) {
-  // Keep transport metadata out of the transcript, but retain a compact
-  // filename/type/size summary so a reload remains useful to the captain.
-  const timestamp = formatConversationTimestamp(message.sentAt);
-  const accessibleTimestamp = formatAccessibleTimestamp(message.sentAt);
-  // Opaque and neutral: spectral colour is reserved for active states, and the
-  // bubble has to stay legible and distinct over an arbitrary environment.
-  const bubble = dark ? '#1E2530' : '#E7EAEF';
-  return <View style={styles.userMessageWrap}><TouchableOpacity testID={`user-message-${message.id}`} accessibilityRole="text" accessibilityLabel={`Your message${timestamp ? `, sent ${timestamp}` : ''}${accessibleTimestamp ? `, ${accessibleTimestamp}` : ''}. Press and hold for actions.`} delayLongPress={2000} onLongPress={onLongPress} activeOpacity={0.92} style={[styles.userMessage, { backgroundColor: bubble, borderColor: bubble }]}>
-    <Text testID={`user-message-text-${message.id}`} selectable={selectable} style={[styles.messageText, { color: textColor }]}>{message.text}</Text>
-    {message.attachments?.map(attachment => <Text key={`${message.id}-${attachment.name}`} testID={`message-attachment-${message.id}`} style={[styles.messageAttachment, { color: textColor }]} numberOfLines={1}>↳ {attachment.name} · {attachment.mediaType}{formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}{attachmentStateLabel(attachment.status)}</Text>)}
-    {timestamp ? <Text testID={`message-timestamp-${message.id}`} style={[styles.messageTimestamp, { color: textColor }]}>{timestamp}</Text> : null}
-    {message.delivery === 'sending' ? <Text testID={`message-sending-${message.id}`} style={styles.messageDelivery}>Sending…</Text> : null}
-    {message.delivery === 'cancelled' ? <Text testID={`message-cancelled-${message.id}`} style={styles.messageDelivery}>Response stopped</Text> : null}
-    {message.delivery === 'failed' ? <View style={styles.messageFailure}><Text testID={`message-failed-${message.id}`} style={styles.messageFailed}>Not sent. Check the attachment and retry.</Text>{onRetry ? <TouchableOpacity testID={`retry-message-${message.id}`} accessibilityRole="button" accessibilityLabel="Retry sending message" onPress={onRetry}><Text style={styles.retryText}>Retry</Text></TouchableOpacity> : null}</View> : null}
-  </TouchableOpacity><TouchableOpacity testID={`message-actions-${message.id}`} accessibilityRole="button" accessibilityLabel="Message actions" onPress={onActions} style={styles.inlineMessageAction}><Text style={styles.inlineMessageActionText}>•••</Text></TouchableOpacity></View>;
-}
-
-function SourceList({ sources, dark, text, muted }: { sources: NonNullable<ConversationMessage['sources']>; dark: boolean; text: string; muted: string }) {
-  const safeSources = sources.filter(source => validatedWebUrl(source.url));
-  if (!safeSources.length) return null;
-  return <View testID="message-sources" accessibilityLabel="Sources" style={styles.sources}><Text style={[styles.sourcesTitle, { color: muted }]}>Sources</Text>{safeSources.map((source, index) => <TouchableOpacity key={source.id} testID={`message-source-${source.id}`} accessibilityRole="link" accessibilityLabel={`Source ${index + 1}: ${source.title}`} onPress={() => void openExternalUrl(source.url)} style={styles.sourceRow}><Text style={[styles.sourceMarker, { color: dark ? brand.cyan : brand.violet }]}>{index + 1}</Text><View style={styles.sourceCopy}><Text numberOfLines={2} style={[styles.sourceTitle, { color: text }]}>{source.title}</Text><Text numberOfLines={1} style={[styles.sourceMeta, { color: muted }]}>{source.publisher || new URL(source.url).hostname}{source.page ? ` · p. ${source.page}` : ''}</Text>{source.quote ? <Text numberOfLines={2} style={[styles.sourceQuote, { color: muted }]}>“{source.quote}”</Text> : null}</View></TouchableOpacity>)}</View>;
-}
-
-function AssistantMessage({ message, dark, text, muted, showToolCalls, onActions, onOpenDecision }: { message: ConversationMessage; dark: boolean; text: string; muted: string; showToolCalls: boolean; onActions: () => void; onOpenDecision: (itemId: string) => void }) {
-  const summary = safeThinkingSummary(message.thinkingSummary);
-  const decisionItemId = message.assistantKind === 'decision'
-    && message.lifecycleState === 'awaiting-user'
-    ? decisionAttentionItemId(message.decisionKey) : null;
-  return <View testID="agent-message" style={styles.assistantMessage}><View style={styles.assistantBody}>{message.structuredContent ? <StructuredAssistantMessage response={message.structuredContent} color={text} mutedColor={muted} dark={dark} testID={`assistant-structured-${message.id}`} /> : <SafeMarkdown markdown={message.text} color={text} mutedColor={muted} dark={dark} testID={`assistant-markdown-${message.id}`} />}{showToolCalls && message.toolResults?.map((result, index) => <View key={`${message.id}-tool-${index}`} testID="tool-history-message" style={styles.attachedToolResult}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{result}</Text></View>)}{summary ? <View testID="safe-thinking-summary" style={styles.thinkingSummary}><Text style={[styles.thinkingSummaryLabel, { color: muted }]}>{summary.provider} summary</Text><Text style={[styles.thinkingSummaryText, { color: muted }]}>{summary.text}</Text></View> : null}<SourceList sources={message.sources || []} dark={dark} text={text} muted={muted} />{decisionItemId ? <TouchableOpacity testID={`assistant-decision-${decisionItemId}`} accessibilityRole="button" accessibilityLabel="Open decision in Attention" onPress={() => onOpenDecision(decisionItemId)} style={styles.decisionAction}><Text style={[styles.decisionActionText, { color: dark ? brand.cyan : brand.violet }]}>Open in Attention</Text></TouchableOpacity> : null}{message.progress === 'failed' ? <Text testID={`assistant-failed-${message.id}`} accessibilityRole="alert" style={styles.assistantStateFailed}>Response stopped before completion. Retry is available only when this run is safe to repeat.</Text> : message.progress === 'cancelled' ? <Text testID={`assistant-cancelled-${message.id}`} style={[styles.assistantState, { color: muted }]}>Response stopped</Text> : message.progress === 'streaming' ? <Text testID={`assistant-streaming-${message.id}`} style={[styles.assistantState, { color: muted }]}>Updating response…</Text> : message.progress === 'working' || message.progress === 'queued' ? <Text testID={`assistant-working-${message.id}`} style={[styles.assistantState, { color: muted }]}>Working…</Text> : null}</View><TouchableOpacity testID={`message-actions-${message.id}`} accessibilityRole="button" accessibilityLabel="Assistant message actions" onPress={onActions} style={styles.inlineMessageAction}><Text style={styles.inlineMessageActionText}>•••</Text></TouchableOpacity></View>;
-}
-
-// Identity and reconciliation live in one place for every delivery path; see
-// src/services/ChatIdentity.ts.
-const historyKey = messageContentKey;
-const stableHistoryId = fallbackMessageId;
-function conversationalPromptResponse(response: unknown): string | null {
-  if (typeof response !== 'string' || !response.trim()) return null;
-  try {
-    const envelope = JSON.parse(response);
-    if (!envelope || typeof envelope !== 'object') return null;
-    // A few older gateways wrapped a real synchronous reply in JSON-RPC. Keep
-    // only an explicit response/text field; never display arbitrary transport
-    // or tool payloads as conversation.
-    const source = 'result' in envelope && envelope.result && typeof envelope.result === 'object'
-      ? envelope.result as Record<string, unknown>
-      : envelope as Record<string, unknown>;
-    if ('jsonrpc' in envelope && !('result' in envelope)) return null;
-    for (const key of ['response', 'text']) {
-      const value = source[key];
-      if (typeof value === 'string' && value.trim() && !isHarnessArtifact(value)) return value.trim();
-    }
-    return null;
-  } catch { /* A plain string is a legacy synchronous conversational response. */ }
-  return isHarnessArtifact(response) ? null : response.trim();
-}
-
-export function ChatCanvas({ target = 'captain', showToolCalls = false, onDrawerToggle = () => {}, drawerOpen = false, profiles = [], capabilityLoading = false, capabilityError = null, selectedProfileId = null, routingReady = true, onProfileChange = () => {}, voiceInputMode = 'automatic', voiceCapabilities, voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {}, onRegenerate }: { target?: string; showToolCalls?: boolean; onDrawerToggle?: () => void; drawerOpen?: boolean; profiles?: ExecutionProfile[]; capabilityLoading?: boolean; capabilityError?: string | null; selectedProfileId?: string | null; routingReady?: boolean; onProfileChange?: (profileId: string | null) => void; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void; onRegenerate?: (message: ConversationMessage) => Promise<void> }) {
-  const router = useRouter();
-  const dark = isDarkTheme(useChatColorScheme());
-  const text = dark ? '#F4F5F7' : brand.ink;
-  const muted = dark ? brand.mutedDark : brand.mutedLight;
-  // The composer remains floating chrome; only its surface fill is transparent.
-  const composerSurface = 'transparent';
-  const messages = useConversationMessages(target);
-  // The captain thread is the conversation the gateway records canonically.
-  // Worker panes are observation surfaces with no submitted turns, so they keep
-  // reading terminal history until they get a submission path of their own; see
-  // CHAT_ARCHITECTURE_FIX.md.
-  const canonicalTarget = target === 'captain';
-  const nativeTarget = canonicalTarget && MAGI_NATIVE_CHAT_ENABLED;
-  const canonicalActivity = useCanonicalActivity();
-  const [activityBefore, setActivityBefore] = useState<number | undefined>();
-  const [activityPageLimit, setActivityPageLimit] = useState(CANONICAL_ACTIVITY_PAGE_SIZE);
-  const [activityHasMore, setActivityHasMore] = useState(false);
-  const [activityLoadingMore, setActivityLoadingMore] = useState(false);
-  const [activityRefreshing, setActivityRefreshing] = useState(false);
+// `target` remains an accepted shell prop for compatibility but is intentionally not read.
+export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voiceInputMode = 'automatic', voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {} }: { target?: string; onDrawerToggle?: () => void; drawerOpen?: boolean; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void }) {
+  const router = useRouter(); const dark = isDarkTheme(useChatColorScheme());
+  const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight; const spectral = dark ? brand.cyan : brand.violet;
+  const messages = useMagiMessages(); const canonicalActivity = useCanonicalActivity();
   const [promptText, setPromptText] = useState('');
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [messageActionsId, setMessageActionsId] = useState<string | null>(null);
   const [selectableMessageId, setSelectableMessageId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [isThinking, setIsThinking] = useState(false);
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
-  // Sticky follow intent is independent of transient geometry. Content growth
-  // can make yesterday's bottom offset look "up" for one frame; only explicit
-  // reader input may turn this off.
-  const [followLatest, setFollowLatest] = useState(true);
-  // A requested jump is visible until a scroll event reports the measured end.
-  // Intent alone must not hide the recovery control while layout catches up.
-  const [latestScrollPending, setLatestScrollPending] = useState(false);
-  const [hasNewMessages, setHasNewMessages] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [conversationSync, setConversationSync] = useState<ConversationSyncState>({ status: 'loading', cachedRows: 0 });
+  const [followLatest, setFollowLatest] = useState(true); const [hasNewMessages, setHasNewMessages] = useState(false);
   const [unreadAttentionCount, setUnreadAttentionCount] = useState(() => notificationManager.getUnreadEvents().length);
-  const [historyBefore, setHistoryBefore] = useState<string | null>(null);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [hydratedHistoryTarget, setHydratedHistoryTarget] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [activityBefore, setActivityBefore] = useState<number | undefined>(); const [activityHasMore, setActivityHasMore] = useState(false);
+  const [activityLoadingMore, setActivityLoadingMore] = useState(false); const [activityRefreshing, setActivityRefreshing] = useState(false);
+  const [isRecording, setIsRecording] = useState(false); const [isTranscribing, setIsTranscribing] = useState(false);
   const [micStatus, setMicStatus] = useState<'idle' | 'requesting' | 'listening' | 'transcribing' | 'ready' | 'error'>('idle');
   const [waveSamples, setWaveSamples] = useState<number[]>(() => new Array(48).fill(0.04));
-  const [modelSelection, setModelSelection] = useState<ModelSelection>(() => {
-    if (target === 'captain' && MAGI_NATIVE_CHAT_ENABLED) return null;
-    const profile = profiles.find(item => item.id === selectedProfileId);
-    return profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null;
-  });
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const [headerHeight, setHeaderHeight] = useState(0);
-  const [composerHeight, setComposerHeight] = useState(0);
-  const [conversationSync, setConversationSync] = useState<ConversationSyncState>({ status: canonicalTarget ? 'loading' : 'fresh', cachedRows: 0 });
-  const pendingAttachmentsByMessageRef = useRef(new Map<string, ComposerAttachment[]>());
-  const scrollRef = useRef<ScrollView>(null);
-  const composerDockRef = useRef<View>(null);
-  const inputRef = useRef<TextInput>(null);
-  const holdActiveRef = useRef(false);
-  const followLatestRef = useRef(true);
-  const explicitReaderInputRef = useRef(false);
-  const readerMovedAwayRef = useRef(false);
-  const touchHistoryYRef = useRef<number | null>(null);
-  const initialHistoryLoadedRef = useRef(false);
-  const historyViewportMeasuredRef = useRef(false);
-  const historyContentMeasuredRef = useRef(false);
-  const pendingLatestScrollRef = useRef(false);
-  const latestScrollFrameRef = useRef<number | null>(null);
-  const finalScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestScrollDeadlineRef = useRef<number | null>(null);
-  const latestScrollMetricsRef = useRef({ offsetY: 0, contentHeight: 0, viewportHeight: 0 });
-  const historyRequestRef = useRef(0);
-  const promptTokenRef = useRef(0);
-  const activePromptRef = useRef<ActivePrompt | null>(null);
-  const postPromptPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activityRecoveryCoordinatorRef = useRef<CanonicalActivityRecoveryCoordinator | null>(null);
-  activityRecoveryCoordinatorRef.current ??= new CanonicalActivityRecoveryCoordinator();
-  const activityRealtimeRef = useRef<RealtimeClient | null>(null);
-  // A prompt must not race the initial scrollback seed. If the seed resolves
-  // after a new reply is already present, it would mark that reply as known
-  // without rendering it and the live poll would skip it forever.
-  const historyReadyRef = useRef<Promise<void>>(Promise.resolve());
-  // Keys of messages already known to the live poll (typed locally, or seen in
-  // a prior Herdr history read), so syncFromHistory only appends genuinely new
-  // ones - see the mount effect below, which seeds this without rendering.
-  const knownKeysRef = useRef<Set<string>>(new Set());
-  const optimisticCountsRef = useRef(new Map<string, number>());
-  const targetLabel = target === 'captain' ? 'Magistrate' : target;
-  const capture = useVoiceInputAdapter(undefined, voiceInputMode);
-  // Personalization only. An unavailable profile keeps the impersonal greeting
-  // rather than inventing a name for the account.
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false); const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [headerHeight, setHeaderHeight] = useState(0); const [composerHeight, setComposerHeight] = useState(0);
+  const scrollRef = useRef<ScrollView>(null); const inputRef = useRef<TextInput>(null); const conversationIdRef = useRef<string | undefined>(undefined);
+  const conversationChangeCursorRef = useRef(0); const conversationObservationRef = useRef(0);
+  const activeControllerRef = useRef<AbortController | null>(null); const activeTokenRef = useRef(0); const pendingAttachmentsRef = useRef(new Map<string, ComposerAttachment[]>());
+  const holdActiveRef = useRef(false); const capture = useVoiceInputAdapter(undefined, voiceInputMode); const captureRef = useRef(capture);
   const [greeting, setGreeting] = useState(() => magiGreeting(null));
-  useEffect(() => {
-    let mounted = true;
-    loadMagiGreeting().then(value => { if (mounted) setGreeting(value); }).catch(() => {});
-    return () => { mounted = false; };
-  }, []);
-  // Only Gateway-issued message/activity identities can drive this status.
-  // Local send promises still control composer affordances, never lifecycle UI.
-  // Activity recovery is an optional operator surface. It must never
-  // reclassify the canonical conversation or an active provider turn as an
-  // interruption, including while the conversation read is reconnecting.
-  const canonicalWork = useMemo(
-    () => deriveCanonicalWorkState(canonicalActivity, messages),
-    [canonicalActivity, messages],
-  );
+  const canonicalWork = useMemo(() => deriveCanonicalWorkState(canonicalActivity, messages), [canonicalActivity, messages]);
+  const pendingAssistant = [...messages].reverse().find(row => row.role === 'assistant' && row.progress === 'working');
+  const pendingUser = pendingAssistant ? messages.find(row => row.turnId === pendingAssistant.turnId && row.role === 'user') : undefined;
+  const stoppableMessageId = activeMessageId || pendingUser?.id || null; const isThinking = Boolean(stoppableMessageId);
 
-  const cancelLatestScroll = () => {
-    pendingLatestScrollRef.current = false;
-    latestScrollDeadlineRef.current = null;
-    if (latestScrollFrameRef.current !== null) {
-      cancelAnimationFrame(latestScrollFrameRef.current);
-      latestScrollFrameRef.current = null;
-    }
-    if (finalScrollTimerRef.current) {
-      clearTimeout(finalScrollTimerRef.current);
-      finalScrollTimerRef.current = null;
-    }
-    setLatestScrollPending(false);
-  };
-  const setFollowLatestIntent = (next: boolean) => {
-    followLatestRef.current = next;
-    setFollowLatest(next);
-    if (next) setHasNewMessages(false);
-  };
-  const stopFollowingLatest = () => {
-    explicitReaderInputRef.current = true;
-    readerMovedAwayRef.current = false;
-    setFollowLatestIntent(false);
-    cancelLatestScroll();
-  };
-  const measuredAtLatestEnd = () => {
-    const { offsetY, contentHeight, viewportHeight } = latestScrollMetricsRef.current;
-    return contentHeight > 0 && offsetY + viewportHeight >= contentHeight - 2;
-  };
-  const completeLatestScroll = () => {
-    if (!pendingLatestScrollRef.current || !measuredAtLatestEnd()) return false;
-    pendingLatestScrollRef.current = false;
-    latestScrollDeadlineRef.current = null;
-    if (latestScrollFrameRef.current !== null) {
-      cancelAnimationFrame(latestScrollFrameRef.current);
-      latestScrollFrameRef.current = null;
-    }
-    if (finalScrollTimerRef.current) {
-      clearTimeout(finalScrollTimerRef.current);
-      finalScrollTimerRef.current = null;
-    }
-    setLatestScrollPending(false);
+  const applyRecords = (records: MagiMessageRecord[], authoritative = false): boolean => {
+    if (!records.length && !authoritative) return true;
+    const current = getMagiMessages();
+    if (hasMagiReconciliationConflict(current, records)) return false;
+    const next = reconcileMagiMessages(current, records, { authoritative });
+    if (!sameMagiTranscript(current, next)) resetMagiMessages(next);
+    conversationObservationRef.current += 1;
     return true;
   };
-  // Retry until the physical measured end is observed. Structured blocks and
-  // Markdown can grow well after the first paint, so a single frame plus a
-  // 50ms settle is not an acknowledgement of the jump.
-  const attemptLatestScroll = () => {
-    if (!pendingLatestScrollRef.current || !followLatestRef.current
-      || !historyViewportMeasuredRef.current || !historyContentMeasuredRef.current) return;
-    scrollRef.current?.scrollToEnd({ animated: false });
-    if (completeLatestScroll()) return;
-    const deadline = latestScrollDeadlineRef.current;
-    if (deadline !== null && Date.now() < deadline && finalScrollTimerRef.current === null) {
-      finalScrollTimerRef.current = setTimeout(() => {
-        finalScrollTimerRef.current = null;
-        attemptLatestScroll();
-      }, 60);
-    }
-  };
-  // ScrollView's native dimensions are trustworthy only after viewport and
-  // content measurement. Follow intent remains sticky across every render and
-  // revision; geometry never revokes it.
-  const requestLatestScroll = (force = false) => {
-    if (force) {
-      explicitReaderInputRef.current = false;
-      readerMovedAwayRef.current = false;
-      setFollowLatestIntent(true);
-      cancelLatestScroll();
-      setLatestScrollPending(true);
-    }
-    if (!followLatestRef.current) return;
-    pendingLatestScrollRef.current = true;
-    if (force) setLatestScrollPending(true);
-    if (latestScrollDeadlineRef.current === null) latestScrollDeadlineRef.current = Date.now() + 3000;
-    if (!initialHistoryLoadedRef.current || latestScrollFrameRef.current !== null || finalScrollTimerRef.current !== null) return;
-    latestScrollFrameRef.current = requestAnimationFrame(() => {
-      latestScrollFrameRef.current = null;
-      attemptLatestScroll();
-    });
-  };
-  const jumpToLatest = () => requestLatestScroll(true);
-  useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
-
-  useEffect(() => {
-    if (nativeTarget) { setModelSelection(null); return; }
-    const profile = profiles.find(item => item.id === selectedProfileId);
-    setModelSelection(profile ? { profileId: profile.id, harness: profile.harness.id, provider: profile.provider.id, model: profile.model.id, variant: profile.variant, label: profile.label, available: profile.available, availabilityReason: profile.availability_reason } : selectedProfileId ? { profileId: selectedProfileId, harness: '', provider: '', model: '', variant: '', label: 'Saved profile unavailable', available: false, availabilityReason: 'The saved execution profile is no longer available.' } : null);
-  }, [nativeTarget, profiles, selectedProfileId]);
-
-  useEffect(() => {
-    const request = ++historyRequestRef.current;
-    const requestPrincipal = canonicalTarget ? getConversationPrincipal() : null;
-    initialHistoryLoadedRef.current = false;
-    touchHistoryYRef.current = null;
-    setFollowLatestIntent(true);
-    historyViewportMeasuredRef.current = false;
-    historyContentMeasuredRef.current = false;
-    pendingLatestScrollRef.current = true;
-    latestScrollDeadlineRef.current = null;
-    setLatestScrollPending(false);
-    let resolveHistoryReady!: () => void;
-    let historyReady = false;
-    const markHistoryReady = (scrollToLatest = true) => {
-      if (historyReady) return;
-      historyReady = true;
-      initialHistoryLoadedRef.current = true;
-      resolveHistoryReady();
-      if (scrollToLatest) requestLatestScroll();
-      // Publish readiness only after React has had a frame to commit the
-      // canonical rows that were applied immediately before this call. Tests,
-      // assistive technology, and scroll anchoring can all observe aria-busy
-      // instead of racing a fetch or relying on an arbitrary sleep.
-      requestAnimationFrame(() => {
-        if (request === historyRequestRef.current) setHydratedHistoryTarget(target);
-      });
-    };
-    historyReadyRef.current = new Promise<void>(resolve => { resolveHistoryReady = resolve; });
-    activePromptRef.current?.controller.abort();
-    activePromptRef.current = null;
-    if (postPromptPollTimerRef.current) clearTimeout(postPromptPollTimerRef.current);
-    postPromptPollTimerRef.current = null;
-    setSendError(null); setIsThinking(false);
-    if (canonicalTarget) setConversationSync({ status: 'loading', cachedRows: 0 });
-    // The captain thread is shared with Voice Mode (see ConversationSession),
-    // so switching back to it keeps whatever it already holds in memory for
-    // this session; other targets start each visit with a clean thread.
-    knownKeysRef.current = new Set();
-    optimisticCountsRef.current = new Map();
-    const rememberOptimistic = (message: ConversationMessage) => {
-      const key = historyKey(message);
-      knownKeysRef.current.add(key);
-      optimisticCountsRef.current.set(key, (optimisticCountsRef.current.get(key) || 0) + 1);
-    };
-    const existingIds = new Set(getConversationMessages(target).map(message => message.id));
-    getConversationMessages(target).forEach(rememberOptimistic);
-    const captainHydration = canonicalTarget
-      ? loadCachedCaptainConversation(target)
-      : Promise.resolve({ canonical: [] as ConversationMessage[], pending: [] as ConversationMessage[] });
-    const workerHydration = canonicalTarget
-      ? Promise.resolve([] as ConversationMessage[])
-      : hydrateConversationMessages(target).then(hydrated => {
-        hydrated.forEach(message => { if (!existingIds.has(message.id)) rememberOptimistic(message); });
-        return hydrated;
-      });
-    // Restore the last strictly validated snapshot before touching the network.
-    // It is a reconnect display only: the next successful full list remains
-    // authoritative and prunes rows the Gateway no longer returns.
-    const loadCanonicalConversation = async (): Promise<void> => {
-      const cached = await captainHydration;
-      if (request !== historyRequestRef.current || requestPrincipal !== getConversationPrincipal()) return;
-      const current = getConversationMessages(target);
-      const inMemoryCanonical = current.filter(message => Boolean(message.canonicalId));
-      const canonical = (inMemoryCanonical.length ? inMemoryCanonical : cached.canonical)
-        .sort((left, right) => (left.sequenceIndex || 0) - (right.sequenceIndex || 0));
-      const restoredIds = new Set(canonical.map(message => message.id));
-      const pending = new Map<string, ConversationMessage>();
-      [...current, ...cached.pending].forEach(message => {
-        if (!message.canonicalId && message.role === 'user' && (message.delivery === 'sending' || message.delivery === 'failed') && !restoredIds.has(message.id)) pending.set(message.id, message);
-      });
-      const restored = [...canonical, ...pending.values()];
-      if (!sameRenderedTranscript(current, restored)) resetConversationMessages(target, restored);
-      setConversationSync({ status: 'loading', cachedRows: canonical.length });
-      try {
-        const result = await fetchMagiChatConversation(target);
-        if (request !== historyRequestRef.current || requestPrincipal !== getConversationPrincipal()) return;
-        applyCanonicalMessages(result.messages, { replace: true, pending: [...pending.values()] });
-        setConversationSync({ status: 'fresh', cachedRows: 0 });
-        setHistoryBefore(null);
-      } catch (error) {
-        if (request !== historyRequestRef.current || requestPrincipal !== getConversationPrincipal()) return;
-        setConversationSync({ status: 'stale', cachedRows: canonical.length, error: errorText(error, 'The conversation could not be loaded.') });
+  const refreshConversation = async (
+    authoritative = true, accept: () => boolean = () => true,
+  ): Promise<boolean> => {
+    const owner = getMagiConversationPrincipal();
+    const revision = getGatewaySessionRevision();
+    if (!owner) throw new Error('Authentication is required.');
+    const observation = conversationObservationRef.current;
+    const result = await fetchMagiChatConversation(conversationIdRef.current);
+    if (!accept() || getMagiConversationPrincipal() !== owner
+      || getGatewaySessionRevision() !== revision) return false;
+    conversationIdRef.current = result.conversation.id;
+    // The current-history page controls visible history, while the bounded
+    // change replay repairs cached rows outside that page without requiring
+    // the operator to paginate back to them.
+    const records: MagiMessageRecord[] = [...result.messages];
+    let cursor = conversationChangeCursorRef.current;
+    let replayLatest = Math.max(cursor, result.latest_change || 0);
+    let replayPages = 0;
+    while (cursor < replayLatest && replayPages < 4) {
+      const replay = await replayMagiChatConversation(result.conversation.id, cursor);
+      if (!accept() || getMagiConversationPrincipal() !== owner
+        || getGatewaySessionRevision() !== revision) return false;
+      if (replay.conversation_id !== result.conversation.id || replay.next_cursor < cursor) {
+        throw new Error('Gateway returned an invalid Native Magi replay cursor.');
       }
-    };
-    // Seed known-message keys from recent Herdr scrollback so the live poll
-    // below doesn't treat pre-existing history as new and replay it into the
-    // thread - chat only ever shows what happens while it's open.
-    const loadHistory = async (attempt: number): Promise<void> => {
-      try {
-        // Hydrate optimistic messages before seeding server identities so a
-        // delayed reload cannot leave an unreconciled duplicate count.
-        await workerHydration;
-        const result = await fetchAgentHistory(target);
-        if (request !== historyRequestRef.current) return;
-        // A working agent can briefly leave an empty terminal snapshot (redraw
-        // or alternate screen); retry a few times before accepting it as empty.
-        if (result.messages.length === 0 && attempt < 5) {
-          await new Promise<void>(resolve => setTimeout(resolve, 2000));
-          return loadHistory(attempt + 1);
-        }
-        // A reply stored before a reload can have grown or reflowed in the
-        // snapshot since. Revise that row rather than letting the seed record
-        // the new content hash as a row this canvas has already shown.
-        const seedRevisable = terminalRevisionCandidate(sanitizeTerminalHistory(result.messages));
-        if (seedRevisable) reviseRenderedReply(seedRevisable);
-        result.messages.forEach(message => {
-          const key = historyKey(message);
-          const optimisticCount = optimisticCountsRef.current.get(key) || 0;
-          if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
-          knownKeysRef.current.add(messageIdentity(message));
-        });
-        setHistoryBefore(result.next_before || null);
-      } catch (error) {
-        if (request !== historyRequestRef.current) return;
-        setSendError(errorText(error, 'Agent history could not be loaded.'));
-        // A history outage must not permanently prevent sending. The active
-        // poll remains the recovery path and will discover the eventual reply.
+      records.push(...replay.messages);
+      if (replay.next_cursor === cursor && replay.messages.length) {
+        throw new Error('Gateway returned a stalled Native Magi replay cursor.');
       }
-    };
-    void (canonicalTarget ? loadCanonicalConversation() : loadHistory(0)).finally(() => {
-      if (request === historyRequestRef.current) {
-        markHistoryReady(!canonicalTarget || requestPrincipal === getConversationPrincipal());
-      }
-    });
-    return () => {
-      historyRequestRef.current += 1;
-      if (latestScrollFrameRef.current !== null) {
-        cancelAnimationFrame(latestScrollFrameRef.current);
-        latestScrollFrameRef.current = null;
-      }
-      if (finalScrollTimerRef.current) clearTimeout(finalScrollTimerRef.current);
-      if (postPromptPollTimerRef.current) clearTimeout(postPromptPollTimerRef.current);
-      activePromptRef.current?.controller.abort();
-      activePromptRef.current = null;
-      markHistoryReady(false);
-    };
-  }, [target]);
-
-  useEffect(() => {
-    if (!isRecording) return;
-    setWaveSamples(previous => [...previous.slice(1), Math.max(0.04, capture.amplitude)]);
-  }, [capture.amplitude, isRecording]);
-
-  useEffect(() => () => { capture.cancel(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleMicPress = async () => {
-    if (isRecording) {
-      setIsRecording(false);
-      setMicStatus('transcribing');
-      setIsTranscribing(true);
-      try {
-        const recording = await capture.stop();
-        if (recording.durationMillis < 250) throw new Error('The recording was too short. Hold the mic and speak before stopping.');
-        const localTranscript = voiceInputMode === 'browser' ? recording.transcript?.trim() : undefined;
-        const transcript = localTranscript || (voiceInputMode === 'browser' ? '' : (await transcribeVoiceAudio(recording.uri, recording.mimeType, recording.filename)).text?.trim());
-        if (!transcript) throw new Error(voiceInputMode === 'browser' ? 'No speech was recognized. Try again or choose Automatic.' : 'No speech was recognized. Try again closer to the microphone.');
-        const combined = promptText.trim() ? `${promptText.trim()} ${transcript}` : transcript;
-        setPromptText(combined);
-        setMicStatus('ready');
-        setSendError(null);
-        if (voiceTranscriptBehavior === 'auto-send') void submitPrompt(combined, editingMessageId, attachments);
-      } catch (error) {
-        setMicStatus('error');
-        setSendError(errorText(error, 'The microphone recording could not be transcribed.'));
-      } finally { setIsTranscribing(false); setWaveSamples(new Array(48).fill(0.04)); }
-      return;
+      cursor = replay.next_cursor;
+      replayLatest = Math.max(replayLatest, replay.latest_change);
+      replayPages += 1;
+      if (!replay.has_more) break;
     }
-    setSendError(null);
-    const capability = voiceCapabilities && capabilityFor(voiceCapabilities, voiceInputMode);
-    if (capability && capability.available === 'unavailable') {
-      setMicStatus('error'); setSendError(capability.reason || `${capability.label} is unavailable.`); return;
+    // A socket event accepted while this request was in flight is newer than
+    // the HTTP snapshot's authority boundary; merge then, but never prune it.
+    const mayPrune = authoritative && observation === conversationObservationRef.current;
+    if (!applyRecords(records, mayPrune)) {
+      throw new Error('Gateway returned conflicting Magi identity.');
     }
-    setMicStatus('requesting');
-    try {
-      await capture.start();
-      // A quick hold can release while permission is being requested. Do not
-      // leave a truthful-looking recording running after that release.
-      if (voiceCaptureBehavior === 'hold-to-talk' && !holdActiveRef.current && !autoStartRecording) { await capture.cancel(); setMicStatus('idle'); return; }
-      setIsRecording(true); setMicStatus('listening');
-    } catch (error) { setMicStatus('error'); setSendError(errorText(error, 'The microphone could not start.')); }
-  };
-
-  useEffect(() => {
-    if (!autoStartRecording) return;
-    const timer = setTimeout(() => { void handleMicPress(); }, 650);
-    return () => clearTimeout(timer);
-    // A native Action Button/Siri deep link only requests the foreground chat
-    // capture seam; background capture is intentionally not implemented here.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoStartRecording]);
-
-  // TRANSITIONAL: upward paging exists only for terminal-derived worker panes.
-  // The canonical record already returns a bounded recent window in order.
-  const loadOlderHistory = async () => {
-    if (canonicalTarget || !historyBefore || historyLoading) return;
-    setHistoryLoading(true);
-    try {
-      const result = await fetchAgentHistory(target, CHAT_HISTORY_LINES, { before: historyBefore });
-      // An older page is terminal-derived like every other read, so it goes
-      // through the same exclusion: internally addressed records are never
-      // restored as messages of either role. Server-known rows must also keep
-      // the gateway's stable id - minting a local one would break cursor/dedup
-      // identity and present a row we cannot re-address, so a row without one
-      // is dropped instead.
-      prependConversationMessages(target, sanitizeTerminalHistory(result.messages).reduce<ConversationMessage[]>((rows, message) => {
-        if (message.kind === 'control' || typeof message.id !== 'string' || !message.id) return rows;
-        rows.push({ id: message.id, role: message.role, kind: message.kind, text: message.text, source: 'text', sources: message.sources, thinkingSummary: message.thinkingSummary, runId: message.runId, regenerateSafe: message.regenerateSafe, progress: message.progress || (message.role === 'assistant' ? 'complete' : undefined) });
-        return rows;
-      }, []));
-      result.messages.forEach(message => {
-        const key = historyKey(message);
-        const optimisticCount = optimisticCountsRef.current.get(key) || 0;
-        if (message.id && optimisticCount > 0) optimisticCountsRef.current.set(key, optimisticCount - 1);
-        knownKeysRef.current.add(messageIdentity(message));
-      });
-      setHistoryBefore(result.next_before || null);
-    } catch (error) { setSendError(errorText(error, 'Older chat history could not be loaded.')); }
-    finally { setHistoryLoading(false); }
-  };
-  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const previousOffsetY = latestScrollMetricsRef.current.offsetY;
-    const wasFollowing = followLatestRef.current;
-    const isPendingScroll = pendingLatestScrollRef.current;
-    latestScrollMetricsRef.current = {
-      offsetY: contentOffset.y,
-      contentHeight: contentSize.height,
-      viewportHeight: layoutMeasurement.height,
-    };
-    const atAbsoluteBottom = measuredAtLatestEnd();
-    // A native scrollbar drag does not reliably emit onScrollBeginDrag or a
-    // React mouse-down event. While no programmatic jump is pending, a
-    // substantial backwards movement is therefore the remaining explicit
-    // reader-input signal. Do this after capturing the new metrics so a
-    // content-size update cannot cancel sticky following while it settles.
-    if (wasFollowing && !isPendingScroll && contentOffset.y < previousOffsetY - 2) {
-      stopFollowingLatest();
-      readerMovedAwayRef.current = true;
-    } else if (!atAbsoluteBottom && !followLatestRef.current) {
-      readerMovedAwayRef.current = true;
+    if (cursor > conversationChangeCursorRef.current) {
+      conversationChangeCursorRef.current = cursor;
+      setMagiConversationChangeCursor(cursor);
     }
-    if (atAbsoluteBottom) {
-      if (pendingLatestScrollRef.current) completeLatestScroll();
-      // Do not let a stale bottom event undo a keyboard/wheel gesture that
-      // stopped following before the browser moved the scroll node. Resume
-      // only after that reader has actually moved away, or on a fresh bottom
-      // event that was not preceded by explicit reader input.
-      if (!followLatestRef.current && (!explicitReaderInputRef.current || readerMovedAwayRef.current)) {
-        explicitReaderInputRef.current = false;
-        readerMovedAwayRef.current = false;
-        setFollowLatestIntent(true);
-      }
-    }
-    if (contentOffset.y < 36) void loadOlderHistory();
-  };
-  const handleHistoryLayout = (event: LayoutChangeEvent) => {
-    latestScrollMetricsRef.current.viewportHeight = event.nativeEvent.layout.height;
-    historyViewportMeasuredRef.current = true;
-    requestLatestScroll();
-  };
-  const handleHistoryContentSizeChange = (width: number, height: number) => {
-    void width;
-    latestScrollMetricsRef.current.contentHeight = height;
-    historyContentMeasuredRef.current = true;
-    requestLatestScroll();
-  };
-  const handleHeaderLayout = (event: LayoutChangeEvent) => {
-    const next = Math.ceil(event.nativeEvent.layout.height);
-    setHeaderHeight(current => Math.abs(current - next) > 1 ? next : current);
-  };
-  const handleComposerLayout = (event: LayoutChangeEvent) => {
-    const next = Math.ceil(event.nativeEvent.layout.height);
-    setComposerHeight(current => Math.abs(current - next) > 1 ? next : current);
-  };
-  // RN Web can resize children inside the absolutely positioned dock without
-  // delivering a fresh Yoga onLayout event. Observe the actual dock as well so
-  // the transcript inset follows attachment previews, voice UI, and status rows
-  // instead of retaining the previous height for one render (or indefinitely).
-  useEffect(() => {
-    if (Platform.OS !== 'web' || typeof ResizeObserver === 'undefined') return;
-    const dock = composerDockRef.current as unknown as HTMLElement | null;
-    if (!dock?.getBoundingClientRect) return;
-    const update = () => {
-      const next = Math.ceil(dock.getBoundingClientRect().height);
-      setComposerHeight(current => Math.abs(current - next) > 1 ? next : current);
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(dock);
-    return () => observer.disconnect();
-  }, []);
-  const handleHistoryScrollBeginDrag = () => {
-    // This callback is user input, never a content-size side effect. A drag is
-    // an explicit reader decision; dragging back to the absolute end below can
-    // explicitly resume following.
-    stopFollowingLatest();
-  };
-  const handleHistoryWheel = (event: any) => {
-    const deltaY = event?.nativeEvent?.deltaY ?? event?.deltaY ?? 0;
-    if (deltaY < 0) stopFollowingLatest();
-  };
-  const handleHistoryTouchStart = (event: any) => {
-    touchHistoryYRef.current = event?.nativeEvent?.touches?.[0]?.pageY ?? null;
-  };
-  const handleHistoryTouchMove = (event: any) => {
-    const y = event?.nativeEvent?.touches?.[0]?.pageY;
-    const previous = touchHistoryYRef.current;
-    if (typeof y === 'number' && typeof previous === 'number' && y > previous + 2) stopFollowingLatest();
-    if (typeof y === 'number') touchHistoryYRef.current = y;
-  };
-  const handleHistoryTouchEnd = () => { touchHistoryYRef.current = null; };
-  const handleHistoryKeyDown = (event: any) => {
-    const key = event?.nativeEvent?.key ?? event?.key;
-    if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(key)) return;
-    const target = event?.target || event?.nativeEvent?.target;
-    const tag = String(target?.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
-    stopFollowingLatest();
-  };
-  const handleHistoryMouseDown = (event: any) => {
-    const target = event?.currentTarget;
-    const rect = target?.getBoundingClientRect?.();
-    const clientX = event?.clientX ?? event?.nativeEvent?.clientX;
-    // Browser scrollbar drags do not reliably emit RN's drag callback. A
-    // press in the scrollbar gutter is unambiguously reader input.
-    if (rect && typeof clientX === 'number' && clientX >= rect.right - 24) stopFollowingLatest();
-  };
-  const addAttachments = (selected: ComposerAttachment[]) => {
-    const normalized = selected.map(item => ({ ...item, status: 'ready' as const }));
-    const currentCount = attachments.length;
-    if (currentCount + normalized.length > CHAT_MAX_UPLOAD_COUNT) { setSendError('A message may include at most 10 attachments.'); return; }
-    const total = attachments.reduce((sum, item) => sum + (item.size || 0), 0) + normalized.reduce((sum, item) => sum + (item.size || 0), 0);
-    if (total > CHAT_MAX_UPLOAD_TOTAL_BYTES) { setSendError('The attachments in one message are too large.'); return; }
-    const invalid = normalized.find(item => validateChatAttachment(item.name, item.mimeType, item.size));
-    if (invalid) { setSendError(validateChatAttachment(invalid.name, invalid.mimeType, invalid.size) || 'This file type is not supported.'); return; }
-    setAttachments(current => [...current, ...normalized]);
-    setSendError(null);
-  };
-  const pickImages = async () => {
-    setAttachmentMenuOpen(false);
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, quality: 1 });
-      if (!result.canceled) addAttachments(result.assets.map((asset, index) => ({
-        id: `image-${Date.now()}-${index}`,
-        name: asset.fileName || `Image-${attachments.length + index + 1}.jpg`,
-        uri: asset.uri,
-        mimeType: asset.mimeType || 'image/jpeg',
-        size: asset.fileSize,
-        kind: 'image',
-      })));
-    } catch (error) { setSendError(errorText(error, 'The photo library could not be opened.')); }
-  };
-  const pickFiles = async () => {
-    setAttachmentMenuOpen(false);
-    try {
-      const result = await DocumentPicker.getDocumentAsync({ type: '*/*', multiple: true, copyToCacheDirectory: true });
-      if (!result.canceled) addAttachments(result.assets.map((asset, index) => ({
-        id: `file-${Date.now()}-${index}`,
-        name: asset.name,
-        uri: asset.uri,
-        mimeType: asset.mimeType,
-        size: asset.size,
-        kind: asset.mimeType?.startsWith('image/') ? 'image' : 'file',
-      })));
-    } catch (error) { setSendError(errorText(error, 'The file picker could not be opened.')); }
-  };
-  const appendMessage = (message: ConversationMessage, optimistic = true) => {
-    const shouldFollow = followLatestRef.current;
-    const key = historyKey(message);
-    if (optimistic) {
-      knownKeysRef.current.add(key);
-      optimisticCountsRef.current.set(key, (optimisticCountsRef.current.get(key) || 0) + 1);
-    } else {
-      knownKeysRef.current.add(messageIdentity(message));
-    }
-    appendConversationMessage(target, message);
-    if (!shouldFollow) setHasNewMessages(true);
-    if (shouldFollow) requestLatestScroll();
-  };
-  /**
-   * Apply canonical gateway messages to the transcript.
-   *
-   * This is the whole of the captain delivery path: the gateway already decided
-   * what each record is, so there is nothing to dedupe by text, no optimistic
-   * count to reconcile, and no prompt boundary to infer. `replace` is for the
-   * authoritative full list an open/reload returns; a socket or poll delta
-   * merges into the rows already rendered. Returns true when the turn this
-   * canvas is waiting on has been answered.
-   */
-  const applyCanonicalMessages = (incoming: CanonicalMessage[], { replace = false, pending = [] }: { replace?: boolean; pending?: ConversationMessage[] } = {}): boolean => {
-    const current = getConversationMessages(target);
-    const currentIds = new Set(current.map(message => message.id));
-    const base = pending.length ? [...current, ...pending.filter(message => !currentIds.has(message.id))] : current;
-    const next = reconcileCanonicalMessages(base, incoming, { authoritative: replace });
-    if (!sameRenderedTranscript(current, next)) {
-      const shouldFollow = followLatestRef.current;
-      resetConversationMessages(target, next);
-      if (shouldFollow) requestLatestScroll(); else setHasNewMessages(true);
-    }
-    const active = activePromptRef.current;
-    if (!active) return false;
-    // The turn's own status is the completion signal: a user row still marked
-    // 'working' has no recorded reply yet. Nothing here inspects reply text.
-    const submitted = next.find(row => row.id === active.messageId);
-    if (!submitted || submitted.progress === 'working') return false;
-    activePromptRef.current = null;
-    setIsThinking(false);
+    setConversationSync({ status: 'fresh', cachedRows: result.messages.length });
     return true;
   };
-  const syncCanonicalConversation = async (): Promise<boolean> => {
-    const requestPrincipal = getConversationPrincipal();
-    try {
-      const result = await fetchMagiChatConversation(target);
-      if (requestPrincipal !== getConversationPrincipal()) return false;
-      const answered = applyCanonicalMessages(result.messages, { replace: true });
-      setConversationSync(current => current.status === 'fresh' ? current : { status: 'fresh', cachedRows: 0 });
-      return answered;
-    } catch (error) {
-      if (requestPrincipal !== getConversationPrincipal()) return false;
-      const cachedRows = getConversationMessages(target).filter(message => Boolean(message.canonicalId)).length;
-      setConversationSync({ status: 'stale', cachedRows, error: errorText(error, 'The conversation could not be refreshed.') });
-      throw error;
-    }
-  };
-  const recoverCanonicalActivity = (authoritativeSnapshot: boolean): Promise<void> => {
-    if (!canonicalTarget) return Promise.resolve();
-    const owner = getConversationPrincipal();
-    if (!owner) return Promise.resolve();
-    return activityRecoveryCoordinatorRef.current!.request(authoritativeSnapshot, async requestedSnapshot => {
-      if (owner !== getConversationPrincipal()) return;
-      markCanonicalActivityRecovering();
-      let health: unknown = null;
-      try {
-        if (requestedSnapshot) {
-          try {
-            const snapshot = await fetchCanonicalActivitySnapshot(
-              undefined, CANONICAL_ACTIVITY_PAGE_SIZE, true,
-            );
-            if (owner !== getConversationPrincipal()) return;
-            const applied = ingestCanonicalActivitySnapshot(snapshot);
-            if (!applied) throw new Error('Gateway returned an invalid activity snapshot.');
-            setActivityBefore(applied.nextBefore);
-            setActivityPageLimit(applied.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE);
-            setActivityHasMore(applied.hasMore);
-            health = snapshot;
-          } catch {
-            // Rolling-deploy compatibility: the replay contract remains a safe
-            // recovery path when the additive snapshot route is not available.
-            const page = await fetchCanonicalActivity(getCanonicalActivityCursor(), 200, true);
-            if (owner !== getConversationPrincipal() || !ingestCanonicalActivityPage(page)) {
-              throw new Error('Gateway activity catch-up could not be applied.');
-            }
-            health = page;
-          }
-        }
-        let cursor = getCanonicalActivityCursor();
-        let caughtUp = false;
-        let resetReplayBudget = true;
-        for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
-          const page = await fetchCanonicalActivity(cursor, 200, false);
-          if (owner !== getConversationPrincipal()) return;
-          const applied = await ingestCanonicalActivityReplayPage(
-            page, () => fetchCanonicalActivitySnapshot(
-              undefined, CANONICAL_ACTIVITY_PAGE_SIZE, true,
-            ),
-          );
-          if (owner !== getConversationPrincipal() || !applied) {
-            throw new Error('Gateway activity replay could not be applied.');
-          }
-          if (applied.snapshotPage) {
-            setActivityBefore(applied.snapshotPage.nextBefore);
-            setActivityPageLimit(
-              applied.snapshotPage.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE,
-            );
-            setActivityHasMore(applied.snapshotPage.hasMore);
-            health = applied.response;
-            if (resetReplayBudget) {
-              pageIndex = -1;
-              resetReplayBudget = false;
-            }
-          } else health ||= page;
-          cursor = getCanonicalActivityCursor();
-          activityRealtimeRef.current?.setActivityCursor(cursor);
-          if (!applied.snapshotPage && !page.has_more) { caughtUp = true; break; }
-        }
-        if (!caughtUp) throw new Error('Gateway activity replay exceeded the bounded catch-up window.');
-        if (canonicalActivityResponseIsDegraded(health)) markCanonicalActivityInterrupted();
-        else markCanonicalActivityFresh();
-      } catch {
-        if (owner === getConversationPrincipal()) markCanonicalActivityInterrupted();
-      }
-    });
-  };
-  const loadOlderCanonicalActivity = async (): Promise<boolean> => {
-    if (!canonicalTarget || !activityHasMore || !activityBefore || activityLoadingMore) return false;
-    const owner = getConversationPrincipal();
-    setActivityLoadingMore(true);
-    try {
-      const snapshot = await fetchCanonicalActivitySnapshot(
-        activityBefore, activityPageLimit, false,
-      );
-      if (owner !== getConversationPrincipal()) return false;
-      // An older page excludes newer non-focus rows even though its snapshot
-      // cursor observes them. Replay through that cursor before merging the
-      // page so pagination can never checkpoint past unseen activity.
-      if (Number.isSafeInteger(snapshot.snapshot_cursor)
-        && snapshot.snapshot_cursor > getCanonicalActivityCursor()) {
-        await recoverCanonicalActivity(false);
-        if (owner !== getConversationPrincipal()) return false;
-      }
-      const applied = ingestCanonicalActivitySnapshot(snapshot, true);
-      if (!applied) throw new Error('Gateway returned an invalid activity page.');
-      setActivityBefore(applied.nextBefore);
-      setActivityPageLimit(applied.nextLimit || CANONICAL_ACTIVITY_PAGE_SIZE);
-      setActivityHasMore(applied.hasMore);
-      return applied.addedHistoryRecords > 0;
-    } catch {
-      if (owner === getConversationPrincipal()) markCanonicalActivityInterrupted();
-      return false;
-    } finally {
-      if (owner === getConversationPrincipal()) setActivityLoadingMore(false);
-    }
-  };
-  const refreshCanonicalState = async (): Promise<void> => {
+  const refreshActivity = async (accept: () => boolean = () => true) => {
+    const owner = getMagiConversationPrincipal();
+    const revision = getGatewaySessionRevision();
+    if (!owner) return;
+    const ownsRequest = () => accept() && getMagiConversationPrincipal() === owner
+      && getGatewaySessionRevision() === revision;
     setActivityRefreshing(true);
     try {
-      if (canonicalTarget) {
-        await Promise.allSettled([syncCanonicalConversation(), recoverCanonicalActivity(true)]);
-      } else await syncFromHistory();
-    } finally { setActivityRefreshing(false); }
-  };
-
-  // Herdr ids hash terminal content (see gateway/app/herdr_client.py), and that
-  // content mutates while a reply renders, reflows, or scrolls its head out of
-  // the snapshot. Update the row it already produced instead of adding a second
-  // near-identical one; a genuinely new reply has no containment relation and
-  // still appends. Returns true when the incoming row was absorbed.
-  function reviseRenderedReply(message: AgentHistoryMessage): boolean {
-    if (message.kind !== 'conversation') return false;
-    const local = getConversationMessages(target);
-    const targetId = revisionTargetId(local, message);
-    if (!targetId) return false;
-    // Idempotent: an unchanged snapshot must not re-emit or re-persist a row.
-    if (local.find(item => item.id === targetId)?.text === message.text) return true;
-    updateConversationMessageState(target, targetId, {
-      text: message.text,
-      ...(message.sources ? { sources: message.sources } : {}),
-      ...(message.thinkingSummary ? { thinkingSummary: message.thinkingSummary } : {}),
-      ...(message.progress ? { progress: message.progress } : {}),
-    });
-    return true;
-  }
-  // TRANSITIONAL: terminal-derived delivery, worker panes only.
-  // A worker pane has no submitted turn, so its transcript is still parsed out
-  // of a mutable snapshot and still needs content identity and revision
-  // matching. The captain thread no longer uses any of this.
-  const appendHistoryMessages = (incoming: AgentHistoryMessage[]): boolean => {
-    let appendedReply = false;
-    const history = sanitizeTerminalHistory(incoming);
-    const revisable = terminalRevisionCandidate(history);
-    history.forEach(message => {
-      const key = historyKey(message);
-      const identity = messageIdentity(message);
-
-      // A control record is never a message of either role.
-      if (message.kind === 'control') return;
-
-      if (message === revisable && reviseRenderedReply(message)) {
-        knownKeysRef.current.add(identity);
-        return;
-      }
-      if (knownKeysRef.current.has(identity)) return;
-      const optimisticCount = optimisticCountsRef.current.get(key) || 0;
-      if (message.id && optimisticCount > 0) {
-        optimisticCountsRef.current.set(key, optimisticCount - 1);
-        knownKeysRef.current.add(identity);
-        return;
-      }
-      knownKeysRef.current.add(identity);
-      appendMessage({ id: message.id || stableHistoryId(message), role: message.role, kind: message.kind, text: message.text, sentAt: undefined, source: 'text', sources: message.sources, thinkingSummary: message.thinkingSummary, runId: message.runId, regenerateSafe: message.regenerateSafe, progress: message.progress || (message.role === 'assistant' ? 'complete' : undefined) }, false);
-      if (message.role === 'assistant' && message.kind === 'conversation') appendedReply = true;
-    });
-    return appendedReply;
-  };
-  const syncFromHistory = async (): Promise<boolean> => {
-    if (canonicalTarget) return syncCanonicalConversation();
-    const result = await fetchAgentHistory(target);
-    return appendHistoryMessages(result.messages);
-  };
-
-  // Herdr has no native push channel, so the gateway's event stream is an
-  // acceleration path only. HTTP polling below remains the recovery path when
-  // the socket is unavailable or a snapshot is transiently empty.
-  useEffect(() => {
-    let active = true;
-    const activityPrincipal = canonicalTarget ? getConversationPrincipal() : null;
-    let realtime: RealtimeClient | null = null;
-    let unsubscribe = () => {};
-    const start = async () => {
-      if (canonicalTarget) await hydrateCanonicalActivity();
-      if (!active || (canonicalTarget && activityPrincipal !== getConversationPrincipal())) return;
-      realtime = new RealtimeClient(target, canonicalTarget ? getCanonicalActivityCursor() : null);
-      if (canonicalTarget) activityRealtimeRef.current = realtime;
-      unsubscribe = realtime.subscribe(event => {
-        if (event?.type === 'connection_state' && event.state === 'disconnected') {
-          if (canonicalTarget) markCanonicalActivityRecovering();
-          return;
-        }
-        if (event?.type === 'connected') {
-          if (canonicalTarget) void recoverCanonicalActivity(false);
-          return;
-        }
-        if (event?.type === 'activity_records') {
-          if (canonicalTarget && activityPrincipal === getConversationPrincipal()) {
-            if (ingestCanonicalActivityPage(event)) {
-              realtime?.setActivityCursor(getCanonicalActivityCursor());
-            } else void recoverCanonicalActivity(true);
-          }
-          return;
-        }
-        if (!Array.isArray(event?.messages)) return;
-        const canonical = event.type === 'conversation_messages' || event.type === 'magi_messages';
-        if (canonical !== canonicalTarget
-          || (canonical && activityPrincipal !== getConversationPrincipal())) return;
-        // In development React may mount, clean up, and mount effects again. Do
-        // not let an early socket delivery race the authoritative initial read.
-        void historyReadyRef.current.then(() => {
-          if (!active || (canonical && activityPrincipal !== getConversationPrincipal())) return;
-          // Canonical events are revision deltas keyed by message id, so they
-          // merge into the rows already rendered rather than replacing them.
-          if (canonical) applyCanonicalMessages(event.type === 'magi_messages'
-            ? normalizeNativeMagiMessages(event.messages) : normalizeCanonicalMessages(event.messages));
-          else if (appendHistoryMessages(event.messages)) setIsThinking(false);
-        });
-      });
-      // Start the authoritative read before authentication can trigger a
-      // socket catch-up. Both paths merge by stable id/revision and cursor.
-      const recovery = canonicalTarget ? recoverCanonicalActivity(true) : Promise.resolve();
-      void realtime.connect();
-      await recovery;
-    };
-    void start();
-    const appState = AppState.addEventListener('change', state => {
-      if (!active || state !== 'active') return;
-      if (canonicalTarget) void recoverCanonicalActivity(true);
-      void realtime?.connect();
-    });
-    return () => {
-      active = false;
-      appState.remove();
-      unsubscribe();
-      if (activityRealtimeRef.current === realtime) activityRealtimeRef.current = null;
-      realtime?.disconnect();
-    };
-  }, [target]);
-  // Live auto-refresh is transport-neutral: native captain state comes from
-  // SQLite, while retained worker/legacy targets may still read a terminal.
-  // Poll independently of the faster post-send reconciliation below.
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        await historyReadyRef.current;
-        if (!cancelled && await syncFromHistory()) setIsThinking(false);
-      } catch { /* Transient transport hiccup: retry on the next tick. */ }
-    };
-    const interval = setInterval(() => void poll(), 3000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [target]);
-  const submitPrompt = async (trimmed: string, editId: string | null = null, pendingAttachments: ComposerAttachment[] = [], queuedMessageId?: string, retryFailed = false) => {
-    const messageId = editId || queuedMessageId || `u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const token = ++promptTokenRef.current;
-    const controller = new AbortController();
-    // The bubble shows the file as uploading until the gateway confirms it. A
-    // local pick is never rendered as a completed attachment.
-    const attachmentSummaries: ConversationAttachment[] = pendingAttachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size, status: attachment.uploaded ? 'stored' : 'uploading', uploadId: attachment.uploaded?.upload_id }));
-    pendingAttachmentsByMessageRef.current.set(messageId, pendingAttachments);
-    if (editId || queuedMessageId) {
-      updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'working' });
-      if (editId) setEditingMessageId(null);
-    } else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt: Date.now(), source: 'text', attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'working' });
-    activePromptRef.current = { token, messageId, text: trimmed, controller };
-    const promptPrincipal = canonicalTarget ? getConversationPrincipal() : null;
-    const isCurrent = () => activePromptRef.current?.token === token
-      && (!canonicalTarget || promptPrincipal === getConversationPrincipal());
-    setPromptText(''); setSendError(null); setIsThinking(true);
-    try {
-      await historyReadyRef.current;
-      if (!isCurrent()) return;
-      if (!nativeTarget && modelSelection && !modelSelection.available) throw new Error(modelSelection.availabilityReason || 'The selected execution profile is unavailable.');
-      const uploaded: ChatUpload[] = [];
-      for (const attachment of pendingAttachments) {
-        if (!isCurrent()) return;
-        setAttachments(current => current.map(item => item.id === attachment.id ? { ...item, status: 'uploading' } : item));
-        const result = attachment.uploaded || await uploadChatFile(attachment.uri, attachment.name, attachment.mimeType, messageId);
-        if (!isCurrent()) return;
-        uploaded.push(result);
-        setAttachments(current => current.map(item => item.id === attachment.id ? { ...item, status: 'uploaded', uploaded: result } : item));
-        // Reflect each confirmed upload as it lands rather than after the whole batch.
-        updateConversationMessageState(target, messageId, { attachments: attachmentSummaries.map(summary => summary.name === result.filename && !summary.uploadId ? { ...summary, status: 'stored', uploadId: result.upload_id } : summary) });
-      }
-      const response = await sendMagiChatPrompt(trimmed, 'iphone', target, modelSelection?.harness, modelSelection?.model, modelSelection?.profileId ?? null, uploaded, messageId, controller.signal, retryFailed);
-      if (!isCurrent()) return;
-      if (response?.status === 'error' || (!nativeTarget && response?.error)) throw new Error(response.error || 'The message was not accepted.');
-      // Only the server-confirmed records are kept, and 'attached' is claimed
-      // solely because the gateway accepted the prompt carrying this manifest.
-      updateConversationMessageState(target, messageId, { delivery: 'sent', progress: 'complete', attachments: uploaded.map(item => ({ name: item.filename, mediaType: item.media_type, size: item.size, status: 'attached' as const, uploadId: item.upload_id })) });
-      const pendingIds = new Set(pendingAttachments.map(attachment => attachment.id));
-      setAttachments(current => current.filter(item => !pendingIds.has(item.id)));
-      if (canonicalTarget) {
-        // The gateway answers with the canonical turn it recorded, including a
-        // reply the harness returned synchronously. Nothing is minted locally,
-        // so there is no local row for a later read to reconcile or duplicate.
-        const canonical = response?.conversation?.messages || [];
-        if (activePromptRef.current?.token === token) activePromptRef.current = { ...activePromptRef.current, turnId: response?.conversation?.turn_id };
-        const answered = canonical.length ? applyCanonicalMessages(canonical) : false;
-        if (response.status === 'failed') {
-          setPromptText(trimmed);
-          setSendError(response.error || 'Magi could not complete this response. Retry when ready.');
-          setIsThinking(false);
-          return;
-        }
-        if (answered) return;
-      } else {
-        const reply = conversationalPromptResponse(response?.response);
-        if (reply) {
-          // A server-issued run id is the stable identity for a server-known
-          // response; the local fallback applies only when the gateway sends none.
-          appendMessage({ id: response.runId ? `run-${response.runId}` : `a-${Date.now()}`, role: 'assistant', kind: 'conversation', text: reply, sentAt: Date.now(), source: 'text', audience: 'primary', progress: response.progress || 'complete', sources: response.sources, thinkingSummary: response.thinkingSummary, runId: response.runId, regenerateSafe: response.regenerateSafe });
-          activePromptRef.current = null; setIsThinking(false); return;
-        }
-      }
-      const pollForReply = async () => {
-        if (!isCurrent()) return;
-        try { if (await syncFromHistory()) return; }
-        catch { /* Retry after transient gateway/snapshot failures. */ }
-        if (isCurrent()) postPromptPollTimerRef.current = setTimeout(() => void pollForReply(), 1000);
-      };
-      void pollForReply();
-    } catch (error) {
-      if (!isCurrent()) return;
-      activePromptRef.current = null;
-      updateConversationMessageState(target, messageId, { delivery: 'failed', progress: 'failed', attachments: attachmentSummaries.map(summary => summary.status === 'stored' ? summary : { ...summary, status: 'failed' as const }) });
-      setAttachments(current => current.map(item => pendingAttachments.some(pending => pending.id === item.id) ? { ...item, status: 'failed' } : item));
-      setPromptText(trimmed); setSendError(errorText(error, 'The message could not be sent.')); setIsThinking(false);
-    }
-  };
-  const stopPendingResponse = async () => {
-    const active = activePromptRef.current;
-    if (!active) return;
-    activePromptRef.current = null;
-    promptTokenRef.current += 1;
-    active.controller.abort();
-    if (postPromptPollTimerRef.current) clearTimeout(postPromptPollTimerRef.current);
-    postPromptPollTimerRef.current = null;
-    updateConversationMessageState(target, active.messageId, { delivery: 'cancelled', progress: 'cancelled' });
-    queuedPrompts.forEach(prompt => updateConversationMessageState(target, prompt.messageId, { delivery: 'cancelled', progress: 'cancelled' }));
-    setQueuedPrompts([]);
-    setIsThinking(false);
-    if (canonicalTarget) {
-      // Cancel the canonical turn as well, so harness output produced after the
-      // captain stopped it is never recorded as that turn's reply.
-      const cancelled = [active.messageId, ...queuedPrompts.map(prompt => prompt.messageId)];
-      await Promise.allSettled(cancelled.map(messageId => cancelMagiChatTurn(target, messageId)));
-      if (nativeTarget) {
-        setSendError('Response stopped.');
-        void syncCanonicalConversation().catch(() => {});
-        return;
-      }
-    }
-    try {
-      const result = await interruptAgent(target);
-      if (result.status === 'error' || result.error) throw new Error(result.error || 'Interruption was not accepted.');
-      setSendError('Response stopped. Gateway interruption sent.');
+      const snapshot = await fetchCanonicalActivitySnapshot(undefined, CANONICAL_ACTIVITY_PAGE_SIZE);
+      if (!ownsRequest()) return;
+      const page = ingestCanonicalActivitySnapshot(snapshot);
+      if (!page) throw new Error('Invalid structured activity snapshot.');
+      setActivityBefore(page.nextBefore ?? undefined); setActivityHasMore(page.hasMore); markCanonicalActivityFresh();
     } catch {
-      // The local request/subscription is definitely cancelled. Be explicit
-      // that backend work can continue if its interruption endpoint failed.
-      setSendError('Response stopped locally; underlying work may continue.');
+      if (ownsRequest()) markCanonicalActivityInterrupted();
     }
+    finally { if (ownsRequest()) setActivityRefreshing(false); }
   };
+  const loadOlderCanonicalActivity = async (): Promise<boolean> => {
+    if (!activityHasMore || activityLoadingMore || !activityBefore) return false;
+    const owner = getMagiConversationPrincipal();
+    const revision = getGatewaySessionRevision();
+    if (!owner) return false;
+    const ownsRequest = () => getMagiConversationPrincipal() === owner
+      && getGatewaySessionRevision() === revision;
+    setActivityLoadingMore(true);
+    try {
+      const snapshot = await fetchCanonicalActivitySnapshot(activityBefore, CANONICAL_ACTIVITY_PAGE_SIZE);
+      if (!ownsRequest()) return false;
+      const page = ingestCanonicalActivitySnapshot(snapshot, true);
+      if (!page) throw new Error('Invalid structured activity snapshot.');
+      setActivityBefore(page.nextBefore ?? undefined); setActivityHasMore(page.hasMore); return true;
+    } catch { if (ownsRequest()) markCanonicalActivityInterrupted(); return false; }
+    finally { if (ownsRequest()) setActivityLoadingMore(false); }
+  };
+
+  useEffect(() => { captureRef.current = capture; });
+  useEffect(() => () => { void captureRef.current.cancel(); }, []);
+  useEffect(() => { let mounted = true; loadMagiGreeting().then(value => { if (mounted) setGreeting(value); }).catch(() => {}); return () => { mounted = false; }; }, []);
+  useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
   useEffect(() => {
-    if (Platform.OS !== 'web' || !isThinking || typeof window === 'undefined') return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      void stopPendingResponse();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isThinking, target]); // eslint-disable-line react-hooks/exhaustive-deps
+    let live = true;
+    const owner = getMagiConversationPrincipal();
+    const ownsLifecycle = () => live && !!owner && getMagiConversationPrincipal() === owner;
+    const realtimeRef: { current: RealtimeClient | null } = { current: null };
+    void (async () => {
+      const cached = await loadCachedMagiConversation();
+      if (!ownsLifecycle()) return;
+      resetMagiMessages([...cached.authoritative, ...cached.pending]);
+      conversationChangeCursorRef.current = cached.latestChange;
+      setMagiConversationChangeCursor(cached.latestChange);
+      // Cache hydration must win the startup race exactly once. Realtime starts
+      // only afterward, so a delayed storage read cannot roll back a newer
+      // canonical socket revision.
+      realtimeRef.current?.connect();
+      setConversationSync({ status: 'loading', cachedRows: cached.authoritative.length });
+      await Promise.allSettled([hydrateCanonicalActivity(), refreshActivity(ownsLifecycle)]);
+      if (!ownsLifecycle()) return;
+      try { await refreshConversation(true, ownsLifecycle); }
+      catch (error) { if (ownsLifecycle()) setConversationSync({ status: 'stale', cachedRows: cached.authoritative.length, error: errorText(error, 'Conversation unavailable.') }); }
+      finally { if (ownsLifecycle()) setHydrated(true); }
+    })();
+    realtimeRef.current = new RealtimeClient({
+      onMagiMessages: payload => {
+        if (!ownsLifecycle()) return false;
+        if ((payload as { type?: string })?.type === 'reconnect') {
+          void refreshConversation(true, ownsLifecycle).catch(() => {
+            if (ownsLifecycle()) setConversationSync(current => ({ ...current, status: 'stale' }));
+          });
+          return true;
+        }
+        const value = payload as Record<string, unknown>; const raw = value.messages;
+        if (!Array.isArray(raw)) return false;
+        const normalized = normalizeMagiMessageRecords(raw);
+        if (normalized.length !== raw.length) return false;
+        if (typeof value.conversation_id !== 'string'
+          || normalized.some(record => record.conversation_id !== value.conversation_id)
+          || (conversationIdRef.current && conversationIdRef.current !== value.conversation_id)) return false;
+        if (!applyRecords(normalized)) return false;
+        conversationIdRef.current = value.conversation_id;
+        setConversationSync(current => ({ ...current, status: 'fresh' }));
+        return true;
+      },
+      onActivity: payload => {
+        if (!ownsLifecycle()) return false;
+        const accepted = ingestCanonicalActivityPage(payload);
+        if (accepted) markCanonicalActivityFresh(); else markCanonicalActivityInterrupted();
+        return accepted;
+      },
+      onError: () => {
+        if (ownsLifecycle()) setConversationSync(current => ({ ...current, status: current.cachedRows ? 'stale' : current.status }));
+      },
+    }, getCanonicalActivityCursor());
+    return () => { live = false; activeControllerRef.current?.abort(); realtimeRef.current?.disconnect(); };
+  }, []); // one authenticated native thread
+
   useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
-    const movementKeys = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar']);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!movementKeys.has(event.key)) return;
-      const targetElement = event.target as HTMLElement | null;
-      const tag = targetElement?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' || targetElement?.isContentEditable) return;
-      const history = document.querySelector('[data-testid="chat-history"]');
-      if (targetElement && targetElement !== document.body && !history?.contains(targetElement)) return;
-      stopFollowingLatest();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (capture.isRecording) setWaveSamples(current => [...current.slice(1), Math.max(0.04, capture.amplitude)]);
+  }, [capture.amplitude, capture.isRecording]);
+  useEffect(() => { if (autoStartRecording && !isRecording && micStatus === 'idle') void startRecording(); }, [autoStartRecording]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (isThinking || queuedPrompts.length === 0) return;
-    const next = queuedPrompts[0];
-    setQueuedPrompts(queue => queue.slice(1));
-    void submitPrompt(next.text, next.editId, next.attachments, next.messageId);
-  }, [isThinking, queuedPrompts]); // eslint-disable-line react-hooks/exhaustive-deps
-  const handleSend = async () => {
+    if (activeMessageId || !queuedPrompts.length) return;
+    const [next, ...rest] = queuedPrompts; setQueuedPrompts(rest); void submitPrompt(next);
+  }, [activeMessageId, queuedPrompts]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const uploadForPrompt = async (item: QueuedPrompt): Promise<ChatUpload[]> => {
+    const completed: ChatUpload[] = [];
+    for (const attachment of item.attachments) {
+      if (attachment.uploaded) { completed.push(attachment.uploaded); continue; }
+      setAttachments(current => current.map(value => value.id === attachment.id ? { ...value, status: 'uploading' } : value));
+      try {
+        const uploaded = await uploadChatFile(attachment.uri, attachment.name, attachment.mimeType);
+        attachment.uploaded = uploaded; attachment.status = 'uploaded'; completed.push(uploaded);
+        updateMagiMessage(item.messageId, { attachments: item.attachments.map(value => ({ name: value.name, mediaType: value.mimeType || 'application/octet-stream', size: value.size, status: value.uploaded ? 'stored' : 'uploading', uploadId: value.uploaded?.upload_id })) });
+      } catch (error) {
+        attachment.status = 'failed';
+        updateMagiMessage(item.messageId, { attachments: item.attachments.map(value => ({ name: value.name, mediaType: value.mimeType || 'application/octet-stream', size: value.size, status: value.status === 'failed' ? 'failed' : value.uploaded ? 'stored' : 'uploading', uploadId: value.uploaded?.upload_id })) });
+        throw error;
+      }
+    }
+    return completed;
+  };
+  async function submitPrompt(item: QueuedPrompt) {
+    const owner = getMagiConversationPrincipal();
+    const sessionRevision = getGatewaySessionRevision();
+    if (!owner) return;
+    const ownsSubmission = () => getMagiConversationPrincipal() === owner
+      && getGatewaySessionRevision() === sessionRevision;
+    const token = ++activeTokenRef.current; const controller = new AbortController(); activeControllerRef.current = controller; setActiveMessageId(item.messageId); setSendError(null);
+    try {
+      const uploaded = await uploadForPrompt(item);
+      if (!ownsSubmission()) return;
+      const result = await sendMagiChatPrompt(item.text, item.messageId, item.source, uploaded, { conversationId: conversationIdRef.current, retryFailed: item.retryFailed, signal: controller.signal });
+      if (!ownsSubmission()) return;
+      const responseRecords = result.messages.length ? result.messages : [result.user_message, result.assistant_message].filter((row): row is MagiMessageRecord => Boolean(row));
+      if (!applyRecords(responseRecords)) throw new Error('Gateway returned conflicting Magi identity.');
+      conversationIdRef.current = result.conversation.id;
+      if (result.status === 'failed') throw new Error(result.error || 'Magi could not complete this response.');
+    } catch (error) {
+      if (controller.signal.aborted || !ownsSubmission()) return;
+      updateMagiMessage(item.messageId, { delivery: 'failed', progress: 'failed' });
+      setSendError(errorText(error, 'Message failed. Retry to send the same request once.'));
+    } finally {
+      if (activeTokenRef.current === token) { activeControllerRef.current = null; setActiveMessageId(null); }
+    }
+  }
+  const queuePrompt = (textValue: string, source: 'text' | 'voice', selectedAttachments: ComposerAttachment[], messageId?: string, retryFailed = false) => {
+    const trimmed = textValue.trim(); if (!trimmed || !getMagiConversationPrincipal()) return;
+    const busy = Boolean(activeControllerRef.current || activeMessageId);
+    const id = messageId || `${source === 'voice' ? 'voice-' : ''}u-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    if (!messageId) appendMagiMessage({ id, role: 'user', text: trimmed, sentAt: Date.now(), source, attachments: selectedAttachments.map(item => ({ name: item.name, mediaType: item.mimeType || 'application/octet-stream', size: item.size, status: item.uploaded ? 'stored' : 'uploading', uploadId: item.uploaded?.upload_id })), progress: busy ? 'queued' : 'working', delivery: 'sending' });
+    else updateMagiMessage(id, { delivery: 'sending', progress: busy ? 'queued' : 'working' });
+    pendingAttachmentsRef.current.set(id, selectedAttachments);
+    const item = { messageId: id, text: trimmed, source, attachments: selectedAttachments, retryFailed };
+    if (busy) setQueuedPrompts(current => [...current, item]); else void submitPrompt(item);
+    setPromptText(''); setAttachments([]); setSendError(null);
+  };
+  const handleSend = () => {
     const trimmed = promptText.trim();
     if (attachments.length && !trimmed) { setSendError('Add a message describing the attached file before sending.'); return; }
-    // Current-session prompts remain usable while optional routing metadata
-    // loads; only an explicit profile choice needs the inventory to be ready.
-    if (!nativeTarget && !routingReady && modelSelection) { setSendError('Execution settings are still unavailable; your message was not sent.'); return; }
-    if (!trimmed) { if (!isThinking) router.push('/voice' as any); return; }
-    if (isThinking) {
-      const sentAt = Date.now();
-      const messageId = editingMessageId || `u-${sentAt}-${Math.random().toString(36).slice(2, 10)}`;
-      const attachmentSummaries: ConversationAttachment[] = attachments.map(attachment => ({ name: attachment.name, mediaType: attachment.mimeType || 'application/octet-stream', size: attachment.size, status: attachment.uploaded ? 'stored' : 'uploading', uploadId: attachment.uploaded?.upload_id }));
-      if (editingMessageId) updateConversationMessageState(target, messageId, { text: trimmed, attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'queued' });
-      else appendMessage({ id: messageId, role: 'user', text: trimmed, sentAt, source: 'text', attachments: attachmentSummaries, audience: 'captain', delivery: 'sending', progress: 'queued' });
-      setQueuedPrompts(queue => [...queue, { id: `q-${sentAt}`, messageId, text: trimmed, attachments: [...attachments], editId: editingMessageId }]);
-      setEditingMessageId(null); setAttachments([]); setPromptText(''); setSendError(null); return;
+    if (!trimmed) { router.push('/voice' as any); return; }
+    queuePrompt(trimmed, 'text', [...attachments]);
+  };
+  const retryMessage = (message: MagiMessage) => {
+    const selected = pendingAttachmentsRef.current.get(message.id) || [];
+    if (message.attachments?.length && !selected.length) { setSendError('Reattach the file before retrying this message.'); return; }
+    queuePrompt(message.text, message.source, selected, message.id, true);
+  };
+  const stopPendingResponse = async () => {
+    if (!stoppableMessageId) return;
+    activeControllerRef.current?.abort(); setActiveMessageId(null);
+    try { await cancelMagiChatTurn(stoppableMessageId); await refreshConversation(true); }
+    catch (error) { setSendError(errorText(error, 'The response could not be stopped.')); }
+  };
+
+  const addAttachments = (items: ComposerAttachment[]) => {
+    const combined = [...attachments, ...items];
+    if (combined.length > CHAT_MAX_UPLOAD_COUNT) { setSendError(`Add at most ${CHAT_MAX_UPLOAD_COUNT} files.`); return; }
+    if (combined.reduce((sum, item) => sum + (item.size || 0), 0) > CHAT_MAX_UPLOAD_TOTAL_BYTES) { setSendError('Attachments may total at most 50 MB.'); return; }
+    const invalid = items.find(item => validateChatAttachment(item.name, item.mimeType, item.size));
+    if (invalid) { setSendError(validateChatAttachment(invalid.name, invalid.mimeType, invalid.size)); return; }
+    setAttachments(combined); setAttachmentMenuOpen(false); setSendError(null);
+  };
+  const pickImages = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) { setSendError('Photo access is required to attach an image.'); return; }
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsMultipleSelection: true, quality: 0.9 });
+    if (!result.canceled) addAttachments(result.assets.map((asset, index) => ({ id: `image-${Date.now()}-${index}`, name: asset.fileName || `photo-${index + 1}.jpg`, uri: asset.uri, mimeType: asset.mimeType || 'image/jpeg', size: asset.fileSize, kind: 'image' as const, status: 'ready' as const })));
+  };
+  const pickFiles = async () => {
+    const result = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
+    if (!result.canceled) addAttachments(result.assets.map((asset, index) => ({ id: `file-${Date.now()}-${index}`, name: asset.name, uri: asset.uri, mimeType: asset.mimeType, size: asset.size, kind: 'file' as const, status: 'ready' as const })));
+  };
+  const startRecording = async () => {
+    const owner = getMagiConversationPrincipal(); const revision = getGatewaySessionRevision();
+    const ownsCapture = () => !!owner && getMagiConversationPrincipal() === owner
+      && getGatewaySessionRevision() === revision;
+    setMicStatus('requesting'); setSendError(null);
+    try {
+      await capture.start();
+      if (!ownsCapture()) { await capture.cancel(); return; }
+      setIsRecording(true); setMicStatus('listening');
+    } catch (error) {
+      if (ownsCapture()) { setMicStatus('error'); setSendError(errorText(error, 'Microphone unavailable.')); }
     }
-    await submitPrompt(trimmed, editingMessageId, attachments);
   };
-  const retryMessage = (message: ConversationMessage) => {
-    const pending = pendingAttachmentsByMessageRef.current.get(message.id);
-    if (!pending && message.attachments?.length) { setSendError('Reattach the file to retry this message; the local file is no longer available.'); return; }
-    void submitPrompt(message.text, message.id, pending || [], undefined, true);
+  const finishRecording = async () => {
+    const owner = getMagiConversationPrincipal(); const revision = getGatewaySessionRevision();
+    const ownsCapture = () => !!owner && getMagiConversationPrincipal() === owner
+      && getGatewaySessionRevision() === revision;
+    setIsRecording(false); setIsTranscribing(true); setMicStatus('transcribing');
+    try {
+      const recording = await capture.stop();
+      if (!ownsCapture()) return;
+      const transcript = recording.transcript || (await transcribeVoiceAudio(recording.uri, recording.mimeType, recording.filename)).text;
+      if (!ownsCapture()) return;
+      if (!transcript.trim()) throw new Error('No speech was detected.');
+      if (voiceTranscriptBehavior === 'auto-send') queuePrompt(transcript, 'voice', []); else { setPromptText(current => current ? `${current} ${transcript}` : transcript); setMicStatus('ready'); }
+    } catch (error) {
+      if (ownsCapture()) { setMicStatus('error'); setSendError(errorText(error, 'The recording could not be transcribed.')); }
+    } finally { if (ownsCapture()) setIsTranscribing(false); }
   };
+  const handleMicPress = async () => { if (isRecording) await finishRecording(); else await startRecording(); };
+
   const activeMessage = messages.find(message => message.id === messageActionsId);
-  const editMessage = () => {
-    if (!activeMessage) return;
-    setPromptText(activeMessage.text); setEditingMessageId(activeMessage.id); setMessageActionsId(null);
-    setTimeout(() => inputRef.current?.focus(), 0);
+  const copyMessage = async () => { if (activeMessage) { await Clipboard.setStringAsync(activeMessage.text); setCopiedMessageId(activeMessage.id); setTimeout(() => setCopiedMessageId(null), 1400); } setMessageActionsId(null); };
+  const onHistoryScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent; const nearEnd = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40;
+    setFollowLatest(nearEnd); if (nearEnd) setHasNewMessages(false);
   };
-  const copyMessage = async () => { if (activeMessage) { await Clipboard.setStringAsync(activeMessage.text); setCopiedMessageId(activeMessage.id); setTimeout(() => setCopiedMessageId(current => current === activeMessage.id ? null : current), 1400); } setMessageActionsId(null); };
-  const selectMessage = () => { if (activeMessage) setSelectableMessageId(activeMessage.id); setMessageActionsId(null); };
-  const regenerateMessage = async () => { if (!activeMessage || !onRegenerate || !activeMessage.runId || activeMessage.regenerateSafe !== true) return; setMessageActionsId(null); try { await onRegenerate(activeMessage); } catch (error) { setSendError(errorText(error, 'This response could not be regenerated safely.')); } };
+  const onContentSizeChange = () => { if (followLatest) requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: false })); else setHasNewMessages(true); };
+  const handleHeaderLayout = (event: LayoutChangeEvent) => setHeaderHeight(event.nativeEvent.layout.height);
+  const handleComposerLayout = (event: LayoutChangeEvent) => setComposerHeight(event.nativeEvent.layout.height);
+  const showEmptyState = hydrated && messages.length === 0 && conversationSync.status !== 'stale';
 
-  const transcript = canonicalTarget ? filterCanonicalMessages(messages, showToolCalls) : filterAgentHistory(messages.map(message => ({ ...message, kind: message.kind || 'conversation' })), showToolCalls);
-  // The resting Magi surface belongs to an empty conversation only, and only
-  // once the read that would populate it has settled - otherwise the greeting
-  // flashes over history that is about to arrive.
-  const showEmptyState = transcript.length === 0 && !isThinking && hydratedHistoryTarget === target && (!canonicalTarget || conversationSync.status !== 'stale');
-  const spectral = dark ? brand.cyan : brand.violet;
-
-  // The environment owns the colour of the canvas. A theme tint here would
-  // cover the entire scene and stack with EnvironmentBackground's targeted dim.
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={styles.canvas}>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onLayout={handleHistoryLayout} onContentSizeChange={handleHistoryContentSizeChange} onScroll={handleScroll} onScrollBeginDrag={handleHistoryScrollBeginDrag} onTouchStart={handleHistoryTouchStart} onTouchMove={handleHistoryTouchMove} onTouchEnd={handleHistoryTouchEnd} {...(Platform.OS === 'web' ? ({ onWheel: handleHistoryWheel, onKeyDown: handleHistoryKeyDown, onMouseDown: handleHistoryMouseDown } as any) : {})} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} refreshControl={<RefreshControl refreshing={activityRefreshing} onRefresh={() => { void refreshCanonicalState(); }} />} accessibilityLabel={`${targetLabel} conversation history`} aria-busy={hydratedHistoryTarget !== target}>
-      {transcript.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={dark ? '#F4F5F7' : brand.ink} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : message.kind === 'tool' ? <View key={message.id} testID="tool-history-message" style={styles.toolMessage}><Text numberOfLines={1} style={[styles.toolMessageText, { color: muted }]}>{toolCallPreview(message.text)}</Text></View> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} showToolCalls={showToolCalls} onActions={() => setMessageActionsId(message.id)} onOpenDecision={itemId => router.push({ pathname: '/attention', params: { item: itemId, source: 'conversation' } } as any)} />)}
-      {canonicalTarget && canonicalWork.active ? <WorkingState dark={dark} muted={muted} operations={canonicalWork.operationCount} phase={canonicalWork.phase === 'idle' ? 'active' : canonicalWork.phase} onPress={onActivityOpen} /> : null}
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onScroll={onHistoryScroll} onContentSizeChange={onContentSizeChange} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} refreshControl={<RefreshControl refreshing={activityRefreshing} onRefresh={() => { void Promise.allSettled([refreshConversation(true), refreshActivity()]); }} />} accessibilityLabel="Magi conversation history" aria-busy={!hydrated}>
+      {messages.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} onActions={() => setMessageActionsId(message.id)} />)}
+      {canonicalWork.active ? <WorkingState dark={dark} muted={muted} operations={canonicalWork.operationCount} phase={canonicalWork.phase === 'idle' ? 'active' : canonicalWork.phase} onPress={onActivityOpen} /> : null}
     </ScrollView>
     <EmptyStateMagi dark={dark} visible={showEmptyState} greeting={greeting} active={isThinking || isRecording} />
-    <View testID="chat-header" style={styles.headerDock} pointerEvents="box-none" onLayout={handleHeaderLayout}>
-      <View style={styles.topBar} pointerEvents="box-none">
-        <GlassCircleButton dark={dark} testID="brand-drawer-toggle" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread captain attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityHint="Opens navigation and attention details" accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} badge={unreadAttentionCount > 0}>
-          <MenuIcon size={ICON_SIZE} color={text} />
-        </GlassCircleButton>
-        <IdentityControl dark={dark} selection={modelSelection} open={modelMenuOpen} onToggle={() => { setModelMenuOpen(value => !value); setAttachmentMenuOpen(false); }} />
-        {/* One contextual control. Magistrate has no "new conversation" endpoint -
-            the captain thread is a single canonical record - so the resting action
-            is Voice Mode, and it becomes the active spectral Stop while Magi works. */}
-        <GlassCircleButton dark={dark} testID="chat-primary-action" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : 'Open Voice Mode'} onPress={() => isThinking ? void stopPendingResponse() : router.push('/voice' as any)}>
-          {isThinking ? <StopIcon size={ICON_SIZE} color={spectral} /> : <SoundwaveIcon size={ICON_SIZE} color={text} />}
-        </GlassCircleButton>
-      </View>
-      {canonicalTarget && conversationSync.status === 'stale' ? <View testID="conversation-stale-state" accessibilityRole="alert" style={[styles.staleConversation, { backgroundColor: glassFill(dark, 'surface'), borderColor: glassEdge(dark) }, blurStyle(18)]}><Text style={[styles.staleConversationText, { color: conversationSync.cachedRows ? muted : brand.attention }]}>{conversationSync.cachedRows ? 'Connection interrupted · showing saved conversation while reconnecting.' : 'Conversation unavailable · reconnecting.'}</Text></View> : null}
-    </View>
-    {(hasNewMessages || !followLatest || latestScrollPending) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={jumpToLatest}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
+    <View testID="chat-header" style={styles.headerDock} pointerEvents="box-none" onLayout={handleHeaderLayout}><View style={styles.topBar} pointerEvents="box-none">
+      <GlassCircleButton dark={dark} testID="brand-drawer-toggle" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} badge={unreadAttentionCount > 0}><MenuIcon size={ICON_SIZE} color={text} /></GlassCircleButton>
+      <View style={styles.identityControl} accessibilityLabel="Magi, provider-native conversation"><Text style={[styles.identityName, { color: text }]}>Magi</Text></View>
+      <GlassCircleButton dark={dark} testID="chat-primary-action" accessibilityLabel={isThinking ? 'Stop Magi response' : 'Open Voice Mode'} onPress={() => isThinking ? void stopPendingResponse() : router.push('/voice' as any)}>{isThinking ? <StopIcon size={ICON_SIZE} color={spectral} /> : <SoundwaveIcon size={ICON_SIZE} color={text} />}</GlassCircleButton>
+    </View>{conversationSync.status === 'stale' ? <View testID="conversation-stale-state" accessibilityRole="alert" style={[styles.staleConversation, { backgroundColor: glassFill(dark, 'surface'), borderColor: glassEdge(dark) }, blurStyle(18)]}><Text style={[styles.staleConversationText, { color: conversationSync.cachedRows ? muted : brand.attention }]}>{conversationSync.cachedRows ? 'Connection interrupted · showing saved conversation while reconnecting.' : 'Conversation unavailable · reconnecting.'}</Text></View> : null}</View>
+    {(hasNewMessages || !followLatest) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={() => { setFollowLatest(true); setHasNewMessages(false); scrollRef.current?.scrollToEnd({ animated: true }); }}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
     {copiedMessageId ? <Text testID="message-copied" accessibilityLiveRegion="polite" style={[styles.copiedLabel, { bottom: composerHeight + 52 }]}>Copied</Text> : null}
-    {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
-      {activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Edit your message" onPress={editMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Edit</Text></TouchableOpacity> : null}
-      <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Copy ${activeMessage?.role === 'assistant' ? 'assistant response' : 'your message'}`} onPress={() => void copyMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Copy</Text></TouchableOpacity>
-      {activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" onPress={selectMessage} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Select text</Text></TouchableOpacity> : null}
-      {activeMessage?.role === 'assistant' && activeMessage.runId && activeMessage.regenerateSafe === true ? <TouchableOpacity accessibilityRole="button" accessibilityLabel={activeMessage.progress === 'failed' ? 'Retry response' : 'Regenerate response'} onPress={() => void regenerateMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>{activeMessage.progress === 'failed' ? 'Retry' : 'Regenerate'}</Text></TouchableOpacity> : null}
-      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close message actions" onPress={() => setMessageActionsId(null)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>×</Text></TouchableOpacity>
-    </View> : null}
-    <View ref={composerDockRef} testID="composer-dock" style={styles.composerDock} pointerEvents="box-none" onLayout={handleComposerLayout}>
-    {isRecording ? <View testID="active-voice-surface" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.activeVoiceSurface}><View style={styles.activeVoiceHalo} /><Image source={markActive} style={styles.activeVoiceMark} resizeMode="contain" accessibilityIgnoresInvertColors /><LiveWaveform samples={waveSamples} color={brand.cyan} /></View> : null}
-    {attachments.length ? <ScrollView testID="attachment-preview" horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentPreview} contentContainerStyle={styles.attachmentPreviewContent} keyboardShouldPersistTaps="handled">
-      {attachments.map(attachment => <View key={attachment.id} testID={`attachment-${attachment.id}`} style={[styles.attachmentChip, { backgroundColor: composerSurface }]}>
-        {attachment.kind === 'image' ? <Image source={{ uri: attachment.uri }} style={styles.attachmentThumbnail} resizeMode="cover" /> : <View style={[styles.attachmentFileIcon, { backgroundColor: dark ? 'rgba(36,216,255,0.12)' : 'rgba(139,108,255,0.10)' }]}><FileIcon color={dark ? brand.cyan : brand.violet} /></View>}
-        <View style={styles.attachmentCopy}><Text numberOfLines={1} style={[styles.attachmentName, { color: text }]}>{attachment.name}</Text><Text style={[styles.attachmentMeta, { color: attachment.status === 'failed' ? brand.critical : muted }]}>{attachment.status === 'uploading' ? 'Uploading…' : attachment.status === 'failed' ? 'Upload failed · retry' : attachment.kind === 'image' ? 'Image' : 'File'}{attachment.status !== 'uploading' && formatAttachmentSize(attachment.size) ? ` · ${formatAttachmentSize(attachment.size)}` : ''}</Text></View>
-        <TouchableOpacity testID={`remove-${attachment.id}`} accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => { setAttachments(current => current.filter(item => item.id !== attachment.id)); setSendError(null); }} style={styles.attachmentRemove}><Text style={[styles.attachmentRemoveText, { color: muted }]}>×</Text></TouchableOpacity>
-      </View>)}
-    </ScrollView> : null}
-    <View testID="composer-surface" style={[styles.composer, { backgroundColor: composerSurface, borderColor: glassEdge(dark) }, blurStyle(24)]}>
-      <View style={styles.attachmentControl}>
-        <TouchableOpacity testID="attachment-menu-button" accessibilityRole="button" accessibilityLabel={attachmentMenuOpen ? 'Close attachment menu' : 'Add attachment'} accessibilityState={{ expanded: attachmentMenuOpen }} onPress={() => { setAttachmentMenuOpen(value => !value); setModelMenuOpen(false); }} style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: attachmentMenuOpen ? spectral : muted }]}>＋</Text></TouchableOpacity>
-        {attachmentMenuOpen ? <View testID="attachment-menu" accessibilityViewIsModal style={[styles.attachmentMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}>
-          <Text style={[styles.menuTitle, { color: text }]}>Add to message</Text>
-          <TouchableOpacity testID="attachment-option-images" accessibilityRole="button" accessibilityLabel="Choose photos" onPress={() => void pickImages()} style={styles.attachmentOption}><ImageIcon color={dark ? brand.cyan : brand.violet} /><View><Text style={[styles.attachmentOptionTitle, { color: text }]}>Photos</Text><Text style={[styles.attachmentOptionMeta, { color: muted }]}>Choose from your library</Text></View></TouchableOpacity>
-          <TouchableOpacity testID="attachment-option-files" accessibilityRole="button" accessibilityLabel="Choose files" onPress={() => void pickFiles()} style={styles.attachmentOption}><FileIcon color={dark ? brand.cyan : brand.violet} /><View><Text style={[styles.attachmentOptionTitle, { color: text }]}>Files</Text><Text style={[styles.attachmentOptionMeta, { color: muted }]}>Browse this device</Text></View></TouchableOpacity>
-        </View> : null}
-      </View>
-      <TextInput ref={inputRef} testID="captain-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onKeyPress={event => { if (isThinking && event.nativeEvent.key === 'Escape') void stopPendingResponse(); }} onSubmitEditing={() => void handleSend()} returnKeyType="send" editable accessibilityLabel={`Message ${targetLabel}`} />
-      <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : micStatus === 'requesting' ? 'Requesting microphone permission' : isTranscribing ? 'Transcribing microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing || micStatus === 'requesting' }} style={[styles.composerIconButton, isRecording ? styles.micActiveButton : undefined]} onPress={voiceCaptureBehavior === 'tap-to-toggle' ? () => void handleMicPress() : undefined} onPressIn={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = true; if (!isRecording) void handleMicPress(); } : undefined} onPressOut={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = false; if (isRecording) void handleMicPress(); } : undefined} disabled={isTranscribing || micStatus === 'requesting'}><MicIcon size={24} color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
-      <TouchableOpacity testID={isThinking ? 'stop-captain-response' : 'send-captain-prompt'} accessibilityRole="button" accessibilityLabel={isThinking ? `Stop response from ${targetLabel}` : promptText.trim() || attachments.length ? `Send message to ${targetLabel}` : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => isThinking ? void stopPendingResponse() : void handleSend()} style={[styles.sendButton, isThinking ? styles.stopButton : undefined]}>{isThinking ? <StopIcon size={20} color={brand.paper} /> : promptText.trim() || attachments.length ? <ArrowUpIcon size={22} color={brand.paper} /> : <SoundwaveIcon color={brand.paper} size={20} />}</TouchableOpacity>
+    {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: dark ? brand.command : '#FFFFFF' }]}><TouchableOpacity accessibilityRole="button" accessibilityLabel="Copy message" onPress={() => void copyMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Copy</Text></TouchableOpacity>{activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" onPress={() => { setSelectableMessageId(activeMessage.id); setMessageActionsId(null); }} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Select text</Text></TouchableOpacity> : null}<TouchableOpacity accessibilityRole="button" accessibilityLabel="Close message actions" onPress={() => setMessageActionsId(null)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>×</Text></TouchableOpacity></View> : null}
+    <View testID="composer-dock" style={styles.composerDock} pointerEvents="box-none" onLayout={handleComposerLayout}>
+      {isRecording ? <View testID="active-voice-surface" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.activeVoiceSurface}><View style={styles.activeVoiceHalo} /><Image source={markActive} style={styles.activeVoiceMark} resizeMode="contain" accessibilityIgnoresInvertColors /><LiveWaveform samples={waveSamples} color={brand.cyan} /></View> : null}
+      {attachments.length ? <ScrollView testID="attachment-preview" horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentPreview} contentContainerStyle={styles.attachmentPreviewContent}>{attachments.map(attachment => <View key={attachment.id} style={[styles.attachmentChip, { backgroundColor: 'transparent' }]}>{attachment.kind === 'image' ? <Image source={{ uri: attachment.uri }} style={styles.attachmentThumbnail} /> : <View style={styles.attachmentFileIcon}><FileIcon color={spectral} /></View>}<View style={styles.attachmentCopy}><Text numberOfLines={1} style={[styles.attachmentName, { color: text }]}>{attachment.name}</Text><Text style={[styles.attachmentMeta, { color: attachment.status === 'failed' ? brand.critical : muted }]}>{attachment.status === 'uploading' ? 'Uploading…' : attachment.status === 'failed' ? 'Upload failed' : formatAttachmentSize(attachment.size)}</Text></View><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments(current => current.filter(item => item.id !== attachment.id))} style={styles.attachmentRemove}><Text style={[styles.attachmentRemoveText, { color: muted }]}>×</Text></TouchableOpacity></View>)}</ScrollView> : null}
+      <View testID="composer-surface" style={[styles.composer, { backgroundColor: 'transparent', borderColor: glassEdge(dark) }, blurStyle(24)]}><View style={styles.attachmentControl}><TouchableOpacity testID="attachment-menu-button" accessibilityRole="button" accessibilityLabel="Add attachment" accessibilityState={{ expanded: attachmentMenuOpen }} onPress={() => setAttachmentMenuOpen(value => !value)} style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: attachmentMenuOpen ? spectral : muted }]}>＋</Text></TouchableOpacity>{attachmentMenuOpen ? <View testID="attachment-menu" accessibilityViewIsModal style={[styles.attachmentMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}><Text style={[styles.menuTitle, { color: text }]}>Add to message</Text><TouchableOpacity testID="attachment-option-images" accessibilityRole="button" onPress={() => void pickImages()} style={styles.attachmentOption}><ImageIcon color={spectral} /><Text style={[styles.attachmentOptionTitle, { color: text }]}>Photos</Text></TouchableOpacity><TouchableOpacity testID="attachment-option-files" accessibilityRole="button" onPress={() => void pickFiles()} style={styles.attachmentOption}><FileIcon color={spectral} /><Text style={[styles.attachmentOptionTitle, { color: text }]}>Files</Text></TouchableOpacity></View> : null}</View>
+      <TextInput ref={inputRef} testID="magi-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onSubmitEditing={handleSend} returnKeyType="send" accessibilityLabel="Message Magi" />
+      <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : isTranscribing ? 'Transcribing microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing || micStatus === 'requesting' }} style={[styles.composerIconButton, isRecording ? styles.micActiveButton : undefined]} onPress={voiceCaptureBehavior === 'tap-to-toggle' ? () => void handleMicPress() : undefined} onPressIn={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = true; if (!isRecording) void handleMicPress(); } : undefined} onPressOut={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = false; if (isRecording) void handleMicPress(); } : undefined} disabled={isTranscribing || micStatus === 'requesting'}><MicIcon size={24} color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
+      <TouchableOpacity testID={isThinking ? 'stop-magi-response' : 'send-magi-prompt'} accessibilityRole="button" accessibilityLabel={isThinking ? 'Stop Magi response' : promptText.trim() || attachments.length ? 'Send message to Magi' : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => isThinking ? void stopPendingResponse() : handleSend()} style={[styles.sendButton, isThinking ? styles.stopButton : undefined]}>{isThinking ? <StopIcon size={20} color={brand.paper} /> : promptText.trim() || attachments.length ? <ArrowUpIcon size={22} color={brand.paper} /> : <SoundwaveIcon color={brand.paper} size={20} />}</TouchableOpacity></View>
+      <View testID="composer-status" style={styles.composerStatus} accessibilityLiveRegion="polite">{micStatus === 'requesting' ? <Text style={styles.micTranscribingLabel}>Requesting microphone permission…</Text> : micStatus === 'listening' ? <Text style={styles.micListeningLabel}>Listening…</Text> : micStatus === 'transcribing' ? <Text style={styles.micTranscribingLabel}>Transcribing…</Text> : micStatus === 'ready' ? <Text style={styles.micReadyLabel}>Transcript ready — review before sending</Text> : null}{queuedPrompts.length ? <Text testID="queued-message-count" style={styles.queuedLabel}>{queuedPrompts.length} queued · sends in order</Text> : null}{sendError ? <Text testID="magi-send-error" accessibilityRole="alert" style={styles.sendError}>{sendError}</Text> : null}</View>
     </View>
-    <View testID="composer-status" style={styles.composerStatus} accessibilityLiveRegion="polite">{editingMessageId ? <Text style={styles.editingLabel}>Editing message</Text> : !isThinking && (micStatus === 'requesting' ? <Text testID="mic-status" style={styles.micTranscribingLabel}>Requesting microphone permission…</Text> : micStatus === 'listening' ? <Text testID="mic-status" style={styles.micListeningLabel}>Listening… {voiceCaptureBehavior === 'hold-to-talk' ? 'release mic to finish' : 'tap mic to finish'}</Text> : micStatus === 'transcribing' ? <Text testID="mic-status" style={styles.micTranscribingLabel}>Transcribing…</Text> : micStatus === 'ready' ? <Text testID="mic-status" style={styles.micReadyLabel}>Transcript ready — review before sending</Text> : micStatus === 'error' ? <Text testID="mic-status" accessibilityRole="alert" style={styles.micErrorLabel}>Microphone unavailable. {sendError || 'Try again.'}</Text> : null)}{queuedPrompts.length ? <Text testID="queued-message-count" style={styles.queuedLabel}>{queuedPrompts.length} queued · sends in order</Text> : null}{sendError ? <Text testID="captain-send-error" style={styles.sendError}>{sendError}</Text> : null}</View>
-    </View>
-    <CanonicalActivitySurface
-      visible={activityOpen}
-      snapshot={canonicalActivity}
-      work={canonicalWork}
-      hasMore={activityHasMore}
-      loadingMore={activityLoadingMore}
-      refreshing={activityRefreshing}
-      onClose={onActivityClose}
-      onLoadMore={loadOlderCanonicalActivity}
-      onRefresh={refreshCanonicalState}
-      onOpenDecision={itemId => {
-        onActivityClose();
-        router.push({ pathname: '/attention', params: { item: itemId, source: 'activity' } } as any);
-      }}
-    />
-    <ExecutionSheet dark={dark} profiles={nativeTarget ? [] : profiles} loading={nativeTarget ? false : capabilityLoading} error={nativeTarget ? null : capabilityError} open={modelMenuOpen} selection={nativeTarget ? null : modelSelection} onClose={() => setModelMenuOpen(false)} onSelect={selection => { if (!nativeTarget) { setModelSelection(selection); onProfileChange(selection?.profileId || null); } setModelMenuOpen(false); setSendError(null); }} />
+    <CanonicalActivitySurface visible={activityOpen} snapshot={canonicalActivity} work={canonicalWork} hasMore={activityHasMore} loadingMore={activityLoadingMore} refreshing={activityRefreshing} onClose={onActivityClose} onLoadMore={loadOlderCanonicalActivity} onRefresh={refreshActivity} onOpenDecision={itemId => { onActivityClose(); router.push({ pathname: '/attention', params: { item: itemId, source: 'activity' } } as any); }} />
   </KeyboardAvoidingView>;
 }
 
 function PanelText({ text, muted }: { text: string; muted: string }) { return <Text style={[styles.panelText, { color: muted }]}>{text}</Text>; }
 
-function FleetAgentRow({ agent, activeStatus, dark, profiles, onOpenChat }: { agent: AgentInfo; activeStatus: string; dark: boolean; profiles: ExecutionProfile[]; onOpenChat: () => void }) {
+function FleetAgentRow({ agent, activeStatus, dark, profiles, onOpenDetails }: { agent: AgentInfo; activeStatus: string; dark: boolean; profiles: ExecutionProfile[]; onOpenDetails: () => void }) {
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
-  const [menuOpen, setMenuOpen] = useState(false); const [confirmInterrupt, setConfirmInterrupt] = useState(false); const [renaming, setRenaming] = useState(false); const [choosingRuntime, setChoosingRuntime] = useState(false);
-  const herdrDisplayName = agentDisplayName(agent);
-  const [name, setName] = useState(agent.name || ''); const [displayName, setDisplayName] = useState(herdrDisplayName); const [busy, setBusy] = useState(false); const [message, setMessage] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false); const [choosingRuntime, setChoosingRuntime] = useState(false);
   const [migrationTarget, setMigrationTarget] = useState<{ profile: ExecutionProfile; idempotencyKey: string } | null>(null);
-  const [migration, setMigration] = useState<AgentMigration | null>(null);
-  const availableProfiles = profiles.filter(profile => profile.available);
-  const hasLegacyPane = Boolean(agent.pane_id);
+  const [migration, setMigration] = useState<AgentMigration | null>(null); const [busy, setBusy] = useState(false); const [message, setMessage] = useState<string | null>(null);
+  const displayName = agentDisplayName(agent); const availableProfiles = profiles.filter(profile => profile.available);
   useEffect(() => {
     if (!migration || migration.status === 'running-on-new' || migration.status === 'failed') return;
     let mounted = true;
     const refresh = () => fetchAgentMigration(agent.id, migration.request_id).then(value => { if (mounted) setMigration(value); }).catch(error => { if (mounted) setMessage(errorText(error, 'Migration status could not be refreshed.')); });
-    const interval = setInterval(refresh, 3000);
-    return () => { mounted = false; clearInterval(interval); };
+    const interval = setInterval(refresh, 3000); return () => { mounted = false; clearInterval(interval); };
   }, [agent.id, migration]);
-  const interrupt = async () => {
-    setBusy(true); setMessage(null);
-    try {
-      const result = await interruptAgent(agent.id);
-      if (result.status === 'error' || result.error) throw new Error(result.error || 'Interrupt was not accepted.');
-      setMessage('Interrupt sent.'); setConfirmInterrupt(false);
-    } catch (error) { setMessage(errorText(error, 'Interrupt failed.')); }
-    finally { setBusy(false); }
-  };
-  const rename = async () => {
-    const trimmed = name.trim();
-    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(trimmed)) { setMessage('Use 1–32 lowercase letters, numbers, _ or -, starting with a letter.'); return; }
-    setBusy(true); setMessage(null);
-    try {
-      const result = await renameAgent(agent.id, trimmed);
-      if (result.status === 'error' || result.error) throw new Error(result.error || 'Rename was not accepted.');
-      setDisplayName(trimmed); setRenaming(false); setMessage(`Renamed to ${trimmed}.`);
-    } catch (error) { setMessage(errorText(error, 'Rename failed.')); }
-    finally { setBusy(false); }
-  };
   const confirmMigration = async () => {
-    if (!migrationTarget) return;
-    setBusy(true); setMessage(null);
-    try {
-      const requested = await requestAgentMigration(agent.id, migrationTarget.profile.id, migrationTarget.idempotencyKey);
-      setMigration(requested); setMigrationTarget(null); setChoosingRuntime(false);
-      setMessage('Request recorded. No agent was stopped; operator confirmation in the Firstmate terminal is still required.');
-    } catch (error) { setMessage(errorText(error, 'Migration request failed. Retry uses the same request key.')); }
+    if (!migrationTarget) return; setBusy(true); setMessage(null);
+    try { const requested = await requestAgentMigration(agent.id, migrationTarget.profile.id, migrationTarget.idempotencyKey); setMigration(requested); setMigrationTarget(null); setChoosingRuntime(false); setMessage('Request recorded. Operator confirmation is still required.'); }
+    catch (error) { setMessage(errorText(error, 'Migration request failed. Retry uses the same request key.')); }
     finally { setBusy(false); }
   };
-  const closeSubflows = () => { setConfirmInterrupt(false); setRenaming(false); setChoosingRuntime(false); setMigrationTarget(null); setMessage(null); };
   return <View style={[styles.fleetAgentWrap, menuOpen ? styles.fleetAgentWrapOpen : undefined]}>
-    <View style={styles.fleetPanelRow}>
-      <TouchableOpacity testID={`fleet-agent-${agent.id}`} accessibilityRole="button" accessibilityLabel={hasLegacyPane ? `Open legacy chat with ${displayName}` : `Open structured run details for ${displayName}`} onPress={onOpenChat} activeOpacity={0.75} style={styles.fleetAgentMain}>
-        <View style={[styles.tinyDot, { backgroundColor: statusColor(agent.status) }]} /><Text style={[styles.fleetPanelName, { color: text }]}>{displayName}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{displayAgentStatus(activeStatus as any)}</Text>
-      </TouchableOpacity>
-      <TouchableOpacity testID={`fleet-agent-${agent.id}-menu`} accessibilityRole="button" accessibilityLabel={`Agent actions for ${displayName}`} accessibilityState={{ expanded: menuOpen }} onPress={() => { setMenuOpen(value => !value); closeSubflows(); }} style={styles.ellipsisButton}><EllipsisIcon size={21.6} color={muted} /></TouchableOpacity>
-    </View>
+    <View style={styles.fleetPanelRow}><TouchableOpacity testID={`fleet-agent-${agent.id}`} accessibilityRole="button" accessibilityLabel={`Open structured run details for ${displayName}`} onPress={onOpenDetails} activeOpacity={0.75} style={styles.fleetAgentMain}><View style={[styles.tinyDot, { backgroundColor: statusColor(agent.status) }]} /><Text style={[styles.fleetPanelName, { color: text }]}>{displayName}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{displayAgentStatus(activeStatus as any)}</Text></TouchableOpacity><TouchableOpacity testID={`fleet-agent-${agent.id}-menu`} accessibilityRole="button" accessibilityLabel={`Execution actions for ${displayName}`} accessibilityState={{ expanded: menuOpen }} onPress={() => { setMenuOpen(value => !value); setChoosingRuntime(false); setMigrationTarget(null); setMessage(null); }} style={styles.ellipsisButton}><EllipsisIcon size={21.6} color={muted} /></TouchableOpacity></View>
     {menuOpen ? <View testID={`fleet-agent-${agent.id}-popover`} accessibilityViewIsModal style={[styles.agentPopover, { backgroundColor: dark ? '#171E2A' : '#F4F6F9' }]}>
       <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>STATUS</Text><Text style={[styles.agentMetaValue, { color: text }]}>{String(agent.status || 'unavailable').toUpperCase()}</Text></View>
-      <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>ACTIVE STATUS</Text><Text style={[styles.agentMetaValue, { color: activeStatus === 'active' ? brand.success : text }]}>{activeStatus === 'active' ? 'ACTIVE' : 'INACTIVE'}</Text></View>
       <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>TASK</Text><Text style={[styles.agentMetaValue, { color: text }]}>{agent.task_id || agent.id}</Text></View>
       <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>RUN</Text><Text style={[styles.agentMetaValue, { color: text }]}>{agent.run_id || 'not reported'}</Text></View>
       <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>HARNESS</Text><Text testID={`fleet-agent-${agent.id}-harness`} style={[styles.agentMetaValue, { color: text }]}>{agent.harness || 'unknown'}</Text></View>
       <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>MODEL</Text><Text testID={`fleet-agent-${agent.id}-model`} style={[styles.agentMetaValue, { color: text }]}>{agent.model || 'unknown'}</Text></View>
-      {renaming ? <View style={styles.renameRow}><TextInput testID={`fleet-agent-${agent.id}-rename-input`} accessibilityLabel={`New name for ${displayName}`} autoCapitalize="none" autoCorrect={false} value={name} onChangeText={setName} editable={!busy} style={[styles.renameInput, { color: text }]} /><TouchableOpacity testID={`fleet-agent-${agent.id}-rename-save`} accessibilityRole="button" onPress={() => void rename()} disabled={busy} style={styles.popoverAction}><Text style={styles.popoverActionText}>{busy ? '…' : 'SAVE'}</Text></TouchableOpacity></View> : null}
-      {confirmInterrupt ? <View style={styles.confirmInterruptRow}><Text style={[styles.confirmInterruptText, { color: muted }]}>Interrupt current work?</Text><TouchableOpacity accessibilityRole="button" onPress={() => setConfirmInterrupt(false)}><Text style={[styles.popoverLink, { color: muted }]}>CANCEL</Text></TouchableOpacity><TouchableOpacity testID={`fleet-agent-${agent.id}-interrupt-confirm`} accessibilityRole="button" onPress={() => void interrupt()} disabled={busy}><Text style={[styles.popoverLink, { color: brand.critical }]}>{busy ? '…' : 'CONFIRM'}</Text></TouchableOpacity></View> : null}
-      {choosingRuntime && !migrationTarget ? <View testID={`fleet-agent-${agent.id}-migration-targets`} style={styles.migrationTargets}><Text style={[styles.migrationNotice, { color: muted }]}>Choose a verified harness/model. The app records a terminal hand-off; it does not stop this agent.</Text>{availableProfiles.map(profile => <TouchableOpacity key={profile.id} testID={`fleet-agent-${agent.id}-migration-${optionId(profile.harness.id, profile.model.id)}`} accessibilityRole="button" onPress={() => setMigrationTarget({ profile, idempotencyKey: `move_${Date.now()}_${agent.id.replace(/[^A-Za-z0-9]/g, '')}` })} style={styles.migrationTarget}><Text style={[styles.migrationTargetText, { color: text }]}>{profile.harness.label} · {profile.model.label}</Text></TouchableOpacity>)}</View> : null}
-      {migrationTarget ? <View testID={`fleet-agent-${agent.id}-migration-confirmation`} style={styles.migrationConfirmation}><Text style={[styles.migrationTitle, { color: text }]}>Stop + relaunch with context?</Text><Text style={[styles.migrationNotice, { color: muted }]}>Target: {migrationTarget.profile.harness.label} / {migrationTarget.profile.model.label}</Text><Text style={[styles.migrationNotice, { color: muted }]}>Persisted context: objective, run identity, brief, and structured progress. No worktree, branch, pane, or in-flight process is inferred.</Text><Text style={styles.migrationWarning}>Confirming records a request only. An operator must confirm and run the relaunch in the Firstmate terminal.</Text><View style={styles.popoverActions}><TouchableOpacity testID={`fleet-agent-${agent.id}-migration-cancel`} accessibilityRole="button" disabled={busy} onPress={() => setMigrationTarget(null)} style={styles.popoverAction}><Text style={[styles.popoverActionText, { color: muted }]}>CANCEL</Text></TouchableOpacity><TouchableOpacity testID={`fleet-agent-${agent.id}-migration-confirm`} accessibilityRole="button" disabled={busy} onPress={() => void confirmMigration()} style={styles.popoverAction}><Text style={styles.popoverActionText}>{busy ? 'REQUESTING…' : message ? 'RETRY REQUEST' : 'CONFIRM REQUEST'}</Text></TouchableOpacity></View></View> : null}
-      {!renaming && !confirmInterrupt && !choosingRuntime && !migrationTarget ? <View style={styles.popoverActions}>{hasLegacyPane ? <><TouchableOpacity testID={`fleet-agent-${agent.id}-interrupt`} accessibilityRole="button" onPress={() => setConfirmInterrupt(true)} style={styles.popoverAction}><Text style={[styles.popoverActionText, { color: brand.critical }]}>INTERRUPT</Text></TouchableOpacity><TouchableOpacity testID={`fleet-agent-${agent.id}-rename`} accessibilityRole="button" onPress={() => setRenaming(true)} style={styles.popoverAction}><Text style={styles.popoverActionText}>RENAME</Text></TouchableOpacity></> : null}<TouchableOpacity testID={`fleet-agent-${agent.id}-move-runtime`} accessibilityRole="button" disabled={availableProfiles.length === 0 || !['working', 'blocked'].includes(String(agent.status || '').toLowerCase())} onPress={() => setChoosingRuntime(true)} style={[styles.popoverAction, availableProfiles.length === 0 ? styles.modelOptionDisabled : undefined]}><Text style={styles.popoverActionText}>MOVE RUNTIME</Text></TouchableOpacity></View> : null}
-      {migration ? <Text testID={`fleet-agent-${agent.id}-migration-state`} accessibilityLiveRegion="polite" style={[styles.agentActionMessage, { color: migration.status === 'failed' ? brand.critical : migration.status === 'running-on-new' ? brand.success : brand.attention }]}>Migration: {migration.status}. {migration.status === 'running-on-new' ? `${migration.target.harness}/${migration.target.model} was reported running by the terminal operator.` : migration.status === 'failed' ? `${migration.error || 'Relaunch failed.'} Retry this request in the terminal.` : 'Requires operator confirmation in the Firstmate terminal.'}</Text> : null}
+      {choosingRuntime && !migrationTarget ? <View testID={`fleet-agent-${agent.id}-migration-targets`} style={styles.migrationTargets}><Text style={[styles.migrationNotice, { color: muted }]}>Choose a verified runtime target. This records an operator hand-off; it does not stop the run.</Text>{availableProfiles.map(profile => <TouchableOpacity key={profile.id} testID={`fleet-agent-${agent.id}-migration-${optionId(profile.harness.id, profile.model.id)}`} accessibilityRole="button" onPress={() => setMigrationTarget({ profile, idempotencyKey: `move_${Date.now()}_${agent.id.replace(/[^A-Za-z0-9]/g, '')}` })} style={styles.migrationTarget}><Text style={[styles.migrationTargetText, { color: text }]}>{profile.harness.label} · {profile.model.label}</Text></TouchableOpacity>)}</View> : null}
+      {migrationTarget ? <View testID={`fleet-agent-${agent.id}-migration-confirmation`} style={styles.migrationConfirmation}><Text style={[styles.migrationTitle, { color: text }]}>Stop + relaunch with context?</Text><Text style={[styles.migrationNotice, { color: muted }]}>Target: {migrationTarget.profile.harness.label} / {migrationTarget.profile.model.label}</Text><Text style={styles.migrationWarning}>Confirming records a request only. An operator must perform the relaunch.</Text><View style={styles.popoverActions}><TouchableOpacity accessibilityRole="button" disabled={busy} onPress={() => setMigrationTarget(null)} style={styles.popoverAction}><Text style={[styles.popoverActionText, { color: muted }]}>CANCEL</Text></TouchableOpacity><TouchableOpacity testID={`fleet-agent-${agent.id}-migration-confirm`} accessibilityRole="button" disabled={busy} onPress={() => void confirmMigration()} style={styles.popoverAction}><Text style={styles.popoverActionText}>{busy ? 'REQUESTING…' : 'CONFIRM REQUEST'}</Text></TouchableOpacity></View></View> : null}
+      {!choosingRuntime && !migrationTarget ? <View style={styles.popoverActions}><TouchableOpacity testID={`fleet-agent-${agent.id}-move-runtime`} accessibilityRole="button" disabled={availableProfiles.length === 0 || !['working', 'blocked'].includes(String(agent.status || '').toLowerCase())} onPress={() => setChoosingRuntime(true)} style={[styles.popoverAction, availableProfiles.length === 0 ? styles.modelOptionDisabled : undefined]}><Text style={styles.popoverActionText}>MOVE RUNTIME</Text></TouchableOpacity></View> : null}
+      {migration ? <Text testID={`fleet-agent-${agent.id}-migration-state`} accessibilityLiveRegion="polite" style={[styles.agentActionMessage, { color: migration.status === 'failed' ? brand.critical : migration.status === 'running-on-new' ? brand.success : brand.attention }]}>Migration: {migration.status}. {migration.status === 'running-on-new' ? `${migration.target.harness}/${migration.target.model} was reported running by the operator.` : migration.status === 'failed' ? `${migration.error || 'Relaunch failed.'} Retry this request.` : 'Requires operator confirmation.'}</Text> : null}
       {message ? <Text accessibilityLiveRegion="polite" style={[styles.agentActionMessage, { color: muted }]}>{message}</Text> : null}
     </View> : null}
   </View>;
@@ -1561,9 +514,9 @@ function activityDate(value: string) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenActivity, onOpenAgent, agents, executionProfiles, attention, activity, providers, errors, loading }: {
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenActivity, agents, executionProfiles, attention, activity, providers, errors, loading }: {
   open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onClose: () => void; onOpenSettings: () => void;
-  onOpenHome: () => void; onOpenActivity: () => void; onOpenAgent: (agentId: string) => void;
+  onOpenHome: () => void; onOpenActivity: () => void;
   agents: AgentInfo[]; executionProfiles: ExecutionProfile[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
 }) {
   const router = useRouter();
@@ -1595,8 +548,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
     { key: 'projects' as const, icon: ProjectsIcon, title: 'Projects', count: projects.length || undefined },
     { key: 'connections' as const, icon: ConnectionsIcon, title: 'Connections' },
   ].filter(row => matches(row.title));
-  // Ongoing work replaces a conventional chat list: these are the things
-  // currently working for the captain, not a server dashboard.
+  // Ongoing work is structured execution state, separate from Magi Chat.
   const activeWork = fleet.ordered.filter(entry => matches(agentDisplayName(entry.agent))).slice(0, 5);
   return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: glassFill(dark, 'surface') }, blurStyle(28), animatedStyle]} {...panHandlers}>
     <View testID="drawer-header" style={[styles.drawerFixedHeader, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}><View style={styles.drawerTitleRow}>
@@ -1621,7 +573,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
         {activeSection === row.key ? <View testID={`drawer-panel-${row.key}`} style={styles.sectionPanel}>{row.key === 'attention' ? (
           loading ? <PanelText text="Loading attention…" muted={muted} /> : errors.attention ? <PanelText text={errors.attention} muted={brand.critical} /> : activeAttention.length === 0 ? <PanelText text="Nothing requires your attention." muted={muted} /> : activeAttention.slice(0, 5).map(item => <TouchableOpacity key={item.id} testID={`attention-item-${item.id}`} accessibilityRole="button" accessibilityLabel={`${item.title}. ${providerLabel(item.provider)}. ${item.subtitle}`} onPress={() => void openAttentionItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{providerLabel(item.provider)} · {item.subtitle}</Text></TouchableOpacity>)
         ) : row.key === 'fleet' ? (
-          loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No active structured worker runs." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <FleetAgentRow key={agent.id} agent={agent} activeStatus={displayStatus} dark={dark} profiles={executionProfiles} onOpenChat={() => agent.pane_id ? onOpenAgent(agent.id) : router.push({ pathname: '/agents', params: { agentId: agent.id } } as any)} />)
+          loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No active structured worker runs." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <FleetAgentRow key={agent.id} agent={agent} activeStatus={displayStatus} dark={dark} profiles={executionProfiles} onOpenDetails={() => router.push({ pathname: '/agents', params: { agentId: agent.id } } as any)} />)
         ) : row.key === 'activity' ? (
           <><TouchableOpacity testID="open-canonical-activity" accessibilityRole="button" accessibilityLabel="Open durable Magi activity" onPress={onOpenActivity} style={[styles.panelItem, { backgroundColor: glassFill(dark) }]}><Text style={[styles.panelItemTitle, { color: text }]}>Magi operations</Text><Text style={[styles.panelItemMeta, { color: muted }]}>Inspect Gateway-confirmed lifecycle and decisions</Text></TouchableOpacity>{loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} accessibilityRole="button" accessibilityLabel={`${item.title}. ${item.description}. ${item.project}`} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)}</>
         ) : row.key === 'projects' ? (
@@ -1630,7 +582,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
       </View>)}
       {activeWork.length ? <View testID="drawer-active-work">
         <Text style={[styles.drawerGroupLabel, { color: muted }]}>ACTIVE WORK</Text>
-        {activeWork.map(({ agent, displayStatus }) => <TouchableOpacity key={agent.id} testID={`drawer-work-${agent.id}`} accessibilityRole="button" accessibilityLabel={`${agentDisplayName(agent)}, ${displayAgentStatus(displayStatus)}`} onPress={() => agent.pane_id ? onOpenAgent(agent.id) : router.push({ pathname: '/agents', params: { agentId: agent.id } } as any)} style={styles.drawerWorkRow}>
+        {activeWork.map(({ agent, displayStatus }) => <TouchableOpacity key={agent.id} testID={`drawer-work-${agent.id}`} accessibilityRole="button" accessibilityLabel={`${agentDisplayName(agent)}, ${displayAgentStatus(displayStatus)}`} onPress={() => router.push({ pathname: '/agents', params: { agentId: agent.id } } as any)} style={styles.drawerWorkRow}>
           <View style={[styles.workDot, { backgroundColor: statusColor(displayStatus) }]} />
           <Text numberOfLines={1} style={[styles.drawerWorkName, { color: text }]}>{agentDisplayName(agent)}</Text>
           <Text numberOfLines={1} style={[styles.drawerWorkStatus, { color: muted }]}>{displayAgentStatus(displayStatus)}</Text>
@@ -1647,7 +599,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
 // Environment choices are shown as what they actually look like. Each key maps
 // to the scene image the renderer will use (src/services/environmentTheme.ts);
 // the two minimal environments are flat tones and carry a swatch instead.
-const backgroundOptions: Array<{ key: WeatherSceneKey; label: string; preview?: ImageSourcePropType; swatch?: string }> = [
+const backgroundOptions: { key: WeatherSceneKey; label: string; preview?: ImageSourcePropType; swatch?: string }[] = [
   { key: 'auto', label: 'Auto', swatch: 'spectral' },
   { key: 'minimal-dark', label: 'Minimal Black', swatch: '#05070A' },
   { key: 'minimal-light', label: 'Minimal Light', swatch: '#F7F8FA' },
@@ -1659,7 +611,7 @@ const backgroundOptions: Array<{ key: WeatherSceneKey; label: string; preview?: 
   { key: 'rain', label: 'Rain', preview: TIME_IMAGES.dusk },
   { key: 'storm', label: 'Storm', preview: TIME_IMAGES.night },
 ];
-const themeOptions: Array<{ key: ChatThemeMode; label: string }> = [
+const themeOptions: { key: ChatThemeMode; label: string }[] = [
   { key: 'system', label: 'System' }, { key: 'dark', label: 'Dark' }, { key: 'light', label: 'Light' },
 ];
 
@@ -1739,8 +691,8 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
       <TouchableOpacity testID="routing-profile-current" accessibilityRole="button" accessibilityState={{ selected: executionSettings.routing_profile_id === null }} onPress={() => onExecutionSettingsChange({ routing_profile_id: null })} style={[styles.optionPill, executionSettings.routing_profile_id === null ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: executionSettings.routing_profile_id === null ? brand.obsidian : text }]}>No default</Text></TouchableOpacity>
       {executionProfiles.filter(profile => profile.available).map(profile => <TouchableOpacity key={profile.id} testID={`routing-profile-${optionId(profile.harness.id, profile.model.id)}`} accessibilityRole="button" accessibilityState={{ selected: executionSettings.routing_profile_id === profile.id }} onPress={() => onExecutionSettingsChange({ routing_profile_id: profile.id })} style={[styles.optionPill, executionSettings.routing_profile_id === profile.id ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: executionSettings.routing_profile_id === profile.id ? brand.obsidian : text }]}>{profile.harness.label} · {profile.model.label}</Text></TouchableOpacity>)}
     </View>
-    <Text style={[styles.preferenceLabel, { color: muted }]}>CURRENT PROMPT ROUTING</Text>
-    <Text style={[styles.settingsToggleDescription, { color: muted }]}>The selector above the composer applies only to new prompts in this session.</Text>
+    <Text style={[styles.preferenceLabel, { color: muted }]}>RUNTIME SWITCHING</Text>
+    <Text style={[styles.settingsToggleDescription, { color: muted }]}>These options apply to structured execution runtime hand-offs, not Magi Chat.</Text>
     <View style={styles.optionRow}>{[
       { key: 'migrate' as const, label: 'Migrate session' }, { key: 'new-session' as const, label: 'New session' },
     ].map(option => <TouchableOpacity key={option.key} testID={`switching-option-${option.key}`} accessibilityRole="button" accessibilityState={{ selected: executionSettings.switching_behavior === option.key }} onPress={() => onExecutionSettingsChange({ switching_behavior: option.key })} style={[styles.optionPill, executionSettings.switching_behavior === option.key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: executionSettings.switching_behavior === option.key ? brand.obsidian : text }]}>{option.label}</Text></TouchableOpacity>)}</View>
@@ -1793,8 +745,6 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
         <TouchableOpacity testID="settings-custom-background-remove" accessibilityRole="button" accessibilityLabel="Remove the custom background" onPress={() => void removeCustom()} style={styles.secondaryAction}><Text style={[styles.secondaryActionText, { color: brand.critical }]}>Remove</Text></TouchableOpacity>
       </View> : null}
       <TouchableOpacity testID="settings-custom-background-upload" accessibilityRole="button" accessibilityLabel={preferences.customBackgroundUri ? 'Replace the custom background photo' : 'Upload a custom background photo'} onPress={() => void pickCustomBackground()} style={[styles.uploadBackgroundButton, { borderColor: dark ? brand.cyan : brand.violet }]}><Text style={[styles.optionText, { color: dark ? brand.cyan : brand.violet }]}>{preferences.customBackgroundUri ? 'Replace photo' : 'Upload background'}</Text></TouchableOpacity>
-      <Text style={[styles.preferenceLabel, { color: muted }]}>CHAT</Text>
-      <View style={styles.settingsToggleRow}><View style={styles.settingsToggleCopy}><Text style={[styles.settingsToggleTitle, { color: text }]}>Show tool calls</Text><Text style={[styles.settingsToggleDescription, { color: muted }]}>Include tool activity in agent conversations.</Text></View><Switch testID="settings-tool-calls-toggle" accessibilityLabel="Show tool calls in chat history" value={preferences.showToolCalls} onValueChange={value => { const next = { ...preferences, showToolCalls: value }; onPreferencesChange(next); void saveToolCallVisibility(value); }} trackColor={{ false: '#424B59', true: brand.cyan }} thumbColor={preferences.showToolCalls ? brand.obsidian : '#F4F5F7'} /></View>
     </View> : null}
     </View>
     <View style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
@@ -1812,15 +762,12 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
 }
 
 export default function ChatScreen() {
-  const { agentId, record } = useLocalSearchParams<{ agentId?: string | string[]; record?: string | string[] }>(); const target = Array.isArray(agentId) ? agentId[0] : agentId; const autoStartRecording = (Array.isArray(record) ? record[0] : record) === 'true';
-  const router = useRouter();
+  const { record } = useLocalSearchParams<{ record?: string | string[] }>(); const autoStartRecording = (Array.isArray(record) ? record[0] : record) === 'true';
   const dark = isDarkTheme(useChatColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
   const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activityOpen, setActivityOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES); const [preferencesReady, setPreferencesReady] = useState(false);
   const [executionProfiles, setExecutionProfiles] = useState<ExecutionProfile[]>([]);
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({ profile_id: null, routing_profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
-  const [executionLoading, setExecutionLoading] = useState(true);
   const [executionError, setExecutionError] = useState<string | null>(null);
-  const [executionReady, setExecutionReady] = useState(false);
   const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
   const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
   const [loading, setLoading] = useState(true); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
@@ -1833,14 +780,14 @@ export default function ChatScreen() {
       if (!mounted) return;
       if (capabilityResult.status === 'fulfilled') setExecutionProfiles(profilesFromCapabilities(capabilityResult.value));
       else setExecutionError(errorText(capabilityResult.reason, 'Execution capabilities could not be loaded.'));
-      if (settingsResult.status === 'fulfilled') { setExecutionSettings(settingsResult.value); setExecutionReady(true); }
+      if (settingsResult.status === 'fulfilled') setExecutionSettings(settingsResult.value);
       else setExecutionError(errorText(settingsResult.reason, 'Execution settings could not be loaded.'));
       if (voiceResult.status === 'fulfilled') {
         const local = getLocalVoiceCapabilities(voiceResult.value.serverConfigured);
         const serverOpenai = capabilityFor(voiceResult.value, 'openai');
         setVoiceCapabilities({ ...local, serverProvider: voiceResult.value.serverProvider, serverConfigured: voiceResult.value.serverConfigured, modes: local.modes.map(item => item.id === 'openai' ? serverOpenai : item) });
       }
-    }).finally(() => { if (mounted) setExecutionLoading(false); });
+    });
     return () => { mounted = false; };
   }, []);
   useEffect(() => { AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion); const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion); return () => sub.remove(); }, []);
@@ -1886,8 +833,8 @@ export default function ChatScreen() {
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls preserveCanvas><SafeAreaView style={styles.page}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
-      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => { setDrawerOpen(false); if (target) router.push('/chat' as any); }} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} onOpenAgent={selectedAgentId => { setDrawerOpen(false); router.push({ pathname: '/chat', params: { agentId: selectedAgentId } } as any); }} agents={agents} executionProfiles={executionProfiles} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
-      <Animated.View style={styles.chatStage}><ChatCanvas target={target || 'captain'} showToolCalls={preferences.showToolCalls} drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} profiles={executionProfiles} capabilityLoading={executionLoading} capabilityError={executionError} selectedProfileId={executionSettings.profile_id} routingReady={executionReady} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onProfileChange={profileId => { setExecutionSettings(current => ({ ...current, profile_id: profileId })); void updateExecutionSettings({ profile_id: profileId }).catch(error => setExecutionError(errorText(error, 'The routing preference could not be saved.'))); }} />
+      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => setDrawerOpen(false)} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} agents={agents} executionProfiles={executionProfiles} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
+      <Animated.View style={styles.chatStage}><ChatCanvas drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} />
         <Animated.View testID="chat-dim" pointerEvents={drawerOpen ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
           <TouchableOpacity testID="drawer-dismiss" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={() => setDrawerOpen(false)} activeOpacity={1} style={styles.chatDimPress} />
         </Animated.View>
@@ -1924,21 +871,16 @@ const styles = StyleSheet.create({
   chatHistory: { flex: 1, minHeight: 0, touchAction: 'pan-y', overscrollBehaviorY: 'contain' } as any,
   chatHistoryContent: { flexGrow: 1, justifyContent: 'flex-end', paddingHorizontal: 20, gap: 18 },
   userMessageWrap: { maxWidth: 680, alignSelf: 'flex-end', flexDirection: 'row', alignItems: 'flex-end', gap: 5 },
-  userMessage: { flex: 1, paddingVertical: 12, paddingHorizontal: 17, borderRadius: 22, borderWidth: 1 },
+  userBubble: { flex: 1, paddingVertical: 12, paddingHorizontal: 17, borderRadius: 22 },
   assistantMessage: { maxWidth: 680, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'flex-start', gap: 5, paddingVertical: 2, paddingHorizontal: 2 },
   assistantBody: { flex: 1, minWidth: 0 },
-  toolMessage: { maxWidth: 680, alignSelf: 'flex-start', paddingVertical: 5, paddingHorizontal: 12, borderLeftWidth: 2, borderLeftColor: 'rgba(142,153,170,0.35)' },
-  attachedToolResult: { maxWidth: 280, marginTop: 7, paddingVertical: 5, paddingHorizontal: 9, borderRadius: 8, backgroundColor: 'rgba(142,153,170,0.10)', overflow: 'hidden' },
-  toolMessageText: { fontSize: 12, lineHeight: 18 },
-  messageText: { fontSize: 17, lineHeight: 26 }, progressLabel: { fontSize: 13, fontWeight: '700', marginBottom: 3 },
-  workingRow: { maxWidth: 680, minHeight: 44, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 2 },
+  messageText: { fontSize: 17, lineHeight: 26 },
+  workingState: { maxWidth: 680, minHeight: 44, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 2 },
+  workingStateMark: { width: 22, height: 22 },
   workingLabel: { fontSize: 13, lineHeight: 19 },
-  decisionAction: { alignSelf: 'flex-start', minHeight: 40, justifyContent: 'center', marginTop: 8, paddingHorizontal: 2 },
-  decisionActionText: { fontSize: 13, fontWeight: '800' },
   assistantState: { fontSize: 11, marginTop: 8 }, assistantStateFailed: { color: brand.critical, fontSize: 11, lineHeight: 17, marginTop: 8 },
-  thinkingSummary: { marginTop: 8, paddingLeft: 9, borderLeftWidth: 2, borderLeftColor: 'rgba(139,108,255,0.5)' }, thinkingSummaryLabel: { fontSize: 10, fontWeight: '800' }, thinkingSummaryText: { fontSize: 12, lineHeight: 17, marginTop: 2 },
-  sources: { marginTop: 10, gap: 4 }, sourcesTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase' }, sourceRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, minHeight: 38, paddingVertical: 4 }, sourceMarker: { width: 20, fontSize: 12, lineHeight: 18, fontWeight: '800', textAlign: 'center' }, sourceCopy: { flex: 1, minWidth: 0 }, sourceTitle: { fontSize: 12, lineHeight: 17, fontWeight: '700' }, sourceMeta: { fontSize: 10, lineHeight: 14, marginTop: 1 }, sourceQuote: { fontSize: 11, lineHeight: 15, marginTop: 2 },
-  messageAttachment: { fontSize: 11, marginTop: 6, opacity: 0.82 }, messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.62, textAlign: 'right' }, messageDelivery: { fontSize: 10, marginTop: 3, color: brand.mutedDark }, messageFailure: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 }, messageFailed: { color: brand.critical, fontSize: 10 }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
+  messageTimestamp: { fontSize: 10, marginTop: 5, opacity: 0.62, textAlign: 'right' }, retryText: { color: brand.cyan, fontSize: 11, fontWeight: '800' },
+  attachedFile: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 7 }, attachedFileName: { maxWidth: 260, fontSize: 11, opacity: 0.82 }, deliverySending: { fontSize: 10, marginTop: 4, color: brand.mutedDark }, deliveryFailed: { fontSize: 10, marginTop: 4, color: brand.critical },
 
   jumpButton: { position: 'absolute', alignSelf: 'center', width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderRadius: 999, zIndex: 30, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, elevation: 16 },
   jumpText: { fontSize: 20, lineHeight: 22, fontWeight: '700' },
@@ -2000,7 +942,7 @@ const styles = StyleSheet.create({
   accountIcon: { width: ICON_SIZE, height: ICON_SIZE, alignItems: 'center', justifyContent: 'center' },
   gearIconContainer: { width: 20, alignItems: 'center', justifyContent: 'center' }, chevron: { width: 18, fontSize: 13, textAlign: 'center' },
   sectionPanel: { paddingLeft: 44, paddingRight: 4, paddingBottom: 12, gap: 8 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { minHeight: 40, justifyContent: 'center', paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '700', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 },
-  fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, renameRow: { flexDirection: 'row', alignItems: 'center', gap: 7 }, renameInput: { flex: 1, minWidth: 0, height: 40, borderWidth: 1, borderColor: 'rgba(142,153,170,0.4)', borderRadius: 10, paddingHorizontal: 10, fontSize: 16, outlineStyle: 'none' as any }, confirmInterruptRow: { flexDirection: 'row', alignItems: 'center', gap: 9 }, confirmInterruptText: { flex: 1, fontSize: 11 }, popoverLink: { fontSize: 10, fontWeight: '800' }, agentActionMessage: { fontSize: 10, lineHeight: 14 }, migrationTargets: { marginTop: 4, gap: 6 }, migrationNotice: { fontSize: 10, lineHeight: 14 }, migrationTarget: { minHeight: 34, borderWidth: 1, borderColor: 'rgba(142,153,170,0.35)', borderRadius: 9, paddingHorizontal: 9, justifyContent: 'center' }, migrationTargetText: { fontSize: 10, fontWeight: '800' }, migrationConfirmation: { gap: 6 }, migrationTitle: { fontSize: 12, fontWeight: '800' }, migrationWarning: { color: brand.attention, fontSize: 10, lineHeight: 14 },
+  fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, agentActionMessage: { fontSize: 10, lineHeight: 14 }, migrationTargets: { marginTop: 4, gap: 6 }, migrationNotice: { fontSize: 10, lineHeight: 14 }, migrationTarget: { minHeight: 34, borderWidth: 1, borderColor: 'rgba(142,153,170,0.35)', borderRadius: 9, paddingHorizontal: 9, justifyContent: 'center' }, migrationTargetText: { fontSize: 10, fontWeight: '800' }, migrationConfirmation: { gap: 6 }, migrationTitle: { fontSize: 12, fontWeight: '800' }, migrationWarning: { color: brand.attention, fontSize: 10, lineHeight: 14 },
 
   settingsLayer: { ...StyleSheet.absoluteFill, zIndex: 20, justifyContent: 'flex-end' },
   settingsScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(5,7,10,0.46)' },

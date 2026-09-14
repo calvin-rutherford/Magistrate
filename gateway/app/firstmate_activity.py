@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote
 
-from app.chat_features import legacy_chat_enabled
 from app.activity_store import (
     MAX_ACTIVITY_FOCUS_RECORDS,
     MAX_ACTIVITY_SUMMARY_CHARS,
@@ -1275,7 +1274,7 @@ class FirstmateActivityAdapter:
         return changed, titles
 
     async def reconcile(self, user_id: str) -> Dict[str, Any]:
-        """Run the retired pull adapter only during explicit legacy rollback."""
+        """Run the explicit structured Firstmate migration adapter."""
         if (
             not isinstance(user_id, str) or not user_id or len(user_id) > 128
             or any(
@@ -1285,11 +1284,6 @@ class FirstmateActivityAdapter:
             )
         ):
             raise ValueError('A bounded authenticated principal is required.')
-        if not legacy_chat_enabled():
-            return {
-                'status': 'disabled', 'changed': [], 'errors': [],
-                'sources': source_diagnostics(user_id),
-            }
         async with self._lock(user_id):
             changed: List[Dict[str, Any]] = []
             errors: List[Dict[str, str]] = []

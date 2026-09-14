@@ -1,13 +1,16 @@
 import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { AccessibilityInfo, Animated, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Defs, G, LinearGradient as SvgLinearGradient, Path, Polygon, Stop } from 'react-native-svg';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
-import { fetchMagiChatConversation, MAGI_NATIVE_CHAT_ENABLED, sendMagiChatPrompt, submitVoiceMove, transcribeVoiceAudio, VoiceMoveResult } from '../src/api/client';
+import {
+  fetchMagiChatConversation, getGatewaySessionRevision, sendMagiChatPrompt,
+  transcribeVoiceAudio,
+} from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
-import { reconcileCanonicalMessages } from '../src/services/CanonicalConversation';
-import { appendConversationMessage, getConversationMessages, resetConversationMessages, updateConversationMessageState, useConversationMessages } from '../src/services/ConversationSession';
+import { hasMagiReconciliationConflict, reconcileMagiMessages } from '../src/services/MagiConversation';
+import { appendMagiMessage, getMagiConversationPrincipal, getMagiMessages, resetMagiMessages, updateMagiMessage, useMagiMessages } from '../src/services/MagiConversationSession';
 import { ttsService } from '../src/services/TextToSpeechService';
 import { transitionVoiceState, VoiceState } from '../src/services/VoiceSessionReducer';
 import { loadChatPreferences } from '../src/services/ChatPreferences';
@@ -129,19 +132,22 @@ export default function VoiceScreen() {
   const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
   const [voiceSetupReady, setVoiceSetupReady] = useState(false);
   const modeNoticeRef = useRef('');
-  const [pendingMove, setPendingMove] = useState<VoiceMoveResult | null>(null);
-  const [pendingKey, setPendingKey] = useState('');
   const [reducedMotion, setReducedMotion] = useState(false);
   const [, setBackgroundReady] = useState(false);
-  const messages = useConversationMessages('captain');
+  const messages = useMagiMessages();
   useEffect(() => { void loadChatPreferences().then(() => setBackgroundReady(true)); }, []);
   useEffect(() => {
-    if (!MAGI_NATIVE_CHAT_ENABLED) return;
     let mounted = true;
-    void fetchMagiChatConversation('captain').then(result => {
-      if (mounted) resetConversationMessages(
-        'captain', reconcileCanonicalMessages(getConversationMessages('captain'), result.messages, { authoritative: true }),
-      );
+    const owner = getMagiConversationPrincipal();
+    const sessionRevision = getGatewaySessionRevision();
+    void fetchMagiChatConversation().then(result => {
+      if (!mounted || !owner || getMagiConversationPrincipal() !== owner
+        || getGatewaySessionRevision() !== sessionRevision) return;
+      const current = getMagiMessages();
+      if (hasMagiReconciliationConflict(current, result.messages)) {
+        throw new Error('Gateway returned conflicting Magi identity.');
+      }
+      resetMagiMessages(reconcileMagiMessages(current, result.messages, { authoritative: true }));
     }).catch(() => { /* A voice submission can retry the authenticated path. */ });
     return () => { mounted = false; };
   }, []);
@@ -152,14 +158,12 @@ export default function VoiceScreen() {
   const amplitudeRef = useRef(capture.amplitude);
   const endingRef = useRef(false);
   const turnInFlightRef = useRef(false);
+  const turnOwnerRef = useRef<string | null>(null);
+  const turnSessionRevisionRef = useRef(-1);
+  const requestControllerRef = useRef<AbortController | null>(null);
   const heardSpeechRef = useRef(false);
   const listeningStartedAtRef = useRef(0);
   const lastSpeechAtRef = useRef(0);
-  const sequenceRef = useRef(0);
-  // The submission id of the turn awaiting a decision, so a confirmed move is
-  // recorded under the same canonical turn the optimistic row already shows.
-  const clientMessageIdRef = useRef('');
-  const sessionId = useId().replace(/[^A-Za-z0-9_-]/g, '');
   const [audioPeak] = useState(() => new Animated.Value(0));
   const [hoverProgress] = useState(() => new Animated.Value(0));
   // The smoothed envelope's own state, stepped deterministically each tick by
@@ -226,100 +230,93 @@ export default function VoiceScreen() {
 
   const beginListening = useCallback(async () => {
     if (endingRef.current || turnInFlightRef.current || !voiceSetupReady) return;
+    const owner = getMagiConversationPrincipal();
+    const sessionRevision = getGatewaySessionRevision();
+    if (!owner) return;
+    const ownsTurn = () => !endingRef.current
+      && getMagiConversationPrincipal() === owner
+      && getGatewaySessionRevision() === sessionRevision;
     const capability = capabilityFor(voiceCapabilities, voiceMode);
     if (capability.available === 'unavailable') { fail(capability.reason || `${capability.label} is unavailable.`); return; }
     ttsService.stop();
-    setError(''); setNotice(modeNoticeRef.current); setIntermediate(''); setFinalTranscript(''); setPendingMove(null); setPendingKey('');
+    setError(''); setNotice(modeNoticeRef.current); setIntermediate(''); setFinalTranscript('');
     envelopeRef.current = ENVELOPE_SILENCE_FLOOR;
+    turnOwnerRef.current = owner;
+    turnSessionRevisionRef.current = sessionRevision;
     setVoiceState('STARTING');
     try {
       await captureRef.current.start();
+      if (!ownsTurn()) { await captureRef.current.cancel(); return; }
       listeningStartedAtRef.current = Date.now();
       lastSpeechAtRef.current = Date.now();
       heardSpeechRef.current = false;
       setVoiceState('LISTENING');
-    } catch (cause) { fail(cause); }
+    } catch (cause) { if (ownsTurn()) fail(cause); }
   }, [fail, voiceCapabilities, voiceMode, voiceSetupReady]);
 
-  const deliverResponse = useCallback((result: VoiceMoveResult) => {
-    if (result.status !== 'completed') throw new Error(result.error || 'Firstmate did not complete the request.');
-    const responseText = result.response?.trim() || `Request completed by ${result.target}.`;
-    // Voice Mode shares the captain thread, and the gateway records a completed
-    // voice turn canonically (see CHAT_ARCHITECTURE_FIX.md). Applying the
-    // returned turn is what keeps one record behind both surfaces instead of a
-    // locally minted voice row that chat would later have to reconcile.
-    const canonical = result.conversation?.messages || [];
-    if (canonical.length) resetConversationMessages('captain', reconcileCanonicalMessages(getConversationMessages('captain'), canonical));
-    else appendConversationMessage('captain', { id: result.move_id ? `move-${result.move_id}` : `voice-a-${Date.now()}`, role: 'assistant', text: responseText, sentAt: Date.now(), source: 'voice', audience: 'primary', runId: result.move_id });
-    setVoiceState('SPEAKING');
-    turnInFlightRef.current = false;
-    ttsService.speakChunk(responseText, () => { if (!endingRef.current) void beginListening(); });
-  }, [beginListening]);
-
   const deliverNativeResponse = useCallback((result: Awaited<ReturnType<typeof sendMagiChatPrompt>>) => {
-    const canonical = result.conversation?.messages || [];
-    if (canonical.length) resetConversationMessages('captain', reconcileCanonicalMessages(getConversationMessages('captain'), canonical));
+    const current = getMagiMessages();
+    if (hasMagiReconciliationConflict(current, result.messages)) {
+      throw new Error('Gateway returned conflicting Magi identity.');
+    }
+    resetMagiMessages(reconcileMagiMessages(current, result.messages));
     if (result.status !== 'completed') throw new Error(result.error || 'Magi did not complete the response.');
-    const assistant = [...canonical].reverse().find(message => message.role === 'assistant' && message.text.trim());
+    const assistant = [...result.messages].reverse().find(message => message.role === 'assistant' && message.content.trim());
     if (!assistant) throw new Error('Magi returned no complete response.');
     setVoiceState('SPEAKING');
     turnInFlightRef.current = false;
-    ttsService.speakChunk(assistant.text, () => { if (!endingRef.current) void beginListening(); });
+    ttsService.speakChunk(assistant.content, () => { if (!endingRef.current) void beginListening(); });
   }, [beginListening]);
 
   const finishTurn = useCallback(async () => {
     if (endingRef.current || stateRef.current !== 'LISTENING' || turnInFlightRef.current) return;
+    const owner = turnOwnerRef.current;
+    const sessionRevision = turnSessionRevisionRef.current;
+    const ownsTurn = () => !endingRef.current && !!owner
+      && getMagiConversationPrincipal() === owner
+      && getGatewaySessionRevision() === sessionRevision;
+    if (!ownsTurn()) return;
     turnInFlightRef.current = true;
     setVoiceState('TRANSCRIBING');
     let submittedMessageId = '';
     try {
       const recording = await captureRef.current.stop();
+      if (!ownsTurn()) return;
       if (recording.durationMillis < MIN_TURN_MS) {
         turnInFlightRef.current = false;
         await beginListening();
-        setNotice('Keep speaking a little longer so Magistrate can hear the full turn.');
+        if (ownsTurn()) setNotice('Keep speaking a little longer so Magistrate can hear the full turn.');
         return;
       }
       const transcription = voiceMode === 'browser' ? { text: recording.transcript || '', is_final: true } : await transcribeVoiceAudio(recording.uri, recording.mimeType, recording.filename);
+      if (!ownsTurn()) return;
       const utterance = transcription.text?.trim() || intermediateRef.current.trim();
       if (!utterance) {
         turnInFlightRef.current = false;
         await beginListening();
-        setNotice('I didn’t catch that. Listening again…');
+        if (ownsTurn()) setNotice('I didn’t catch that. Listening again…');
         return;
       }
       setFinalTranscript(utterance); setIntermediate('');
-      // This id is the submission identity the gateway records the turn under,
-      // so the optimistic row and the canonical user message are one row.
       const clientMessageId = `voice-u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       submittedMessageId = clientMessageId;
-      clientMessageIdRef.current = clientMessageId;
-      appendConversationMessage('captain', { id: clientMessageId, role: 'user', text: utterance, sentAt: Date.now(), source: 'voice', audience: 'captain', delivery: 'sending' });
+      appendMagiMessage({ id: clientMessageId, role: 'user', text: utterance, sentAt: Date.now(), source: 'voice', delivery: 'sending', progress: 'working' });
       setVoiceState('THINKING');
-      if (MAGI_NATIVE_CHAT_ENABLED) {
-        const result = await sendMagiChatPrompt(
-          utterance, 'voice', 'captain', undefined, undefined, undefined,
-          undefined, clientMessageId,
-        );
-        deliverNativeResponse(result);
-        return;
-      }
-      sequenceRef.current += 1;
-      const key = `voice-${sessionId}-${sequenceRef.current}`;
-      const move = await submitVoiceMove(utterance, 'captain', key, false, undefined, clientMessageId);
-      if (move.status === 'prohibited' || move.status === 'error' || move.status === 'confirmation_expired') throw new Error(move.error || 'That request cannot be completed in Voice Mode.');
-      if (move.status === 'confirmation_required') {
-        setPendingMove(move); setPendingKey(key); setVoiceState('CONFIRMING'); turnInFlightRef.current = false;
-        return;
-      }
-      if (move.status !== 'ready') throw new Error(move.error || 'The voice request could not be prepared.');
-      const result = await submitVoiceMove(utterance, 'captain', key, true, undefined, clientMessageId);
-      deliverResponse(result);
+      const controller = new AbortController();
+      requestControllerRef.current = controller;
+      const result = await sendMagiChatPrompt(
+        utterance, clientMessageId, 'voice', undefined, { signal: controller.signal },
+      );
+      if (!ownsTurn()) return;
+      deliverNativeResponse(result);
     } catch (cause) {
-      if (submittedMessageId) updateConversationMessageState('captain', submittedMessageId, { delivery: 'failed', progress: 'failed' });
+      if (!ownsTurn()) return;
+      if (submittedMessageId) updateMagiMessage(submittedMessageId, { delivery: 'failed', progress: 'failed' });
       fail(cause);
+    } finally {
+      requestControllerRef.current = null;
     }
-  }, [beginListening, deliverNativeResponse, deliverResponse, fail, sessionId, voiceMode]);
+  }, [beginListening, deliverNativeResponse, fail, voiceMode]);
 
   useEffect(() => {
     if (voiceState !== 'LISTENING') return;
@@ -346,24 +343,11 @@ export default function VoiceScreen() {
     if (!voiceSetupReady) return () => clearTimeout(timer);
     return () => {
       clearTimeout(timer); endingRef.current = true;
+      requestControllerRef.current?.abort();
       void captureRef.current.cancel();
       ttsService.stop();
     };
   }, [beginListening, voiceSetupReady]);
-
-  const confirmMove = async () => {
-    if (!pendingMove || !pendingKey || turnInFlightRef.current) return;
-    turnInFlightRef.current = true; setVoiceState('THINKING');
-    try {
-      const result = await submitVoiceMove(finalTranscript, 'captain', pendingKey, true, pendingMove.confirmation_token, clientMessageIdRef.current || undefined);
-      setPendingMove(null); setPendingKey(''); deliverResponse(result);
-    } catch (cause) { fail(cause); }
-  };
-
-  const cancelConfirmation = () => {
-    turnInFlightRef.current = false; setPendingMove(null); setPendingKey('');
-    void beginListening();
-  };
 
   const handleMainControl = () => {
     if (voiceState === 'LISTENING') void finishTurn();
@@ -371,15 +355,15 @@ export default function VoiceScreen() {
   };
 
   const endConversation = () => {
-    endingRef.current = true; turnInFlightRef.current = true; ttsService.stop();
-    // Voice mode can be deep-linked (or reloaded) with no history behind it,
-    // where router.back() is a no-op and would trap the captain here.
+    endingRef.current = true; turnInFlightRef.current = true;
+    requestControllerRef.current?.abort(); ttsService.stop();
+    // Voice mode can be deep-linked with no navigation history behind it.
     void captureRef.current.cancel().finally(() => { if (router.canGoBack()) router.back(); else router.replace('/chat' as any); });
   };
 
   const currentCopy = stateCopy[voiceState];
   // Voice Mode is a dedicated near-black ceremonial canvas regardless of the
-  // captain's chat theme/environment choice, so its palette is fixed rather
+  // conversation theme/environment choice, so its palette is fixed rather
   // than tracking the account's light/dark preference.
   const textColor = brand.paper;
   const mutedColor = brand.mutedDark;
@@ -408,7 +392,7 @@ export default function VoiceScreen() {
           <Text testID="voice-input-mode" style={[styles.modeLabel, { color: mutedColor }]}>Input: {capabilityFor(voiceCapabilities, voiceMode).label}</Text>
         </View>
 
-        <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState) }} onPress={handleMainControl} {...(hoverHandlers as any)} disabled={['STARTING','TRANSCRIBING','THINKING','CONFIRMING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
+        <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState) }} onPress={handleMainControl} {...(hoverHandlers as any)} disabled={['STARTING','TRANSCRIBING','THINKING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
           <VoiceRippleField audioPeak={audioPeak} reducedMotion={reducedMotion} />
           <Animated.View style={[styles.markHalo, { shadowColor: voiceState === 'THINKING' ? brand.violet : brand.cyan, transform: [{ translateY: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }, { scale: hoverProgress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.015] }) }] }]}><ActiveMark size={markSize} /></Animated.View>
         </TouchableOpacity>
@@ -420,14 +404,7 @@ export default function VoiceScreen() {
           {voiceState === 'LISTENING' ? <Text style={[styles.turnHint, { color: mutedColor }]}>{(capture.durationMillis / 1000).toFixed(1)}s · tap the mark to finish now</Text> : null}
         </View>
 
-        {pendingMove?.confirmation_message && voiceState === 'CONFIRMING' ? <View testID="voice-confirmation" style={[styles.confirmation, { backgroundColor: surfaceColor, borderColor }]}>
-          <Text style={[styles.confirmationLabel, { color: brand.violet }]}>REVIEW BEFORE CONTINUING</Text>
-          <Text style={[styles.confirmationText, { color: textColor }]}>{pendingMove.confirmation_message}</Text>
-          <View style={styles.confirmationActions}>
-            <TouchableOpacity testID="confirm-voice-move" onPress={() => void confirmMove()} style={styles.confirmButton}><Text style={styles.confirmButtonText}>Confirm</Text></TouchableOpacity>
-            <TouchableOpacity onPress={cancelConfirmation} style={[styles.cancelButton, { borderColor }]}><Text style={[styles.cancelButtonText, { color: textColor }]}>Cancel</Text></TouchableOpacity>
-          </View>
-        </View> : null}
+
 
         {error ? <View testID="voice-error" accessibilityLiveRegion="assertive" style={[styles.feedback, { borderColor: brand.critical }]}><Text style={styles.errorText}>{error}</Text></View> : null}
         {notice ? <Text accessibilityLiveRegion="polite" style={[styles.noticeText, { color: mutedColor }]}>{notice}</Text> : null}

@@ -13,8 +13,6 @@ const base = () => ({
   profile: 'preview',
   env: {
     EXPO_PUBLIC_GATEWAY_URL: 'https://beta.example.test/api/v1',
-    EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED: 'true',
-    EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED: 'false',
   },
   app: read('app.json'),
   eas: read('eas.json'),
@@ -63,17 +61,4 @@ test('production remains fail-closed until a real App Store Connect record is li
   const ready = evaluateFriendBetaRelease(fixture);
   assert.equal(ready.result, 'PASS', ready.failures.join('\n'));
   assert.ok(ready.checks.includes('testflight-production-profile'));
-});
-
-test('preview requires an explicit native-only chat transport selection', () => {
-  const fixture = base();
-  fixture.eas = clone(fixture.eas);
-  fixture.eas.build.preview.env.EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED = 'false';
-  delete fixture.env.EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED;
-  fixture.env.EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED = 'true';
-  const result = evaluateFriendBetaRelease(fixture);
-  assert.equal(result.result, 'FAIL');
-  assert.ok(result.failures.some(item => item.startsWith('eas-native-only-env:')));
-  assert.ok(result.failures.some(item => item.startsWith('native-chat-selected:')));
-  assert.ok(result.failures.some(item => item.startsWith('legacy-chat-disabled:')));
 });

@@ -608,11 +608,9 @@ def init_db():
                       ON firstmate_decision_answers(owner_user_id, decision_id, decision_revision)
                       WHERE status IN ('pending', 'succeeded')''')
 
-    # The canonical conversation record. Herdr terminal output is an ingestion
-    # adapter into these tables, never the chat database itself; see
-    # app/conversation_store.py and CHAT_ARCHITECTURE_FIX.md. Migrations are
-    # confined to these new canonical tables, so legacy deployment rows remain
-    # untouched.
+    # Retired conversation records remain additive historical data. Native Magi
+    # Chat does not read or write these tables; removal requires a separate,
+    # operator-approved migration.
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,

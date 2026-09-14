@@ -35,21 +35,7 @@ class FakeModel:
         return MagiModelResult(f"# Native reply\n\n{content}\n\n✓ café 🚀")
 
 
-@pytest.fixture
-def native_flags(monkeypatch):
-    monkeypatch.setenv('MAGISTRATE_NATIVE_CHAT_ENABLED', 'true')
-    monkeypatch.setenv('MAGISTRATE_LEGACY_CHAT_ENABLED', 'false')
-
-
-@pytest.mark.parametrize(('native', 'legacy'), [('true', 'true'), ('false', 'false'), ('maybe', 'false')])
-def test_chat_transport_configuration_fails_closed(monkeypatch, native, legacy):
-    monkeypatch.setenv('MAGISTRATE_NATIVE_CHAT_ENABLED', native)
-    monkeypatch.setenv('MAGISTRATE_LEGACY_CHAT_ENABLED', legacy)
-    response = client.get('/api/v1/magi/conversations/current', headers=TEST_HEADERS)
-    assert response.status_code == 503
-
-
-def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastructure(native_flags, monkeypatch):
+def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastructure(monkeypatch):
     import app.magi_chat_api as native_api
     import app.main as gateway
 
@@ -60,12 +46,10 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     async def forbidden(*args, **kwargs):
         raise AssertionError('native chat consulted execution infrastructure')
 
-    monkeypatch.setattr(gateway.herdr_client, 'read_typed_rows', forbidden)
-    monkeypatch.setattr(gateway.herdr_client, 'get_agent_history', forbidden)
-    monkeypatch.setattr(gateway.herdr_client, 'interrupt_agent', forbidden)
-    monkeypatch.setattr(gateway.herdr_client, 'prompt_agent', forbidden)
+    assert not hasattr(gateway.herdr_client, 'read_typed_rows')
+    assert not hasattr(gateway.herdr_client, 'get_agent_history')
+    assert not hasattr(gateway.herdr_client, 'prompt_agent')
     monkeypatch.setattr(gateway.fm_client, 'get_snapshot', forbidden)
-    monkeypatch.setattr(gateway, '_exchange_pi_dispatch', forbidden)
 
     body = {
         'client_message_id': 'native-api-0001',
@@ -74,13 +58,12 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     assert client.post('/api/v1/magi/messages', json=body).status_code == 401
     assert client.post('/api/v1/captain/prompt', headers=TEST_HEADERS, json={
         'message_id': 'legacy-must-stay-off', 'text': 'do not dispatch',
-    }).status_code == 404
+    }).status_code in {404, 405}
     assert client.post('/api/v1/voice/moves', headers=TEST_HEADERS, json={
         'utterance': 'do not dispatch', 'idempotency_key': 'legacy-voice-off',
-    }).status_code == 404
+    }).status_code in {404, 405}
     assert client.get('/api/v1/captain/output', headers=TEST_HEADERS).status_code == 404
     assert client.get('/api/v1/agents/captain/history', headers=TEST_HEADERS).status_code == 404
-    assert client.post('/api/v1/agents/captain/interrupt', headers=TEST_HEADERS).status_code == 404
     response = client.post('/api/v1/magi/messages', headers=TEST_HEADERS, json=body)
     assert response.status_code == 200
     payload = response.json()
@@ -116,7 +99,7 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     assert diagnostics['pi_ownership_chat_reads'] == 0
 
 
-def test_voice_only_principal_can_chat_but_is_never_offered_execution_tools(native_flags, monkeypatch):
+def test_voice_only_principal_can_chat_but_is_never_offered_execution_tools(monkeypatch):
     import app.magi_chat_api as native_api
 
     monkeypatch.setenv('MAGISTRATE_SESSION_SCOPES', 'read,voice')
@@ -136,14 +119,11 @@ def test_voice_only_principal_can_chat_but_is_never_offered_execution_tools(nati
     assert fake.offered_tools == [()]
 
 
-def test_native_websocket_replays_sqlite_messages_without_terminal_reads(native_flags, monkeypatch):
+def test_native_websocket_replays_sqlite_messages_without_terminal_reads():
     import app.magi_chat_api as native_api
     import app.main as gateway
 
-    async def forbidden(*args, **kwargs):
-        raise AssertionError('native WebSocket read terminal infrastructure')
-
-    monkeypatch.setattr(gateway.herdr_client, 'read_typed_rows', forbidden)
+    assert not hasattr(gateway.herdr_client, 'read_typed_rows')
     prepared = native_api.magi_chat_store.prepare_submission(
         'default_user', 'native-websocket-0001', 'socket native prompt',
     )
@@ -151,32 +131,35 @@ def test_native_websocket_replays_sqlite_messages_without_terminal_reads(native_
         'default_user', prepared.assistant_message_id, prepared.attempt,
         'socket native response', latency_ms=1,
     )
-    with client.websocket_connect('/api/v1/events') as websocket:
-        websocket.send_json({
-            'type': 'auth', 'token': TEST_HEADERS['Authorization'].removeprefix('Bearer '),
-            'target': 'captain', 'chat_mode': 'native',
-        })
-        assert websocket.receive_json() == {'type': 'connected', 'target': 'captain'}
-        event = websocket.receive_json()
-        assert event['type'] == 'magi_messages'
-        assert event['schema_version'] == 'magi.native-chat.v1'
-        [first_response] = [message for message in event['messages'] if message['content'] == 'socket native response']
-        assert all(message['source'] in {'text', 'voice', 'magi-native'} for message in event['messages'])
-    with client.websocket_connect('/api/v1/events') as websocket:
-        websocket.send_json({
-            'type': 'auth', 'token': TEST_HEADERS['Authorization'].removeprefix('Bearer '),
-            'target': 'captain', 'chat_mode': 'native',
-        })
-        websocket.receive_json()
-        reconnect = websocket.receive_json()
-        [restored_response] = [
-            message for message in reconnect['messages'] if message['content'] == 'socket native response'
-        ]
-        assert restored_response['id'] == first_response['id']
-        assert restored_response['revision'] == first_response['revision']
+    for reconnecting in (False, True):
+        with client.websocket_connect('/api/v1/events') as websocket:
+            websocket.send_json({
+                'type': 'auth', 'token': TEST_HEADERS['Authorization'].removeprefix('Bearer '),
+                'activity_after': 0,
+            })
+            assert websocket.receive_json() == {
+                'type': 'connected', 'schema_version': 'magistrate.events.v2',
+            }
+            event = websocket.receive_json()
+            assert event['type'] == 'magi_messages'
+            assert event['schema_version'] == 'magistrate.events.v2'
+            assert event['payload_schema_version'] == 'magi.native-chat.v1'
+            [restored_response] = [
+                message for message in event['messages']
+                if message['content'] == 'socket native response'
+            ]
+            assert all(
+                message['source'] in {'text', 'voice', 'magi-native'}
+                for message in event['messages']
+            )
+            if not reconnecting:
+                first_response = restored_response
+            else:
+                assert restored_response['id'] == first_response['id']
+                assert restored_response['revision'] == first_response['revision']
 
 
-def test_native_api_rejects_client_identity_and_cross_tenant_conversation(native_flags, monkeypatch):
+def test_native_api_rejects_client_identity_and_cross_tenant_conversation(monkeypatch):
     import app.magi_chat_api as native_api
 
     monkeypatch.setattr(native_api.magi_chat_service, 'model', FakeModel())

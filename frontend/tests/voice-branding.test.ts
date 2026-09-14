@@ -16,7 +16,7 @@ test('voice renders the canonical active triangle and centered spiral as a singl
   assert.match(voiceSource, /stroke="url\(#magistrateSpectralStroke\)"/);
   assert.equal((voiceSource.match(/<Polygon points=\{ACTIVE_MARK_TRIANGLE\}/g) || []).length, 1);
   assert.doesNotMatch(voiceSource, /translate\(-5 2\)|translate\(5 -2\)/);
-  for (const state of ['READY', 'LISTENING', 'THINKING', 'CONFIRMING', 'SPEAKING', 'ERROR']) {
+  for (const state of ['READY', 'LISTENING', 'THINKING', 'SPEAKING', 'ERROR']) {
     assert.match(voiceSource, new RegExp(`${state}:`));
   }
   assert.match(voiceSource, /testID="voice-state"/);

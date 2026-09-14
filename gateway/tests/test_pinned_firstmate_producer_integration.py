@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from app.activity_store import list_activity, source_diagnostics
-from app.conversation_store import list_messages
 from app.firstmate_activity import FirstmateActivityAdapter
 from app.firstmate_producer import FIRSTMATE_PRODUCER_PIN, validate_producer_root
 
@@ -159,9 +158,6 @@ async def test_exact_pinned_pi_producer_reaches_gateway_identity_replay_decision
     assert all(
         (record['objective_id'], record['run_id']) == (objective['objective_id'], objective['run_id'])
         for record in operations
-    )
-    assert list_messages(owner_a, 'captain')['messages'] == [], (
-        'source-native activity must not invent an autonomous conversation turn'
     )
 
     # The same source facts project into separately owned rows. Source-native

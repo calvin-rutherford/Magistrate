@@ -52,13 +52,8 @@ async function startWebServer({ readyPath = '/', environment = {} } = {}) {
     ['start', '--web', '--port', String(port)],
     {
       cwd: process.cwd(),
-      // Existing compatibility suites remain explicit legacy coverage. Native
-      // chat suites override these two values and production exports rely on
-      // the application's native-on/legacy-off defaults.
       env: {
         ...process.env,
-        EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED: 'false',
-        EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED: 'true',
         ...environment,
         CI: '1', BROWSER: 'none',
       },

@@ -10,10 +10,6 @@
       "distribution": "internal",
       "channel": "development",
       "environment": "development",
-      "env": {
-        "EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED": "true",
-        "EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED": "false"
-      },
       "ios": {
         "simulator": false
       }
@@ -22,10 +18,6 @@
       "distribution": "internal",
       "channel": "preview",
       "environment": "preview",
-      "env": {
-        "EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED": "true",
-        "EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED": "false"
-      },
       "ios": {
         "simulator": false
       }
@@ -34,11 +26,7 @@
       "distribution": "store",
       "channel": "production",
       "environment": "production",
-      "autoIncrement": true,
-      "env": {
-        "EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED": "true",
-        "EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED": "false"
-      }
+      "autoIncrement": true
     }
   },
   "submit": {

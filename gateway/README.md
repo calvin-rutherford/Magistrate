@@ -11,7 +11,7 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 `v1`. Do not commit either value. `MAGISTRATE_ENV=development` or
 `MAGISTRATE_ENV=test` permits an in-memory ephemeral key for local-only use.
 
-## Native Magi chat (Phase 1)
+## Provider-native Magi Chat
 
 Normal captain chat is now `POST /api/v1/magi/messages`: authenticated FastAPI
 calls one non-streamed OpenAI-compatible provider adapter and atomically retains
@@ -20,15 +20,15 @@ tables. `client_message_id` is unique per authenticated principal, including
 under concurrent retries. Reads, replay, retry, cancel, diagnostics, and the
 native WebSocket feed are owner-scoped and fail closed; clients cannot submit an
 owner identity. Provider keys remain server-only. See
-[`../docs/magi-native-chat-phase1.md`](../docs/magi-native-chat-phase1.md) for
-the API, limits, reliability evidence, backup, and rollback contract.
+[`../docs/native-chat-architecture.md`](../docs/native-chat-architecture.md) for
+the API and architecture contract.
 
-`MAGISTRATE_NATIVE_CHAT_ENABLED` defaults true and
-`MAGISTRATE_LEGACY_CHAT_ENABLED` defaults false. Deployment requires exactly one
-to be enabled and requires `OPENAI_API_KEY` before native activation. Native
-chat and replay never call Herdr, terminal parsers, or Pi ownership. The only
-execution edge is the closed `firstmate.submit_objective` tool: it is offered
-only to a command-authorized turn and dispatches only when explicitly selected.
+Native Magi Chat is unconditional and requires `OPENAI_API_KEY` in production.
+Existing deployment compatibility settings do not register an alternate human
+conversation API. Chat and replay never call Herdr, terminal parsers, or Pi
+ownership. The only execution edge is the closed
+`firstmate.submit_objective` tool: it is offered only to a command-authorized
+turn and dispatches only when explicitly selected.
 
 ## Process-free runtime reads
 
@@ -38,9 +38,8 @@ not run `fm-fleet-snapshot.sh`, scrape Herdr, or signal execution processes.
 Firstmate execution and decision producers push strict authenticated events;
 Gateway startup registers no runtime observation timer. Health reports static
 provider/delegation/event-ingress configuration, persisted runtime status, and
-last event time while marking Herdr `not-probed`. Terminal/Herdr APIs and the
-old Firstmate snapshot adapter are available only in explicit legacy rollback
-mode. See
+last event time while marking Herdr `not-probed`. Explicit non-chat agent controls and structured Firstmate migration tooling
+remain separate from human Chat. See
 [`../docs/gateway-runtime-observation-boundary.md`](../docs/gateway-runtime-observation-boundary.md).
 
 ## Firstmate decisions for Magi
@@ -55,50 +54,6 @@ idempotent; duplicate, stale, resolved, malformed, and foreign-principal
 answers fail closed. Track C exports a registry-native tool definition and
 handler without editing the generic model-selection/orchestration path. See
 [`../docs/magi-firstmate-decisions-v1.md`](../docs/magi-firstmate-decisions-v1.md).
-
-## Retained Pi semantic ownership compatibility channel
-
-When legacy chat is explicitly re-enabled, Pi ownership retains its prior
-default within that compatibility path: an unset
-`MAGISTRATE_PI_OWNERSHIP_ENABLED` or an explicit true literal enables it;
-explicit false literals select terminal compatibility/recovery mode, and every
-other literal fails Gateway startup. Enabled legacy captain prompt creation atomically
-prepares an encrypted, one-use dispatch for the local Magistrate Pi extension.
-The prompt route then uses authenticated mode-`0600` Unix IPC instead of the
-legacy provider/display path. A prepared turn is never terminal-fallback
-eligible, including when the adapter is absent. The extension binds native Pi
-session/user/final-assistant entry IDs and returns only complete visible text;
-Gateway commits that text into the pre-reserved canonical primary row as
-`content_source: "pi-semantic"`.
-
-This is a guarded current-session channel, not a public callback or model
-router. Startup validates the same-UID runtime, key, socket/journal metadata,
-and bounded timeout configuration; readiness requires a signed nonce-bound
-probe, while a genuinely missing adapter is reported unavailable without
-releasing prepared ownership. Authenticated health/soak responses expose only
-policy/defaulting, readiness, fixed state/backlog counts, and legacy eligibility.
-The socket/key/journal must remain local and private, and capabilities must
-never be returned to HTTP clients or logs. Installation, protocol, threat
-model, recovery matrix, and rollback are documented in
-[`../docs/pi-semantic-ownership-v1.md`](../docs/pi-semantic-ownership-v1.md).
-
-## Retained structured-response compatibility API
-
-`POST /api/v1/conversations/captain/events` accepts the strict,
-authenticated `magi.event.v1` lifecycle and writes a validated
-`magi.response.v1` document into a reserved assistant slot in the existing
-canonical conversation. The prompt response reserves the stable primary slot;
-producers may idempotently reserve bounded progress, decision, and outcome slots
-through `POST /api/v1/conversations/{target}/turns/{turn_id}/assistant-messages`.
-Each slot has independent contiguous revisions. Both endpoints require the
-least-privilege `response` scope or the existing owner `command` scope, and an
-event body may be no larger than 256 KiB. It is additive:
-without a semantic producer, the existing terminal-derived text path is
-unchanged. Unknown/unsafe JSON never becomes render instructions. See
-[`../docs/magi-structured-response-v1.md`](../docs/magi-structured-response-v1.md)
-for response schemas and sequencing, and
-[`../docs/canonical-lifecycle-activity-v1.md`](../docs/canonical-lifecycle-activity-v1.md)
-for reservation, lifecycle, replay, and activity contracts.
 
 ## Attention action API
 

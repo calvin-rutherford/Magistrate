@@ -69,9 +69,9 @@ def test_default_grant_is_digest_only_and_principal_scoped(monkeypatch):
     assert inspected.json()["onboarding_required"] is True
     # Observer access cannot reach the shared command boundary.
     assert client.post(
-        "/api/v1/captain/prompt",
+        "/api/v1/magi/messages",
         headers=_headers(payload["session_token"]),
-        json={"text": "do work"},
+        json={"client_message_id": "friend-scope-0001", "content": "do work"},
     ).status_code == 403
 
     assert client.post(

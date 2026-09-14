@@ -17,10 +17,6 @@ async def test_missing_herdr_cli_is_a_degraded_state_not_a_gateway_error(monkeyp
 
     snapshot = await client.get_snapshot()
     assert snapshot['agents'] == []
-    assert await client.read_agent_output('captain') == ''
-    prompt = await client.prompt_agent('captain', 'hello')
-    assert prompt['status'] == 'error'
-    assert prompt['error'] == 'Herdr is unavailable.'
 
 
 @pytest.mark.asyncio
@@ -125,7 +121,7 @@ async def test_list_agents_prefers_real_name_over_generic_harness_title_and_neve
 
 
 @pytest.mark.asyncio
-async def test_resolve_target_preserves_an_explicit_legacy_firstmate_name():
+async def test_resolve_target_preserves_an_explicit_firstmate_name():
     client = HerdrClient()
     client.get_snapshot = AsyncMock(return_value={
         'agents': [{'pane_id': 'w1:p1', 'name': 'firstmate', 'agent': 'pi'}],

@@ -36,9 +36,18 @@ function installNativeGatewayMock() {
     const url = typeof resource === 'string' ? resource : resource.url;
     if (url.includes('/api/v1/auth/session')) {
       const payload = options.method === 'POST'
-        ? { session_token: 'native-browser-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' }
-        : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
+        ? { session_token: 'native-browser-session-token-000001', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' }
+        : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user', auth_method: 'operator-bootstrap', onboarding_required: false };
       return json(payload);
+    }
+    if (url.includes('/api/v1/magi/conversations/') && url.includes('/replay')) {
+      const record = readRecord() || emptyRecord();
+      const after = Number(new URL(url).searchParams.get('after') || '0');
+      const changes = (record.messages || []).slice(after).map((message, index) => ({
+        ...message, change_sequence: after + index + 1,
+      }));
+      return json({ ...record, messages: changes, next_cursor: after + changes.length,
+        latest_change: (record.messages || []).length, has_more: false });
     }
     if (url.includes('/api/v1/magi/conversations/current')) {
       increment('native-chat-get-count');
@@ -49,7 +58,11 @@ function installNativeGatewayMock() {
       const body = JSON.parse(options.body || '{}');
       const previous = readRecord();
       if (previous?.messages?.some(message => message.client_message_id === body.client_message_id)) {
-        return json({ ...previous, status: 'completed', duplicate: true });
+        const user = previous.messages.find(message => message.client_message_id === body.client_message_id);
+        const assistant = previous.messages.find(message => message.reply_to_message_id === user.id);
+        return json({ schema_version: previous.schema_version, conversation: previous.conversation,
+          conversation_id: previous.conversation_id, status: assistant.status, user_message: user,
+          assistant_message: assistant, messages: [user, assistant], duplicate: true, retry: false, attempt: 1 });
       }
       const createdAt = 1789000001000 + Number(localStorage.getItem('native-chat-post-count'));
       const turnId = `mgt_browser_${body.client_message_id.replace(/[^A-Za-z0-9_-]/g, '')}`;
@@ -67,19 +80,20 @@ function installNativeGatewayMock() {
         sequence_index: start + 1, revision: 2, attachments: [], created_at: createdAt, updated_at: createdAt + 1,
       }];
       const record = {
-        schema_version: 'magi.native-chat.v1', status: 'completed',
+        schema_version: 'magi.native-chat.v1',
         conversation: { ...conversation, updated_at: createdAt + 1 }, conversation_id: conversation.id,
-        user_message: messages.at(-2), assistant_message: messages.at(-1), messages,
-        has_more: false, next_before: null, latest_change: messages.length + 1,
+        messages, has_more: false, next_before: null, latest_change: messages.length + 1,
       };
       localStorage.setItem('native-chat-browser-record', JSON.stringify(record));
-      const response = { ...record, messages: messages.slice(-2) };
+      const response = { schema_version: record.schema_version, conversation: record.conversation,
+        conversation_id: record.conversation_id, status: 'completed', user_message: messages.at(-2),
+        assistant_message: messages.at(-1), messages: messages.slice(-2), duplicate: false, retry: false, attempt: 1 };
       if (localStorage.getItem('native-chat-delay-post') === '1') {
         return new Promise(resolve => setTimeout(() => { void json(response).then(resolve); }, 1_200));
       }
       return json(response);
     }
-    if (url.includes('/api/v1/voice/transcribe')) return json({ text: 'Native voice message', is_final: true });
+    if (url.includes('/api/v1/voice/transcribe')) return json({ schema_version: 'voice-transcription.v1', text: 'Native voice message', is_final: true });
     if (url.includes('/api/v1/captain/prompt') || url.includes('/api/v1/conversations/captain')
       || url.includes('/api/v1/agents/captain/history') || url.includes('/api/v1/voice/moves')) {
       increment('native-chat-forbidden-count');
@@ -91,7 +105,7 @@ function installNativeGatewayMock() {
         schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
         snapshot_cursor: 0, latest_sequence: 0, next_before: null, has_more: false,
         summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
-        reconciliation: 'available', sources: [],
+        reconciliation: 'persisted-only', sources: [],
       });
     }
     if (url.includes('/api/v1/activity')) {
@@ -99,19 +113,19 @@ function installNativeGatewayMock() {
       return json({
       schema_version: 'activity.v1', records: [], next_cursor: 0, latest_cursor: 0,
       has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 },
-      reconciliation: 'not-requested', sources: [],
+      reconciliation: 'persisted-only', sources: [],
       });
     }
     if (url.includes('/api/v1/execution/capabilities')) return json({ harnesses: [], profiles: [], source: 'native', configured: false });
     if (url.includes('/api/v1/execution/settings')) return json({ profile_id: null, routing_profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
     if (url.includes('/api/v1/voice/capabilities')) return json({ schema_version: 'voice-capabilities.v1', provider: 'openai', configured: true, modes: [{ id: 'openai', label: 'Gateway OpenAI', available: true }] });
-    if (url.includes('/api/v1/notifications/')) return json({ events: [], unread: [] });
+    if (url.includes('/api/v1/notifications/')) return json({ events: [], unread: [], enabled: true, mode: 'moderate', quiet: false, suppressed_foreground: false, delivery: 'none' });
     if (url.includes('/api/v1/agents')) return json([]);
     if (url.includes('/api/v1/attention')) return json([]);
     if (url.includes('/api/v1/recent-activity')) return json({ items: [], sources: { firstmate: 'unavailable', github: 'unavailable' } });
     if (url.includes('/api/v1/auth/providers')) return json([]);
     if (url.includes('/api/v1/usage')) return json({ source: 'test', providers: [] });
-    if (url.includes('/api/v1/health')) return json({ status: 'healthy', service: 'gateway', herdr_socket_connected: false });
+    if (url.includes('/api/v1/health')) return json({ status: 'healthy', service: 'gateway' });
     if (url.includes('/api/v1/')) return json({});
     return nativeFetch(resource, options);
   };
@@ -127,13 +141,7 @@ function stubSpeechSynthesis() {
 }
 
 test.before(async () => {
-  server = await startWebServer({
-    readyPath: '/chat',
-    environment: {
-      EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED: 'true',
-      EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED: 'false',
-    },
-  });
+  server = await startWebServer({ readyPath: '/chat' });
   browser = await launchBrowser({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 });
 
@@ -150,9 +158,9 @@ test('production-default chat composer persists and restores only through native
   await page.reload({ waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
-  await page.focus('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="magi-prompt"]');
   await page.keyboard.type('Hello native Magi');
-  await page.click('[data-testid="send-captain-prompt"]');
+  await page.click('[data-testid="send-magi-prompt"]');
   await page.waitForFunction(() => document.body.innerText.includes('Native item 30 is complete.'), { timeout: 20_000 });
   assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-post-count'))), 1);
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('native-chat-browser-record')).messages[0].source), 'text');
@@ -172,45 +180,22 @@ test('production-default chat composer persists and restores only through native
 });
 
 test('an activity outage does not interrupt an active native LLM turn', async () => {
-  const activity = {
-    id: 'ca-native-active', sequence: 1, delivery_sequence: 1, revision: 1,
-    kind: 'objective.progress', state: 'active', importance: 'routine',
-    title: 'Native LLM turn', summary: 'Provider completion is in progress.', summary_truncated: false,
-    task_id: 'native-task', decision_key: null, objective_id: 'native-objective', run_id: 'native-run',
-    project: 'Magistrate', occurred_at: null, observed_at: 1789000000000, refs: [],
-    source: { instance_id: 'firstmate:main', event_id: null },
-  };
-  const cache = {
-    schema_version: 'activity-cache.v1', principal: 'default_user', cursor: 1,
-    summary_cursor: 1, summary_authoritative: true,
-    summary: { active_objectives: 1, operation_count: 0, pending_decisions: 0 }, records: [activity],
-  };
   const page = await browser.newPage();
-  await page.evaluateOnNewDocument(value => {
+  await page.evaluateOnNewDocument(() => {
     localStorage.removeItem('native-chat-browser-record');
     localStorage.removeItem('native-chat-post-count');
     localStorage.removeItem('native-chat-forbidden-count');
     localStorage.setItem('native-chat-activity-unavailable', '1');
     localStorage.setItem('native-chat-delay-post', '1');
-    localStorage.setItem('magistrate.activity.canonical.v1.default_user', JSON.stringify(value));
-  }, cache);
+  });
   await page.evaluateOnNewDocument(installNativeGatewayMock);
   await page.goto(`${server.base}/chat`, { waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
-  await page.waitForSelector('[data-testid="agent-thinking-message"]', { timeout: 20_000 });
-  // Let the failed optional recovery settle before checking the user-critical
-  // state. It may briefly say recovering during normal initialization.
-  await new Promise(resolve => setTimeout(resolve, 2_000));
-  let label = await page.$eval('[data-testid="working-state-label"]', element => element.textContent);
-  assert.doesNotMatch(label, /observability interrupted/i);
-
-  await page.focus('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="magi-prompt"]');
   await page.keyboard.type('Continue through the optional activity outage');
-  await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForSelector('[data-testid="stop-captain-response"]', { timeout: 5_000 });
-  label = await page.$eval('[data-testid="working-state-label"]', element => element.textContent);
-  assert.doesNotMatch(label, /observability interrupted/i);
+  await page.click('[data-testid="send-magi-prompt"]');
+  await page.waitForSelector('[data-testid="stop-magi-response"]', { timeout: 5_000 });
   await page.waitForFunction(() => document.body.innerText.includes('Native item 30 is complete.'), { timeout: 20_000 });
   assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-post-count'))), 1);
   assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-forbidden-count') || '0')), 0);

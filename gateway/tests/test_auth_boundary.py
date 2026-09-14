@@ -46,7 +46,9 @@ def test_session_is_opaque_scoped_and_revocable(monkeypatch):
 
     assert client.get('/api/v1/health', headers=headers(payload['session_token'])).status_code == 200
     # Account scope is present, but command scope is not.
-    assert client.post('/api/v1/captain/prompt', headers=headers(payload['session_token']), json={'text': 'status'}).status_code == 403
+    assert client.post('/api/v1/magi/messages', headers=headers(payload['session_token']), json={
+        'client_message_id': 'scope-check-0001', 'content': 'status',
+    }).status_code == 403
     assert client.post('/api/v1/auth/session/revoke', headers=headers(payload['session_token'])).status_code == 200
     assert client.get('/api/v1/health', headers=headers(payload['session_token'])).status_code == 401
 
@@ -65,13 +67,13 @@ def test_events_authenticates_in_first_frame_without_query_secret(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_SESSION_SCOPES', 'read')
     issued = client.post('/api/v1/auth/session', json={'bootstrap_secret': 'socket-secret'}).json()
 
-    async def history(target, lines):
-        return {'target': target, 'messages': []}
-
-    monkeypatch.setattr('app.main.herdr_client.get_agent_history', history)
     with client.websocket_connect('/api/v1/events') as websocket:
-        websocket.send_json({'type': 'auth', 'token': issued['session_token'], 'target': 'captain'})
-        assert websocket.receive_json() == {'type': 'connected', 'target': 'captain'}
+        websocket.send_json({
+            'type': 'auth', 'token': issued['session_token'], 'activity_after': 0,
+        })
+        assert websocket.receive_json() == {
+            'type': 'connected', 'schema_version': 'magistrate.events.v2',
+        }
 
 
 def test_unconfigured_providers_are_honest(monkeypatch):
@@ -131,8 +133,8 @@ def test_missing_or_query_only_credentials_are_rejected():
     ('POST', '/api/v1/notifications/events/ack', {'item_ids': []}),
     ('GET', '/api/v1/voice/capabilities', None),
     ('POST', '/api/v1/voice/transcribe', None),
-    ('POST', '/api/v1/voice/moves', {'utterance': 'status', 'idempotency_key': 'auth-test-1234'}),
-    ('POST', '/api/v1/captain/prompt', {'text': 'status'}),
+    ('POST', '/api/v1/magi/messages', {'client_message_id': 'auth-test-1234', 'content': 'status'}),
+    ('GET', '/api/v1/magi/conversations/current', None),
     ('GET', '/api/v1/agents', None),
     ('GET', '/api/v1/execution/settings', None),
     ('GET', '/api/v1/execution/routing-preference', None),
