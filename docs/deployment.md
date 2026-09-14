@@ -271,7 +271,7 @@ MAGISTRATE_TRUSTED_SMOKE=1 \
 ```
 
 That smoke proves session issuance, protected session validation, authenticated
-`/health`, and authenticated `/agents` (the Herdr-backed application path). The
+`/health`, and authenticated `/agents` (the persisted structured-runtime projection; it performs no Herdr probe). The
 Actions workflow separately performs only secret-free, unauthenticated
 reachability checks (plus the static frontend); it never reads the bootstrap
 secret or handles a bearer token. A Tailscale HTTPS reverse proxy may remain

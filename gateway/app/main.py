@@ -46,8 +46,8 @@ from app.db import (init_db, get_profile, update_profile, get_connected_accounts
                     create_agent_migration, get_agent_migration, get_agent_migration_by_idempotency, transition_agent_migration)
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
-from app.activity_store import known_activity_users, list_activity, snapshot_activity, source_diagnostics
-from app.firstmate_activity import FirstmateActivityAdapter
+from app.activity_store import list_activity, snapshot_activity, source_diagnostics
+from app.structured_runtime import StructuredRuntimeProjection
 from app.attention_service import attention_service
 from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
                                    prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
@@ -73,13 +73,15 @@ from app.pi_ownership import (
     get_recoverable_dispatches, has_terminal_fallback_candidates,
     mark_pi_adapter_acknowledged, mark_pi_dispatch_attempt,
 )
-from app.magi_chat_api import (magi_chat_service, router as magi_chat_router,
+from app.magi_chat_api import (magi_chat_readiness, magi_chat_service,
+                               router as magi_chat_router,
                                validate_magi_chat_configuration)
 from app.magi_chat_store import MagiChatStore, record_compatibility_read
 from app.firstmate_execution import MAX_FIRSTMATE_EXECUTION_EVENT_BYTES
 from app.firstmate_execution_api import (
     firstmate_execution_service, router as firstmate_execution_router,
 )
+from app.firstmate_decision_api import router as firstmate_decision_router
 
 init_db()
 
@@ -120,6 +122,7 @@ app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name=
 app.include_router(ar_router)
 app.include_router(magi_chat_router)
 app.include_router(firstmate_execution_router)
+app.include_router(firstmate_decision_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -144,11 +147,16 @@ async def enforce_bounded_request_size(request: Request, call_next):
         r'/api/v1/firstmate/execution-events(?:/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/wake)?',
         request.url.path,
     ))
-    if firstmate_execution_contract and length > MAX_FIRSTMATE_EXECUTION_EVENT_BYTES:
+    firstmate_decision_contract = (
+        request.method == 'POST'
+        and request.url.path == '/api/v1/firstmate/decision-events'
+    )
+    firstmate_structured_contract = firstmate_execution_contract or firstmate_decision_contract
+    if firstmate_structured_contract and length > MAX_FIRSTMATE_EXECUTION_EVENT_BYTES:
         return JSONResponse({'detail': 'The Firstmate execution event is too large.'}, status_code=413)
     bounded_contract_path = request.method == 'POST' and (
         request.url.path == '/api/v1/activity/catch-up'
-        or firstmate_execution_contract
+        or firstmate_structured_contract
         or bool(re.fullmatch(
             r'/api/v1/conversations/[^/]+/(?:events|turns/[^/]+/assistant-messages)',
             request.url.path,
@@ -166,14 +174,14 @@ async def enforce_bounded_request_size(request: Request, call_next):
         # contract's hard cap and let Starlette reuse the verified cached bytes.
         body_cap = (
             MAX_FIRSTMATE_EXECUTION_EVENT_BYTES
-            if firstmate_execution_contract else MAGI_MAX_RESPONSE_BYTES
+            if firstmate_structured_contract else MAGI_MAX_RESPONSE_BYTES
         )
         body = bytearray()
         async for chunk in request.stream():
             if len(body) + len(chunk) > body_cap:
                 detail = (
                     'The Firstmate execution event is too large.'
-                    if firstmate_execution_contract
+                    if firstmate_structured_contract
                     else 'The semantic response request is too large.'
                 )
                 return JSONResponse({'detail': detail}, status_code=413)
@@ -183,12 +191,11 @@ async def enforce_bounded_request_size(request: Request, call_next):
 
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
-firstmate_activity = FirstmateActivityAdapter(fm_client)
-recent_activity_service = RecentActivityService(fm_client, github_service)
+structured_runtime = StructuredRuntimeProjection()
+recent_activity_service = RecentActivityService(structured_runtime, github_service)
 stt_adapter = VoiceInputAdapter()
 voice_move_service = VoiceMoveService(herdr_client)
 _notification_reconciler_task = None
-_activity_reconciler_task = None
 _pi_ownership_reconciler_task = None
 
 
@@ -397,38 +404,9 @@ async def _reconcile_registered_notifications() -> None:
             print('Notification reconciler unavailable:', exc)
 
 
-async def _reconcile_firstmate_activity() -> None:
-    """Recover structured source state after startup and on a bounded cadence."""
-    try:
-        interval = max(5, int(os.getenv('MAGISTRATE_ACTIVITY_POLL_SECONDS', '15')))
-    except ValueError:
-        interval = 15
-    user_offset = 0
-    while True:
-        try:
-            # Every durable candidate originated at an authenticated route or
-            # an unexpired server-issued session. Never invent a default owner
-            # for source rows that have no tenant identity of their own. Rotate
-            # bounded batches so a large tenant set cannot starve later rows.
-            users = sorted(set(known_activity_users()))
-            if users:
-                start = user_offset % len(users)
-                batch = (users + users)[start:start + min(100, len(users))]
-                user_offset = (start + len(batch)) % len(users)
-                for user_id in batch:
-                    await firstmate_activity.reconcile(user_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # The adapter persists bounded per-source fault detail. Logging only
-            # the class avoids echoing a source payload or local path.
-            print('Activity reconciler unavailable:', type(exc).__name__)
-        await asyncio.sleep(interval)
-
-
 @app.on_event('startup')
 async def start_notification_reconciler():
-    global _notification_reconciler_task, _activity_reconciler_task, _pi_ownership_reconciler_task
+    global _notification_reconciler_task, _pi_ownership_reconciler_task
     # Resolve both strict flags at startup. Native is production-default-on;
     # legacy must be explicitly enabled for rollback/readability.
     native_enabled, legacy_enabled = validate_chat_feature_configuration()
@@ -447,27 +425,24 @@ async def start_notification_reconciler():
     pi_enabled = legacy_enabled and _validate_pi_ownership_startup()
     if pi_enabled:
         await _verify_pi_adapter_startup_readiness()
-    if legacy_enabled:
-        # Optional by default for owner/Friend compatibility. Once an operator
-        # explicitly requires the pinned producer, startup must fail closed if
-        # its reviewed call sites or activation are absent.
-        await firstmate_activity.require_captain_producer_ready()
+    if legacy_enabled and fm_client.captain_producer_required:
+        # Validate persisted producer configuration without invoking Firstmate
+        # tooling during Gateway startup.
+        producer = fm_client.get_producer_readiness()
+        if producer['status'] != 'ready':
+            raise RuntimeError('The required pinned Firstmate producer is unavailable.')
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
-    activity_disabled = os.getenv('MAGISTRATE_DISABLE_ACTIVITY_RECONCILER', '').lower() in {'1', 'true', 'yes'}
-    if os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'} and not activity_disabled:
-        _activity_reconciler_task = asyncio.create_task(_reconcile_firstmate_activity())
     if pi_enabled and os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'}:
         _pi_ownership_reconciler_task = asyncio.create_task(_reconcile_pi_ownership())
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
-    global _notification_reconciler_task, _activity_reconciler_task, _pi_ownership_reconciler_task
+    global _notification_reconciler_task, _pi_ownership_reconciler_task
     tasks = [
         task for task in (
-            _notification_reconciler_task, _activity_reconciler_task,
-            _pi_ownership_reconciler_task,
+            _notification_reconciler_task, _pi_ownership_reconciler_task,
         ) if task
     ]
     for task in tasks:
@@ -475,7 +450,6 @@ async def stop_notification_reconciler():
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _notification_reconciler_task = None
-    _activity_reconciler_task = None
     _pi_ownership_reconciler_task = None
 
 
@@ -641,8 +615,10 @@ async def agent_events(websocket: WebSocket):
         else:
             await websocket.close(code=1008)
             return
-        if ((chat_mode == 'native' and not native_chat_enabled())
-                or (chat_mode == 'legacy' and target == CANONICAL_CONVERSATION_TARGET and not legacy_chat_enabled())):
+        if (
+            (chat_mode == 'native' and (not native_chat_enabled() or target != CANONICAL_CONVERSATION_TARGET))
+            or (chat_mode == 'legacy' and not legacy_chat_enabled())
+        ):
             await websocket.close(code=1008)
             return
         activity_after_present = isinstance(message, dict) and 'activity_after' in message
@@ -685,8 +661,10 @@ async def agent_events(websocket: WebSocket):
                             await websocket.close(code=1008)
                             return
                         target = requested
-                        if (target == CANONICAL_CONVERSATION_TARGET and chat_mode == 'legacy'
-                                and not legacy_chat_enabled()):
+                        if (
+                            (chat_mode == 'native' and target != CANONICAL_CONVERSATION_TARGET)
+                            or (chat_mode == 'legacy' and not legacy_chat_enabled())
+                        ):
                             await websocket.close(code=1008)
                             return
                         subscription_changed = True
@@ -695,8 +673,12 @@ async def agent_events(websocket: WebSocket):
                         if requested_mode not in {'native', 'legacy'}:
                             await websocket.close(code=1008)
                             return
-                        if ((requested_mode == 'native' and not native_chat_enabled())
-                                or (requested_mode == 'legacy' and target == CANONICAL_CONVERSATION_TARGET and not legacy_chat_enabled())):
+                        if (
+                            (requested_mode == 'native' and (
+                                not native_chat_enabled() or target != CANONICAL_CONVERSATION_TARGET
+                            ))
+                            or (requested_mode == 'legacy' and not legacy_chat_enabled())
+                        ):
                             await websocket.close(code=1008)
                             return
                         chat_mode = requested_mode
@@ -780,9 +762,8 @@ async def agent_events(websocket: WebSocket):
                         'target': target, 'messages': fresh,
                     })
                 if activity_enabled:
-                    # Delivery reads only durable canonical rows. Source I/O is
-                    # performed by startup/cadence reconciliation or an explicit
-                    # catch-up request, never in the chat delivery loop.
+                    # Delivery reads only durable canonical rows. Structured
+                    # producers push source events; no read path polls runtime.
                     try:
                         activity_page = list_activity(
                             principal.user_id, after=activity_cursor, limit=100,
@@ -884,42 +865,62 @@ oauth_transaction_store = OAuthTransactionStore()
 
 @app.get('/api/v1/runtime')
 async def get_runtime(principal: Principal = Depends(require_scope('read'))):
-    snapshot = await herdr_client.get_snapshot()
-    fm_snapshot = await fm_client.get_snapshot()
-    # A missing snapshot means Herdr is unreachable. Reporting a placeholder
-    # version/protocol here would be an invented metric, so report null instead.
-    herdr_connected = bool(snapshot.get('version'))
+    fleet, runtime = await asyncio.gather(
+        asyncio.to_thread(structured_runtime.fleet, principal.user_id),
+        asyncio.to_thread(structured_runtime.runtime, principal.user_id),
+    )
+    execution_interface = fm_client.get_execution_interface_readiness()
+    event_ingress = {
+        'status': 'ready',
+        'schemas': ['firstmate.execution-event.v1', 'firstmate.decision-events.v1'],
+        'live_probe_performed': False,
+    }
     return {
+        'gateway': {'status': 'connected'},
+        'provider': magi_chat_readiness(),
+        # Herdr exposes no durable process observation contract. A normal read
+        # therefore reports that it was not probed instead of opening its socket
+        # or invoking its CLI.
         'herdr': {
-            'status': 'connected' if herdr_connected else 'disconnected',
-            'version': snapshot.get('version') if herdr_connected else None,
-            'protocol': snapshot.get('protocol') if herdr_connected else None,
-            'agents_count': len(snapshot.get('agents', []))
+            'status': 'not-observed',
+            'required': False,
+            'version': None,
+            'protocol': None,
+            'agents_count': None,
+            'live_probe_performed': False,
         },
         'firstmate': {
-            'fm_home': fm_snapshot.get('fm_home'),
-            'schema': fm_snapshot.get('schema', 'fm-fleet-snapshot.v1'),
-            'status': 'connected' if fm_snapshot.get('available') is True else 'disconnected',
-            'tasks_count': len(fm_snapshot.get('tasks', []))
-        }
+            'schema': fleet['schema'],
+            'status': execution_interface['status'],
+            'tasks_count': fleet['tasks_count'],
+            'last_event_at': fleet['last_event_at'],
+            'persisted_runtime_status': fleet['persisted_runtime_status'],
+            'live_probe_performed': False,
+        },
+        'execution_interface': execution_interface,
+        'event_ingress': event_ingress,
+        'persisted_runtime': runtime,
     }
 
 @app.get('/api/v1/health')
 async def get_health(principal: Principal = Depends(require_scope('read'))):
-    snapshot = await herdr_client.get_snapshot()
-    fm_snapshot = await fm_client.get_snapshot()
-    herdr_connected = bool(snapshot.get('version'))
-    firstmate_available = fm_snapshot.get('available') is True
+    runtime = await asyncio.to_thread(structured_runtime.runtime, principal.user_id)
+    execution_interface = fm_client.get_execution_interface_readiness()
+    event_ingress = {
+        'status': 'ready',
+        'schemas': ['firstmate.execution-event.v1', 'firstmate.decision-events.v1'],
+        'live_probe_performed': False,
+    }
+    provider = magi_chat_readiness()
     producer = fm_client.get_producer_readiness()
     pi_ownership = await _pi_ownership_diagnostics(
         principal.user_id, CANONICAL_CONVERSATION_TARGET,
     )
-    # The gateway process answering is not the same claim as the product being
-    # healthy. Degrade explicitly when a live source is missing, and never
-    # substitute a placeholder Herdr version for one we did not observe. A
-    # required producer remains part of readiness after startup, so later
-    # contract drift cannot look healthy.
-    degraded = [name for name, ok in (('herdr', herdr_connected), ('firstmate', firstmate_available)) if not ok]
+    degraded: List[str] = []
+    if provider['enabled'] and provider['status'] != 'configured':
+        degraded.append('magi-provider')
+    if execution_interface['status'] != 'configured':
+        degraded.append('firstmate-execution-interface')
     if producer['required'] and producer['status'] != 'ready':
         degraded.append('firstmate-producer')
     if pi_ownership['enabled'] and not pi_ownership['adapter']['ready']:
@@ -929,11 +930,19 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         'degraded_sources': degraded,
         'service': 'magistrate-gateway',
         'version': '1.1.0',
-        'herdr_version': snapshot.get('version') if herdr_connected else None,
-        'herdr_socket_connected': herdr_connected,
-        'firstmate_home': fm_snapshot.get('fm_home'),
-        'firstmate_available': firstmate_available,
-        'firstmate_tasks_count': len(fm_snapshot.get('tasks', [])),
+        'gateway_ready': True,
+        'magi_provider': provider,
+        'execution_interface': execution_interface,
+        'event_ingress': event_ingress,
+        'persisted_runtime': runtime,
+        'last_execution_event_at': runtime['last_event_at'],
+        # Backward-compatible fields deliberately make no live Herdr claim.
+        'herdr_version': None,
+        'herdr_socket_connected': False,
+        'herdr_observation': 'not-probed',
+        'firstmate_home': None,
+        'firstmate_available': execution_interface['status'] == 'configured',
+        'firstmate_tasks_count': runtime['known_objectives'],
         'firstmate_producer': producer,
         'pi_semantic_ownership': pi_ownership,
     }
@@ -1161,19 +1170,22 @@ async def get_github_pull(number: int, refresh: bool = Query(False), principal: 
 @app.get('/api/v1/recent-activity')
 async def get_recent_activity(limit: int = Query(20, ge=1, le=50), refresh: bool = Query(False), principal: Principal = Depends(require_scope('read'))):
     try:
-        return await recent_activity_service.get_recent_activity(limit, refresh)
+        return await recent_activity_service.get_recent_activity(
+            principal.user_id, limit, refresh,
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 async def _activity_catch_up(user_id: str, *, after: int, limit: int, reconcile: bool) -> Dict[str, Any]:
-    reconciliation = None
-    if reconcile:
-        reconciliation = await firstmate_activity.reconcile(user_id)
+    # ``reconcile`` remains accepted for older clients but observation is now a
+    # pure durable replay. Producers push execution/decision/completion events
+    # through their authenticated structured seams.
+    del reconcile
     return {
         **list_activity(user_id, after=after, limit=limit),
         'sources': source_diagnostics(user_id),
-        'reconciliation': reconciliation['status'] if reconciliation else 'not-requested',
+        'reconciliation': 'persisted-only',
     }
 
 
@@ -1184,13 +1196,13 @@ async def get_canonical_activity_snapshot(
     reconcile: bool = Query(True),
     principal: Principal = Depends(require_scope('read')),
 ):
-    """Return a bounded authoritative projection and its replay cursor."""
+    """Return a bounded projection without polling execution runtime."""
     try:
-        reconciliation = await firstmate_activity.reconcile(principal.user_id) if reconcile else None
+        del reconcile
         return {
             **snapshot_activity(principal.user_id, before=before, limit=limit),
             'sources': source_diagnostics(principal.user_id),
-            'reconciliation': reconciliation['status'] if reconciliation else 'not-requested',
+            'reconciliation': 'persisted-only',
         }
     except (ValueError, MagiEventConflict) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1207,7 +1219,7 @@ async def get_canonical_activity(
     reconcile: bool = Query(True),
     principal: Principal = Depends(require_scope('read')),
 ):
-    """Catch up sources, then replay tenant-owned canonical activity."""
+    """Replay tenant-owned canonical activity from durable structured events."""
     try:
         return await _activity_catch_up(
             principal.user_id, after=after, limit=limit, reconcile=reconcile,
@@ -1661,15 +1673,12 @@ async def remove_execution_credential(credential_key: str, principal: Principal 
 
 @app.get('/api/v1/agents')
 async def list_agents(principal: Principal = Depends(require_scope('read'))):
-    # /agents is the captain-visible Fleet surface. Attention and Voice call
-    # list_agents() directly because they still need the primary identity for
-    # routing/awareness; do the structural exclusion at this boundary only.
-    agents, fleet = await asyncio.gather(herdr_client.list_fleet_agents(), fm_client.get_snapshot())
-    return fm_client.apply_agent_display_names(agents, fleet)
+    """Return process-free objective/run projections for the Fleet UI."""
+    return await asyncio.to_thread(structured_runtime.agents, principal.user_id)
 
 @app.get('/api/v1/fleet')
 async def get_fleet(principal: Principal = Depends(require_scope('read'))):
-    return await fm_client.get_snapshot()
+    return await asyncio.to_thread(structured_runtime.fleet, principal.user_id)
 
 
 @app.post('/api/v1/agents/{agent_id}/migration-requests')
@@ -1685,15 +1694,20 @@ async def request_agent_migration(agent_id: str, contract: AgentMigrationRequest
         raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    agents, fleet = await asyncio.gather(herdr_client.list_agents(), fm_client.get_snapshot())
-    observed_agents = fm_client.apply_agent_display_names(agents, fleet)
-    agent = next((item for item in observed_agents if item.get('id') == agent_id or item.get('pane_id') == agent_id), None)
-    if not agent or agent.get('workspace_role') == 'primary':
-        raise HTTPException(status_code=404, detail='The running worker agent is no longer available.')
-    if str(agent.get('status') or '').lower() not in {'working', 'running', 'active', 'executing'}:
-        raise HTTPException(status_code=409, detail='Migration is available only for a currently running agent.')
-    context = fm_client.migration_context(str(agent.get('pane_id') or agent_id), fleet)
-    context['current_runtime'] = {'harness': agent.get('harness'), 'model': agent.get('model')}
+    observed_agents = await asyncio.to_thread(structured_runtime.agents, principal.user_id)
+    agent = next((item for item in observed_agents if item.get('id') == agent_id), None)
+    if not agent:
+        raise HTTPException(status_code=404, detail='The structured worker run is no longer available.')
+    if str(agent.get('status') or '').lower() not in {'working', 'blocked'}:
+        raise HTTPException(status_code=409, detail='Migration is available only for a structured active worker run.')
+    context = await asyncio.to_thread(
+        structured_runtime.migration_context, principal.user_id, agent_id,
+    )
+    if context is None:
+        raise HTTPException(status_code=404, detail='The structured worker run is no longer available.')
+    context['current_runtime'] = {
+        'harness': agent.get('harness'), 'model': agent.get('model'),
+    }
     try:
         return create_agent_migration(principal.user_id, agent_id, contract.idempotency_key, target, context)
     except ValueError as exc:
@@ -1747,10 +1761,9 @@ async def get_agent_history(
 ):
     if before and after:
         raise HTTPException(status_code=422, detail='Use only one history cursor.')
-    if agent_id == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
-        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
-        record_compatibility_read(principal.user_id, 'terminal_chat_reads')
+    _require_legacy_chat_api()
+    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
+    record_compatibility_read(principal.user_id, 'terminal_chat_reads')
     try:
         history_kwargs = {'lines': lines}
         if before is not None: history_kwargs['before'] = before
@@ -1761,8 +1774,8 @@ async def get_agent_history(
 
 @app.post('/api/v1/captain/prompt')
 async def send_captain_prompt(contract: UniversalInputContract, principal: Principal = Depends(require_scope('command'))):
-    if contract.target == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
+    # This entire route is the retained terminal/Pi compatibility transport.
+    _require_legacy_chat_api()
     use_pi_ownership = (
         _pi_ownership_enabled() and contract.target == CANONICAL_CONVERSATION_TARGET
     )
@@ -1943,9 +1956,8 @@ async def get_conversation_messages(
     limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
     principal: Principal = Depends(require_scope('read')),
 ):
-    if target == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
-        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
+    _require_legacy_chat_api()
+    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
     # Canonical ingestion always asks for every row Herdr still retains. A
     # caller-controlled viewport limit cannot be allowed to erase context.
     ingest_error = await _ingest_target_snapshot(principal.user_id, target)
@@ -1962,9 +1974,8 @@ async def replay_conversation(
     principal: Principal = Depends(require_scope('read')),
 ):
     """Catch up legacy canonical rows after a durable change cursor."""
-    if target == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
-        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
+    _require_legacy_chat_api()
+    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
     try:
         return replay_messages(principal.user_id, target, after=after, limit=limit)
     except ValueError as exc:
@@ -1977,9 +1988,8 @@ async def inspect_conversation_turn(
     turn_id: str,
     principal: Principal = Depends(require_scope('read')),
 ):
-    if target == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
-        record_compatibility_read(principal.user_id, 'legacy_chat_reads')
+    _require_legacy_chat_api()
+    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
     try:
         return get_turn_lifecycle(principal.user_id, target, turn_id)
     except LookupError as exc:
@@ -2032,8 +2042,7 @@ async def post_magi_response_event(
 @app.post('/api/v1/conversations/{target}/reset')
 async def post_conversation_reset(target: str, principal: Principal = Depends(require_scope('command'))):
     """Discard this legacy conversation's canonical record for a fresh thread."""
-    if target == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
+    _require_legacy_chat_api()
     try:
         return reset_conversation(principal.user_id, target)
     except MagiEventConflict as exc:
@@ -2044,25 +2053,23 @@ async def post_conversation_reset(target: str, principal: Principal = Depends(re
 async def post_conversation_turn_cancel(
     target: str, client_message_id: str, principal: Principal = Depends(require_scope('command')),
 ):
-    if target == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
+    _require_legacy_chat_api()
     set_turn_status(principal.user_id, target, client_message_id, 'cancelled')
     return {'status': 'cancelled', 'target': target, 'client_message_id': client_message_id}
 
 @app.post('/api/v1/agents/{agent_id}/send-key')
 async def send_agent_key(agent_id: str, key: str = Query('Enter'), principal: Principal = Depends(require_scope('command'))):
-    if agent_id == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
+    _require_legacy_chat_api()
     return await herdr_client.send_agent_key(agent_id, key=key)
 
 @app.post('/api/v1/agents/{agent_id}/interrupt')
 async def interrupt_agent(agent_id: str, principal: Principal = Depends(require_scope('command'))):
-    if agent_id == CANONICAL_CONVERSATION_TARGET:
-        _require_legacy_chat_api()
+    _require_legacy_chat_api()
     return await herdr_client.interrupt_agent(agent_id)
 
 @app.post('/api/v1/agents/{agent_id}/rename')
 async def rename_agent(agent_id: str, contract: RenameAgentContract, principal: Principal = Depends(require_scope('command'))):
+    _require_legacy_chat_api()
     return await herdr_client.rename_agent(agent_id, contract.name)
 
 # STATIC SPA FALLBACK FOR DIRECT DEEP LINKS

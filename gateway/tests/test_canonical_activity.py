@@ -15,7 +15,7 @@ from app.activity_store import (
 )
 from app.auth import issue_session
 from app.firstmate_activity import FirstmateActivityAdapter
-from app.main import app, firstmate_activity
+from app.main import app
 from conftest import TEST_HEADERS, TEST_SESSION_TOKEN
 
 
@@ -774,9 +774,6 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
         }],
         open_decision_keys=[],
     )
-    monkeypatch.setattr(firstmate_activity, 'reconcile', AsyncMock(return_value={
-        'status': 'available', 'changed': [], 'errors': [], 'sources': [],
-    }))
     monkeypatch.setattr('app.main._ingest_target_snapshot', AsyncMock(return_value=None))
     client = TestClient(app)
 

@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import sqlite3
 import stat as stat_module
 import tempfile
@@ -651,7 +650,6 @@ class TasksAxiObjectiveDispatcher:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=fm_home,
                 env=environment,
-                start_new_session=True,
             )
 
             async def collect() -> tuple[bytes, bytes, int]:
@@ -667,10 +665,11 @@ class TasksAxiObjectiveDispatcher:
                     collect(), timeout=self._timeout_seconds,
                 )
             except (asyncio.TimeoutError, _OutputTooLarge) as exc:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                 await process.wait()
                 raise ObjectiveDispatchError("runtime-bound-exceeded") from exc
             if return_code != 0 or stderr:
@@ -681,7 +680,7 @@ class TasksAxiObjectiveDispatcher:
         except asyncio.CancelledError:
             if process is not None and process.returncode is None:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    process.kill()
                 except ProcessLookupError:
                     pass
                 await process.wait()
@@ -691,7 +690,7 @@ class TasksAxiObjectiveDispatcher:
         except (OSError, UnicodeError, ValueError) as exc:
             if process is not None and process.returncode is None:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    process.kill()
                 except ProcessLookupError:
                     pass
                 await process.wait()

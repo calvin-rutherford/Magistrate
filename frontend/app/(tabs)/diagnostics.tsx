@@ -83,36 +83,36 @@ export default function HomeScreen() {
     if (!result.ok) Alert.alert('Unable to open attention item', result.message);
   };
 
-  const healthStatus = loading ? 'CONNECTING' : healthError ? 'UNAVAILABLE' : health?.status === 'healthy' && health.herdr_socket_connected ? 'OPERATIONAL' : health?.status === 'healthy' ? 'DEGRADED' : (health?.status || 'UNKNOWN').toUpperCase();
+  const healthStatus = loading ? 'CONNECTING' : healthError ? 'UNAVAILABLE' : health?.status === 'healthy' ? 'OPERATIONAL' : (health?.status || 'UNKNOWN').toUpperCase();
   const healthColor = healthError || healthStatus === 'UNAVAILABLE' ? '#FCA5A5' : healthStatus === 'OPERATIONAL' ? '#34D399' : '#F59E0B';
-  const healthSubtext = loading ? 'Loading gateway status' : healthError ? 'Gateway status unavailable' : health?.herdr_socket_connected ? 'Gateway and Herdr connected' : 'Gateway reachable; Herdr unavailable';
+  const runtimeStatus = health?.persisted_runtime?.status || 'unobserved';
+  const healthSubtext = loading ? 'Loading gateway status' : healthError ? 'Gateway status unavailable' : `Gateway reachable · persisted runtime ${runtimeStatus}`;
 
-  const renderAgentCard = ({ agent, displayStatus }: ReturnType<typeof summarizeAgents>['ordered'][number]) => (
-    <TouchableOpacity
+  const renderAgentCard = ({ agent, displayStatus }: ReturnType<typeof summarizeAgents>['ordered'][number]) => {
+    const card = <GlassSurface variant="card" style={styles.card}>
+      <View style={styles.cardHeader}>
+        <Text testID={`agent-name-${agent.id}`} style={styles.agentName}>{agentDisplayName(agent)}</Text>
+        <View style={styles.statusBadge}>
+        <Text style={styles.statusBadgeText}>{displayAgentStatus(displayStatus)}</Text>
+        </View>
+      </View>
+      <Text testID={`agent-runtime-${agent.id}`} style={styles.harnessText}>Task: {agent.task_id || agent.id} · Run: {agent.run_id || 'not reported'} · Harness/model: {agent.harness || 'unknown'}/{agent.model || 'unknown'}</Text>
+      {agent.pane_id ? <Text selectable style={styles.harnessText}>Legacy pane: {agent.pane_id}</Text> : null}
+      <Text style={styles.agentLinkText}>{agent.pane_id ? 'OPEN LEGACY AGENT CHAT →' : 'STRUCTURED RUN · NO PANE CONTROL'}</Text>
+    </GlassSurface>;
+    if (!agent.pane_id) return <View key={agent.id} testID={`agent-card-${agent.id}`}>{card}</View>;
+    return <TouchableOpacity
       key={agent.id}
       testID={`agent-card-${agent.id}`}
       accessibilityRole="button"
-      accessibilityLabel={`Open chat with ${agentDisplayName(agent)}`}
+      accessibilityLabel={`Open legacy chat with ${agentDisplayName(agent)}`}
       onPress={() => router.push({ pathname: '/chat', params: { agentId: agent.id } } as any)}
       activeOpacity={0.85}
-    >
-      <GlassSurface variant="card" style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Text testID={`agent-name-${agent.id}`} style={styles.agentName}>{agentDisplayName(agent)}</Text>
-          <View style={styles.statusBadge}>
-          <Text style={styles.statusBadgeText}>{displayAgentStatus(displayStatus)}</Text>
-          </View>
-        </View>
-        <Text testID={`agent-runtime-${agent.id}`} style={styles.harnessText}>Harness: {agent.harness || 'unknown'} · Model: {agent.model || 'unknown'}</Text>
-        {agent.pane_id ? <Text selectable style={styles.harnessText}>Pane ID: {agent.pane_id}</Text> : null}
-        {agent.tab_id ? <Text selectable style={styles.harnessText}>Tab ID: {agent.tab_id}</Text> : null}
-        <Text style={styles.agentLinkText}>OPEN AGENT CHAT →</Text>
-      </GlassSurface>
-    </TouchableOpacity>
-  );
+    >{card}</TouchableOpacity>;
+  };
 
   const renderAgentGroup = (items: ReturnType<typeof summarizeAgents>['ordered'], emptyMessage: string) => {
-    if (loading) return <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>Loading live agent data…</Text></GlassSurface>;
+    if (loading) return <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>Loading structured worker data…</Text></GlassSurface>;
     if (items.length === 0) return <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>{emptyMessage}</Text></GlassSurface>;
     return items.map(renderAgentCard);
   };
@@ -134,9 +134,10 @@ export default function HomeScreen() {
           </TouchableOpacity>
           <Text style={styles.sphereHint}>TAP SPHERE FOR SYSTEM TELEMETRY ↗</Text>
           {healthError ? <Text testID="diagnostics-health-error" accessibilityRole="alert" style={styles.errorText}>{healthError}</Text> : null}
-          {/* A version we did not observe is never substituted, and any source
-              the gateway reports as degraded is named rather than hidden. */}
-          {health ? <Text testID="diagnostics-herdr-version" style={styles.sphereHint}>HERDR VERSION: {health.herdr_version || 'NOT REPORTED'}</Text> : null}
+          {/* Normal health is process-free: Herdr is explicitly unprobed, not
+              presented as stopped or connected from invented telemetry. */}
+          {health ? <Text testID="diagnostics-herdr-version" style={styles.sphereHint}>HERDR OBSERVATION: {(health.herdr_observation || 'NOT PROBED').replace(/-/g, ' ').toUpperCase()}</Text> : null}
+          {health ? <Text testID="diagnostics-runtime-source" style={styles.sphereHint}>RUNTIME SOURCE: PERSISTED STRUCTURED EVENTS · {runtimeStatus.toUpperCase()}</Text> : null}
           {health?.degraded_sources?.length ? <Text testID="diagnostics-degraded-sources" style={styles.sphereHint}>UNAVAILABLE SOURCES: {health.degraded_sources.join(', ').toUpperCase()}</Text> : null}
         </View>
 
@@ -147,7 +148,7 @@ export default function HomeScreen() {
           </Text>
         </View>
         {agentError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{agents.length ? `Showing last known agents. ${agentError}` : agentError}</Text></GlassSurface>}
-        {renderAgentGroup(fleet.ordered, 'No live agent sessions reported by Herdr.')}
+        {renderAgentGroup(fleet.ordered, 'No active structured worker runs.')}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>PULL REQUESTS ({prs.length})</Text>

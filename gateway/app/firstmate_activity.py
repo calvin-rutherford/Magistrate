@@ -1,9 +1,9 @@
-"""Read-only Firstmate structured source adapter.
+"""Retained legacy Firstmate structured-source migration adapter.
 
-The adapter consumes only ``fm-fleet-snapshot.sh --json`` and Firstmate's
-append-only ``branch-outcomes.jsonl`` / ``fm-captain-event.v1`` contracts. It
-never calls Herdr, reads a pane, parses ANSI, or turns terminal prose into a
-semantic event.
+The normal Gateway uses authenticated pushed execution/decision events. This
+adapter is disabled outside explicit legacy rollback; it consumes the old fleet
+snapshot and append-only branch/captain contracts without parsing terminal
+prose. No startup task or HTTP read route calls it.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import stat as stat_module
 import time
 import unicodedata
@@ -21,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote
 
+from app.chat_features import legacy_chat_enabled
 from app.activity_store import (
     MAX_ACTIVITY_FOCUS_RECORDS,
     MAX_ACTIVITY_SUMMARY_CHARS,
@@ -491,7 +491,6 @@ class FirstmateActivityAdapter:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.fm_root,
                 env=environment,
-                start_new_session=True,
             )
             async def collect() -> Tuple[bytes, bytes, int]:
                 stdout, stderr, returncode = await asyncio.gather(
@@ -506,17 +505,19 @@ class FirstmateActivityAdapter:
                     collect(), timeout=MAX_CAPTAIN_COMMAND_SECONDS,
                 )
             except asyncio.CancelledError:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                 await process.wait()
                 raise
             except (asyncio.TimeoutError, _CaptainCommandOutputTooLarge) as exc:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                 await process.wait()
                 raise SourceUnavailable('The Firstmate captain-event reader exceeded a runtime bound.') from exc
             return returncode, stdout, stderr
@@ -1274,7 +1275,7 @@ class FirstmateActivityAdapter:
         return changed, titles
 
     async def reconcile(self, user_id: str) -> Dict[str, Any]:
-        """Reconcile both source contracts while preserving partial success."""
+        """Run the retired pull adapter only during explicit legacy rollback."""
         if (
             not isinstance(user_id, str) or not user_id or len(user_id) > 128
             or any(
@@ -1284,6 +1285,11 @@ class FirstmateActivityAdapter:
             )
         ):
             raise ValueError('A bounded authenticated principal is required.')
+        if not legacy_chat_enabled():
+            return {
+                'status': 'disabled', 'changed': [], 'errors': [],
+                'sources': source_diagnostics(user_id),
+            }
         async with self._lock(user_id):
             changed: List[Dict[str, Any]] = []
             errors: List[Dict[str, str]] = []

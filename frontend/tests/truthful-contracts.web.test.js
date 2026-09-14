@@ -229,28 +229,28 @@ test('a configured provider with a live credential is the only connected render'
 
 // --- Health / telemetry honesty -------------------------------------------
 
-test('a degraded gateway never shows an invented Herdr version or a healthy state', async () => {
+test('a degraded gateway reports process-free runtime state without invented Herdr telemetry', async () => {
   const page = await openPage('/diagnostics', {
-    healthPayload: { status: 'degraded', service: 'magistrate-gateway', herdr_socket_connected: false, herdr_version: null, degraded_sources: ['herdr'] },
+    healthPayload: { status: 'degraded', service: 'magistrate-gateway', gateway_ready: true, herdr_socket_connected: false, herdr_observation: 'not-probed', herdr_version: null, degraded_sources: ['magi-provider'], persisted_runtime: { status: 'unobserved' } },
   });
-  await page.waitForFunction(() => document.body.innerText.includes('HERDR VERSION'));
+  await page.waitForFunction(() => document.body.innerText.includes('HERDR OBSERVATION'));
   const body = await page.evaluate(() => document.body.innerText);
   assert.match(body, /DEGRADED/);
   assert.doesNotMatch(body, /OPERATIONAL/);
   // 0.8.2 was the placeholder the snapshot fallback substituted for a version
   // nobody observed, which also made the socket read as connected.
   assert.doesNotMatch(body, /0\.8\.2/);
-  assert.equal(await page.$eval('[data-testid="diagnostics-herdr-version"]', node => node.innerText), 'HERDR VERSION: NOT REPORTED');
-  assert.equal(await page.$eval('[data-testid="diagnostics-degraded-sources"]', node => node.innerText), 'UNAVAILABLE SOURCES: HERDR');
+  assert.equal(await page.$eval('[data-testid="diagnostics-herdr-version"]', node => node.innerText), 'HERDR OBSERVATION: NOT PROBED');
+  assert.equal(await page.$eval('[data-testid="diagnostics-degraded-sources"]', node => node.innerText), 'UNAVAILABLE SOURCES: MAGI-PROVIDER');
   await page.close();
 });
 
-test('a healthy gateway with a real Herdr snapshot reports the observed version', async () => {
+test('a healthy gateway stays operational while Herdr remains deliberately unprobed', async () => {
   const page = await openPage('/diagnostics', {
-    healthPayload: { status: 'healthy', service: 'magistrate-gateway', herdr_socket_connected: true, herdr_version: '0.9.1', degraded_sources: [] },
+    healthPayload: { status: 'healthy', service: 'magistrate-gateway', gateway_ready: true, herdr_socket_connected: false, herdr_observation: 'not-probed', herdr_version: null, degraded_sources: [], persisted_runtime: { status: 'idle' } },
   });
-  await page.waitForFunction(() => document.body.innerText.includes('HERDR VERSION'));
-  assert.equal(await page.$eval('[data-testid="diagnostics-herdr-version"]', node => node.innerText), 'HERDR VERSION: 0.9.1');
+  await page.waitForFunction(() => document.body.innerText.includes('HERDR OBSERVATION'));
+  assert.equal(await page.$eval('[data-testid="diagnostics-herdr-version"]', node => node.innerText), 'HERDR OBSERVATION: NOT PROBED');
   assert.equal(await page.$('[data-testid="diagnostics-degraded-sources"]'), null);
   assert.match(await page.evaluate(() => document.body.innerText), /OPERATIONAL/);
   await page.close();

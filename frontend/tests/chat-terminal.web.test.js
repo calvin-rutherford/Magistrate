@@ -277,8 +277,8 @@ async function openChat(viewport, emptyInventory = false, promptResponseText = '
         return Promise.resolve(new Response(JSON.stringify({ target: 'w1:p7', messages }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (url.includes('/api/v1/agents')) return Promise.resolve(new Response(JSON.stringify([
-        { id: 'w4:p1', name: 'Primary conversation', status: 'idle', harness: 'pi', workspace_id: 'w4', workspace_role: 'primary' },
-        { id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex', workspace_id: 'w1', workspace_role: 'worker' },
+        { id: 'w4:p1', pane_id: 'w4:p1', name: 'Primary conversation', status: 'idle', harness: 'pi', workspace_id: 'w4', workspace_role: 'primary' },
+        { id: 'w1:p7', pane_id: 'w1:p7', name: 'Deploy agent', status: 'working', harness: 'codex', workspace_id: 'w1', workspace_role: 'worker' },
       ]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (url.includes('/api/v1/activity/snapshot')) {
         window.__activityRequests.push(url);

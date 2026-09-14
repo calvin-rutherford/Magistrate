@@ -1,18 +1,25 @@
 import asyncio
 from typing import Any, Dict, List
 
-from app.firstmate_client import FirstmateClient
 from app.github_service import GitHubService
+from app.structured_runtime import StructuredRuntimeProjection
 
 
 class RecentActivityService:
-    def __init__(self, firstmate: FirstmateClient, github: GitHubService):
-        self.firstmate = firstmate
+    """Merge persisted structured execution facts with forge merge events."""
+
+    def __init__(self, runtime: StructuredRuntimeProjection, github: GitHubService):
+        self.runtime = runtime
         self.github = github
 
-    async def get_recent_activity(self, limit: int = 20, refresh: bool = False) -> Dict[str, Any]:
+    async def get_recent_activity(
+        self,
+        owner_user_id: str,
+        limit: int = 20,
+        refresh: bool = False,
+    ) -> Dict[str, Any]:
         fleet_result, github_result = await asyncio.gather(
-            self.firstmate.get_recent_activity(),
+            asyncio.to_thread(self.runtime.recent_activity, owner_user_id, limit=limit),
             self.github.get_merged_pull_requests(limit=limit, refresh=refresh),
             return_exceptions=True,
         )
@@ -38,8 +45,16 @@ class RecentActivityService:
                     'pull_request_number': pull['number'],
                 })
 
-        # Prefer GitHub's precise merge event over the snapshot's date-only copy.
+        # Prefer GitHub's precise merge event if a future structured completion
+        # carries the same public URL.
         github_urls = {item['url'] for item in items if item['source'] == 'github' and item.get('url')}
-        items = [item for item in items if item['source'] == 'github' or not item.get('url') or item['url'] not in github_urls]
+        items = [
+            item for item in items
+            if item['source'] == 'github' or not item.get('url') or item['url'] not in github_urls
+        ]
         items.sort(key=lambda item: item['occurred_at'], reverse=True)
-        return {'items': items[:limit], 'sources': source_status}
+        return {
+            'items': items[:limit],
+            'sources': source_status,
+            'firstmate_source': 'persisted-structured-state',
+        }

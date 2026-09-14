@@ -15,8 +15,13 @@ export default function StatusScreen() {
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Gateway status could not be loaded.'); }
   }, []);
   useEffect(() => { load(); }, [load]);
-  const gatewayStatus = error ? 'UNAVAILABLE' : health?.status === 'healthy' ? 'HEALTHY' : health?.status?.toUpperCase() || 'CONNECTING';
-  const herdrStatus = health?.herdr_socket_connected ? 'CONNECTED' : health ? 'UNAVAILABLE' : 'UNKNOWN';
+  const gatewayStatus = error ? 'UNAVAILABLE' : health?.gateway_ready === false ? 'DEGRADED' : health ? 'READY' : 'CONNECTING';
+  const overallStatus = health?.status?.toUpperCase() || 'UNKNOWN';
+  const herdrObservation = health ? (health.herdr_observation || 'not-probed').replace(/-/g, ' ').toUpperCase() : 'UNKNOWN';
+  const lastEventDate = health?.last_execution_event_at != null
+    ? new Date(health.last_execution_event_at) : null;
+  const lastEvent = lastEventDate && !Number.isNaN(lastEventDate.getTime())
+    ? lastEventDate.toISOString() : 'No event observed';
 
   return (
     <EnvironmentBackground>
@@ -45,18 +50,36 @@ export default function StatusScreen() {
             <Text style={styles.metricValue}>{gatewayStatus}</Text>
           </View>
           <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>HERDR SOCKET</Text>
-            <Text style={styles.metricValue}>{herdrStatus}</Text>
+            <Text style={styles.metricLabel}>OVERALL READINESS</Text>
+            <Text style={styles.metricValue}>{overallStatus}</Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>MODEL PROVIDER</Text>
+            <Text style={styles.metricValue}>{health?.magi_provider?.status?.toUpperCase() || 'NOT REPORTED'}</Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>EVENT INGRESS</Text>
+            <Text style={styles.metricValue}>{health?.event_ingress?.status?.toUpperCase() || 'NOT REPORTED'}</Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>EXECUTION INTERFACE</Text>
+            <Text style={styles.metricValue}>{health?.execution_interface?.status?.toUpperCase() || 'NOT REPORTED'}</Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>PERSISTED RUNTIME</Text>
+            <Text style={styles.metricValue}>{health?.persisted_runtime?.status?.toUpperCase() || 'UNOBSERVED'}</Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>LAST EXECUTION EVENT</Text>
+            <Text style={styles.metricValue}>{lastEvent}</Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>HERDR OBSERVATION</Text>
+            <Text testID="status-herdr-version" style={styles.metricValue}>{herdrObservation}</Text>
           </View>
           <View style={styles.metricRow}>
             <Text style={styles.metricLabel}>SERVICE</Text>
             <Text style={styles.metricValue}>{health?.service || 'Unavailable'}</Text>
-          </View>
-          <View style={styles.metricRow}>
-            <Text style={styles.metricLabel}>HERDR VERSION</Text>
-            {/* Null whenever the gateway did not observe a live snapshot; a
-                placeholder build number here would be an invented metric. */}
-            <Text testID="status-herdr-version" style={styles.metricValue}>{health?.herdr_version || 'Not reported'}</Text>
           </View>
           {health?.degraded_sources?.length ? <View style={styles.metricRow}>
             <Text style={styles.metricLabel}>UNAVAILABLE SOURCES</Text>
@@ -64,7 +87,7 @@ export default function StatusScreen() {
           </View> : null}
         </GlassSurface>
 
-        <TouchableOpacity onPress={load} accessibilityRole="button" accessibilityLabel="Refresh system status"><Text style={styles.refreshText}>REFRESH LIVE STATUS</Text></TouchableOpacity>
+        <TouchableOpacity onPress={load} accessibilityRole="button" accessibilityLabel="Refresh system status"><Text style={styles.refreshText}>REFRESH PERSISTED STATUS</Text></TouchableOpacity>
       </ScrollView>
     </EnvironmentBackground>
   );

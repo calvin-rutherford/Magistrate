@@ -47,6 +47,27 @@ def validate_magi_chat_configuration() -> None:
         raise RuntimeError("Enabled native Magi chat requires server-side provider credentials.")
 
 
+def magi_chat_readiness() -> dict[str, object]:
+    """Report static provider configuration without issuing a model request."""
+    try:
+        enabled, _ = validate_chat_feature_configuration()
+        model = _configured_model() if enabled else None
+    except RuntimeError:
+        return {
+            "status": "invalid", "enabled": True,
+            "provider": None, "live_probe_performed": False,
+        }
+    return {
+        "status": (
+            "configured" if model is not None and model.configured
+            else "unconfigured" if enabled else "disabled"
+        ),
+        "enabled": enabled,
+        "provider": "openai" if enabled else None,
+        "live_probe_performed": False,
+    }
+
+
 class _ConfiguredProvider:
     """Resolve secrets lazily so legacy rollback can boot without native config."""
 

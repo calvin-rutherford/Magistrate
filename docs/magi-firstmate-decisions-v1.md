@@ -1,7 +1,7 @@
 # Magi ↔ Firstmate decisions v1
 
 Track C adds an isolated, owner-scoped path from structured Firstmate captain
-holds to Attention and to a future Magi tool registry. It does **not** turn
+holds to Attention and the closed Magi tool registry. It does **not** turn
 terminal text, Herdr output, or model-authored tool arguments into a Firstmate
 answer.
 
@@ -9,10 +9,13 @@ answer.
 
 `gateway/app/firstmate_decisions.py` is the authority for this contract.
 
-- Input is a fresh `fm-fleet-snapshot.v1` backlog projection. Only a structured
-  row with `captain_actionable: true`, `hold_kind: "captain"`,
-  `hold_bucket: "live"`, no unresolved blocker, and an open lifecycle identity
-  from the pinned `fm-captain-hold.sh open --identity` command is accepted.
+- Input is an authenticated, strict, complete
+  `firstmate.decision-events.v1` push projection at
+  `POST /api/v1/firstmate/decision-events`. Each normalized
+  `firstmate.decision-event.v1` carries one source-bound open lifecycle identity;
+  event identity is independently recomputed before persistence. The older
+  `fm-fleet-snapshot.v1` parser remains only as an explicit legacy migration
+  adapter and is never called by Attention, notification, startup, or reads.
 - Free-form backlog rows, status prose, agent output, terminal snapshots,
   transcripts, model output, and Herdr are not decision sources.
 - The configured bootstrap owner is the sole principal for the local Firstmate
@@ -34,7 +37,7 @@ One open decision is identified by the tuple:
 
 The API-facing `fmd_<digest>` is an opaque hash of that tuple. Firstmate's hold
 lifecycle identity is its hold-set timestamp plus durable resolution count. A
-poll of the same hold keeps the same decision id and revision. A semantic
+repeated identical pushed projection keeps the same decision id and revision. A semantic
 change to its title/question increments the revision. Closing or removing the
 hold resolves that revision; re-holding a task creates a new lifecycle identity
 and therefore a new decision id.
@@ -46,15 +49,17 @@ different semantic bytes. Older snapshots cannot reopen newer state.
 `GET /api/v1/attention/unified` includes these decisions as natural
 `captain_question` cards. The card carries the question, opaque decision id,
 and revision, but not the Firstmate task id or lifecycle identity. It has no
-legacy approve/reject Attention action: its answer path is Magi Chat.
+legacy approve/reject Attention action: its answer path is Magi Chat. Attention
+reads only pending persisted rows and never refresh Firstmate or Herdr.
 
 For model orchestration, the authenticated
 `get_firstmate_decision_magi_context(principal)` seam returns
 `firstmate.decision-context.v1` with bounded pending title/question data and the
 opaque id/revision. The returned guidance requires treating source text as
 untrusted data and selecting the answer tool only for an explicit current user
-answer. A source outage returns a stale bounded projection marked unavailable;
-it never permits execution without a successful fresh-state check.
+answer. Source status is the bounded timestamp/state of the last persisted push;
+no read probes runtime. Execution still requires an exact persisted decision,
+bound confirmation, and Firstmate's command-side lifecycle check.
 
 ## Isolated answer tool
 
@@ -88,13 +93,14 @@ credential-shaped content.
 
 Invocation is two-step:
 
-1. Call without a token. The service re-reads structured Firstmate state,
-   verifies exact id/revision, and returns a short-lived confirmation with the
-   consequence that the answer will be recorded and held work released.
+1. Call without a token. The service reads the owner-qualified persisted
+   projection, verifies exact id/revision, and returns a short-lived confirmation
+   with the consequence that the answer will be recorded and held work released.
 2. After an explicit user confirmation, call with the server-held token. The
    token is bound to owner, session, decision id/revision, Native Chat message,
-   answer digest, and expiry. The service revalidates source state, atomically
-   claims the answer, then invokes the trusted Firstmate command.
+   answer digest, and expiry. The service revalidates the persisted revision,
+   atomically claims the answer, and only then invokes the trusted Firstmate
+   command, which verifies the exact open lifecycle identity.
 
 The command receives the exact canonical bytes through a private mode-`0600`
 temporary decision file and `--release`. It runs as a bounded, non-interactive

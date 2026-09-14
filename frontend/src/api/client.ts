@@ -545,11 +545,16 @@ export interface AgentInfo {
   harness?: string | null;
   model?: string | null;
   runtime_sources?: { harness?: 'firstmate' | 'herdr' | null; model?: 'firstmate' | 'herdr' | null };
-  status?: 'idle' | 'working' | 'blocked' | 'done' | 'unknown' | string | null;
-  pane_id?: string;
-  tab_id?: string;
-  workspace_id?: string;
+  status?: 'idle' | 'queued' | 'working' | 'blocked' | 'done' | 'unknown' | string | null;
+  pane_id?: string | null;
+  tab_id?: string | null;
+  workspace_id?: string | null;
   workspace_role?: 'primary' | 'worker';
+  objective_id?: string;
+  task_id?: string;
+  run_id?: string | null;
+  last_event_at?: number | null;
+  display_name_source?: 'magistrate-structured' | 'firstmate' | 'herdr' | string;
 }
 
 export interface AgentControlResult {
@@ -685,10 +690,41 @@ export interface UsageSummary {
 export interface HealthInfo {
   status: 'healthy' | 'degraded' | string;
   service: string;
+  gateway_ready?: boolean;
   herdr_socket_connected: boolean;
-  /** Null whenever the gateway did not observe a live Herdr snapshot. */
+  /** Compatibility telemetry is deliberately unprobed during normal reads. */
+  herdr_observation?: 'not-probed' | string;
   herdr_version?: string | null;
   degraded_sources?: string[];
+  magi_provider?: {
+    status: 'configured' | 'unconfigured' | 'disabled' | 'invalid' | string;
+    enabled: boolean;
+    provider: string | null;
+    live_probe_performed: boolean;
+  };
+  execution_interface?: {
+    status: 'configured' | 'unavailable' | string;
+    delegation: string;
+    event_ingress: string;
+    live_probe_performed: boolean;
+  };
+  event_ingress?: {
+    status: 'ready' | string;
+    schemas: string[];
+    live_probe_performed: boolean;
+  };
+  persisted_runtime?: {
+    status: 'active' | 'queued' | 'idle' | 'unobserved' | string;
+    observation_mode: string;
+    live_process_probe: boolean;
+    gateway_is_runtime_parent: boolean;
+    active_objectives: number;
+    active_workers: number;
+    known_objectives: number;
+    last_event_at: number | null;
+    last_state_update_at: number | null;
+  };
+  last_execution_event_at?: number | null;
   firstmate_available?: boolean;
   firstmate_tasks_count?: number;
 }

@@ -240,25 +240,25 @@ def test_provider_error_during_callback_never_stores_a_connection(monkeypatch):
 
 # --- Health / runtime honesty ---------------------------------------------
 
-def test_health_never_reports_an_unobserved_herdr_version(monkeypatch):
-    async def empty_snapshot():
-        return {}
+def test_health_never_probes_or_reports_an_unobserved_herdr_version(monkeypatch):
+    async def forbidden_snapshot():
+        raise AssertionError('health must not open the Herdr observation path')
 
-    monkeypatch.setattr(gateway.herdr_client, 'get_snapshot', empty_snapshot)
+    monkeypatch.setattr(gateway.herdr_client, 'get_snapshot', forbidden_snapshot)
     payload = client.get('/api/v1/health', headers=TEST_HEADERS).json()
-    assert payload['status'] == 'degraded'
-    assert 'herdr' in payload['degraded_sources']
+    assert payload['herdr_observation'] == 'not-probed'
     assert payload['herdr_version'] is None
     assert payload['herdr_socket_connected'] is False
 
 
-def test_runtime_never_reports_an_unobserved_version_or_protocol(monkeypatch):
-    async def empty_snapshot():
-        return {}
+def test_runtime_never_probes_or_reports_an_unobserved_protocol(monkeypatch):
+    async def forbidden_snapshot():
+        raise AssertionError('runtime must not open the Herdr observation path')
 
-    monkeypatch.setattr(gateway.herdr_client, 'get_snapshot', empty_snapshot)
+    monkeypatch.setattr(gateway.herdr_client, 'get_snapshot', forbidden_snapshot)
     payload = client.get('/api/v1/runtime', headers=TEST_HEADERS).json()
-    assert payload['herdr']['status'] == 'disconnected'
+    assert payload['herdr']['status'] == 'not-observed'
+    assert payload['herdr']['live_probe_performed'] is False
     assert payload['herdr']['version'] is None
     assert payload['herdr']['protocol'] is None
 
