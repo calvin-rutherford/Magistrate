@@ -7,7 +7,6 @@ import stat as stat_module
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-from app.chat_features import legacy_chat_enabled
 from app.firstmate_producer import (
     ProducerContractError,
     producer_readiness,
@@ -265,19 +264,7 @@ class FirstmateClient:
         }
 
     async def get_snapshot(self) -> Dict[str, Any]:
-        """Run the retired fleet scraper only in explicit legacy chat mode.
-
-        Modern Gateway startup and read routes use ``StructuredRuntimeProjection``.
-        This compatibility seam remains solely for an operator-selected rollback
-        and fails before filesystem or process access in native mode.
-        """
-        if not legacy_chat_enabled():
-            return {
-                'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
-                'tasks': [], 'scout_reports': [], 'available': False,
-                'secondmate_current': {'records': []},
-                'error': 'Legacy fleet snapshot compatibility is disabled',
-            }
+        """Run the Firstmate Fleet snapshot command for explicit execution flows."""
         if self.fm_root_is_explicit:
             try:
                 self.validate_producer_contract()

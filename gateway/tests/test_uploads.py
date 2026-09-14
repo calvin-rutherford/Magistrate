@@ -1,7 +1,6 @@
-from unittest.mock import AsyncMock
-
 from fastapi.testclient import TestClient
 
+from app.magi_model import MagiModelResult
 from app.main import app
 from conftest import TEST_HEADERS
 
@@ -39,38 +38,50 @@ def test_upload_rejects_content_type_mismatch_and_unsafe_name(monkeypatch, tmp_p
     assert response.json()['uploads'][0]['filename'] == 'secret_name.txt'
 
 
-def test_prompt_associates_owned_upload_and_forwards_only_safe_summary(monkeypatch, tmp_path):
+def test_native_message_associates_owned_upload_and_forwards_only_safe_summary(monkeypatch, tmp_path):
+    import app.magi_chat_api as native_api
+
     monkeypatch.setenv('MAGISTRATE_CHAT_UPLOAD_DIR', str(tmp_path / 'files'))
     upload = client.post('/api/v1/uploads', headers=TEST_HEADERS, files={'files': ('notes.txt', b'hello', 'text/plain')}).json()['uploads'][0]
-    prompt = AsyncMock(return_value={'status': 'submitted', 'response': None})
-    monkeypatch.setattr('app.main.herdr_client.prompt_agent', prompt)
-    response = client.post('/api/v1/captain/prompt', headers=TEST_HEADERS, json={
-        'text': 'Review this', 'message_id': 'message-123', 'attachments': [upload],
+    observed = []
+
+    class CapturingModel:
+        async def complete(self, messages, **_kwargs):
+            observed.append(messages[-1].content)
+            return MagiModelResult('Received attachment.')
+
+    monkeypatch.setattr(native_api.magi_chat_service, 'model', CapturingModel())
+    response = client.post('/api/v1/magi/messages', headers=TEST_HEADERS, json={
+        'client_message_id': 'attachment-message-0001', 'content': 'Review this',
+        'attachments': [{
+            'upload_id': upload['upload_id'], 'filename': upload['filename'],
+            'media_type': upload['media_type'], 'size': upload['size'],
+        }],
     })
     assert response.status_code == 200
-    forwarded = prompt.await_args.args[1]
-    assert forwarded == 'Review this\n\nAttached files: notes.txt (text/plain, 5 bytes)'
-    assert 'upload_id' not in forwarded
-    assert 'message-123' not in forwarded
-    [attachment] = response.json()['conversation']['messages'][0]['attachments']
-    assert attachment == {
-        'id': upload['upload_id'],
-        'upload_id': upload['upload_id'],
-        'name': 'notes.txt',
-        'media_type': 'text/plain',
-        'size': 5,
-        'url': f"/api/v1/uploads/{upload['upload_id']}",
-    }
-    persisted = client.get('/api/v1/conversations/captain/messages', headers=TEST_HEADERS).json()
-    canonical_prompt = next(item for item in persisted['messages'] if item.get('client_message_id') == 'message-123')
+    assert observed == [
+        'Review this\n\nAuthenticated attachment metadata (file bytes are not included):\n'
+        '- notes.txt (text/plain, 5 bytes)'
+    ]
+    assert upload['upload_id'] not in observed[0]
+    [attachment] = response.json()['user_message']['attachments']
+    assert attachment['upload_id'] == upload['upload_id']
+    persisted = client.get('/api/v1/magi/conversations/current', headers=TEST_HEADERS).json()
+    canonical_prompt = next(item for item in persisted['messages'] if item.get('client_message_id') == 'attachment-message-0001')
     assert canonical_prompt['attachments'] == [attachment]
 
 
-def test_prompt_rejects_client_attachment_metadata_tampering(monkeypatch, tmp_path):
+def test_native_message_rejects_client_attachment_metadata_tampering(monkeypatch, tmp_path):
     monkeypatch.setenv('MAGISTRATE_CHAT_UPLOAD_DIR', str(tmp_path / 'files'))
     upload = client.post('/api/v1/uploads', headers=TEST_HEADERS, files={'files': ('notes.txt', b'hello', 'text/plain')}).json()['uploads'][0]
     upload['size'] = 999
-    response = client.post('/api/v1/captain/prompt', headers=TEST_HEADERS, json={'text': 'Review', 'attachments': [upload]})
+    response = client.post('/api/v1/magi/messages', headers=TEST_HEADERS, json={
+        'client_message_id': 'attachment-tamper-0001', 'content': 'Review',
+        'attachments': [{
+            'upload_id': upload['upload_id'], 'filename': upload['filename'],
+            'media_type': upload['media_type'], 'size': upload['size'],
+        }],
+    })
     assert response.status_code == 422
 
 

@@ -164,18 +164,9 @@ export default function AgentsScreen() {
               </View>
               <Text testID={`agent-${agent.id}-runtime`} style={styles.detailText}>Task: {agent.task_id || agent.id} · Run: {agent.run_id || 'not reported'} · Harness/model: {agent.harness || 'unknown'}/{agent.model || 'unknown'}</Text>
               {agent.pane_id ? <>
-                <TouchableOpacity
-                  testID={`agent-${agent.id}-chat-link`}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Open legacy chat with ${agentDisplayName(agent)}`}
-                  onPress={() => router.push({ pathname: '/chat', params: { agentId: agent.id } } as any)}
-                  style={styles.chatLink}
-                >
-                  <Text style={styles.chatLinkText}>OPEN LEGACY CHAT TARGET →</Text>
-                </TouchableOpacity>
                 <View style={styles.controlsHeader}>
-                  <Text style={styles.controlsLabel}>LEGACY PANE CONTROLS</Text>
-                  <Text style={styles.controlsHint}>Available only for an explicitly observed rollback pane.</Text>
+                  <Text style={styles.controlsLabel}>AGENT CONTROLS</Text>
+                  <Text style={styles.controlsHint}>Explicit command-authorized controls for the observed agent pane.</Text>
                 </View>
                 <View style={styles.controlsRow}>
                   {(['interrupt', 'Enter', 'Escape'] as AgentAction[]).map(action => {
@@ -284,8 +275,6 @@ const styles = StyleSheet.create({
   detailText: { color: 'rgba(255, 255, 255, 0.65)', fontFamily: 'monospace', fontSize: 11, marginTop: 4 },
   mutedText: { color: 'rgba(255, 255, 255, 0.55)', fontSize: 12 },
   errorText: { color: '#FCA5A5', fontSize: 12 },
-  chatLink: { alignSelf: 'flex-start', marginTop: 12, paddingVertical: 6 },
-  chatLinkText: { color: '#72F5B1', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold' },
   controlsHeader: { marginTop: 16, marginBottom: 8 },
   controlsLabel: { color: '#FFFFFF', fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', letterSpacing: 1 },
   controlsHint: { color: 'rgba(255, 255, 255, 0.45)', fontSize: 10, marginTop: 3 },

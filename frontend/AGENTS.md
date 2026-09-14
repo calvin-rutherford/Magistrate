@@ -8,33 +8,28 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before 
 `tests/helpers/web-server.js` owns the shared lifecycle: each suite gets an OS-assigned free port, a readiness probe that fails
 loudly (with the server's own output) instead of silently binding to another checkout's dev server, and a teardown that waits for
 the server to exit. Set `MAGISTRATE_WEB_TEST_PORT` only to pin one suite to a known port for debugging.
-The drawer/fleet cases in `chat-terminal.web.test.js` used to be written off as flaky; they were fixed-port cross-talk with a concurrent
-worktree running the same suite, and they pass reliably now. Treat a new intermittent failure as a real signal, not as known noise.
+The Native Magi browser suite lives in `native-chat.web.test.js`; treat intermittent failures as real signal, not known noise.
 
 Sharp edges when driving the web build in headless Chrome:
-- `chrome-devtools-axi` reports screenshots saved but writes no file and its eval bridge omits `pageId`; drive headless Chrome with `puppeteer-core` (launch config in `tests/chat-terminal.web.test.js`) for visual verification instead.
+- Drive headless Chrome with `puppeteer-core` using the shared browser helper in `tests/helpers/web-server.js`.
 - The Metro dev server can serve a stale bundle after edits; if changes don't appear on reload, restart `expo start --web` with `--clear`.
 - `Appearance.setColorScheme` is not implemented by react-native-web; theme-mode overrides must go through the subscribable store in `src/services/ChatPreferences.ts` (`useChatColorScheme`).
-- Expo's development-only `#error-toast` has a zero-sized box but can win hit-testing near the viewport bottom, silently swallowing clicks on the composer or drawer footer. Disable its pointer events first (see `tests/chat-terminal.web.test.js`).
+- Expo's development-only `#error-toast` has a zero-sized box but can win hit-testing near the viewport bottom, silently swallowing clicks on the composer or drawer footer. Disable its pointer events before browser interactions.
 - React Native `PanResponder` gestures do not fire from synthetic mouse drags; dispatch real touch events via the CDP `Input.dispatchTouchEvent` command instead.
 - Never attach a `PanResponder` to the whole chat page or transcript: even a nominally horizontal responder can steal native wheel/touch scrolling. The drawer's optional close swipe is scoped to the drawer itself; open it with the floating menu control. Test touch paths with CDP `Input.dispatchTouchEvent`, and retain `overscroll-behavior-x: none` in `app/_layout.tsx` plus `touchAction: 'pan-y'` on bounded scrollers.
 - Cross-origin gateway mocks need in-page `fetch` patching (`page.evaluateOnNewDocument`); network-level request interception fails CORS preflights.
 - Expo Router keeps a collapsed (0x0) copy of a screen mounted next to the visible one, so `page.locator(sel).click()` can bind to the hidden copy and then time out after 30s waiting for a box that never appears. Click through `clickRendered` from `tests/helpers/web-server.js`, which filters by bounding box and still issues a real mouse click.
-- The deployed gateway may run behind `main`, so it can 404 newly added endpoints. To verify chat rendering against *real* herdr data, run this checkout's gateway locally against the real socket (`uvicorn app.main:app --port 8099` in `gateway/`) and set `EXPO_PUBLIC_GATEWAY_URL` in the test environment — gateway URLs are configuration, never embedded private runner addresses.
+- Gateway URLs are configuration; never embed private runner addresses in app or test code.
 
-## Chat history rendering
+## Provider-native Chat
 
-The captain thread renders the gateway's canonical conversation record: `fetchCanonicalConversation` plus `conversation_messages` events, merged by `src/services/CanonicalConversation.ts` (append by canonical id, update on revision/lifecycle revision, order by `sequence_index`). Startup may display the strictly validated, server-principal-qualified `ConversationSession` cache while the full list is in flight or transiently unavailable, but the next successful full list remains authoritative and prunes it; auth logout/expiry/401/principal change must clear memory and evict the old principal keys before protected remount. `src/services/CanonicalActivity.ts` is the reactive id/revision/change-cursor adapter behind the bounded native activity sheet. It may restore its strictly validated principal-qualified cache before snapshot-plus-replay recovery, but Gateway remains authority: delayed HTTP cannot regress newer realtime revisions, current focus can clear stale non-terminal cache facts, and auth changes clear memory before paint and evict old principal keys. Read `../CHAT_ARCHITECTURE_FIX.md` before changing these paths, and do not reintroduce text matching, optimistic counting, or prompt-boundary inference.
+`src/services/MagiConversation.ts` is the wire/revision adapter and `MagiConversationSession.ts` owns the one reactive human thread. Chat and Voice use only `/api/v1/magi/*` plus `magi_messages` socket events. Do not introduce target switching, worker/pane history, process-output parsing, transport flags, text matching, optimistic counting, or prompt-boundary inference.
 
-Worker-pane (`?agentId=`) history is terminal-derived only in explicit legacy rollback mode: `fetchAgentHistory` is bounded by `CHAT_HISTORY_LINES`, pages by cursor, and uses `ChatIdentity` revision matching. Those branches are marked `TRANSITIONAL` in `app/(tabs)/chat.tsx`; normal native Fleet rows are structured task/run projections and must not trigger that path. In rollback, working panes can expose transiently empty snapshots, so consumers must tolerate them. Captain time is gateway-authored epoch milliseconds: local `Date.now()` exists only on an optimistic row and canonical `created_at` replaces it on acknowledgement. A terminal-derived worker message leaves `sentAt` unset unless its source carries a real timestamp.
-
-## Backend model selection contract
-
-`POST /api/v1/captain/prompt` requires `harness` and `model` together or neither; omitting both keeps the backend's current session selection (see `gateway/app/main.py`). Offer variants from `GET /api/v1/execution/capabilities` only. It returns the canonical turn it recorded in `conversation.messages`, which is what the caller renders; the legacy `response` field is provider text the gateway has already recorded and the captain thread ignores it.
+Startup may render a validated principal-qualified cache while Gateway is unavailable. A successful list is authoritative and prunes/replaces it; canonical timestamps and monotonic revisions win. Logout, expiry, revocation, `401`, and principal change clear the conversation before protected remount. Read `../docs/native-chat-architecture.md` before changing this path.
 
 ## Voice input
 
-`src/input/VoiceInputAdapter.ts` (`useVoiceInputAdapter`) is the one seam for microphone capture: it wraps `expo-audio` recording, exposes live `amplitude` (0-1, ~100ms cadence) for waveform UI, and on web also drives the Web Speech API for interim transcript callbacks. Pair `capture.stop()` with `transcribeVoiceAudio()` from `src/api/client.ts` to get a final transcript from the gateway's `/voice/transcribe` endpoint. Test it in headless Chrome by launching Puppeteer with `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` so `getUserMedia` resolves without real hardware.
+`src/input/VoiceInputAdapter.ts` (`useVoiceInputAdapter`) is the one seam for microphone capture: it wraps `expo-audio` recording, exposes live `amplitude` (0-1, ~100ms cadence) for waveform UI, and on web also drives the Web Speech API for interim transcript callbacks. Pair `capture.stop()` with `transcribeVoiceAudio()` from `src/api/client.ts`, then submit the text through the same Native Magi API and conversation as typed input. Test it in headless Chrome with fake media-device/UI flags.
 
 Voice input mode selection is persisted as `magistrate.voice.input-mode` by `ChatPreferences.ts`; capability definitions and fallback resolution live in `src/services/VoiceInputModes.ts`. Keep speech mode selection separate from execution harness/model routing, and keep gateway STT credentials server-side.
 

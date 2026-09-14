@@ -74,7 +74,6 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
       if (requestUrl.includes('/api/v1/execution/capabilities')) return Promise.resolve(new Response(JSON.stringify({ harnesses: [], profiles: [], source: 'test', configured: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/execution/settings')) return Promise.resolve(new Response(JSON.stringify({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/voice/capabilities')) return Promise.resolve(new Response(JSON.stringify({ modes: [], configured: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-      if (requestUrl.includes('/api/v1/agents/captain/history')) return Promise.resolve(new Response(JSON.stringify({ target: 'captain', messages: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       return nativeFetch(resource, options);
     };
     if (mode === 'granted' || mode === 'denied') {
@@ -98,7 +97,7 @@ test('new attention transition uses one real browser notification, an unread dot
   await page.waitForSelector('[data-testid="unread-attention-dot"]');
   assert.equal(await page.$('[data-testid^="notification-"]'), null);
   await page.waitForSelector('[data-testid="brand-drawer-toggle"]');
-  assert.match(await page.$eval('[data-testid="brand-drawer-toggle"]', node => node.getAttribute('aria-label')), /1 unread captain attention item/);
+  assert.match(await page.$eval('[data-testid="brand-drawer-toggle"]', node => node.getAttribute('aria-label')), /1 unread attention item/);
   assert.ok(await page.evaluate(() => window.__notificationCalls.some(call => call.url.includes('/events/delivered'))));
   await page.close();
 });

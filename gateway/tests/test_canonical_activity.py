@@ -774,7 +774,6 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
         }],
         open_decision_keys=[],
     )
-    monkeypatch.setattr('app.main._ingest_target_snapshot', AsyncMock(return_value=None))
     client = TestClient(app)
 
     assert client.get('/api/v1/activity/replay').status_code == 401
@@ -801,7 +800,7 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
     diagnostics = client.get('/api/v1/diagnostics/soak', headers=TEST_HEADERS)
     assert diagnostics.status_code == 200
     assert diagnostics.json()['schema_version'] == 'soak-diagnostics.v1'
-    assert {'conversation_ingest', 'turn_lifecycle', 'activity_sources'} <= diagnostics.json().keys()
+    assert {'native_chat', 'activity_sources'} <= diagnostics.json().keys()
     assert client.post(
         '/api/v1/activity/catch-up', headers=TEST_HEADERS,
         json={'after': before, 'limit': 10, 'reconcile': False, 'user_id': 'another-owner'},
@@ -830,12 +829,11 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
 
     with client.websocket_connect('/api/v1/events') as socket:
         socket.send_json({
-            'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': 'captain',
-            'activity_after': before,
+            'type': 'auth', 'token': TEST_SESSION_TOKEN, 'activity_after': before,
         })
         assert socket.receive_json()['type'] == 'connected'
         activity = socket.receive_json()
-        if activity['type'] == 'conversation_messages':
+        if activity['type'] == 'magi_messages':
             activity = socket.receive_json()
         assert activity['type'] == 'activity_records'
         assert [row['summary'] for row in activity['records']] == ['Actual semantic progress.']
@@ -850,7 +848,7 @@ def test_activity_http_replay_and_opt_in_websocket_are_principal_scoped(monkeypa
 def test_websocket_control_targets_and_activity_cursors_fail_closed(control):
     client = TestClient(app)
     with client.websocket_connect('/api/v1/events') as socket:
-        socket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': 'captain'})
+        socket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'activity_after': 0})
         assert socket.receive_json()['type'] == 'connected'
         socket.send_json(control)
         with pytest.raises(WebSocketDisconnect) as closed:
@@ -862,7 +860,7 @@ def test_websocket_auth_and_control_frames_have_a_hard_utf8_byte_bound():
     client = TestClient(app)
     with client.websocket_connect('/api/v1/events') as socket:
         socket.send_text(json.dumps({
-            'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': 'captain',
+            'type': 'auth', 'token': TEST_SESSION_TOKEN, 'activity_after': 0,
             'padding': 'x' * 4096,
         }))
         with pytest.raises(WebSocketDisconnect) as closed:
@@ -870,9 +868,9 @@ def test_websocket_auth_and_control_frames_have_a_hard_utf8_byte_bound():
         assert closed.value.code == 1009
 
     with client.websocket_connect('/api/v1/events') as socket:
-        socket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': 'captain'})
+        socket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'activity_after': 0})
         assert socket.receive_json()['type'] == 'connected'
-        socket.send_text(json.dumps({'target': 'captain', 'padding': 'x' * 4096}))
+        socket.send_text(json.dumps({'activity_after': 0, 'padding': 'x' * 4096}))
         with pytest.raises(WebSocketDisconnect) as closed:
             socket.receive_json()
         assert closed.value.code == 1009

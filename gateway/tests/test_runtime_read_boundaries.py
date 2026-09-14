@@ -73,9 +73,6 @@ def objective_call(suffix: str) -> tuple[MagiModelToolCall, MagiToolContext]:
 def native_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "runtime-read-boundary.sqlite3"))
     db.init_db()
-    monkeypatch.setenv("MAGISTRATE_NATIVE_CHAT_ENABLED", "true")
-    monkeypatch.setenv("MAGISTRATE_LEGACY_CHAT_ENABLED", "false")
-    monkeypatch.setenv("MAGISTRATE_PI_OWNERSHIP_ENABLED", "false")
     monkeypatch.setenv("MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER", "true")
 
     forbidden = AsyncMock(side_effect=AssertionError("runtime observation boundary crossed"))
@@ -83,9 +80,6 @@ def native_runtime(monkeypatch, tmp_path):
         (gateway.herdr_client, "get_snapshot"),
         (gateway.herdr_client, "list_agents"),
         (gateway.herdr_client, "list_fleet_agents"),
-        (gateway.herdr_client, "read_agent_output"),
-        (gateway.herdr_client, "get_agent_history"),
-        (gateway.herdr_client, "prompt_agent"),
         (gateway.herdr_client, "interrupt_agent"),
         (gateway.fm_client, "get_snapshot"),
         (gateway.fm_client, "get_attention_items"),
@@ -232,12 +226,10 @@ async def test_startup_with_herdr_stopped_does_not_observe_or_schedule_runtime(n
         gateway.firstmate_execution_service, "recover_pending", AsyncMock(return_value={}),
     )
     gateway._notification_reconciler_task = None
-    gateway._pi_ownership_reconciler_task = None
 
     await gateway.start_notification_reconciler()
 
     assert gateway._notification_reconciler_task is None
-    assert gateway._pi_ownership_reconciler_task is None
     assert not hasattr(gateway, "_activity_reconciler_task")
     health = native_runtime.client.get(
         "/api/v1/health", headers=native_runtime.headers,
@@ -249,13 +241,10 @@ async def test_startup_with_herdr_stopped_does_not_observe_or_schedule_runtime(n
 
 def test_non_execution_routes_cannot_reach_firstmate_or_herdr_runtime(native_runtime):
     _read_routes(native_runtime)
-    # Every terminal/process compatibility route is disabled as one boundary,
-    # including worker targets rather than only the captain alias.
+    # Human terminal history is retired for worker targets as well as captain.
+    # Explicit command-authorized agent controls remain a separate execution surface.
     assert native_runtime.client.get(
         "/api/v1/agents/worker-1/history", headers=native_runtime.headers,
-    ).status_code == 404
-    assert native_runtime.client.post(
-        "/api/v1/agents/worker-1/interrupt", headers=native_runtime.headers,
     ).status_code == 404
     assert native_runtime.client.get(
         "/api/v1/captain/output", headers=native_runtime.headers,
@@ -266,7 +255,7 @@ def test_non_execution_routes_cannot_reach_firstmate_or_herdr_runtime(native_run
             "utterance": "show status",
             "idempotency_key": "read-only-status",
         },
-    ).status_code == 404
+    ).status_code in {404, 405}
 
 
 def test_pushed_decision_projection_replaces_snapshot_polling(native_runtime):

@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
-from conftest import TEST_HEADERS, TEST_SESSION_TOKEN
+from conftest import TEST_HEADERS
 
 client = TestClient(app)
 
@@ -24,10 +24,8 @@ def test_health_authorized():
     assert data["service"] == "magistrate-gateway"
     assert data["firstmate_producer"]["schema_version"] == "firstmate-producer-readiness.v1"
     assert "fm_home" not in data["firstmate_producer"]
-    assert data["pi_semantic_ownership"]["default_enabled"] is True
-    assert data["pi_semantic_ownership"]["defaulted"] is False
-    assert data["pi_semantic_ownership"]["enabled"] is False
-    assert data["pi_semantic_ownership"]["adapter"]["status"] == "disabled"
+    assert data["magi_provider"]["enabled"] is True
+    assert "pi_semantic_ownership" not in data
 
 
 def test_health_is_process_free_and_reports_configured_interfaces(monkeypatch):
@@ -118,18 +116,13 @@ def test_health_never_reports_a_live_firstmate_home_or_herdr_identity(monkeypatc
     assert data["herdr_socket_connected"] is False
 
 
-def test_soak_diagnostics_include_only_bounded_pi_ownership_state():
+def test_soak_diagnostics_report_native_chat_without_legacy_transport_state():
     response = client.get('/api/v1/diagnostics/soak', headers=TEST_HEADERS)
     assert response.status_code == 200
-    ownership = response.json()['pi_semantic_ownership']
-    assert ownership['schema_version'] == 'pi-semantic-ownership-diagnostics.v1'
-    assert set(ownership['dispatch_state_counts']) == {
-        'prepared', 'bound', 'finalized', 'failed',
-    }
-    assert isinstance(ownership['recovery_backlog_count'], int)
-    serialized = str(ownership)
-    for secret_field in ('capability_enc', 'prompt_enc', 'assistant_content', 'source_sequence'):
-        assert secret_field not in serialized
+    payload = response.json()
+    assert payload['native_chat']['schema_version'] == 'magi.native-chat-diagnostics.v1'
+    assert 'chat_features' not in payload
+    assert 'pi_semantic_ownership' not in payload
 
 
 def test_runtime():
@@ -178,14 +171,13 @@ def test_unknown_api_route_is_not_captured_by_spa_fallback():
     assert response.status_code == 404
 
 
-def test_captain_prompt_empty():
+def test_captain_prompt_is_retired():
     resp = client.post(
         "/api/v1/captain/prompt",
         headers=TEST_HEADERS,
         json={"source": "iphone", "modality": "text", "type": "prompt", "text": ""}
     )
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "error"
+    assert resp.status_code in {404, 405}
 
 
 def test_events_requires_first_frame_authentication():
@@ -193,25 +185,6 @@ def test_events_requires_first_frame_authentication():
         with client.websocket_connect('/api/v1/events') as websocket:
             websocket.send_json({'type': 'auth', 'token': 'not-a-session'})
             websocket.receive_json()
-
-
-def test_events_stream_normalized_history(monkeypatch):
-    async def fake_history(target, lines):
-        return {'target': target, 'messages': [
-            {'id': 'turn-1', 'role': 'assistant', 'kind': 'conversation', 'text': 'ready'},
-            {'id': 'turn-2', 'role': 'assistant', 'kind': 'conversation', 'text': 'ready'},
-        ]}
-
-    monkeypatch.setattr('app.main.herdr_client.get_agent_history', fake_history)
-    with client.websocket_connect('/api/v1/events') as websocket:
-        websocket.send_json({'type': 'auth', 'token': TEST_SESSION_TOKEN, 'target': 'captain'})
-        assert websocket.receive_json() == {'type': 'connected', 'target': 'captain'}
-        websocket.send_text('{"target":"agent-1"}')
-        assert websocket.receive_json() == {'type': 'subscribed', 'target': 'agent-1'}
-        event = websocket.receive_json()
-        assert event['type'] == 'agent_history'
-        assert [message['id'] for message in event['messages']] == ['turn-1', 'turn-2']
-        assert [message['text'] for message in event['messages']] == ['ready', 'ready']
 
 
 def test_agent_interrupt_requires_authentication():
@@ -229,14 +202,9 @@ def test_agent_interrupt_delegates_to_herdr(monkeypatch):
     assert resp.json() == {'status': 'interrupted', 'target': 'agent-1'}
 
 
-def test_agent_history_delegates_to_herdr(monkeypatch):
-    async def fake_history(target, lines):
-        return {'target': target, 'messages': [{'role': 'user', 'kind': 'conversation', 'text': 'Hello'}]}
-
-    monkeypatch.setattr('app.main.herdr_client.get_agent_history', fake_history)
+def test_agent_history_transport_is_retired():
     resp = client.get('/api/v1/agents/agent-1/history?lines=25', headers=TEST_HEADERS)
-    assert resp.status_code == 200
-    assert resp.json()['messages'][0]['text'] == 'Hello'
+    assert resp.status_code == 404
 
 
 def test_agent_rename_delegates_to_herdr_and_validates_name(monkeypatch):

@@ -33,8 +33,9 @@ async function open(url) {
       if (requestUrl.includes('/attention/unified')) return Promise.resolve(new Response('[]', { status: 200 }));
       if (requestUrl.includes('/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200 }));
       if (requestUrl.includes('/health')) return Promise.resolve(new Response(JSON.stringify({ status: 'healthy', service: 'gateway', herdr_socket_connected: true }), { status: 200 }));
-      if (requestUrl.includes('/captain/output')) return Promise.resolve(new Response(JSON.stringify({ output: 'live terminal output' }), { status: 200 }));
-      if (requestUrl.includes('/execution/capabilities')) return Promise.resolve(new Response(JSON.stringify({ harnesses: [], source: 'test', configured: false }), { status: 200 }));
+      if (requestUrl.includes('/magi/conversations/current')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'magi.native-chat.v1', conversation: { id: 'mgc_workspace_0001', created_at: 1789000000000, updated_at: 1789000000000 }, conversation_id: 'mgc_workspace_0001', messages: [], has_more: false, next_before: null, latest_change: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/activity')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false, snapshot_cursor: 0, next_cursor: 0, latest_cursor: 0, latest_sequence: 0, next_before: null, has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 }, reconciliation: 'persisted-only', sources: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/execution/capabilities')) return Promise.resolve(new Response(JSON.stringify({ harnesses: [], profiles: [], source: 'test', configured: false }), { status: 200 }));
       return nativeFetch(resource, options);
     };
   });
@@ -47,17 +48,17 @@ test('root and explicit home resolve to the standalone chat shell', async () => 
     const page = await open(BASE + route);
     await page.waitForSelector('[data-testid="branded-chat-shell"]');
     assert.equal(await page.$('[data-testid="workspace-shell"]'), null);
-    assert.ok(await page.$('[data-testid="captain-prompt"]'));
+    assert.ok(await page.$('[data-testid="magi-prompt"]'));
     await page.close();
   }
 });
 
-test('chat is a standalone route and preserves agent target deep links', async () => {
+test('chat ignores retired agent-target deep links and keeps the sole Magi thread', async () => {
   const page = await open(`${BASE}/chat?agentId=w1%3Ap7`);
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   assert.equal(await page.$('[data-testid="workspace-shell"]'), null);
-  assert.equal(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
-  assert.match(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('aria-label')), /w1:p7/);
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('aria-label')), 'Message Magi');
   assert.equal(new URL(page.url()).pathname, '/chat');
   await page.close();
 });

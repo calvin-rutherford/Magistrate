@@ -1,109 +1,158 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { normalizeNativeMagiMessages, reconcileCanonicalMessages } from '../src/services/CanonicalConversation';
+import {
+  hasMagiReconciliationConflict, normalizeMagiMessageRecords, reconcileMagiMessages,
+} from '../src/services/MagiConversation';
+import type { MagiMessage } from '../src/services/MagiConversationSession';
 
-const message = (overrides: Record<string, unknown>) => ({
-  id: 'mgm_user_1',
-  conversation_id: 'mgc_native_1',
-  turn_id: 'mgt_native_1',
-  client_message_id: 'client-native-1',
-  reply_to_message_id: null,
-  role: 'user',
-  content: 'café 東京 🚀',
-  status: 'completed',
-  source: 'voice',
-  sequence_index: 0,
-  revision: 1,
-  attachments: [],
-  created_at: 1_789_000_000_000,
-  updated_at: 1_789_000_000_000,
-  ...overrides,
+const message = (overrides: Record<string, unknown> = {}) => ({
+  id: 'mgm_user_1', conversation_id: 'mgc_native_1', turn_id: 'mgt_native_1',
+  client_message_id: 'client-native-1', reply_to_message_id: null, role: 'user',
+  content: 'café 東京 🚀', status: 'completed', source: 'voice', sequence_index: 0,
+  revision: 1, attachments: [], created_at: 1_789_000_000_000,
+  updated_at: 1_789_000_000_000, ...overrides,
 });
 
-test('native Magi wire messages preserve Unicode, identity, and one assistant reply', () => {
+test('provider-native records replace the matching optimistic user by canonical identity', () => {
+  const optimistic: MagiMessage = {
+    id: 'client-native-1', role: 'user', text: 'café 東京 🚀', source: 'voice',
+    delivery: 'sending', progress: 'working', sentAt: 1_789_000_000_100,
+  };
+  const rendered = reconcileMagiMessages([optimistic], normalizeMagiMessageRecords([message()]));
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].id, optimistic.id);
+  assert.equal(rendered[0].serverId, 'mgm_user_1');
+  assert.equal(rendered[0].delivery, 'sent');
+
+  const conflicting = reconcileMagiMessages([
+    { ...optimistic, text: 'different local request' },
+  ], normalizeMagiMessageRecords([message()]));
+  assert.equal(conflicting[0].serverId, undefined);
+  assert.equal(conflicting[0].text, 'different local request');
+});
+
+test('provider-native records preserve exact Unicode and stable identities', () => {
   const response = '# Complete\n\n1. café\n2. 東京\n\n```ts\nconst rocket = "🚀";\n```\n';
-  const canonical = normalizeNativeMagiMessages([
-    message({}),
-    message({
-      id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+  const records = normalizeMagiMessageRecords([
+    message(),
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
       reply_to_message_id: 'mgm_user_1', content: response, source: 'magi-native',
-      sequence_index: 1, revision: 2,
-    }),
+      sequence_index: 1, revision: 2 }),
   ]);
-  assert.equal(canonical.length, 2);
-  assert.equal(canonical[1].text, response);
-  assert.equal(canonical[1].content_source, 'magi-native');
-  const rendered = reconcileCanonicalMessages([], canonical);
-  assert.equal(rendered.length, 2);
-  assert.equal(rendered[1].contentSource, 'magi-native');
+  assert.equal(records.length, 2);
+  assert.equal(records[1].content, response);
+  const rendered = reconcileMagiMessages([], records);
+  assert.deepEqual(rendered.map(row => row.id), ['client-native-1', 'mgm_assistant_1']);
   assert.equal(rendered[1].text, response);
   assert.equal(rendered[1].progress, 'complete');
 });
 
-test('a verified outcome arrives as a new assistant-only native row', () => {
-  const canonical = normalizeNativeMagiMessages([
-    message({}),
-    message({
-      id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
-      reply_to_message_id: 'mgm_user_1', content: 'Objective accepted.', source: 'magi-native',
-      sequence_index: 1,
-    }),
-    message({
-      id: 'mgm_completion_1', turn_id: 'mgt_completion_1', role: 'assistant',
+test('verified completion evidence can append an assistant-only native row', () => {
+  const records = normalizeMagiMessageRecords([
+    message(),
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: 'Objective accepted.',
+      source: 'magi-native', sequence_index: 1 }),
+    message({ id: 'mgm_completion_1', turn_id: 'mgt_completion_1', role: 'assistant',
       client_message_id: null, reply_to_message_id: 'mgm_user_1',
-      content: 'The objective is complete and verified.', source: 'magi-native',
-      sequence_index: 2,
-    }),
+      content: 'The objective is complete and verified.', source: 'magi-native', sequence_index: 2 }),
   ]);
-  assert.equal(canonical.filter(item => item.role === 'user').length, 1);
-  assert.deepEqual(canonical.map(item => item.id), [
-    'mgm_user_1', 'mgm_assistant_1', 'mgm_completion_1',
-  ]);
-  const rendered = reconcileCanonicalMessages([], canonical);
-  assert.equal(rendered.length, 3);
+  const rendered = reconcileMagiMessages([], records);
+  assert.equal(rendered.filter(row => row.role === 'user').length, 1);
   assert.equal(rendered[2].text, 'The objective is complete and verified.');
-  assert.equal(rendered[2].progress, 'complete');
 });
 
-test('malformed native provenance, status, and control text fail closed', () => {
-  assert.deepEqual(normalizeNativeMagiMessages([
+test('unrecognised provenance, status, identity, controls, and unknown fields fail closed', () => {
+  const attachment = {
+    id: 'upload_1234567890', upload_id: 'upload_1234567890', name: 'notes.txt',
+    media_type: 'text/plain', size: 5, url: '/api/v1/uploads/upload_1234567890',
+  };
+  for (const invalid of [
     message({ id: 'mgm_assistant_bad', role: 'assistant', client_message_id: null,
-      reply_to_message_id: 'mgm_user_1', source: 'terminal', status: 'completed' }),
-  ]), []);
-  assert.deepEqual(normalizeNativeMagiMessages([
+      reply_to_message_id: 'mgm_user_1', source: 'other-provider' }),
+    message({ status: 'invented' }),
+    message({ content: 'unsafe\u001b[31m' }),
+    message({ conversation_id: 'another-thread' }),
+    message({ attachments: [attachment, attachment] }),
     message({ id: 'mgm_assistant_bad', role: 'assistant', client_message_id: null,
-      reply_to_message_id: 'mgm_user_1', source: 'magi-native', status: 'invented' }),
-  ]), []);
-  assert.deepEqual(normalizeNativeMagiMessages([
-    message({ id: 'mgm_assistant_bad', role: 'assistant', client_message_id: null,
-      reply_to_message_id: 'mgm_user_1', source: 'magi-native', content: 'unsafe\u001b[31m' }),
+      reply_to_message_id: 'mgm_user_1', source: 'magi-native', status: 'failed', content: 'spoofed failure prose' }),
+    message({ unexpected: 'field' }),
+  ]) assert.deepEqual(normalizeMagiMessageRecords([invalid]), []);
+});
+
+test('pending, failed, and cancelled pairs map to truthful render state', () => {
+  const pair = (status: string) => normalizeMagiMessageRecords([
+    message(),
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native',
+      status, sequence_index: 1 }),
+  ]);
+  assert.equal(reconcileMagiMessages([], pair('pending'))[0].progress, 'working');
+  assert.equal(reconcileMagiMessages([], pair('failed'))[0].delivery, 'failed');
+  assert.equal(reconcileMagiMessages([], pair('cancelled'))[1].progress, 'cancelled');
+});
+
+test('monotonic revision reconciliation rejects identity mutation and stale rollback', () => {
+  const initial = reconcileMagiMessages([], normalizeMagiMessageRecords([
+    message(), message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native', status: 'pending', sequence_index: 1 }),
+  ]));
+  const completed = reconcileMagiMessages(initial, normalizeMagiMessageRecords([
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: 'Done.', source: 'magi-native', status: 'completed', sequence_index: 1, revision: 2 }),
+  ]));
+  assert.equal(completed[1].text, 'Done.');
+  assert.equal(completed[0].progress, 'complete', 'an assistant-only socket revision settles its user pair');
+  const staleRecords = normalizeMagiMessageRecords([
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native', status: 'pending', sequence_index: 1 }),
+  ]);
+  assert.equal(hasMagiReconciliationConflict(completed, staleRecords), false,
+    'a delayed lower revision is ignored without poisoning realtime');
+  const stale = reconcileMagiMessages(completed, staleRecords);
+  assert.equal(stale[1].text, 'Done.');
+  const mutatedStatusRecords = normalizeMagiMessageRecords([
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native', status: 'failed', sequence_index: 1, revision: 2 }),
+  ]);
+  assert.equal(hasMagiReconciliationConflict(completed, mutatedStatusRecords), true);
+  const sameRevisionMutation = reconcileMagiMessages(completed, mutatedStatusRecords);
+  assert.equal(sameRevisionMutation[1].progress, 'complete');
+  const mutatedIdentityRecords = normalizeMagiMessageRecords([
+    message({ id: 'mgm_assistant_1', turn_id: 'mgt_mutated_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: 'Changed.', source: 'magi-native', status: 'completed', sequence_index: 1, revision: 3 }),
+  ]);
+  assert.equal(hasMagiReconciliationConflict(completed, mutatedIdentityRecords), true);
+  const mutated = reconcileMagiMessages(completed, mutatedIdentityRecords);
+  assert.equal(mutated[1].turnId, 'mgt_native_1');
+  const changedClientId = reconcileMagiMessages(completed, normalizeMagiMessageRecords([
+    message({ client_message_id: 'client-native-2', revision: 2 }),
+  ]));
+  assert.deepEqual(changedClientId.map(row => row.id), completed.map(row => row.id));
+  const terminalRewrite = normalizeMagiMessageRecords([
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: 'Rewritten.', source: 'magi-native',
+      status: 'completed', sequence_index: 1, revision: 3 }),
+  ]);
+  assert.equal(hasMagiReconciliationConflict(completed, terminalRewrite), true,
+    'a higher revision cannot rewrite terminal provider bytes');
+});
+
+test('message batches reject partial, mixed-conversation, and duplicate identity payloads', () => {
+  const assistant = message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+    reply_to_message_id: 'mgm_user_1', content: 'Done.', source: 'magi-native', sequence_index: 1 });
+  assert.deepEqual(normalizeMagiMessageRecords([message(), { ...assistant, status: 'invented' }]), []);
+  assert.deepEqual(normalizeMagiMessageRecords([message(), { ...assistant, conversation_id: 'mgc_native_2' }]), []);
+  assert.deepEqual(normalizeMagiMessageRecords([message(), { ...assistant, sequence_index: 0 }]), []);
+  assert.deepEqual(normalizeMagiMessageRecords([
+    message({ client_message_id: 'mgm_assistant_1' }), assistant,
   ]), []);
 });
 
-
-test('native pending and failed assistant placeholders remain truthful, empty, and retryable', () => {
-  const pending = normalizeNativeMagiMessages([
-    message({ status: 'completed' }),
-    message({
-      id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
-      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native',
-      status: 'pending', sequence_index: 1,
-    }),
-  ]);
-  assert.equal(pending.length, 2);
-  assert.equal(pending[0].turn_status, 'awaiting_reply');
-  assert.equal(pending[1].turn_status, 'awaiting_reply');
-  assert.equal(reconcileCanonicalMessages([], pending)[1].progress, 'working');
-
-  const failed = normalizeNativeMagiMessages([
-    message({ status: 'completed' }),
-    message({
-      id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
-      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native',
-      status: 'failed', sequence_index: 1, revision: 3,
-    }),
-  ]);
-  assert.equal(failed.length, 2);
-  assert.equal(reconcileCanonicalMessages([], failed)[1].progress, 'failed');
+test('authoritative reads prune only server rows and retain genuine pending sends', () => {
+  const pending: MagiMessage = { id: 'u-local123', role: 'user', text: 'Pending', source: 'text', delivery: 'sending', progress: 'working' };
+  const old: MagiMessage = { id: 'mgm_old', serverId: 'mgm_old', role: 'assistant', text: 'old', source: 'text', sequenceIndex: 9, revision: 1, turnId: 'mgt_old', sentAt: 1_789_000_000_000 };
+  const result = reconcileMagiMessages([old, pending], normalizeMagiMessageRecords([message()]), { authoritative: true });
+  assert.deepEqual(result.map(row => row.id), ['client-native-1', 'u-local123']);
 });

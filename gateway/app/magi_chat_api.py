@@ -13,7 +13,6 @@ from typing import Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth import Principal, require_any_scope, require_scope
-from app.chat_features import validate_chat_feature_configuration
 from app.contracts import NativeMagiMessageContract
 from app.magi_chat_service import MagiChatService
 from app.magi_chat_store import (
@@ -50,26 +49,22 @@ def validate_magi_chat_configuration() -> None:
 def magi_chat_readiness() -> dict[str, object]:
     """Report static provider configuration without issuing a model request."""
     try:
-        enabled, _ = validate_chat_feature_configuration()
-        model = _configured_model() if enabled else None
+        model = _configured_model()
     except RuntimeError:
         return {
             "status": "invalid", "enabled": True,
             "provider": None, "live_probe_performed": False,
         }
     return {
-        "status": (
-            "configured" if model is not None and model.configured
-            else "unconfigured" if enabled else "disabled"
-        ),
-        "enabled": enabled,
-        "provider": "openai" if enabled else None,
+        "status": "configured" if model.configured else "unconfigured",
+        "enabled": True,
+        "provider": "openai",
         "live_probe_performed": False,
     }
 
 
 class _ConfiguredProvider:
-    """Resolve secrets lazily so legacy rollback can boot without native config."""
+    """Resolve provider secrets lazily at the native request boundary."""
 
     async def complete(
         self,
@@ -93,15 +88,6 @@ router = APIRouter(prefix="/api/v1/magi", tags=["Magi native chat"])
 _SAFE_CONVERSATION_ID = re.compile(r"^mgc_[A-Za-z0-9_-]{4,124}$")
 
 
-def _require_native_chat() -> None:
-    try:
-        enabled, _ = validate_chat_feature_configuration()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail="Native Magi chat configuration is invalid.") from exc
-    if not enabled:
-        raise HTTPException(status_code=404, detail="Native Magi chat is disabled by compatibility configuration.")
-
-
 def _conversation_id(value: str) -> str:
     if not _SAFE_CONVERSATION_ID.fullmatch(value):
         raise HTTPException(status_code=404, detail="Native Magi conversation not found.")
@@ -123,7 +109,6 @@ async def post_magi_message(
     contract: NativeMagiMessageContract,
     principal: Principal = Depends(require_any_scope("command", "voice")),
 ):
-    _require_native_chat()
     attachments = []
     for attachment in contract.attachments:
         stored = get_upload(principal.user_id, attachment.upload_id)
@@ -174,7 +159,6 @@ async def get_current_magi_conversation(
     limit: int = Query(MAX_MAGI_HISTORY_MESSAGES, ge=1, le=MAX_MAGI_HISTORY_MESSAGES),
     principal: Principal = Depends(require_scope("read")),
 ):
-    _require_native_chat()
     try:
         return await magi_chat_service.current_conversation(
             principal.user_id, before=before, limit=limit,
@@ -190,7 +174,6 @@ async def get_magi_conversation(
     limit: int = Query(MAX_MAGI_HISTORY_MESSAGES, ge=1, le=MAX_MAGI_HISTORY_MESSAGES),
     principal: Principal = Depends(require_scope("read")),
 ):
-    _require_native_chat()
     try:
         return await magi_chat_service.conversation(
             principal.user_id,
@@ -211,7 +194,6 @@ async def replay_magi_conversation(
     limit: int = Query(MAX_MAGI_HISTORY_MESSAGES, ge=1, le=MAX_MAGI_HISTORY_MESSAGES),
     principal: Principal = Depends(require_scope("read")),
 ):
-    _require_native_chat()
     try:
         return await magi_chat_service.replay(
             principal.user_id,
@@ -230,7 +212,6 @@ async def cancel_magi_message(
     client_message_id: str,
     principal: Principal = Depends(require_any_scope("command", "voice")),
 ):
-    _require_native_chat()
     if not re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$", client_message_id):
         raise HTTPException(status_code=404, detail="Native Magi submission not found.")
     try:
@@ -243,5 +224,4 @@ async def cancel_magi_message(
 async def get_magi_chat_diagnostics(
     principal: Principal = Depends(require_scope("read")),
 ):
-    _require_native_chat()
     return await magi_chat_service.diagnostics(principal.user_id)

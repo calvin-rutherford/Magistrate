@@ -49,8 +49,16 @@ async function openPage(route, mocks) {
       if (url.includes('/api/v1/account/profile')) return json({ user_id: 'default_user', name: 'Owner', email: 'owner@example.test', avatar_url: '', bio: '' });
       if (url.includes('/api/v1/health')) return healthStatus === 200 ? json(healthPayload) : json({ detail: 'Gateway telemetry is unavailable.' }, healthStatus);
       if (url.includes('/api/v1/uploads')) return uploadStatus === 200 ? json({ uploads: [uploadRecord] }) : json({ detail: 'The file content does not match its declared type.' }, uploadStatus);
-      if (url.includes('/api/v1/captain/prompt')) return json({ status: 'submitted', target: 'captain', response: 'Received.' });
-      if (url.includes('/api/v1/agents') && url.includes('/history')) return json({ target: 'captain', messages: [] });
+      const emptyMagi = () => ({ schema_version: 'magi.native-chat.v1', conversation: { id: 'mgc_truthful_0001', created_at: 1756000000000, updated_at: 1756000000000 }, conversation_id: 'mgc_truthful_0001', messages: [], has_more: false, next_before: null, latest_change: 0 });
+      if (url.includes('/api/v1/magi/messages') && options?.method === 'POST') {
+        const body = JSON.parse(options.body || '{}');
+        const user = { id: 'mgm_truthful_user_0001', conversation_id: 'mgc_truthful_0001', turn_id: 'mgt_truthful_0001', client_message_id: body.client_message_id, reply_to_message_id: null, role: 'user', content: body.content, status: 'completed', source: body.source || 'text', sequence_index: 0, revision: 1, attachments: (body.attachments || []).map(item => ({ id: item.upload_id, upload_id: item.upload_id, name: item.filename, media_type: item.media_type, size: item.size, url: `/api/v1/uploads/${item.upload_id}` })), created_at: 1756000000000, updated_at: 1756000000000 };
+        const assistant = { id: 'mgm_truthful_assistant_0001', conversation_id: 'mgc_truthful_0001', turn_id: 'mgt_truthful_0001', client_message_id: null, reply_to_message_id: user.id, role: 'assistant', content: 'Received.', status: 'completed', source: 'magi-native', sequence_index: 1, revision: 1, attachments: [], created_at: 1756000000001, updated_at: 1756000000001 };
+        return json({ ...emptyMagi(), status: 'completed', messages: [user, assistant], user_message: user, assistant_message: assistant, duplicate: false, retry: false, attempt: 1 });
+      }
+      if (url.includes('/api/v1/magi/conversations/current')) return json(emptyMagi());
+      if (url.includes('/api/v1/activity/snapshot')) return json({ schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false, snapshot_cursor: 0, latest_sequence: 0, next_before: null, has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 }, reconciliation: 'persisted-only', sources: [] });
+      if (url.includes('/api/v1/activity')) return json({ schema_version: 'activity.v1', records: [], next_cursor: 0, latest_cursor: 0, has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 }, reconciliation: 'persisted-only', sources: [] });
       if (url.includes('/api/v1/agents')) return json([]);
       if (url.includes('/api/v1/attention/unified')) return json([]);
       if (url.includes('/api/v1/github/pulls')) return json({ items: [], page: 1, per_page: 20, has_more: false, cached: false });
@@ -278,13 +286,13 @@ test('an upload the gateway did not confirm as stored fails instead of reading a
   await page.click('[data-testid="attachment-option-files"]');
   await (await chooserPromise).accept([path.join(process.cwd(), 'package.json')]);
   await page.waitForFunction(() => document.querySelector('[data-testid="attachment-preview"]')?.innerText.includes('package.json'));
-  await page.focus('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="magi-prompt"]');
   await page.keyboard.type('Review the attached manifest');
-  await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForSelector('[data-testid="captain-send-error"]');
-  assert.match(await page.$eval('[data-testid="captain-send-error"]', node => node.innerText), /did not confirm the upload was stored/);
+  await page.click('[data-testid="send-magi-prompt"]');
+  await page.waitForSelector('[data-testid="magi-send-error"]');
+  assert.match(await page.$eval('[data-testid="magi-send-error"]', node => node.innerText), /did not confirm the upload was stored/);
   // The prompt is never sent, so nothing can present the file as delivered.
-  assert.equal(await page.evaluate(() => window.__calls.filter(call => call.url.includes('/captain/prompt')).length), 0);
+  assert.equal(await page.evaluate(() => window.__calls.filter(call => call.url.includes('/magi/messages')).length), 0);
   const history = await page.$eval('[data-testid="chat-history"]', node => node.innerText);
   assert.match(history, /Upload failed/);
   assert.doesNotMatch(history, /· Attached/);
@@ -299,12 +307,12 @@ test('a rejected upload reports the gateway reason and never claims delivery', a
   await page.click('[data-testid="attachment-option-files"]');
   await (await chooserPromise).accept([path.join(process.cwd(), 'package.json')]);
   await page.waitForFunction(() => document.querySelector('[data-testid="attachment-preview"]')?.innerText.includes('package.json'));
-  await page.focus('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="magi-prompt"]');
   await page.keyboard.type('Review the attached manifest');
-  await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForSelector('[data-testid="captain-send-error"]');
-  assert.match(await page.$eval('[data-testid="captain-send-error"]', node => node.innerText), /does not match its declared type/);
-  assert.equal(await page.evaluate(() => window.__calls.filter(call => call.url.includes('/captain/prompt')).length), 0);
+  await page.click('[data-testid="send-magi-prompt"]');
+  await page.waitForSelector('[data-testid="magi-send-error"]');
+  assert.match(await page.$eval('[data-testid="magi-send-error"]', node => node.innerText), /does not match its declared type/);
+  assert.equal(await page.evaluate(() => window.__calls.filter(call => call.url.includes('/magi/messages')).length), 0);
   assert.doesNotMatch(await page.$eval('[data-testid="chat-history"]', node => node.innerText), /· Attached/);
   await page.close();
 });
@@ -317,14 +325,14 @@ test('a confirmed upload reports Attached only after the prompt is accepted', as
   await page.click('[data-testid="attachment-option-files"]');
   await (await chooserPromise).accept([path.join(process.cwd(), 'package.json')]);
   await page.waitForFunction(() => document.querySelector('[data-testid="attachment-preview"]')?.innerText.includes('package.json'));
-  await page.focus('[data-testid="captain-prompt"]');
+  await page.focus('[data-testid="magi-prompt"]');
   await page.keyboard.type('Review the attached manifest');
-  await page.click('[data-testid="send-captain-prompt"]');
+  await page.click('[data-testid="send-magi-prompt"]');
   await page.waitForFunction(() => document.querySelector('[data-testid="chat-history"]')?.innerText.includes('· Attached'));
-  assert.equal(await page.$('[data-testid="captain-send-error"]'), null);
+  assert.equal(await page.$('[data-testid="magi-send-error"]'), null);
   // Only the four contract fields reach the prompt; the local status flags
   // never travel to the gateway as if they were part of the manifest.
-  const body = JSON.parse(await page.evaluate(() => window.__calls.find(item => item.url.includes('/captain/prompt')).body));
+  const body = JSON.parse(await page.evaluate(() => window.__calls.find(item => item.url.includes('/magi/messages')).body));
   assert.deepEqual(Object.keys(body.attachments[0]).sort(), ['filename', 'media_type', 'size', 'upload_id']);
   assert.equal(body.attachments[0].upload_id, 'upload-000000000000abcd');
   await page.close();

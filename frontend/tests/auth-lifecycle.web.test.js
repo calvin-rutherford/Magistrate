@@ -72,21 +72,24 @@ async function open(mode = 'normal', preserveStorage = false) {
         const authorization = options.headers?.Authorization || options.headers?.get?.('Authorization');
         state.calls.push({ url, method, authorization: authorization || null });
         if (!state.valid || authorization !== `Bearer ${state.token}`) return json({ detail: 'Authentication required' }, 401);
-        if (mode === 'active-401' && url.includes('/captain/prompt')) return json({ detail: 'Invalid or expired session' }, 401);
-        if (mode === 'scope-403' && url.includes('/captain/prompt')) return json({ detail: 'Missing required scope: command' }, 403);
-        // The captain transcript is the gateway's canonical record, so a prompt
-        // answers with the turn it recorded rather than a bare reply string.
-        const canonicalMessages = () => state.turn ? [
-          { id: 'cm_0_u', turn_id: 'ct_0', client_message_id: state.turn.clientMessageId, role: 'user', type: 'conversation', text: state.turn.text, visible_in_chat: true, sequence_index: 0, revision: 1, source: 'text', created_at: 1756000000000, turn_status: 'answered' },
-          { id: 'cm_0_a', turn_id: 'ct_0', role: 'assistant', type: 'conversation', text: 'Authenticated reply from Firstmate.', visible_in_chat: true, sequence_index: 999, revision: 1, source: 'text', created_at: 1756000000000, turn_status: 'answered' },
+        if (mode === 'active-401' && url.includes('/magi/messages')) return json({ detail: 'Invalid or expired session' }, 401);
+        if (mode === 'scope-403' && url.includes('/magi/messages')) return json({ detail: 'Missing required scope: command' }, 403);
+        const nativeMessages = () => state.turn ? [
+          { id: 'mgm_auth_user_0001', conversation_id: 'mgc_auth_native_0001', turn_id: 'mgt_auth_native_0001', client_message_id: state.turn.clientMessageId, reply_to_message_id: null, role: 'user', content: state.turn.text, status: 'completed', source: 'text', sequence_index: 0, revision: 1, attachments: [], created_at: 1756000000000, updated_at: 1756000000000 },
+          { id: 'mgm_auth_assistant_0001', conversation_id: 'mgc_auth_native_0001', turn_id: 'mgt_auth_native_0001', client_message_id: null, reply_to_message_id: 'mgm_auth_user_0001', role: 'assistant', content: 'Authenticated reply from Magi.', status: 'completed', source: 'magi-native', sequence_index: 1, revision: 1, attachments: [], created_at: 1756000000001, updated_at: 1756000000001 },
         ] : [];
-        if (url.includes('/captain/prompt')) {
+        const nativeEnvelope = messages => ({ schema_version: 'magi.native-chat.v1', conversation: { id: 'mgc_auth_native_0001', created_at: 1756000000000, updated_at: 1756000000001 }, conversation_id: 'mgc_auth_native_0001', messages, has_more: false, next_before: null, latest_change: messages.length });
+        if (url.includes('/magi/messages') && method === 'POST') {
           let body = {};
           try { body = JSON.parse(options.body || '{}'); } catch {}
-          state.turn = { clientMessageId: body.message_id, text: body.text };
-          return json({ status: 'submitted', target: 'captain', message_id: body.message_id, conversation: { schema_version: 'conversation.v1', target: 'captain', turn_id: 'ct_0', messages: canonicalMessages() } });
+          state.turn = { clientMessageId: body.client_message_id, text: body.content };
+          const messages = nativeMessages();
+          const envelope = nativeEnvelope(messages);
+          return json({ ...envelope, status: 'completed', user_message: messages[0], assistant_message: messages[1], duplicate: false, retry: false, attempt: 1 });
         }
-        if (url.includes('/conversations/') && url.includes('/messages')) return json({ schema_version: 'conversation.v1', target: 'captain', messages: canonicalMessages() });
+        if (url.includes('/magi/conversations/current')) return json(nativeEnvelope(nativeMessages()));
+        if (url.includes('/activity/snapshot')) return json({ schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false, snapshot_cursor: 0, latest_sequence: 0, next_before: null, has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 }, reconciliation: 'persisted-only', sources: [] });
+        if (url.includes('/activity')) return json({ schema_version: 'activity.v1', records: [], next_cursor: 0, latest_cursor: 0, has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 }, reconciliation: 'persisted-only', sources: [] });
         if (url.includes('/execution/capabilities')) return json({ harnesses: [], profiles: [], source: 'test', configured: false });
         if (url.includes('/execution/settings')) return json({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
         if (url.includes('/account/profile') && method === 'POST') {
@@ -97,7 +100,6 @@ async function open(mode = 'normal', preserveStorage = false) {
         if (url.includes('/notifications/events')) return json({ events: [] });
         if (url.includes('/recent-activity')) return json({ items: [], sources: { firstmate: 'available', github: 'available' } });
         if (url.includes('/auth/providers')) return json([]);
-        if (url.includes('/agents/') && url.includes('/history')) return json({ target: 'captain', messages: [] });
         if (url.endsWith('/agents')) return json([]);
         if (url.includes('/health')) return json({ status: 'healthy', service: 'gateway', herdr_socket_connected: true });
         if (url.includes('/attention')) return json([]);
@@ -114,9 +116,9 @@ async function open(mode = 'normal', preserveStorage = false) {
 
 async function seedPrincipalCache(page, principal = 'default_user') {
   await page.evaluate(owner => {
-    const row = { id: 'cm-secret', canonicalId: 'cm-secret', role: 'assistant', kind: 'conversation', text: `private for ${owner}`, source: 'text', sentAt: Date.now() };
-    localStorage.setItem(`magistrate.chat.canonical.v1.${encodeURIComponent(owner)}|captain`, JSON.stringify({ schema_version: 'conversation-cache.v1', principal_id: owner, messages: { 'cm-secret': row } }));
-    localStorage.setItem(`magistrate.chat.pending.v1.${encodeURIComponent(owner)}|captain`, JSON.stringify({ schema_version: 'conversation-pending.v1', principal_id: owner, messages: {} }));
+    const row = { id: 'mgm_secret_0001', serverId: 'mgm_secret_0001', conversationId: 'mgc_secret_0001', clientMessageId: null, replyToServerId: 'mgm_secret_user_0001', serverStatus: 'completed', role: 'assistant', text: `private for ${owner}`, source: 'text', sentAt: Date.now(), progress: 'complete', revision: 1, turnId: 'mgt_secret_0001', sequenceIndex: 0, attachments: [] };
+    localStorage.setItem(`magistrate.magi.messages.v1.${encodeURIComponent(owner)}`, JSON.stringify({ schema_version: 'magi-conversation-cache.v1', principal_id: owner, messages: { 'mgm_secret_0001': row } }));
+    localStorage.setItem(`magistrate.magi.pending.v1.${encodeURIComponent(owner)}`, JSON.stringify({ schema_version: 'magi-conversation-pending.v1', principal_id: owner, messages: {} }));
     localStorage.setItem(`magistrate.activity.canonical.v1.${encodeURIComponent(owner)}`, JSON.stringify({
       schema_version: 'activity-cache.v1', principal: owner, cursor: 1, summary_cursor: 1,
       summary_authoritative: true,
@@ -135,7 +137,8 @@ async function seedPrincipalCache(page, principal = 'default_user') {
 
 async function principalCacheKeys(page, principal = 'default_user') {
   return page.evaluate(owner => Object.keys(localStorage).filter(key =>
-    (key.startsWith('magistrate.chat.') && key.includes(`.${encodeURIComponent(owner)}|`))
+    key === `magistrate.magi.messages.v1.${encodeURIComponent(owner)}`
+      || key === `magistrate.magi.pending.v1.${encodeURIComponent(owner)}`
       || key === `magistrate.activity.canonical.v1.${encodeURIComponent(owner)}`), principal);
 }
 
@@ -144,8 +147,7 @@ async function connect(page) {
   await page.type('[data-testid="bootstrap-secret"]', 'valid-bootstrap');
   await page.click('[data-testid="connect-session"]');
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
-  await page.waitForSelector('[data-testid="captain-prompt"]');
-  await page.waitForSelector('[data-testid="model-menu-button"]');
+  await page.waitForSelector('[data-testid="magi-prompt"]');
   await page.waitForFunction(() => window.__authLifecycle.calls.some(call => call.url.includes('/execution/settings')));
 }
 
@@ -169,10 +171,10 @@ test('fresh browser gates protected routes, rejects invalid bootstrap, then reac
   await page.type('[data-testid="bootstrap-secret"]', 'valid-bootstrap');
   await page.click('[data-testid="connect-session"]');
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
-  await page.type('[data-testid="captain-prompt"]', 'status please');
-  await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForFunction(() => window.__authLifecycle.calls.some(call => call.url.includes('/captain/prompt')));
-  await page.waitForFunction(() => document.body.innerText.includes('Authenticated reply from Firstmate.'));
+  await page.type('[data-testid="magi-prompt"]', 'status please');
+  await page.click('[data-testid="send-magi-prompt"]');
+  await page.waitForFunction(() => window.__authLifecycle.calls.some(call => call.url.includes('/magi/messages')));
+  await page.waitForFunction(() => document.body.innerText.includes('Authenticated reply from Magi.'));
   assert.ok(await page.evaluate(() => window.__authLifecycle.calls.length > 0));
   assert.ok(await page.evaluate(() => window.__authLifecycle.calls.every(call => call.authorization === `Bearer ${'browser-test-session'}`)));
   await page.close();
@@ -276,8 +278,8 @@ test('an active protected 401 invalidates once, evicts principal chat caches, an
   const page = await open('active-401');
   await connect(page);
   await seedPrincipalCache(page);
-  await page.type('[data-testid="captain-prompt"]', 'expire now');
-  await page.click('[data-testid="send-captain-prompt"]');
+  await page.type('[data-testid="magi-prompt"]', 'expire now');
+  await page.click('[data-testid="send-magi-prompt"]');
   await page.waitForSelector('[data-testid="bootstrap-secret"]');
   const callsAtLogin = await page.evaluate(() => window.__authLifecycle.calls.length);
   await new Promise(resolve => setTimeout(resolve, 1200));
@@ -290,10 +292,10 @@ test('an active protected 401 invalidates once, evicts principal chat caches, an
 test('a 403 remains an authorization error and does not invalidate the session', async () => {
   const page = await open('scope-403');
   await connect(page);
-  await page.type('[data-testid="captain-prompt"]', 'needs command scope');
-  await page.click('[data-testid="send-captain-prompt"]');
-  await page.waitForSelector('[data-testid="captain-send-error"]');
-  assert.match(await page.$eval('[data-testid="captain-send-error"]', node => node.textContent), /Missing required scope: command/);
+  await page.type('[data-testid="magi-prompt"]', 'needs command scope');
+  await page.click('[data-testid="send-magi-prompt"]');
+  await page.waitForSelector('[data-testid="magi-send-error"]');
+  assert.match(await page.$eval('[data-testid="magi-send-error"]', node => node.textContent), /Missing required scope: command/);
   assert.ok(await page.$('[data-testid="branded-chat-shell"]'));
   assert.notEqual(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
   await page.close();

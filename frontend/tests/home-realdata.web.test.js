@@ -86,7 +86,7 @@ async function openHome({ agentsStatus = 200, agents = null, attention = [] } = 
   return page;
 }
 
-test('Home renders live agent identity and makes the agent card actionable', async () => {
+test('Home renders live agent identity and links agent context to the sole Magi conversation', async () => {
   const page = await openHome();
   await page.waitForFunction(() => document.body.innerText.includes('AGENT FLEET (1)'));
   const body = await page.evaluate(() => document.body.innerText);
@@ -96,9 +96,10 @@ test('Home renders live agent identity and makes the agent card actionable', asy
   assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
 
   await page.locator('::-p-text(Live captain)').click();
-  await page.waitForFunction(() => location.pathname === '/chat' && document.body.innerText.includes('Live captain'));
-  assert.equal(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
-  assert.match(await page.$eval('[data-testid="captain-prompt"]', node => node.getAttribute('aria-label')), /w1:p7/);
+  await page.waitForFunction(() => location.pathname === '/chat');
+  await page.waitForSelector('[data-testid="magi-prompt"]');
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('aria-label')), 'Message Magi');
   await page.close();
 });
 

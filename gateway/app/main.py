@@ -17,38 +17,26 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from app.auth import (Principal, friend_beta_onboarding_required, issue_friend_beta_session,
                       issue_session, revoke_session, require_any_scope, require_scope,
                       validate_friend_beta_configuration, verify_token)
-from app.chat_features import (LEGACY_CHAT_DEFAULT_ENABLED, NATIVE_CHAT_DEFAULT_ENABLED,
-                               legacy_chat_enabled, native_chat_enabled,
-                               validate_chat_feature_configuration)
-from app.herdr_client import DEFAULT_HISTORY_LINES, HERDR_MAX_READ_LINES, HerdrClient
+from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
-from app.contracts import (UniversalInputContract, ExecutionSettingsContract, ExecutionCredentialContract, GestureInputContract,
+from app.contracts import (ExecutionSettingsContract, ExecutionCredentialContract,
                            NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
                            AttentionActionExecuteContract, RoutingPreferenceContract,
                            AgentMigrationRequestContract, AgentMigrationTransitionContract,
-                           ActivityCatchUpContract, AssistantMessageReservationContract,
-                           MagiEventContract, MAGI_MAX_RESPONSE_BYTES,
-                           RenameAgentContract, VoiceMoveRequest)
+                           ActivityCatchUpContract, MAGI_MAX_RESPONSE_BYTES,
+                           RenameAgentContract)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
-from app.voice_moves import VoiceMoveService
-from app.conversation_store import (CONVERSATION_SCHEMA, MAX_MESSAGE_WINDOW, MagiEventConflict,
-                                    apply_magi_event, get_ingest_diagnostics, get_lifecycle_diagnostics,
-                                    get_turn_lifecycle,
-                                    ingest_terminal_rows,
-                                    list_messages as list_conversation_messages, record_ingest_error,
-                                    record_primary_reply, record_prompt, replay_messages,
-                                    reserve_assistant_message, reset_conversation, set_turn_status,
-                                    turn_messages)
 from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
                     disconnect_account, get_execution_preferences, get_execution_credential_status,
                     save_execution_preferences, save_execution_credential, delete_execution_credential,
                     create_agent_migration, get_agent_migration, get_agent_migration_by_idempotency, transition_agent_migration)
 from app.github_service import github_service
 from app.recent_activity import RecentActivityService
-from app.activity_store import list_activity, snapshot_activity, source_diagnostics
+from app.activity_store import SourceEventConflict, list_activity, snapshot_activity, source_diagnostics
 from app.structured_runtime import StructuredRuntimeProjection
 from app.attention_service import attention_service
+from app.ar_glasses import router as ar_router
 from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
                                    prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
 from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
@@ -64,19 +52,12 @@ from app.providers.jira import JiraProviderAdapter
 from app.providers.teams import TeamsProviderAdapter
 from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
 from app.usage import get_usage
-from app.ar_glasses import router as ar_router
 from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BYTES,
-                         associate_uploads, save_upload, get_upload, validate_upload_metadata)
-from app.pi_adapter_ipc import PI_IPC_SCHEMA, PiAdapterClient, PiAdapterIPCError
-from app.pi_ownership import (
-    PiOwnershipError, apply_pi_ownership_envelope, get_pi_ownership_diagnostics,
-    get_recoverable_dispatches, has_terminal_fallback_candidates,
-    mark_pi_adapter_acknowledged, mark_pi_dispatch_attempt,
-)
+                         associate_uploads, save_upload, get_upload)
 from app.magi_chat_api import (magi_chat_readiness, magi_chat_service,
                                router as magi_chat_router,
                                validate_magi_chat_configuration)
-from app.magi_chat_store import MagiChatStore, record_compatibility_read
+from app.magi_chat_store import MagiChatStore
 from app.firstmate_execution import MAX_FIRSTMATE_EXECUTION_EVENT_BYTES
 from app.firstmate_execution_api import (
     firstmate_execution_service, router as firstmate_execution_router,
@@ -141,7 +122,7 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
     if request.url.path == '/api/v1/uploads' and length > MAX_UPLOAD_REQUEST_BYTES:
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
-    if request.url.path in {'/api/v1/captain/prompt', '/api/v1/magi/messages'} and length > MAX_PROMPT_REQUEST_BYTES:
+    if request.url.path == '/api/v1/magi/messages' and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
     firstmate_execution_contract = request.method == 'POST' and bool(re.fullmatch(
         r'/api/v1/firstmate/execution-events(?:/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/wake)?',
@@ -157,10 +138,6 @@ async def enforce_bounded_request_size(request: Request, call_next):
     bounded_contract_path = request.method == 'POST' and (
         request.url.path == '/api/v1/activity/catch-up'
         or firstmate_structured_contract
-        or bool(re.fullmatch(
-            r'/api/v1/conversations/[^/]+/(?:events|turns/[^/]+/assistant-messages)',
-            request.url.path,
-        ))
     )
     if bounded_contract_path and content_length is None:
         # Semantic/catch-up contracts are small JSON records, never streaming
@@ -194,194 +171,7 @@ fm_client = FirstmateClient()
 structured_runtime = StructuredRuntimeProjection()
 recent_activity_service = RecentActivityService(structured_runtime, github_service)
 stt_adapter = VoiceInputAdapter()
-voice_move_service = VoiceMoveService(herdr_client)
 _notification_reconciler_task = None
-_pi_ownership_reconciler_task = None
-
-
-PI_OWNERSHIP_DEFAULT_ENABLED = True
-
-
-def _pi_ownership_enabled() -> bool:
-    # Pi ownership belongs exclusively to the explicit legacy compatibility
-    # path. Native Magi chat never probes or dispatches to Pi.
-    if not legacy_chat_enabled():
-        return False
-    configured = os.getenv('MAGISTRATE_PI_OWNERSHIP_ENABLED')
-    if configured is None:
-        return PI_OWNERSHIP_DEFAULT_ENABLED
-    raw = configured.strip().lower()
-    if raw in {'0', 'false', 'no', 'off'}:
-        return False
-    if raw in {'1', 'true', 'yes', 'on'}:
-        return True
-    raise RuntimeError('MAGISTRATE_PI_OWNERSHIP_ENABLED has an invalid boolean value.')
-
-
-def _pi_capability_ttl_ms() -> int:
-    raw = os.getenv('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS')
-    try:
-        seconds = 120 if raw is None else int(raw)
-    except ValueError as exc:
-        raise RuntimeError('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS must be an integer.') from exc
-    if seconds < 5 or seconds > 600:
-        raise RuntimeError('MAGISTRATE_PI_CAPABILITY_TTL_SECONDS must be between 5 and 600.')
-    return seconds * 1000
-
-
-def _pi_recovery_seconds() -> int:
-    raw = os.getenv('MAGISTRATE_PI_RECOVERY_SECONDS')
-    try:
-        seconds = 3 if raw is None else int(raw)
-    except ValueError as exc:
-        raise RuntimeError('MAGISTRATE_PI_RECOVERY_SECONDS must be an integer.') from exc
-    if seconds < 1 or seconds > 60:
-        raise RuntimeError('MAGISTRATE_PI_RECOVERY_SECONDS must be between 1 and 60.')
-    return seconds
-
-
-def _validate_pi_ownership_startup() -> bool:
-    """Validate every local boundary before an enabled Gateway serves."""
-    enabled = _pi_ownership_enabled()
-    if not enabled:
-        return False
-    _pi_capability_ttl_ms()
-    _pi_recovery_seconds()
-    PiAdapterClient.from_environment().ensure_key()
-    return True
-
-
-async def _verify_pi_adapter_startup_readiness() -> None:
-    """Authenticate an existing adapter; allow only genuine delayed arrival."""
-    try:
-        await PiAdapterClient.from_environment().probe()
-    except PiAdapterIPCError as exc:
-        if str(exc) == 'adapter-unavailable':
-            return
-        # An existing/responding endpoint that cannot prove the shared key and
-        # peer contract is a trust failure, not a readiness condition.
-        raise RuntimeError(f'Pi adapter startup trust check failed: {exc}') from None
-
-
-async def _pi_ownership_diagnostics(user_id: str, target: str) -> Dict[str, Any]:
-    """Bounded, content-free ownership readiness for one authenticated tenant."""
-    enabled = _pi_ownership_enabled()
-    ready = False
-    if enabled:
-        try:
-            ready = await PiAdapterClient.from_environment().is_ready()
-        except PiAdapterIPCError:
-            # Startup rejects configuration defects. Keep this route free of
-            # local paths and collapse a later filesystem/runtime drift to one
-            # truthful availability state.
-            ready = False
-    durable = get_pi_ownership_diagnostics(user_id, target)
-    return {
-        'schema_version': 'pi-semantic-ownership-diagnostics.v1',
-        'enabled': enabled,
-        'default_enabled': PI_OWNERSHIP_DEFAULT_ENABLED,
-        'defaulted': os.getenv('MAGISTRATE_PI_OWNERSHIP_ENABLED') is None,
-        'selection': {
-            'new_captain_turns': 'pi-semantic' if enabled else 'compatibility',
-            'pi_semantic_selected': enabled,
-        },
-        'adapter': {
-            'status': 'ready' if ready else ('unavailable' if enabled else 'disabled'),
-            'ready': ready,
-        },
-        **durable,
-        'terminal_fallback': {
-            'policy': 'unowned-legacy-only',
-            'eligible_legacy_turns': has_terminal_fallback_candidates(user_id, target),
-        },
-    }
-
-
-async def _exchange_pi_dispatch(dispatch: Dict[str, Any]) -> Dict[str, Any]:
-    """Exchange one opaque dispatch without exposing local secret material."""
-    mark_pi_dispatch_attempt(dispatch['dispatch_incarnation'])
-    client = PiAdapterClient.from_environment()
-    try:
-        response = await client.exchange(dispatch)
-    except PiAdapterIPCError as exc:
-        accepted_hash = dispatch.get('accepted_envelope_sha256')
-        if (
-            exc.code == 'unknown-dispatch'
-            and dispatch.get('state') in {'finalized', 'failed'}
-            and isinstance(accepted_hash, str)
-        ):
-            mark_pi_adapter_acknowledged(
-                dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
-                dispatch['dispatch_incarnation'], accepted_hash,
-            )
-            return {'state': dispatch['state'], 'status': 'retired'}
-        raise
-    if response.get('schema_version') == PI_IPC_SCHEMA:
-        accepted_hash = dispatch.get('accepted_envelope_sha256')
-        if (
-            response.get('event_type') != 'acknowledged'
-            or dispatch.get('state') not in {'finalized', 'failed'}
-            or response.get('dispatch_incarnation') != dispatch.get('dispatch_incarnation')
-            or response.get('accepted_envelope_sha256') != accepted_hash
-            or not isinstance(accepted_hash, str)
-        ):
-            raise PiAdapterIPCError('ipc-acknowledgement-mismatch')
-        mark_pi_adapter_acknowledged(
-            dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
-            dispatch['dispatch_incarnation'], accepted_hash,
-        )
-        return {'state': dispatch['state'], 'status': 'retired'}
-    applied = apply_pi_ownership_envelope(
-        dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
-        dispatch['capability'], response,
-    )
-    accepted_hash = applied.get('accepted_envelope_sha256')
-    if isinstance(accepted_hash, str):
-        try:
-            await client.acknowledge(dispatch, accepted_hash)
-            mark_pi_adapter_acknowledged(
-                dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
-                dispatch['dispatch_incarnation'], accepted_hash,
-            )
-        except PiAdapterIPCError as exc:
-            # If acknowledged evidence has already been pruned, canonical
-            # final/failed state is sufficient to retire this cleanup pass.
-            # Other failures remain retryable; no accepted content is at risk.
-            if exc.code == 'unknown-dispatch' and applied.get('state') in {'finalized', 'failed'}:
-                mark_pi_adapter_acknowledged(
-                    dispatch['principal_id'], CANONICAL_CONVERSATION_TARGET,
-                    dispatch['dispatch_incarnation'], accepted_hash,
-                )
-        except (PiOwnershipError, LookupError):
-            # Canonical acceptance already committed. The completed state remains
-            # in the bounded recovery set until this receipt converges.
-            pass
-    return applied
-
-
-async def _reconcile_pi_ownership_once() -> None:
-    """Run one bounded recovery pass without consulting display transport."""
-    for dispatch in get_recoverable_dispatches():
-        try:
-            await _exchange_pi_dispatch(dispatch)
-        except (PiAdapterIPCError, PiOwnershipError, LookupError, ValueError):
-            # Durable state remains retryable/fail-closed. Do not print an
-            # exception that could contain local paths or payloads.
-            continue
-
-
-async def _reconcile_pi_ownership() -> None:
-    """Recover prepared/bound adapter state from authenticated local evidence."""
-    interval = _pi_recovery_seconds()
-    while True:
-        try:
-            await _reconcile_pi_ownership_once()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # A corrupt recovery candidate cannot kill later bounded passes.
-            pass
-        await asyncio.sleep(interval)
 
 
 async def _reconcile_registered_notifications() -> None:
@@ -406,392 +196,116 @@ async def _reconcile_registered_notifications() -> None:
 
 @app.on_event('startup')
 async def start_notification_reconciler():
-    global _notification_reconciler_task, _pi_ownership_reconciler_task
-    # Resolve both strict flags at startup. Native is production-default-on;
-    # legacy must be explicitly enabled for rollback/readability.
-    native_enabled, legacy_enabled = validate_chat_feature_configuration()
+    global _notification_reconciler_task
     validate_friend_beta_configuration()
-    if native_enabled:
-        validate_magi_chat_configuration()
-        # A process cannot resume an in-flight provider socket. Preserve the
-        # reserved pair and expose a truthful, explicitly retryable failure.
-        await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
-        # Completion evidence is durable independently of its generated Chat
-        # report. Requeue interrupted report claims only after native pending
-        # rows have acquired their truthful server-restart failure state.
-        await firstmate_execution_service.recover_pending()
-    # Native normal chat must not initialize its retained Pi/Firstmate captain
-    # transport. Those trust checks run only in explicit legacy rollback mode.
-    pi_enabled = legacy_enabled and _validate_pi_ownership_startup()
-    if pi_enabled:
-        await _verify_pi_adapter_startup_readiness()
-    if legacy_enabled and fm_client.captain_producer_required:
-        # Validate persisted producer configuration without invoking Firstmate
-        # tooling during Gateway startup.
+    validate_magi_chat_configuration()
+    # A process cannot resume an in-flight provider socket. Preserve the
+    # reserved pair and expose a truthful, explicitly retryable failure.
+    await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
+    await firstmate_execution_service.recover_pending()
+    if fm_client.captain_producer_required:
         producer = fm_client.get_producer_readiness()
         if producer['status'] != 'ready':
             raise RuntimeError('The required pinned Firstmate producer is unavailable.')
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
-    if pi_enabled and os.getenv('MAGISTRATE_ENV', '').lower() not in {'test', 'testing'}:
-        _pi_ownership_reconciler_task = asyncio.create_task(_reconcile_pi_ownership())
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
-    global _notification_reconciler_task, _pi_ownership_reconciler_task
-    tasks = [
-        task for task in (
-            _notification_reconciler_task, _pi_ownership_reconciler_task,
-        ) if task
-    ]
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    global _notification_reconciler_task
+    if _notification_reconciler_task:
+        _notification_reconciler_task.cancel()
+        await asyncio.gather(_notification_reconciler_task, return_exceptions=True)
     _notification_reconciler_task = None
-    _pi_ownership_reconciler_task = None
 
 
-# The captain thread is the conversation Magistrate owns end to end, and the
-# only one whose transcript comes from the canonical record. Worker panes also
-# contain autonomous and Firstmate-authored turns with no Magistrate submission
-# id, so they keep reading terminal history until every turn has durable identity.
-CANONICAL_CONVERSATION_TARGET = 'captain'
-# Keep a strong reference while a disconnected request's producer finishes.
-# The set is intentionally process-local: it is recovery for an in-flight POST,
-# not a claim of durable producer ownership across a Gateway restart.
-_detached_prompt_tasks: set[asyncio.Task[Any]] = set()
-
-
-def _require_legacy_chat_api() -> None:
+async def _bounded_event_frame(websocket: WebSocket, timeout: float) -> str:
+    raw = await asyncio.wait_for(websocket.receive_text(), timeout=timeout)
     try:
-        _, enabled = validate_chat_feature_configuration()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail='Legacy chat configuration is invalid.') from exc
-    if not enabled:
-        raise HTTPException(
-            status_code=404,
-            detail='Legacy captain chat is disabled. Use the native Magi chat API.',
-        )
-
-
-async def _ingest_target_snapshot(user_id: str, target: str, lines: int = HERDR_MAX_READ_LINES) -> Optional[str]:
-    """Fold the current terminal snapshot into the canonical record.
-
-    This is the only place terminal output enters the conversation. A working
-    agent can expose a transiently empty snapshot, and Herdr may be unreachable
-    entirely; neither may hide the record that already exists. The failure is
-    returned rather than swallowed so the caller reports it instead of
-    presenting a stale transcript as a current one.
-    """
-    # Avoid even a cosmetic Herdr read when legacy compatibility is disabled or
-    # every candidate already has a semantic owner. Native turns never reach
-    # this function.
-    if not legacy_chat_enabled() or not has_terminal_fallback_candidates(user_id, target):
-        return None
-    try:
-        record_compatibility_read(user_id, 'terminal_chat_reads')
-        snapshot = await herdr_client.read_typed_rows(target, lines=lines)
-        status = str(snapshot.get('agent_status') or '').strip().lower()
-        response_complete: Optional[bool]
-        if status in {'idle', 'done', 'complete', 'completed'}:
-            response_complete = True
-        elif status in {'working', 'blocked'}:
-            response_complete = False
-        else:
-            response_complete = None
-        ingest_terminal_rows(
-            user_id, target, snapshot.get('rows', []),
-            response_complete=response_complete,
-        )
-        return None
-    except Exception as exc:
-        record_ingest_error(user_id, target, exc)
-        # Exception strings can contain pane excerpts, paths, or transport
-        # credentials. The canonical record reports only a classification.
-        code = re.sub(r'[^A-Za-z0-9._-]+', '-', type(exc).__name__)[:64] or 'ingest-error'
-        return f'{code}: terminal snapshot unavailable'
-
-
-def _record_prompt_result(user_id: str, target: str, client_message_id: str, turn_id: str, result: Any) -> None:
-    """Persist the provider outcome independently of the HTTP response.
-
-    The prompt row is durable before Herdr is called. Keeping this small result
-    fold separate lets an interrupted POST finish its provider task without
-    asking a later client to guess the assistant identity from terminal text.
-    """
-    if not isinstance(result, dict) or result.get('status') == 'error' or result.get('error'):
-        set_turn_status(
-            user_id, target, client_message_id, 'failed', terminal_fallback_only=True,
-        )
-        return
-    response = result.get('response')
-    if isinstance(response, str) and response.strip():
-        record_primary_reply(user_id, target, turn_id, response)
-
-
-async def _finish_detached_prompt(
-    user_id: str, target: str, client_message_id: str, turn_id: str, provider_task: 'asyncio.Task[Any]',
-) -> None:
-    """Finish a provider call after the browser has interrupted its POST.
-
-    ``asyncio.shield`` keeps the producer task alive when the request scope is
-    cancelled. This is best-effort process-local recovery; a producer that only
-    exposes mutable terminal output still depends on the normal canonical poll.
-    """
-    try:
-        result = await provider_task
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        set_turn_status(
-            user_id, target, client_message_id, 'failed', terminal_fallback_only=True,
-        )
-        return
-    _record_prompt_result(user_id, target, client_message_id, turn_id, result)
-
-
-def _schedule_detached_prompt(
-    user_id: str, target: str, client_message_id: str, turn_id: str, provider_task: 'asyncio.Task[Any]',
-) -> None:
-    task = asyncio.create_task(_finish_detached_prompt(
-        user_id, target, client_message_id, turn_id, provider_task,
-    ))
-    _detached_prompt_tasks.add(task)
-    task.add_done_callback(_detached_prompt_tasks.discard)
+        if len(raw.encode('utf-8', errors='strict')) > 4096:
+            await websocket.close(code=1009)
+            raise WebSocketDisconnect(code=1009)
+    except UnicodeEncodeError:
+        await websocket.close(code=1008)
+        raise WebSocketDisconnect(code=1008)
+    return raw
 
 
 @app.websocket('/api/v1/events')
-async def agent_events(websocket: WebSocket):
-    """Authenticate in the first frame; credentials never travel in a URL."""
-    principal = None
-    requested_target = None
+async def application_events(websocket: WebSocket):
+    """Deliver only Native Magi messages and structured Activity changes."""
     await websocket.accept()
     try:
-        if principal is None:
-            raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
-            try:
-                oversized_auth_frame = len(raw.encode('utf-8', errors='strict')) > 4096
-            except UnicodeEncodeError:
-                await websocket.close(code=1008)
-                return
-            if oversized_auth_frame:
-                await websocket.close(code=1009)
-                return
-            message = json.loads(raw)
-            token = message.get('token') if isinstance(message, dict) and message.get('type') == 'auth' else None
-            requested_target = message.get('target') if isinstance(message, dict) else None
-            requested_chat_mode = message.get('chat_mode') if isinstance(message, dict) else None
-            if not isinstance(token, str):
-                await websocket.close(code=1008)
-                return
-            # Browser WebSocket APIs cannot set an Authorization header. The
-            # first application frame is the equivalent bearer transport.
-            from app.auth import _principal_from_token
-            try:
-                principal = _principal_from_token(token)
-            except HTTPException:
-                await websocket.close(code=1008)
-                return
+        raw = await _bounded_event_frame(websocket, 10)
+        message = json.loads(raw)
+        if not isinstance(message, dict) or set(message) != {'type', 'token', 'activity_after'}:
+            await websocket.close(code=1008)
+            return
+        token = message.get('token')
+        activity_after = message.get('activity_after')
+        if (message.get('type') != 'auth' or not isinstance(token, str)
+                or type(activity_after) is not int
+                or not 0 <= activity_after <= 9_007_199_254_740_991):
+            await websocket.close(code=1008)
+            return
+        from app.auth import _principal_from_token
+        try:
+            principal = _principal_from_token(token)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
         if not principal.has('read'):
             await websocket.close(code=1008)
             return
-        if requested_target is not None and not (
-            isinstance(requested_target, str) and 0 < len(requested_target) <= 200
-            and not any(
-                ord(character) < 32 or 127 <= ord(character) <= 159
-                or 0xD800 <= ord(character) <= 0xDFFF or ord(character) in {0x2028, 0x2029}
-                for character in requested_target
-            )
-        ):
-            await websocket.close(code=1008)
-            return
-        target = requested_target if principal is not None and isinstance(requested_target, str) and requested_target else 'captain'
-        if requested_chat_mode is None:
-            chat_mode = 'native' if native_chat_enabled() else 'legacy'
-        elif requested_chat_mode in {'native', 'legacy'}:
-            chat_mode = requested_chat_mode
-        else:
-            await websocket.close(code=1008)
-            return
-        if (
-            (chat_mode == 'native' and (not native_chat_enabled() or target != CANONICAL_CONVERSATION_TARGET))
-            or (chat_mode == 'legacy' and not legacy_chat_enabled())
-        ):
-            await websocket.close(code=1008)
-            return
-        activity_after_present = isinstance(message, dict) and 'activity_after' in message
-        activity_after = message.get('activity_after') if isinstance(message, dict) else None
-        activity_enabled = type(activity_after) is int and 0 <= activity_after <= 9_007_199_254_740_991
-        if activity_after_present and not activity_enabled:
-            await websocket.close(code=1008)
-            return
-        activity_cursor = activity_after if activity_enabled else 0
-        seen: set[str] = set()
+        activity_cursor = activity_after
         revisions: Dict[str, tuple[Any, ...]] = {}
-        await websocket.send_json({'type': 'connected', 'target': target})
+        await websocket.send_json({
+            'type': 'connected', 'schema_version': 'magistrate.events.v2',
+        })
         while True:
             try:
-                control = await asyncio.wait_for(websocket.receive_text(), timeout=0.75)
-                try:
-                    oversized_control_frame = len(control.encode('utf-8', errors='strict')) > 4096
-                except UnicodeEncodeError:
+                control = json.loads(await _bounded_event_frame(websocket, 0.75))
+                if not isinstance(control, dict) or set(control) != {'activity_after'}:
                     await websocket.close(code=1008)
                     return
-                if oversized_control_frame:
-                    await websocket.close(code=1009)
+                requested_cursor = control['activity_after']
+                if (type(requested_cursor) is not int
+                        or not activity_cursor <= requested_cursor <= 9_007_199_254_740_991):
+                    await websocket.close(code=1008)
                     return
-                try:
-                    message = json.loads(control)
-                except json.JSONDecodeError:
-                    message = {}
-                if isinstance(message, dict):
-                    subscription_changed = False
-                    if 'target' in message:
-                        requested = message['target']
-                        if not (
-                            isinstance(requested, str) and 0 < len(requested) <= 200
-                            and not any(
-                                ord(character) < 32 or 127 <= ord(character) <= 159
-                                or 0xD800 <= ord(character) <= 0xDFFF or ord(character) in {0x2028, 0x2029}
-                                for character in requested
-                            )
-                        ):
-                            await websocket.close(code=1008)
-                            return
-                        target = requested
-                        if (
-                            (chat_mode == 'native' and target != CANONICAL_CONVERSATION_TARGET)
-                            or (chat_mode == 'legacy' and not legacy_chat_enabled())
-                        ):
-                            await websocket.close(code=1008)
-                            return
-                        subscription_changed = True
-                    if 'chat_mode' in message:
-                        requested_mode = message['chat_mode']
-                        if requested_mode not in {'native', 'legacy'}:
-                            await websocket.close(code=1008)
-                            return
-                        if (
-                            (requested_mode == 'native' and (
-                                not native_chat_enabled() or target != CANONICAL_CONVERSATION_TARGET
-                            ))
-                            or (requested_mode == 'legacy' and not legacy_chat_enabled())
-                        ):
-                            await websocket.close(code=1008)
-                            return
-                        chat_mode = requested_mode
-                        subscription_changed = True
-                    if 'activity_after' in message:
-                        if not (
-                            type(message['activity_after']) is int
-                            and 0 <= message['activity_after'] <= 9_007_199_254_740_991
-                        ):
-                            await websocket.close(code=1008)
-                            return
-                        activity_enabled = True
-                        activity_cursor = message['activity_after']
-                        subscription_changed = True
-                    if subscription_changed:
-                        seen.clear()
-                        revisions.clear()
-                        await websocket.send_json({'type': 'subscribed', 'target': target})
+                activity_cursor = requested_cursor
             except asyncio.TimeoutError:
                 pass
-            if target == CANONICAL_CONVERSATION_TARGET and chat_mode == 'native':
-                # Native delivery reads only additive Magi SQLite rows. It has
-                # no terminal ingestion or execution-infrastructure fallback.
-                payload = await magi_chat_service.current_conversation(principal.user_id)
-                fresh = [
-                    item for item in payload['messages']
-                    if revisions.get(item['id']) != (item['revision'], item['status'])
-                ]
-                revisions = {
-                    item['id']: (item['revision'], item['status'])
-                    for item in payload['messages']
-                }
-                if fresh:
-                    await websocket.send_json({
-                        'type': 'magi_messages',
-                        'schema_version': payload['schema_version'],
-                        'target': target,
-                        'conversation_id': payload['conversation_id'],
-                        'messages': fresh,
-                    })
-                if activity_enabled:
-                    try:
-                        activity_page = list_activity(
-                            principal.user_id, after=activity_cursor, limit=100,
-                        )
-                    except ValueError:
-                        await websocket.close(code=1008)
-                        return
-                    if activity_page['records']:
-                        activity_cursor = activity_page['next_cursor']
-                        await websocket.send_json({'type': 'activity_records', **activity_page})
-                continue
-            if target == CANONICAL_CONVERSATION_TARGET:
-                # Legacy canonical delivery: ingest the snapshot, then send only the
-                # messages whose revision this connection has not seen. A
-                # re-read that changed nothing sends nothing, and a revised
-                # message arrives with the id the client already rendered.
-                await _ingest_target_snapshot(principal.user_id, target)
-                payload = list_conversation_messages(principal.user_id, target)
-                fresh = [
-                    item for item in payload['messages']
-                    if revisions.get(item['id']) != (
-                        item['revision'], item['turn_status'], item['lifecycle_state'],
-                        item['lifecycle_revision'],
-                    )
-                ]
-                # Rebuilt rather than accumulated: the delivered window slides,
-                # so this stays bounded by the window instead of by session age.
-                # Turn status participates because idle can complete an unchanged
-                # final prose row and clients must observe that transition.
-                revisions = {
-                    item['id']: (
-                        item['revision'], item['turn_status'], item['lifecycle_state'],
-                        item['lifecycle_revision'],
-                    )
-                    for item in payload['messages']
-                }
-                if fresh:
-                    await websocket.send_json({
-                        'type': 'conversation_messages', 'schema_version': CONVERSATION_SCHEMA,
-                        'target': target, 'messages': fresh,
-                    })
-                if activity_enabled:
-                    # Delivery reads only durable canonical rows. Structured
-                    # producers push source events; no read path polls runtime.
-                    try:
-                        activity_page = list_activity(
-                            principal.user_id, after=activity_cursor, limit=100,
-                        )
-                    except ValueError:
-                        await websocket.close(code=1008)
-                        return
-                    if activity_page['records']:
-                        activity_cursor = activity_page['next_cursor']
-                        await websocket.send_json({
-                            'type': 'activity_records',
-                            **activity_page,
-                        })
-                continue
-            # Worker panes still read their transcript from the terminal; see
-            # CHAT_ARCHITECTURE_FIX.md for why that path is transitional.
-            history = await herdr_client.get_agent_history(target, lines=DEFAULT_HISTORY_LINES)
-            fresh = []
-            for item in history.get('messages', []):
-                # Stable history ids keep two legitimate identical turns
-                # distinct while repeated snapshots remain idempotent.
-                key = f"id:{item.get('id')}" if item.get('id') else f"{item.get('role')}|{item.get('kind')}|{item.get('text')}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                fresh.append(item)
+
+            payload = await magi_chat_service.current_conversation(principal.user_id)
+            fresh = [
+                item for item in payload['messages']
+                if revisions.get(item['id']) != (item['revision'], item['status'])
+            ]
+            revisions = {
+                item['id']: (item['revision'], item['status'])
+                for item in payload['messages']
+            }
             if fresh:
-                await websocket.send_json({'type': 'agent_history', 'target': history.get('target', target), 'messages': fresh})
+                await websocket.send_json({
+                    'type': 'magi_messages',
+                    'schema_version': 'magistrate.events.v2',
+                    'payload_schema_version': payload['schema_version'],
+                    'conversation_id': payload['conversation_id'],
+                    'messages': fresh,
+                })
+            activity_page = list_activity(
+                principal.user_id, after=activity_cursor, limit=100,
+            )
+            if activity_page['records']:
+                activity_cursor = activity_page['next_cursor']
+                await websocket.send_json({
+                    **activity_page,
+                    'type': 'activity_records',
+                    'schema_version': 'magistrate.events.v2',
+                    'payload_schema_version': activity_page['schema_version'],
+                })
     except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError):
         try:
             await websocket.close(code=1008)
@@ -913,9 +427,6 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
     }
     provider = magi_chat_readiness()
     producer = fm_client.get_producer_readiness()
-    pi_ownership = await _pi_ownership_diagnostics(
-        principal.user_id, CANONICAL_CONVERSATION_TARGET,
-    )
     degraded: List[str] = []
     if provider['enabled'] and provider['status'] != 'configured':
         degraded.append('magi-provider')
@@ -923,8 +434,6 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         degraded.append('firstmate-execution-interface')
     if producer['required'] and producer['status'] != 'ready':
         degraded.append('firstmate-producer')
-    if pi_ownership['enabled'] and not pi_ownership['adapter']['ready']:
-        degraded.append('pi-ownership-adapter')
     return {
         'status': 'degraded' if degraded else 'healthy',
         'degraded_sources': degraded,
@@ -944,30 +453,17 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         'firstmate_available': execution_interface['status'] == 'configured',
         'firstmate_tasks_count': runtime['known_objectives'],
         'firstmate_producer': producer,
-        'pi_semantic_ownership': pi_ownership,
     }
 
 
 @app.get('/api/v1/diagnostics/soak')
 async def get_soak_diagnostics(principal: Principal = Depends(require_scope('read'))):
     """Bounded P0 evidence without prompts, terminal bytes, or source payloads."""
-    target = CANONICAL_CONVERSATION_TARGET
     return {
         'schema_version': 'soak-diagnostics.v1',
-        'target': target,
-        'conversation_ingest': get_ingest_diagnostics(principal.user_id, target),
-        'turn_lifecycle': get_lifecycle_diagnostics(principal.user_id, target),
+        'target': 'captain',
         'activity_sources': source_diagnostics(principal.user_id),
         'firstmate_producer': fm_client.get_producer_readiness(),
-        'pi_semantic_ownership': await _pi_ownership_diagnostics(
-            principal.user_id, target,
-        ),
-        'chat_features': {
-            'native_enabled': native_chat_enabled(),
-            'native_default_enabled': NATIVE_CHAT_DEFAULT_ENABLED,
-            'legacy_enabled': legacy_chat_enabled(),
-            'legacy_default_enabled': LEGACY_CHAT_DEFAULT_ENABLED,
-        },
         'native_chat': await magi_chat_service.diagnostics(principal.user_id),
     }
 
@@ -1204,7 +700,7 @@ async def get_canonical_activity_snapshot(
             'sources': source_diagnostics(principal.user_id),
             'reconciliation': 'persisted-only',
         }
-    except (ValueError, MagiEventConflict) as exc:
+    except (ValueError, SourceEventConflict) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
@@ -1224,7 +720,7 @@ async def get_canonical_activity(
         return await _activity_catch_up(
             principal.user_id, after=after, limit=limit, reconcile=reconcile,
         )
-    except (ValueError, MagiEventConflict) as exc:
+    except (ValueError, SourceEventConflict) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail='Structured activity reconciliation is unavailable.') from exc
@@ -1505,51 +1001,6 @@ async def transcribe_voice_input(file: Optional[UploadFile] = File(None), source
     except TranscriptionError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
-@app.post('/api/v1/voice/moves')
-async def create_voice_move(request: VoiceMoveRequest, principal: Principal = Depends(require_scope('voice'))):
-    _require_legacy_chat_api()
-    if _pi_ownership_enabled():
-        # This legacy voice service dispatches through Herdr before it creates a
-        # canonical captain turn. It cannot truthfully manufacture Pi ownership,
-        # so the default semantic channel disables this seam rather than silently bypassing
-        # source-native correlation. Typed captain prompts remain available.
-        raise HTTPException(
-            status_code=503,
-            detail='Voice moves are unavailable while Pi semantic ownership is enabled.',
-        )
-    try:
-        result = await voice_move_service.handle(request, principal.user_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # Voice Mode shares the captain thread, so a completed voice turn is
-    # recorded canonically exactly like a typed one. Without this the chat
-    # transcript and the voice transcript would be two different records.
-    if result.get('status') == 'completed':
-        client_message_id = request.client_message_id or result.get('move_id')
-        if client_message_id:
-            turn = record_prompt(
-                principal.user_id, CANONICAL_CONVERSATION_TARGET, client_message_id,
-                result.get('utterance') or request.utterance, source='voice',
-            )
-            response = result.get('response')
-            if isinstance(response, str) and response.strip():
-                record_primary_reply(
-                    principal.user_id, CANONICAL_CONVERSATION_TARGET, turn['turn_id'], response,
-                    source='voice',
-                )
-            return {
-                **result,
-                'conversation': {
-                    'schema_version': CONVERSATION_SCHEMA,
-                    'target': CANONICAL_CONVERSATION_TARGET,
-                    'conversation_id': turn['conversation_id'],
-                    'turn_id': turn['turn_id'],
-                    'assistant_message_id': turn['assistant_message_id'],
-                    'messages': turn_messages(turn['turn_id']),
-                },
-            }
-    return result
-
 # FLEET, ATTENTION & AGENTS
 @app.get('/api/v1/execution/capabilities')
 async def get_execution_capability_inventory(principal: Principal = Depends(require_scope('read'))):
@@ -1740,336 +1191,16 @@ async def report_agent_migration_transition(agent_id: str, request_id: str, cont
 async def get_attention(principal: Principal = Depends(require_scope('read'))):
     return await attention_service.get_unified_attention_items(principal.user_id)
 
-@app.get('/api/v1/captain/output')
-async def get_captain_output(
-    lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
-    principal: Principal = Depends(require_scope('read')),
-):
-    _require_legacy_chat_api()
-    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
-    record_compatibility_read(principal.user_id, 'terminal_chat_reads')
-    output = await herdr_client.read_agent_output('captain', lines=lines)
-    return {'output': output}
-
-@app.get('/api/v1/agents/{agent_id}/history')
-async def get_agent_history(
-    agent_id: str,
-    lines: int = Query(DEFAULT_HISTORY_LINES, ge=0, le=HERDR_MAX_READ_LINES),
-    before: Optional[str] = Query(None, min_length=1, max_length=64),
-    after: Optional[str] = Query(None, min_length=1, max_length=64),
-    principal: Principal = Depends(require_scope('read')),
-):
-    if before and after:
-        raise HTTPException(status_code=422, detail='Use only one history cursor.')
-    _require_legacy_chat_api()
-    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
-    record_compatibility_read(principal.user_id, 'terminal_chat_reads')
-    try:
-        history_kwargs = {'lines': lines}
-        if before is not None: history_kwargs['before'] = before
-        if after is not None: history_kwargs['after'] = after
-        return await herdr_client.get_agent_history(agent_id, **history_kwargs)
-    except ValueError as exc:
-        raise HTTPException(status_code=410, detail=str(exc)) from exc
-
-@app.post('/api/v1/captain/prompt')
-async def send_captain_prompt(contract: UniversalInputContract, principal: Principal = Depends(require_scope('command'))):
-    # This entire route is the retained terminal/Pi compatibility transport.
-    _require_legacy_chat_api()
-    use_pi_ownership = (
-        _pi_ownership_enabled() and contract.target == CANONICAL_CONVERSATION_TARGET
-    )
-    explicit_execution_selection = any(
-        value is not None for value in (
-            contract.profile_id, contract.harness, contract.provider,
-            contract.model, contract.variant,
-        )
-    )
-    if use_pi_ownership and explicit_execution_selection:
-        # This channel binds the already-running, explicitly activated Pi
-        # captain session. Per-request model routing is a separate contract.
-        raise HTTPException(
-            status_code=409,
-            detail='The Pi ownership channel uses the current captain session and cannot apply a per-request execution profile.',
-        )
-    selection = None
-    if contract.profile_id:
-        try:
-            selection = profile_selection(contract.profile_id, principal.user_id)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
-        except ValueError as exc:
-            if get_execution_preferences(principal.user_id)['unavailable_behavior'] != 'fallback':
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            # Fallback is explicit user policy, never the default. The response
-            # remains a current-session prompt and does not pretend migration ran.
-            selection = None
-    elif contract.harness or contract.model:
-        if not contract.harness or not contract.model:
-            raise HTTPException(status_code=422, detail='A harness and model must be selected together.')
-        try:
-            selection = validate_execution_selection(contract.harness, contract.model, user_id=principal.user_id, provider=contract.provider, variant=contract.variant)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
-        except ValueError as exc:
-            if get_execution_preferences(principal.user_id)['unavailable_behavior'] == 'fallback':
-                selection = None
-            else:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-    elif 'profile_id' not in contract.model_fields_set and not use_pi_ownership:
-        preference = get_execution_preferences(principal.user_id)
-        if preference['profile_id']:
-            try:
-                selection = profile_selection(preference['profile_id'], principal.user_id)
-            except RuntimeError as exc:
-                raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
-            except ValueError as exc:
-                if preference['unavailable_behavior'] != 'fallback':
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-                selection = None
-    prompt_text = contract.text or ''
-    stored_uploads = []
-    if contract.attachments:
-        # Attachment ids are opaque and must belong to this principal. Verify
-        # every piece of client metadata against the stored record before the
-        # provider sees a manifest; names and sizes from JSON are never trusted.
-        for attachment in contract.attachments:
-            stored = get_upload(principal.user_id, attachment.upload_id)
-            if not stored:
-                raise HTTPException(status_code=404, detail='One or more attached files are unavailable.')
-            try:
-                validate_upload_metadata(stored, attachment.filename, attachment.media_type, attachment.size)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            stored_uploads.append(stored)
-        if contract.message_id:
-            try:
-                associate_uploads(principal.user_id, contract.message_id, [item['upload_id'] for item in stored_uploads])
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # The current prompt contracts are text-only. Forward a bounded,
-        # human-readable manifest through the selected provider path; never put
-        # bytes, local paths, credentials, or bearer tokens in prompt history.
-        # A provider that cannot accept even this manifest must
-        # return its real error, which the client surfaces instead of claiming
-        # delivery.
-        attachment_summary = ', '.join(
-            f"{item['filename']} ({item['media_type']}, {item['size']} bytes)" for item in stored_uploads
-        )
-        prompt_text = prompt_text + ('\n\n' if prompt_text else '') + 'Attached files: ' + attachment_summary
-    # The canonical turn is created before the provider sees the prompt: the
-    # frontend's message_id is the submission identity, so a retry or replay
-    # reuses this turn instead of minting a second user message, and the
-    # selected source can finish the reserved reply even when it arrives later.
-    client_message_id = contract.message_id or 'srv-' + secrets.token_hex(8)
-    try:
-        turn = record_prompt(
-            principal.user_id, contract.target, client_message_id, contract.text or '',
-            source='text', submitted_text=prompt_text, attachments=stored_uploads,
-            pi_semantic=use_pi_ownership,
-            pi_capability_ttl_ms=_pi_capability_ttl_ms() if use_pi_ownership else 120_000,
-        )
-    except PiOwnershipError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    if use_pi_ownership:
-        record_compatibility_read(principal.user_id, 'pi_ownership_chat_reads')
-        # The adapter invokes Pi's native message API. Herdr is deliberately not
-        # called on this path and cannot supply or repair semantic ownership.
-        durable_state = turn['pi_dispatch']['state']
-        if durable_state == 'finalized':
-            applied = {'state': 'finalized', 'status': 'duplicate'}
-        elif durable_state == 'failed':
-            raise HTTPException(
-                status_code=409,
-                detail='This Pi-owned captain turn already ended without an accepted response.',
-            )
-        else:
-            try:
-                applied = await _exchange_pi_dispatch(turn['pi_dispatch'])
-            except PiAdapterIPCError as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail='The local Pi captain adapter is unavailable; the prepared turn remains recoverable.',
-                ) from exc
-            except (PiOwnershipError, LookupError, ValueError) as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail='The local Pi captain adapter returned invalid ownership evidence.',
-                ) from exc
-        if applied['state'] == 'failed':
-            raise HTTPException(
-                status_code=502,
-                detail='The local Pi captain adapter ended this dispatch without an accepted response.',
-            )
-        if applied['state'] not in {'bound', 'finalized'}:
-            raise HTTPException(
-                status_code=503,
-                detail='The local Pi captain adapter has not durably bound the prompt; recovery will continue.',
-            )
-        result: Dict[str, Any] = {
-            'status': 'accepted',
-            'transport': 'pi-semantic',
-        }
-    else:
-        # A browser refresh can cancel this legacy request while Herdr is still
-        # producing the answer. Owned Pi turns never enter this branch.
-        provider_task = asyncio.create_task(
-            herdr_client.prompt_agent(contract.target, prompt_text, **(selection or {}))
-        )
-        try:
-            result = await asyncio.shield(provider_task)
-        except asyncio.CancelledError:
-            _schedule_detached_prompt(
-                principal.user_id, contract.target, client_message_id, turn['turn_id'], provider_task,
-            )
-            raise
-        except Exception:
-            set_turn_status(
-                principal.user_id, contract.target, client_message_id, 'failed',
-                terminal_fallback_only=True,
-            )
-            raise
-        _record_prompt_result(principal.user_id, contract.target, client_message_id, turn['turn_id'], result)
-    return {
-        **result,
-        'message_id': client_message_id,
-        'conversation': {
-            'schema_version': CONVERSATION_SCHEMA,
-            'target': contract.target,
-            'conversation_id': turn['conversation_id'],
-            'turn_id': turn['turn_id'],
-            'objective_id': turn['objective_id'],
-            'run_id': turn['run_id'],
-            'assistant_message_id': turn['assistant_message_id'],
-            'lifecycle': get_turn_lifecycle(principal.user_id, contract.target, turn['turn_id']),
-            'messages': turn_messages(turn['turn_id']),
-        },
-    }
-
-# CANONICAL CONVERSATION RECORD
-# The chat transcript is the gateway's own record (see app/conversation_store.py
-# and CHAT_ARCHITECTURE_FIX.md). Terminal snapshots only feed it.
-@app.get('/api/v1/conversations/{target}/messages')
-async def get_conversation_messages(
-    target: str,
-    limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
-    principal: Principal = Depends(require_scope('read')),
-):
-    _require_legacy_chat_api()
-    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
-    # Canonical ingestion always asks for every row Herdr still retains. A
-    # caller-controlled viewport limit cannot be allowed to erase context.
-    ingest_error = await _ingest_target_snapshot(principal.user_id, target)
-    # The record is still authoritative when the live snapshot could not be
-    # read; the failure travels with it rather than being presented as success.
-    return {**list_conversation_messages(principal.user_id, target, limit=limit), 'ingest_error': ingest_error}
-
-
-@app.get('/api/v1/conversations/{target}/replay')
-async def replay_conversation(
-    target: str,
-    after: int = Query(-1, ge=-1, le=9_007_199_254_740_991),
-    limit: int = Query(MAX_MESSAGE_WINDOW, ge=1, le=MAX_MESSAGE_WINDOW),
-    principal: Principal = Depends(require_scope('read')),
-):
-    """Catch up legacy canonical rows after a durable change cursor."""
-    _require_legacy_chat_api()
-    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
-    try:
-        return replay_messages(principal.user_id, target, after=after, limit=limit)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.get('/api/v1/conversations/{target}/turns/{turn_id}')
-async def inspect_conversation_turn(
-    target: str,
-    turn_id: str,
-    principal: Principal = Depends(require_scope('read')),
-):
-    _require_legacy_chat_api()
-    record_compatibility_read(principal.user_id, 'legacy_chat_reads')
-    try:
-        return get_turn_lifecycle(principal.user_id, target, turn_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post('/api/v1/conversations/{target}/turns/{turn_id}/assistant-messages')
-async def reserve_conversation_assistant_message(
-    target: str,
-    turn_id: str,
-    contract: AssistantMessageReservationContract,
-    principal: Principal = Depends(require_any_scope('response', 'command')),
-):
-    if target != CANONICAL_CONVERSATION_TARGET:
-        raise HTTPException(status_code=422, detail='Semantic assistant messages are supported only for captain chat.')
-    _require_legacy_chat_api()
-    try:
-        return reserve_assistant_message(
-            principal.user_id, target, turn_id, contract.idempotency_key,
-            kind=contract.kind,
-        )
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except MagiEventConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.post('/api/v1/conversations/{target}/events')
-async def post_magi_response_event(
-    target: str,
-    event: MagiEventContract,
-    principal: Principal = Depends(require_any_scope('response', 'command')),
-):
-    """Accept one authenticated, strictly validated semantic response event."""
-    if target != CANONICAL_CONVERSATION_TARGET:
-        raise HTTPException(status_code=422, detail='Structured response events are supported only for captain chat.')
-    _require_legacy_chat_api()
-    try:
-        return apply_magi_event(principal.user_id, target, event)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except MagiEventConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.post('/api/v1/conversations/{target}/reset')
-async def post_conversation_reset(target: str, principal: Principal = Depends(require_scope('command'))):
-    """Discard this legacy conversation's canonical record for a fresh thread."""
-    _require_legacy_chat_api()
-    try:
-        return reset_conversation(principal.user_id, target)
-    except MagiEventConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post('/api/v1/conversations/{target}/turns/{client_message_id}/cancel')
-async def post_conversation_turn_cancel(
-    target: str, client_message_id: str, principal: Principal = Depends(require_scope('command')),
-):
-    _require_legacy_chat_api()
-    set_turn_status(principal.user_id, target, client_message_id, 'cancelled')
-    return {'status': 'cancelled', 'target': target, 'client_message_id': client_message_id}
-
 @app.post('/api/v1/agents/{agent_id}/send-key')
 async def send_agent_key(agent_id: str, key: str = Query('Enter'), principal: Principal = Depends(require_scope('command'))):
-    _require_legacy_chat_api()
     return await herdr_client.send_agent_key(agent_id, key=key)
 
 @app.post('/api/v1/agents/{agent_id}/interrupt')
 async def interrupt_agent(agent_id: str, principal: Principal = Depends(require_scope('command'))):
-    _require_legacy_chat_api()
     return await herdr_client.interrupt_agent(agent_id)
 
 @app.post('/api/v1/agents/{agent_id}/rename')
 async def rename_agent(agent_id: str, contract: RenameAgentContract, principal: Principal = Depends(require_scope('command'))):
-    _require_legacy_chat_api()
     return await herdr_client.rename_agent(agent_id, contract.name)
 
 # STATIC SPA FALLBACK FOR DIRECT DEEP LINKS

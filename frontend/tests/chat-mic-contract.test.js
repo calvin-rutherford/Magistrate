@@ -14,7 +14,7 @@ test('chat mic contract covers every truthful capture state and hold release gua
   assert.match(chat, /holdActiveRef\.current/);
   assert.match(chat, /capture\.cancel\(\)/);
   assert.match(chat, /voiceTranscriptBehavior === 'auto-send'/);
-  assert.match(chat, /submitPrompt\(combined/);
+  assert.match(chat, /queuePrompt\(transcript, 'voice'/);
 });
 
 test('voice preferences have durable keys, defaults, validation, and save functions', () => {

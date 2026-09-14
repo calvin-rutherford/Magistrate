@@ -27,10 +27,10 @@ test('cancel and permission errors recover without entering chat', () => {
   const source = readFileSync(new URL('../app/voice.tsx', import.meta.url), 'utf8');
   const capture = readFileSync(new URL('../src/input/VoiceInputAdapter.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /router\.push\s*\(\s*['"]\/chat/);
-  // Voice Mode submits through the move endpoint and shares the captain thread;
-  // the client message id is what ties its optimistic row to the canonical turn
-  // the gateway records (see ../CHAT_ARCHITECTURE_FIX.md).
-  assert.match(source, /submitVoiceMove\(utterance, 'captain', key, false, undefined, clientMessageId\)/);
-  assert.match(source, /reconcileCanonicalMessages\(getConversationMessages\('captain'\), canonical\)/);
+  // Voice Mode submits through the same provider-native endpoint as Chat; the
+  // client message id ties its optimistic row to the owner-scoped canonical turn.
+  assert.match(source, /sendMagiChatPrompt\(\s*utterance, clientMessageId, 'voice'/);
+  assert.match(source, /reconcileMagiMessages\(current, result\.messages\)/);
+  assert.doesNotMatch(source, /submitVoiceMove/);
   assert.match(capture, /Microphone permission was denied/);
 });
