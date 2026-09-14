@@ -54,7 +54,17 @@ explicitly select rollback mode; normal native chat never enters it. See
 [`pi-semantic-ownership-v1.md`](./pi-semantic-ownership-v1.md) for that retained
 contract.
 
-The additive `activity.v1` ledger consumes only structured Firstmate snapshot, append-only supervision, and explicit `fm-captain-event.v1` facts. It has principal-scoped rows, source-native ids, independent cursor/prefix hashes, restart reconciliation, HTTP replay, opt-in WebSocket catch-up, and bounded diagnostics. It never derives an audience or lifecycle from terminal prose. See [`canonical-lifecycle-activity-v1.md`](./canonical-lifecycle-activity-v1.md) and the program traceability baseline in [`opus/soak-p0-day1-baseline.md`](./opus/soak-p0-day1-baseline.md).
+The additive `activity.v1` ledger consumes authenticated, pushed
+`firstmate.execution-event.v1` facts and persists principal-scoped objective,
+task, run, phase, and evidence identity. Fleet/runtime/agent, Attention,
+notification, recent-activity, and Activity reads are SQLite projections; they
+do not run a Firstmate snapshot or inspect Herdr. Structured decisions arrive
+through a separate complete push projection. The historical snapshot/journal
+adapter is retained only for explicit legacy migration/rollback and has no
+startup timer or read-route caller. See
+[`gateway-runtime-observation-boundary.md`](./gateway-runtime-observation-boundary.md),
+[`canonical-lifecycle-activity-v1.md`](./canonical-lifecycle-activity-v1.md),
+and [`magi-firstmate-execution-v1.md`](./magi-firstmate-execution-v1.md).
 
 These tenant-qualified foundations prevent owner-data crossover but do not claim the future Friend/multi-user product, complete worker transcripts, a visual activity drawer, or physical-device release acceptance.
 

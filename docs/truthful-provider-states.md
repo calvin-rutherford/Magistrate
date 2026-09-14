@@ -61,14 +61,18 @@ alpha.
 
 `HerdrClient.get_snapshot` previously returned a placeholder `version` when
 neither the socket nor the CLI answered, which made `herdr_socket_connected`
-read as **true** while Herdr was unreachable. The empty snapshot now carries no
-version, so:
+read as **true** while Herdr was unreachable. Normal health/runtime reads no
+longer inspect Herdr or run a Firstmate snapshot at all:
 
-- `/api/v1/health` reports `status: 'degraded'` with a `degraded_sources` list
-  whenever Herdr or Firstmate was not observed, and `herdr_version: null`.
-- `/api/v1/runtime` reports `version: null` and `protocol: null` when
-  disconnected instead of substituting values.
-- Counts derived from a failed source render as `—`, not as `0`.
+- `/api/v1/health` reports Gateway, static provider/event-ingress/delegation
+  readiness, persisted runtime status, and `herdr_observation: 'not-probed'`;
+  its backward-compatible Herdr fields remain null/false.
+- `/api/v1/runtime` reports Herdr `status: 'not-observed'`, null version/protocol,
+  and `live_probe_performed: false`.
+- persisted event/objective counts are real SQLite counts. They are never
+  presented as a live process count, and absent live metrics remain null.
+
+See [`gateway-runtime-observation-boundary.md`](gateway-runtime-observation-boundary.md).
 
 ## Attachments: real processing state
 

@@ -1137,6 +1137,33 @@ def init_db():
         ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_changes_record ON activity_changes(user_id, record_id, record_revision)')
 
+    # Authorized Magi delegation records queue acceptance before Firstmate owns
+    # execution. Fleet/runtime reads project this durable row together with the
+    # structured execution-event ledger below; they never inspect live processes.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_objective_submissions (
+        objective_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE,
+        owner_user_id TEXT NOT NULL,
+        invocation_key TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        user_message_id TEXT NOT NULL,
+        assistant_message_id TEXT NOT NULL,
+        contract_json TEXT NOT NULL,
+        contract_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('submitting','accepted','failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        last_error_code TEXT,
+        accepted_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, invocation_key)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_owner_task ON magi_objective_submissions(owner_user_id, task_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_chat_turn ON magi_objective_submissions(owner_user_id, conversation_id, turn_id)')
+
     # Structured Firstmate execution events are a separate immutable producer
     # ledger. They project into canonical Activity, while only a verified
     # completion row may wake generation of an additional native Magi message.

@@ -2,9 +2,10 @@ import asyncio
 import json
 import os
 import re
-import subprocess
 import hashlib
 from typing import Dict, Any, List, Optional
+
+from app.chat_features import legacy_chat_enabled
 
 HERDR_SOCKET_PATH = os.getenv('HERDR_SOCKET_PATH', os.path.expanduser('~/.config/herdr/herdr.sock'))
 HERDR_MAX_READ_LINES = 2**32 - 1
@@ -456,7 +457,9 @@ def _prompt_response(output: str) -> Optional[str]:
 
 
 async def _run_cli(*args: str) -> tuple[bytes, bytes, int]:
-    """Run a Herdr CLI command, tolerating an unavailable local runtime."""
+    """Run a Herdr CLI command only for explicit legacy compatibility."""
+    if not legacy_chat_enabled():
+        return b'', b'Legacy Herdr compatibility is disabled.', 126
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -474,6 +477,8 @@ class HerdrClient:
         self.socket_path = socket_path
 
     async def send_rpc_request(self, method: str, params: Optional[Dict[str, Any]] = None, req_id: str = 'magistrate:rpc') -> Dict[str, Any]:
+        if not legacy_chat_enabled():
+            return {'error': {'message': 'Legacy Herdr compatibility is disabled.'}}
         payload = {'jsonrpc': '2.0', 'id': req_id, 'method': method, 'params': params or {}}
         if not os.path.exists(self.socket_path):
             return await self._cli_rpc_fallback(method, params)

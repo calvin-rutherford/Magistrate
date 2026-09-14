@@ -1,9 +1,10 @@
 # Harness and model switching
 
-Magistrate treats execution identity as observed runtime data, not a guess. Fleet
-rows show the harness and model reported by Herdr or the matched Firstmate task;
-missing fields are shown as **unknown**. A configured capability or a saved
-preference is not evidence that a running process uses that identity.
+Magistrate treats execution identity as persisted structured data, not a guess.
+Fleet rows show objective/task/run lifecycle accepted through versioned events;
+they never inspect Herdr panes. The current event contract does not carry a
+harness/model identity, so those fields remain **unknown**. A configured
+capability or saved preference is not evidence that a running process uses it.
 
 ## Defaults for new and restarted agents
 
@@ -34,13 +35,14 @@ prompt context for a new prompt and does not claim to change a live process.
 operator must confirm the target in the app, then confirm and execute the
 request in the Firstmate terminal. In the current release the Gateway records
 an idempotent request at
-`POST /api/v1/agents/{agent_id}/migration-requests`, but performs no lifecycle
-mutation. The UI says this explicitly and remains in `requested` until an
-operator reports a transition with terminal evidence.
+`POST /api/v1/agents/{agent_id}/migration-requests`, where `agent_id` is the
+structured task identity, but performs no lifecycle mutation. The UI says this
+explicitly and remains in `requested` until an operator reports a transition
+with terminal evidence.
 
-The recorded plan identifies what the relaunch is intended to preserve:
-worktree, checked-out branch, original brief, and recorded progress. The
-in-flight turn is not preserved. A terminal integration can report the honest
+The recorded plan identifies the persisted objective, run, original brief, and
+structured progress. It deliberately makes no worktree, branch, pane, or
+in-flight-process claim. A terminal integration can report the honest
 state sequence `requested → relaunching → running-on-new`, or
 `requested/relaunching → failed`; a failed request may be retried, while a
 completed migration cannot be reopened.

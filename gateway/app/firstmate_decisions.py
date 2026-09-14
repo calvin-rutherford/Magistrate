@@ -1,8 +1,9 @@
 """Principal-owned Firstmate captain decisions and Native Magi answer seam.
 
-Only structured ``fm-fleet-snapshot.v1`` captain holds enter this module.  The
-answer bytes are loaded from the authenticated principal's canonical Native
-Chat user row and are sent to Firstmate's captain-hold command; terminal output,
+Only authenticated ``firstmate.decision-events.v1`` push projections enter the
+normal path; the old fleet snapshot parser is an explicit migration adapter.
+Answer bytes are loaded from the authenticated principal's canonical Native
+Chat user row and sent to Firstmate's captain-hold command; terminal output,
 Herdr panes, and infrastructure transcripts have no input path.
 """
 from __future__ import annotations
@@ -13,7 +14,6 @@ import json
 import os
 import re
 import secrets
-import signal
 import sqlite3
 import stat as stat_module
 import tempfile
@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Optional
 from urllib.parse import unquote
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app import db
 from app.auth import Principal
@@ -114,6 +114,39 @@ class FirstmateDecisionRequiredEvent(_StrictDecisionContract):
         if not _valid_lifecycle_identity(value):
             raise ValueError("Firstmate decision lifecycle identity is invalid.")
         return value
+
+
+class FirstmateDecisionEventBatch(_StrictDecisionContract):
+    """Complete pushed projection from the trusted structured producer."""
+
+    schema_version: Literal["firstmate.decision-events.v1"]
+    source_instance_id: str = Field(
+        min_length=1, max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    )
+    observed_at: int = Field(ge=0, le=9_007_199_254_740_991)
+    complete: Literal[True]
+    events: list[FirstmateDecisionRequiredEvent] = Field(
+        default_factory=list, max_length=MAX_OPEN_DECISIONS,
+    )
+
+    @model_validator(mode="after")
+    def validate_batch(self) -> "FirstmateDecisionEventBatch":
+        if any(
+            event.source_instance_id != self.source_instance_id
+            or event.observed_at != self.observed_at
+            for event in self.events
+        ):
+            raise ValueError("Decision events do not match their complete source projection.")
+        event_ids = [event.source_event_id for event in self.events]
+        if len(set(event_ids)) != len(event_ids):
+            raise ValueError("Decision event identities must be unique.")
+        if event_ids != sorted(event_ids):
+            raise ValueError("Decision events must use canonical source-event order.")
+        encoded = _canonical_json(self.model_dump(mode="json")).encode("utf-8")
+        if len(encoded) > 64 * 1024:
+            raise ValueError("The decision event projection exceeds its bounded contract.")
+        return self
 
 
 class FirstmateAnswerDecisionToolArguments(_StrictDecisionContract):
@@ -402,7 +435,6 @@ class FirstmateDecisionCommandAdapter:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
             )
             try:
                 stdout, stderr, returncode = await asyncio.wait_for(
@@ -414,17 +446,19 @@ class FirstmateDecisionCommandAdapter:
                     timeout=self.timeout_seconds,
                 )
             except asyncio.CancelledError:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                 await process.wait()
                 raise
             except (asyncio.TimeoutError, _CommandOutputTooLarge) as exc:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                 await process.wait()
                 raise FirstmateDecisionError(
                     "command_unavailable", "The Firstmate decision command exceeded a runtime bound.", 503
@@ -814,6 +848,31 @@ class FirstmateDecisionStore:
             return self._pending_rows(connection, owner_user_id)
         finally:
             connection.close()
+
+    def source_status(
+        self, owner_user_id: str, source_instance_id: str = SOURCE_INSTANCE_ID,
+    ) -> dict[str, Any]:
+        """Return bounded persisted source metadata without refreshing Firstmate."""
+        owner_user_id = _valid_owner(owner_user_id)
+        if not _SAFE_SOURCE_ID.fullmatch(source_instance_id):
+            raise FirstmateDecisionError("source_invalid", "Firstmate decision source identity is invalid.", 503)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """SELECT state,last_observed_at,updated_at
+                   FROM firstmate_decision_sources
+                   WHERE owner_user_id=? AND source_instance_id=?""",
+                (owner_user_id, source_instance_id),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return {"status": "unobserved", "last_event_at": None}
+        status = row["state"] if row["state"] in {"available", "fault"} else "unavailable"
+        return {
+            "status": status,
+            "last_event_at": int(row["last_observed_at"]) if row["last_observed_at"] is not None else None,
+        }
 
     def get(self, owner_user_id: str, decision_id: str) -> Optional[dict[str, Any]]:
         owner_user_id = _valid_owner(owner_user_id)
@@ -1439,18 +1498,68 @@ class FirstmateDecisionService:
             )
         return owner_user_id
 
+    async def ingest_events(
+        self, owner_user_id: str, batch: FirstmateDecisionEventBatch,
+    ) -> list[dict[str, Any]]:
+        """Persist one complete push projection without invoking Firstmate."""
+        owner_user_id = self._require_source_owner(owner_user_id)
+        if batch.source_instance_id != self.source_instance_id:
+            raise FirstmateDecisionError(
+                "source_conflict", "The Firstmate decision source identity changed.", 409
+            )
+        for event in batch.events:
+            safe_title = _bounded_text(event.title, 240, required=True)
+            safe_question = _bounded_text(event.question, 600, required=True)
+            safe_project = (
+                _bounded_text(event.project, 160, required=True)
+                if event.project is not None else None
+            )
+            if (
+                safe_title != event.title
+                or safe_question != event.question
+                or safe_project != event.project
+            ):
+                raise FirstmateDecisionError(
+                    "source_invalid", "A Firstmate decision event is not canonical.", 503
+                )
+            semantic = {
+                "task_id": event.task_id,
+                "lifecycle_identity": event.lifecycle_identity,
+                "title": event.title,
+                "question": event.question,
+                "project": event.project,
+                "close_mode": event.close_mode,
+            }
+            if event.source_event_id != _event_id(
+                self.source_instance_id, event.task_id,
+                event.lifecycle_identity, semantic,
+            ):
+                raise FirstmateDecisionError(
+                    "source_invalid", "A Firstmate decision event identity is invalid.", 503
+                )
+        snapshot_hash = _payload_sha256(batch.model_dump(mode="json"))
+        async with self._lock(owner_user_id):
+            return await asyncio.to_thread(
+                self.store.apply_snapshot,
+                owner_user_id,
+                self.source_instance_id,
+                batch.observed_at,
+                snapshot_hash,
+                batch.events,
+            )
+
     async def reconcile_snapshot(
         self, owner_user_id: str, snapshot: Mapping[str, Any]
     ) -> list[dict[str, Any]]:
+        """Legacy migration adapter; normal routes use ``ingest_events``."""
         owner_user_id = self._require_source_owner(owner_user_id)
         async with self._lock(owner_user_id):
             return await self._reconcile_snapshot_unlocked(owner_user_id, snapshot)
 
     async def reconcile(self, owner_user_id: str) -> list[dict[str, Any]]:
+        """Read already-ingested decisions; observation never polls Firstmate."""
         owner_user_id = self._require_source_owner(owner_user_id)
-        async with self._lock(owner_user_id):
-            snapshot = await self.firstmate.get_snapshot()
-            return await self._reconcile_snapshot_unlocked(owner_user_id, snapshot)
+        return await asyncio.to_thread(self.store.pending, owner_user_id)
 
     @staticmethod
     def _authorize(principal: Principal) -> None:
@@ -1464,15 +1573,14 @@ class FirstmateDecisionService:
 
     async def magi_context(self, owner_user_id: str, *, refresh: bool = True) -> dict[str, Any]:
         owner_user_id = self._require_source_owner(owner_user_id)
-        source_status = "available"
-        if refresh:
-            try:
-                decisions = await self.reconcile(owner_user_id)
-            except FirstmateDecisionError:
-                source_status = "unavailable"
-                decisions = await asyncio.to_thread(self.store.pending, owner_user_id)
-        else:
-            decisions = await asyncio.to_thread(self.store.pending, owner_user_id)
+        # ``refresh`` remains wire-compatible for composition callers, but a
+        # model-context read is never authority to inspect execution runtime.
+        del refresh
+        decisions, source = await asyncio.gather(
+            asyncio.to_thread(self.store.pending, owner_user_id),
+            asyncio.to_thread(self.store.source_status, owner_user_id, self.source_instance_id),
+        )
+        source_status = source["status"]
         pending = [decision for decision in decisions if decision["state"] == "pending"]
         return {
             "schema_version": DECISION_CONTEXT_SCHEMA,
@@ -1568,7 +1676,9 @@ class FirstmateDecisionService:
         if existing:
             return existing["outcome"]
         async with self._lock(principal.user_id):
-            await self._reconcile_snapshot_unlocked(principal.user_id, await self.firstmate.get_snapshot())
+            # Confirmation binds only to the latest persisted structured
+            # decision. The explicit command revalidates its lifecycle before
+            # releasing work; this read phase never launches a snapshot shell.
             return await asyncio.to_thread(
                 self.store.prepare_confirmation,
                 principal.user_id,
@@ -1598,8 +1708,6 @@ class FirstmateDecisionService:
         if existing and existing["row"]["status"] != "pending":
             return existing["outcome"]
         async with self._lock(principal.user_id):
-            if not existing:
-                await self._reconcile_snapshot_unlocked(principal.user_id, await self.firstmate.get_snapshot())
             claim = await asyncio.to_thread(
                 self.store.claim_answer,
                 principal.user_id,

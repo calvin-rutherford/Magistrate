@@ -6,8 +6,10 @@ from conftest import TEST_HEADERS
 from app.recent_activity import RecentActivityService
 
 
-class StubFirstmate:
-    async def get_recent_activity(self):
+class StubRuntime:
+    def recent_activity(self, owner_user_id, *, limit=50):
+        assert owner_user_id == "owner"
+        assert limit > 0
         return [{
             'id': 'firstmate:request', 'type': 'task_requested', 'title': 'New request',
             'description': 'Task requested', 'occurred_at': '2026-08-28T00:00:00Z',
@@ -28,7 +30,7 @@ class StubGitHub:
 
 @pytest.mark.asyncio
 async def test_feed_is_newest_first_and_deduplicates_snapshot_pr():
-    feed = await RecentActivityService(StubFirstmate(), StubGitHub()).get_recent_activity()
+    feed = await RecentActivityService(StubRuntime(), StubGitHub()).get_recent_activity("owner")
     assert [item['id'] for item in feed['items']] == ['github:pull:42:merged', 'firstmate:request']
     assert feed['sources'] == {'firstmate': 'available', 'github': 'available'}
 
@@ -38,13 +40,14 @@ async def test_feed_keeps_real_partial_source_data():
     class FailedGitHub:
         async def get_merged_pull_requests(self, limit, refresh):
             raise RuntimeError('offline')
-    feed = await RecentActivityService(StubFirstmate(), FailedGitHub()).get_recent_activity(limit=1)
+    feed = await RecentActivityService(StubRuntime(), FailedGitHub()).get_recent_activity("owner", limit=1)
     assert feed['items'][0]['title'] == 'New request'
     assert feed['sources']['github'] == 'unavailable'
 
 
 def test_recent_activity_endpoint_is_authenticated_and_returns_feed(monkeypatch):
-    async def fake_feed(limit, refresh):
+    async def fake_feed(owner_user_id, limit, refresh):
+        assert owner_user_id == "default_user"
         assert (limit, refresh) == (8, True)
         return {'items': [], 'sources': {'firstmate': 'available', 'github': 'available'}}
     monkeypatch.setattr(recent_activity_service, 'get_recent_activity', fake_feed)

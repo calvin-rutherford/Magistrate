@@ -25,9 +25,23 @@ the API, limits, reliability evidence, backup, and rollback contract.
 
 `MAGISTRATE_NATIVE_CHAT_ENABLED` defaults true and
 `MAGISTRATE_LEGACY_CHAT_ENABLED` defaults false. Deployment requires exactly one
-to be enabled and requires `OPENAI_API_KEY` before native activation. A native
-request never calls Herdr, Firstmate, terminal parsers, Pi ownership, or tool
-execution.
+to be enabled and requires `OPENAI_API_KEY` before native activation. Native
+chat and replay never call Herdr, terminal parsers, or Pi ownership. The only
+execution edge is the closed `firstmate.submit_objective` tool: it is offered
+only to a command-authorized turn and dispatches only when explicitly selected.
+
+## Process-free runtime reads
+
+Health, runtime, Fleet, agents, Activity, Attention, notifications, recent
+activity, and native-chat reads project owner-qualified SQLite state. They do
+not run `fm-fleet-snapshot.sh`, scrape Herdr, or signal execution processes.
+Firstmate execution and decision producers push strict authenticated events;
+Gateway startup registers no runtime observation timer. Health reports static
+provider/delegation/event-ingress configuration, persisted runtime status, and
+last event time while marking Herdr `not-probed`. Terminal/Herdr APIs and the
+old Firstmate snapshot adapter are available only in explicit legacy rollback
+mode. See
+[`../docs/gateway-runtime-observation-boundary.md`](../docs/gateway-runtime-observation-boundary.md).
 
 ## Firstmate decisions for Magi
 
@@ -100,7 +114,7 @@ source revision. The owner-only command scope is required for both steps:
 2. `POST /api/v1/attention/actions/{action_key}/execute` with the same fields
    plus `confirmation_token` after an explicit confirmation.
 
-The Gateway re-reads live Attention before both steps, rejects stale, replayed,
+The Gateway re-reads the persisted Attention projection before both steps, rejects stale, replayed,
 mismatched, unauthorized, risky, and unconfirmed requests, and stores only
 bounded safe evidence. Retries return the recorded outcome without executing
 again. `GET /api/v1/attention/actions/{action_key}` returns the live action or

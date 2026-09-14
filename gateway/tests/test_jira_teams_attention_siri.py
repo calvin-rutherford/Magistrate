@@ -29,8 +29,6 @@ def test_teams_provider():
     assert mentions == []
 
 def test_unified_attention_service_has_no_placeholder_items(monkeypatch):
-    monkeypatch.setattr('app.attention_service.herdr_client.list_agents', AsyncMock(return_value=[]))
-    monkeypatch.setattr('app.attention_service.fm_client.get_attention_items', AsyncMock(return_value=[]))
     monkeypatch.setattr('app.attention_service.attention_service.decision_service.reconcile', AsyncMock(return_value=[]))
     monkeypatch.setattr('app.attention_service.github_service.get_pull_requests', AsyncMock(return_value={'items': []}))
     res = client.get('/api/v1/attention/unified', headers=HEADERS)

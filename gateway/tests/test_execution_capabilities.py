@@ -134,17 +134,19 @@ def test_new_agent_routing_preference_round_trips_and_rejects_invalid_selection(
 
 def test_agent_migration_is_confirmed_durable_and_idempotent(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
-    monkeypatch.setattr(main_module.herdr_client, 'list_agents', AsyncMock(return_value=[{
-        'id': 'w1:p7', 'pane_id': 'w1:p7', 'name': 'worker',
-        'status': 'working', 'harness': 'pi', 'model': 'old-model',
-    }]))
-    monkeypatch.setattr(main_module.fm_client, 'get_snapshot', AsyncMock(return_value={
-        'tasks': [{
-            'id': 'migration-task', 'endpoint': {'target': 'default:w1:p7'}, 'harness': 'pi',
-            'paths': {'worktree': {'present': True, 'path': '/tmp/worktree'}, 'status_log': {'last_event': 'working: tests'}},
-            'backlog': {'title': 'Migrate this worker'},
-        }],
-    }))
+    monkeypatch.setattr(main_module.structured_runtime, 'agents', lambda owner: [{
+        'id': 'w1:p7', 'name': 'worker', 'status': 'working',
+        'harness': 'pi', 'model': 'old-model',
+    }])
+    monkeypatch.setattr(
+        main_module.structured_runtime, 'migration_context',
+        lambda owner, agent_id: {
+            'task_id': 'migration-task', 'worktree': '/tmp/worktree',
+            'branch': None, 'brief': 'Migrate this worker', 'progress': 'working: tests',
+            'preservation_plan': ['worktree', 'branch', 'brief', 'progress'],
+            'not_preserved': ['in-flight turn'],
+        },
+    )
     body = {'profile_id': 'codex:gpt-5', 'idempotency_key': 'migration_retry_0001', 'confirmed': True}
 
     unconfirmed = client.post('/api/v1/agents/w1:p7/migration-requests', headers=HEADERS, json={**body, 'confirmed': False})
@@ -175,10 +177,19 @@ def test_agent_migration_is_confirmed_durable_and_idempotent(monkeypatch):
 
 def test_agent_migration_transitions_require_terminal_evidence_and_retry_idempotently(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
-    monkeypatch.setattr(main_module.herdr_client, 'list_agents', AsyncMock(return_value=[{
-        'id': 'w2:p8', 'pane_id': 'w2:p8', 'name': 'worker', 'status': 'working', 'harness': 'pi', 'model': None,
-    }]))
-    monkeypatch.setattr(main_module.fm_client, 'get_snapshot', AsyncMock(return_value={'tasks': []}))
+    monkeypatch.setattr(main_module.structured_runtime, 'agents', lambda owner: [{
+        'id': 'w2:p8', 'name': 'worker', 'status': 'working',
+        'harness': 'pi', 'model': None,
+    }])
+    monkeypatch.setattr(
+        main_module.structured_runtime, 'migration_context',
+        lambda owner, agent_id: {
+            'task_id': None, 'worktree': None, 'branch': None,
+            'brief': None, 'progress': None,
+            'preservation_plan': ['worktree', 'branch', 'brief', 'progress'],
+            'not_preserved': ['in-flight turn'],
+        },
+    )
     key = 'migration_retry_0002'
     created = client.post('/api/v1/agents/w2:p8/migration-requests', headers=HEADERS, json={
         'profile_id': 'codex:gpt-5', 'idempotency_key': key, 'confirmed': True,

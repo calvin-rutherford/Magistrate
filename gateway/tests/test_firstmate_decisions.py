@@ -80,6 +80,11 @@ def captain_record(task_id="task-alpha", *, title="Choose an implementation", qu
     }
 
 
+async def ingest_legacy_snapshot(service, firstmate):
+    """Exercise the explicit migration adapter; ordinary reads never call it."""
+    return await service.reconcile_snapshot("owner", await firstmate.get_snapshot())
+
+
 @pytest.fixture
 def isolated_decision_db(tmp_path, monkeypatch):
     path = tmp_path / "gateway.sqlite3"
@@ -154,8 +159,8 @@ async def test_structured_holds_have_stable_owner_scoped_identity_and_natural_pr
     command = FakeCommand({"task-alpha": "2026-09-13T20:00:00Z#2"})
     service = FirstmateDecisionService(firstmate, command=command)
 
-    first = await service.reconcile("owner")
-    repeated = await service.reconcile("owner")
+    first = await ingest_legacy_snapshot(service, firstmate)
+    repeated = await ingest_legacy_snapshot(service, firstmate)
     assert len(first) == 1
     assert repeated[0]["decision_id"] == first[0]["decision_id"]
     assert repeated[0]["revision"] == 1
@@ -221,13 +226,13 @@ async def test_structured_holds_have_stable_owner_scoped_identity_and_natural_pr
     old_generated = firstmate.generated
     firstmate.records = []
     firstmate.bump()
-    assert await service.reconcile("owner") == []
+    assert await ingest_legacy_snapshot(service, firstmate) == []
     resolved = service.store.get("owner", first[0]["decision_id"])
     assert resolved["state"] == "resolved"
     assert resolved["revision"] == 2
     firstmate.records = [captain_record()]
     firstmate.generated = old_generated
-    assert await service.reconcile("owner") == []
+    assert await ingest_legacy_snapshot(service, firstmate) == []
     assert service.store.get("owner", first[0]["decision_id"])["revision"] == 2
 
 
@@ -240,8 +245,7 @@ async def test_unified_attention_includes_owner_decision_without_legacy_action(
         firstmate,
         command=FakeCommand({"task-alpha": "2026-09-13T20:00:00Z#2"}),
     )
-    monkeypatch.setattr(attention_module.herdr_client, "list_agents", AsyncMock(return_value=[]))
-    monkeypatch.setattr(attention_module.fm_client, "get_attention_items", AsyncMock(return_value=[]))
+    await ingest_legacy_snapshot(decision_service, firstmate)
     monkeypatch.setattr(
         attention_module.github_service,
         "get_pull_requests",
@@ -266,7 +270,7 @@ async def test_answer_handler_uses_exact_native_bytes_confirmation_and_idempoten
     firstmate = FakeFirstmate([captain_record()])
     command = FakeCommand({"task-alpha": "2026-09-13T20:00:00Z#2"})
     service = FirstmateDecisionService(firstmate, command=command)
-    decision = (await service.reconcile("owner"))[0]
+    decision = (await ingest_legacy_snapshot(service, firstmate))[0]
     answer = "Use option B.\nPreserve the bounded adapter exactly."
     insert_native_user_message("mgm_answer_one", answer)
     arguments = {
@@ -357,7 +361,7 @@ async def test_concurrent_exact_duplicate_does_not_invoke_firstmate_twice(isolat
     command = BlockingCommand({"task-alpha": "2026-09-13T20:00:00Z#2"})
     first_service = FirstmateDecisionService(firstmate, command=command)
     second_service = FirstmateDecisionService(firstmate, command=command)
-    decision = (await first_service.reconcile("owner"))[0]
+    decision = (await ingest_legacy_snapshot(first_service, firstmate))[0]
     insert_native_user_message("mgm_concurrent_answer", "Use the bounded path.")
     arguments = {"decision_id": decision["decision_id"], "decision_revision": 1}
     prepared = await first_service.prepare_tool_answer(
@@ -403,7 +407,7 @@ async def test_answers_reject_malformed_stale_foreign_unconfirmed_and_resolved_r
     firstmate = FakeFirstmate([captain_record()])
     command = FakeCommand({"task-alpha": "2026-09-13T20:00:00Z#2"})
     service = FirstmateDecisionService(firstmate, command=command)
-    decision = (await service.reconcile("owner"))[0]
+    decision = (await ingest_legacy_snapshot(service, firstmate))[0]
     insert_native_user_message("mgm_superseded_answer", "Use the old choice.")
     insert_native_user_message("mgm_fresh_answer", "Choose the smaller change.")
     arguments = {"decision_id": decision["decision_id"], "decision_revision": 1}
@@ -473,7 +477,7 @@ async def test_answers_reject_malformed_stale_foreign_unconfirmed_and_resolved_r
 
     firstmate.records = []
     firstmate.bump()
-    await service.reconcile("owner")
+    await ingest_legacy_snapshot(service, firstmate)
     resolved = service.store.get("owner", decision["decision_id"])
     assert resolved["state"] == "resolved"
     with pytest.raises(FirstmateDecisionError) as already_resolved:
@@ -496,7 +500,7 @@ async def test_changed_source_revision_invalidates_confirmation_and_conflicts_fa
     firstmate = FakeFirstmate([captain_record()])
     command = FakeCommand({"task-alpha": "2026-09-13T20:00:00Z#2"})
     service = FirstmateDecisionService(firstmate, command=command)
-    decision = (await service.reconcile("owner"))[0]
+    decision = (await ingest_legacy_snapshot(service, firstmate))[0]
     insert_native_user_message("mgm_revision_answer", "Take the revised path.")
     prepared = await service.prepare_tool_answer(
         principal(),
@@ -506,7 +510,7 @@ async def test_changed_source_revision_invalidates_confirmation_and_conflicts_fa
 
     firstmate.records = [captain_record(question="Which revised path should the worker take?")]
     firstmate.bump()
-    revised = (await service.reconcile("owner"))[0]
+    revised = (await ingest_legacy_snapshot(service, firstmate))[0]
     assert revised["decision_id"] == decision["decision_id"]
     assert revised["revision"] == 2
     with pytest.raises(FirstmateDecisionError) as stale:
@@ -523,7 +527,7 @@ async def test_changed_source_revision_invalidates_confirmation_and_conflicts_fa
     # is not treated as a legitimate update.
     firstmate.records = [captain_record(question="A conflicting same-time question?")]
     with pytest.raises(FirstmateDecisionError) as conflict:
-        await service.reconcile("owner")
+        await ingest_legacy_snapshot(service, firstmate)
     assert conflict.value.code == "source_conflict"
 
 

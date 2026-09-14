@@ -30,50 +30,65 @@ def test_health_authorized():
     assert data["pi_semantic_ownership"]["adapter"]["status"] == "disabled"
 
 
-def test_health_reports_healthy_only_when_every_source_is_observed(monkeypatch):
+def test_health_is_process_free_and_reports_configured_interfaces(monkeypatch):
     import app.main as gateway
 
-    async def live_herdr():
-        return {"version": "9.9.9", "agents": []}
+    async def forbidden_probe():
+        raise AssertionError("health must not inspect Herdr or run a fleet snapshot")
 
-    async def live_firstmate():
-        return {"fm_home": "/tmp/fm", "tasks": [], "available": True}
-
-    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", live_herdr)
-    monkeypatch.setattr(gateway.fm_client, "get_snapshot", live_firstmate)
+    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", forbidden_probe)
+    monkeypatch.setattr(gateway.fm_client, "get_snapshot", forbidden_probe)
+    monkeypatch.setattr(gateway, "magi_chat_readiness", lambda: {
+        "status": "configured", "enabled": True,
+        "provider": "openai", "live_probe_performed": False,
+    })
+    monkeypatch.setattr(gateway.fm_client, "get_execution_interface_readiness", lambda: {
+        "schema_version": "firstmate.execution-interface-readiness.v1",
+        "status": "configured", "delegation": "explicit-authorized-action-only",
+        "event_ingress": "ready", "live_probe_performed": False,
+    })
     data = client.get("/api/v1/health", headers=TEST_HEADERS).json()
     assert data["status"] == "healthy"
     assert data["degraded_sources"] == []
-    assert data["herdr_version"] == "9.9.9"
-    assert data["herdr_socket_connected"] is True
+    assert data["herdr_version"] is None
+    assert data["herdr_socket_connected"] is False
+    assert data["herdr_observation"] == "not-probed"
     assert data["firstmate_available"] is True
+    assert data["persisted_runtime"]["live_process_probe"] is False
 
 
-def test_health_names_each_unobserved_source(monkeypatch):
+def test_health_names_unconfigured_bounded_interfaces(monkeypatch):
     import app.main as gateway
 
-    async def empty():
-        return {}
-
-    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", empty)
-    monkeypatch.setattr(gateway.fm_client, "get_snapshot", empty)
+    monkeypatch.setattr(gateway, "magi_chat_readiness", lambda: {
+        "status": "unconfigured", "enabled": True,
+        "provider": "openai", "live_probe_performed": False,
+    })
+    monkeypatch.setattr(gateway.fm_client, "get_execution_interface_readiness", lambda: {
+        "schema_version": "firstmate.execution-interface-readiness.v1",
+        "status": "unavailable", "delegation": "explicit-authorized-action-only",
+        "event_ingress": "ready", "live_probe_performed": False,
+    })
     data = client.get("/api/v1/health", headers=TEST_HEADERS).json()
     assert data["status"] == "degraded"
-    assert sorted(data["degraded_sources"]) == ["firstmate", "herdr"]
-    assert data["herdr_version"] is None
+    assert data["degraded_sources"] == [
+        "magi-provider", "firstmate-execution-interface",
+    ]
+    assert data["last_execution_event_at"] is None
 
 
 def test_health_degrades_if_a_required_producer_drifts_after_startup(monkeypatch):
     import app.main as gateway
 
-    async def live_herdr():
-        return {"version": "9.9.9", "agents": []}
-
-    async def live_firstmate():
-        return {"fm_home": "/tmp/fm", "tasks": [], "available": True}
-
-    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", live_herdr)
-    monkeypatch.setattr(gateway.fm_client, "get_snapshot", live_firstmate)
+    monkeypatch.setattr(gateway, "magi_chat_readiness", lambda: {
+        "status": "configured", "enabled": True,
+        "provider": "openai", "live_probe_performed": False,
+    })
+    monkeypatch.setattr(gateway.fm_client, "get_execution_interface_readiness", lambda: {
+        "schema_version": "firstmate.execution-interface-readiness.v1",
+        "status": "configured", "delegation": "explicit-authorized-action-only",
+        "event_ingress": "ready", "live_probe_performed": False,
+    })
     monkeypatch.setattr(gateway.fm_client, "get_producer_readiness", lambda: {
         "schema_version": "firstmate-producer-readiness.v1",
         "required": True,
@@ -87,25 +102,20 @@ def test_health_degrades_if_a_required_producer_drifts_after_startup(monkeypatch
     assert data["degraded_sources"] == ["firstmate-producer"]
 
 
-def test_health_keeps_failed_firstmate_unavailable_with_configured_home(monkeypatch):
+def test_health_never_reports_a_live_firstmate_home_or_herdr_identity(monkeypatch):
     import app.main as gateway
 
-    async def live_herdr():
-        return {"version": "9.9.9", "agents": []}
-
-    async def failed_firstmate():
-        return {
-            "schema": "fm-fleet-snapshot.v1", "fm_home": "/tmp/fm", "tasks": [],
-            "available": False, "error": "Fleet snapshot command failed",
-        }
-
-    monkeypatch.setattr(gateway.herdr_client, "get_snapshot", live_herdr)
-    monkeypatch.setattr(gateway.fm_client, "get_snapshot", failed_firstmate)
+    monkeypatch.setattr(gateway.fm_client, "get_execution_interface_readiness", lambda: {
+        "schema_version": "firstmate.execution-interface-readiness.v1",
+        "status": "unavailable", "delegation": "explicit-authorized-action-only",
+        "event_ingress": "ready", "live_probe_performed": False,
+    })
     data = client.get("/api/v1/health", headers=TEST_HEADERS).json()
     assert data["status"] == "degraded"
-    assert data["degraded_sources"] == ["firstmate"]
-    assert data["firstmate_home"] == "/tmp/fm"
+    assert "firstmate-execution-interface" in data["degraded_sources"]
+    assert data["firstmate_home"] is None
     assert data["firstmate_available"] is False
+    assert data["herdr_socket_connected"] is False
 
 
 def test_soak_diagnostics_include_only_bounded_pi_ownership_state():
@@ -134,7 +144,9 @@ def test_fleet():
     resp = client.get("/api/v1/fleet", headers=TEST_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
-    assert data.get("schema", "fm-fleet-snapshot.v1") == "fm-fleet-snapshot.v1"
+    assert data["schema"] == "magistrate.fleet-projection.v1"
+    assert data["source"] == "persisted-structured-state"
+    assert data["live_process_probe"] is False
 
 
 def test_usage_returns_quota_axi_summary(monkeypatch):

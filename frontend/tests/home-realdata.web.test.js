@@ -91,7 +91,7 @@ test('Home renders live agent identity and makes the agent card actionable', asy
   await page.waitForFunction(() => document.body.innerText.includes('AGENT FLEET (1)'));
   const body = await page.evaluate(() => document.body.innerText);
   assert.match(body, /Live captain/);
-  assert.match(body, /Harness: codex/);
+  assert.match(body, /Harness\/model: codex\/unknown/);
   assert.match(body, /1 active · 0 idle/);
   assert.doesNotMatch(body, /Firstmate Autonomous Control Loop|Claude 3\.7 Sonnet/);
 

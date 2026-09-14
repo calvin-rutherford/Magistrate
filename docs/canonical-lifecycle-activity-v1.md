@@ -26,15 +26,23 @@ Every database read/write is qualified with the `user_id` from the authenticated
 
 The frontend establishes the server-validated principal before protected routes mount. Captain canonical and pending cache keys use the unambiguous `<encoded-principal>|<encoded-target>` scope and their payload repeats `principal_id`; mismatches fail closed. Logout, expiry, a protected 401, or a server-observed principal change synchronously clears in-memory chat and removes the old principal's persisted keys after outstanding writes settle. Unqualified historical caches are deleted, not migrated.
 
-## Firstmate structured adapter
+## Firstmate structured ingress
 
-`gateway/app/firstmate_activity.py` owns the snapshot/journal source adapter. It does not import Herdr, inspect panes, read terminal output, parse ANSI, or infer an audience from prose. It consumes three semantic sources:
+Normal execution Activity is push-based. The authenticated
+`POST /api/v1/firstmate/execution-events` seam persists the strict
+`firstmate.execution-event.v1` objective/run lifecycle described below; the
+complete `POST /api/v1/firstmate/decision-events` projection persists current
+captain holds for Attention. `firstmate.submit_objective` persists the original
+owner-qualified assignment before dispatch. Gateway reads project those SQLite
+facts and never invoke Firstmate, Herdr, a terminal parser, or a shell snapshot.
+See [`gateway-runtime-observation-boundary.md`](gateway-runtime-observation-boundary.md).
 
-1. `fm-fleet-snapshot.sh --json`: current structured task/completion and exact keyed-decision facts. Runtime state is accepted only with allowlisted semantic provenance. Missing, `pane`, terminal, and unknown provenance fail closed.
-2. `state/branch-outcomes.jsonl`: append-only supervision outcomes. The independent Magistrate cursor never reads or writes Pi/Firstmate cursor sidecars. `wake` and optional endpoint provenance are hashed but never exported.
-3. `state/captain-events/events.jsonl`: the explicitly enabled private append-only `fm-captain-event.v1` outbox produced at Pi's persisted `turn_end` semantic boundary.
-
-The Gateway never enables or reloads the producer; Firstmate's upgrade contract requires the operator to reload the applicable Pi sessions before writing the exact home-local activation flag. Its reviewed immutable code pin, separate operational-home model, feature gate, atomic installer/activation procedure, compatibility fixture, and rollback are specified in [`firstmate-pinned-producer.md`](firstmate-pinned-producer.md). The production consumer uses Firstmate's versioned `fm-captain-event.sh enabled/read/ack` tooling and independently requires canonical strict UTF-8/JSON with no duplicate keys, an owned single-link mode-0600 regular journal, a final newline, at most 10,000 rows / 81,920,000 bytes, and at most 8 KiB including each event newline. The configured Firstmate home has one gap-free sequence from one, and every row must match that adapter's explicit `source_home` binding (`main` or `secondmate:<stable-id>`); journals are never copied or mixed across homes. This slice instantiates the main-home binding, while a future independently enabled secondmate home requires its own adapter/source instance. Required semantics are:
+`gateway/app/firstmate_activity.py` is now a retained migration/rollback adapter
+only. No startup task or HTTP read route calls it, and it returns disabled when
+legacy chat is off. Its historical `fm-fleet-snapshot.sh`, branch-outcome, and
+`fm-captain-event.v1` readers remain to validate old stores/fixtures during an
+explicit rollback; they are not current Fleet or Activity observation
+mechanisms. The historical captain-event wire shape was:
 
 ```json
 {
@@ -59,9 +67,15 @@ The Gateway never enables or reloads the producer; Firstmate's upgrade contract 
 
 The field set is exact, with no aliases. Source role and kind must agree: `primary.message|primary.final` has no task id; `worker.message|worker.final` requires one. The event id is recomputed from schema, source home/role, task, incarnation, producer, and harness-event identity. Unknown schema, kind, audience, field, reference, source identity, non-canonical JSON, sequence, duplicate id, or identity digest stops the source before cursor advance. Prompt, terminal, output, tool, reasoning, environment, credentials, arbitrary paths, transcript, and ANSI have no schema path. Firstmate applies bounded high-confidence credential-shape redaction (not a mathematical guarantee over arbitrary prose); the consumer independently rejects the same deterministic residual forms. Source refs are the exact optional object keys `pr_url`, `report_id`, safe `report_path`, and positive `branch_outcome_seq`; clients receive only the existing canonical GitHub PR / GitLab MR URL grammars and bounded report ids.
 
-Canonical activity preserves the four source message kinds and `summary_truncated` truth directly. Their record state is `completed` because publication happens only after Pi persisted that assistant turn; `primary.final` / `worker.final` describe Pi's per-turn `stopReason=stop` and **never** assert that a Firstmate task or objective completed. Task lifecycle remains owned by validated fleet/branch facts.
+Canonical activity preserves the four source message kinds and `summary_truncated` truth directly. Their record state is `completed` because publication happens only after Pi persisted that assistant turn; `primary.final` / `worker.final` describe Pi's per-turn `stopReason=stop` and **never** assert that a Firstmate task or objective completed. In the retained adapter, task lifecycle remains owned by its validated
+legacy facts. In normal operation, task lifecycle is owned by accepted
+`firstmate.execution-event.v1` records.
 
-The adapter normalizes source-native identity into `(source_instance, stream, event_id, source_sequence, payload_hash)`. It writes the immutable source event, canonical activity projection, activity change-ledger row, and new source cursor in one SQLite transaction. Only after commit does it call Firstmate `ack` with that exact sequence/event id; before a later read it may reassert only that already-durable pair so Firstmate can finish an interrupted atomic acknowledgement. Parsed-but-uncommitted input is never acknowledged. Stable objective identity derives from the bound source instance plus task/primary role; run identity additionally includes incarnation. Neither borrows an unrelated conversation turn.
+The retained adapter normalizes source-native identity into
+`(source_instance, stream, event_id, source_sequence, payload_hash)`. Its
+acknowledgement behavior applies only when that adapter is explicitly invoked
+in rollback/migration operation. Normal reads never invoke it or acknowledge an
+upstream cursor.
 
 ### Structured execution extension
 
@@ -84,15 +98,20 @@ evidence, retry, and restart contract.
 
 ## Bootstrap, restart, and conflict policy
 
-Bootstrap is explicit per source:
+Structured producers own retry and send authenticated events; Gateway owns the
+durable principal-scoped replay. Duplicate event identity plus identical bytes
+is idempotent, while identity reuse with changed semantics conflicts. Execution
+objective/run causality is immutable, terminal events cannot be extended, and
+an older complete decision projection cannot reopen newer state. A disappearing
+keyed decision means only `decision.resolved`, never approved/rejected or
+objective completion.
 
-- fleet snapshot: `snapshot-current`;
-- branch outcomes: `tail` by default, so a first deployment validates/checkpoints existing history without injecting it (`MAGISTRATE_FIRSTMATE_ACTIVITY_BOOTSTRAP=from-start|tail|after:N`);
-- captain semantic outbox: this slice explicitly chooses `from-start` by default because it is bounded, explicitly captain-addressed, and is the delivery ledger (`MAGISTRATE_FIRSTMATE_CAPTAIN_BOOTSTRAP=from-start|tail|after:N`). Operators choosing Firstmate's usual checkpoint-current-tail posture set `tail`; any nonzero checkpoint is durably registered before its exact Firstmate acknowledgement.
-
-Each append-only stream persists its cursor and an exact validated line-prefix SHA-256. Byte rewrites (including whitespace/separators), truncation, cursor-ahead, malformed/gapped/reordered rows, or event-id payload conflict mark the source faulted while preserving accepted rows and cursor. Snapshot timestamps cannot regress; reusing a timestamp with changed semantic content is a conflict. A disappearing keyed decision means only `decision.resolved`, never approved/rejected or objective completion.
-
-Gateway startup launches a bounded rotating cadence across known conversation/activity/active-session principals, so large tenant sets are covered without inventing an owner or making one unbounded pass. This is restart recovery, not producer ownership. The outbox remains authoritative and retryable while Gateway is down.
+Gateway startup performs bounded recovery of its own pending native rows and
+completion-report claims. It does not launch an Activity reconciler, enumerate
+activity principals, run `fm-fleet-snapshot.sh`, read an outbox, or install a
+replacement timer. The retired activity poll interval/disable environment
+controls no longer exist. The historical bootstrap/cursor policy remains
+implemented only inside the explicitly invoked legacy adapter.
 
 ## Delivery and observability
 
@@ -101,10 +120,10 @@ Authenticated, principal-scoped endpoints:
 - `GET /api/v1/conversations/{target}/replay?after=…`
 - `GET /api/v1/conversations/{target}/turns/{turn_id}`
 - `POST /api/v1/conversations/{target}/turns/{turn_id}/assistant-messages`
-- `GET /api/v1/activity` (optional source reconciliation plus replay)
+- `GET /api/v1/activity` (persisted replay; retained `reconcile` input is ignored)
 - `GET /api/v1/activity/snapshot` (bounded current projection, active/decision focus, summary, and replay cursor)
 - `GET /api/v1/activity/replay` (durable SQLite replay only; no source or terminal I/O)
-- `POST /api/v1/activity/catch-up`
+- `POST /api/v1/activity/catch-up` (persisted replay only)
 - `GET /api/v1/diagnostics/soak`
 
 Conversation `replay?after=` pages the tenant-local, append-only `conversation_changes.change_sequence` ledger, not render-order `sequence_index` and not history pagination. Every visible message insertion or revision commits a new change identity; replay returns the current projection for each ledger entry. Thus a progress message committed later at render index 900 is delivered after an already observed primary response at render index 999, and duplicate transports still reconcile by stable message id and revision. The cursor survives restart, begins at `-1`, and a cursor ahead of that principal's ledger fails closed. Authoritative HTTP refreshes replace the bounded conversation window, and every new captain WebSocket connection starts with that current bounded window before tracking `(message revision, turn status, lifecycle revision)` deltas; therefore an in-place revision at an already observed message sequence is replayed after reconnect.

@@ -1,19 +1,24 @@
+import asyncio
 import os
 from typing import Dict, Any, List, Optional
-from app.firstmate_client import FirstmateClient
+
 from app.firstmate_decisions import FirstmateDecisionService, firstmate_decisions
-from app.herdr_client import HerdrClient
 from app.github_service import github_service
 from app.providers.jira import JiraProviderAdapter
 from app.providers.teams import TeamsProviderAdapter
-from app.attention_actions import action_for_item
 
-fm_client = FirstmateClient()
-herdr_client = HerdrClient()
 jira_adapter = JiraProviderAdapter()
 teams_adapter = TeamsProviderAdapter()
 
+
 class AttentionService:
+    """Project persisted decisions plus configured provider attention.
+
+    Firstmate and Herdr are never polled here. This service is used by both GET
+    routes and the notification timer, so keeping it process-free is the
+    read-does-not-mutate runtime boundary.
+    """
+
     def __init__(self, decision_service: FirstmateDecisionService = firstmate_decisions):
         self.decision_service = decision_service
 
@@ -21,51 +26,29 @@ class AttentionService:
         owner_user_id = owner_user_id or os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
         items = []
 
-        # 1. FIRSTMATE & HERDR BLOCKERS
+        # Structured captain holds enter through the decision event/store seam.
+        # Reads expose that owner-qualified projection without refreshing a
+        # shell snapshot or consulting pane state.
         try:
-            agents = await herdr_client.list_agents()
-            fm_att = await fm_client.get_attention_items(herdr_agents=agents)
-            for att in fm_att:
-                item = {
-                    'id': att.get('id', 'fm-item'),
-                    'provider': 'firstmate',
-                    'title': att.get('title', 'Firstmate Action Required'),
-                    'subtitle': att.get('subtitle', 'Agent blocked or decision needed'),
-                    'priority': 'HIGH',
-                    'status': att.get('status', 'blocked'),
-                    'url': att.get('url', '/attention'),
-                    'deep_link': att.get('deep_link'),
-                    'target_id': att.get('target_id'),
-                    'context': att.get('context'),
-                    'requires_action': True,
-                    'notification_kind': att.get('type'),
-                    'consequential': att.get('consequential') is True,
-                    'revision': att.get('revision')
-                }
-                action = action_for_item(item)
-                if action:
-                    item['action'] = action
-                items.append(item)
-        except Exception as e:
-            print('Error fetching Firstmate attention:', e)
-
-        # Structured captain holds use stable lifecycle identities and remain
-        # owner-qualified; unlike legacy pane/status hints they are answerable
-        # only through the isolated Native Chat decision handler.
-        try:
-            decisions = await self.decision_service.reconcile(owner_user_id)
-            items.extend(self.decision_service.attention_items(owner_user_id, decisions=decisions))
+            decisions, source = await asyncio.gather(
+                self.decision_service.reconcile(owner_user_id),
+                asyncio.to_thread(
+                    self.decision_service.store.source_status,
+                    owner_user_id,
+                    self.decision_service.source_instance_id,
+                ),
+            )
+            items.extend(self.decision_service.attention_items(
+                owner_user_id,
+                decisions=decisions,
+                stale=source["status"] not in {"available", "unobserved"},
+            ))
         except Exception:
-            # Source exceptions can carry local paths; Attention logs only a
-            # fixed availability signal and falls back to previously validated
-            # owner-qualified rows.
-            print('Firstmate decisions unavailable')
-            try:
-                items.extend(self.decision_service.attention_items(owner_user_id, stale=True))
-            except Exception:
-                print('Cached Firstmate decisions unavailable')
+            # Persistence failures can carry local paths; expose no exception
+            # detail and continue with independent providers.
+            print('Persisted Firstmate decisions unavailable')
 
-        # 2. GITHUB PULL REQUESTS
+        # GitHub pull requests are provider data, not execution-runtime state.
         try:
             page = await github_service.get_pull_requests()
             for pr in page['items']:
@@ -90,7 +73,6 @@ class AttentionService:
         except Exception as e:
             print('Error fetching GitHub attention:', e)
 
-        # 3. JIRA ISSUES
         try:
             issues = await jira_adapter.get_assigned_issues()
             for issue in issues:
@@ -112,28 +94,28 @@ class AttentionService:
         except Exception as e:
             print('Error fetching Jira attention:', e)
 
-        # 4. TEAMS MENTIONS
         try:
             mentions = await teams_adapter.get_mentions()
-            for m in mentions:
-                if m.get('requires_attention'):
+            for mention in mentions:
+                if mention.get('requires_attention'):
                     items.append({
-                        'id': m.get('id', 'teams-msg'),
+                        'id': mention.get('id', 'teams-msg'),
                         'provider': 'teams',
-                        'title': f'Teams Mention from {m.get("sender")}',
-                        'subtitle': m.get('summary'),
+                        'title': f'Teams Mention from {mention.get("sender")}',
+                        'subtitle': mention.get('summary'),
                         'priority': 'HIGH',
                         'status': 'unread_mention',
-                        'url': f'/attention?item={m.get("id", "teams-msg")}',
-                        'external_url': m.get('url'),
-                        'context': {'sender': m.get('sender'), 'message_id': m.get('id')},
+                        'url': f'/attention?item={mention.get("id", "teams-msg")}',
+                        'external_url': mention.get('url'),
+                        'context': {'sender': mention.get('sender'), 'message_id': mention.get('id')},
                         'requires_action': True,
                         'notification_kind': 'captain_question',
-                        'revision': m.get('updated_at') or m.get('id')
+                        'revision': mention.get('updated_at') or mention.get('id')
                     })
         except Exception as e:
             print('Error fetching Teams attention:', e)
 
         return items
+
 
 attention_service = AttentionService()

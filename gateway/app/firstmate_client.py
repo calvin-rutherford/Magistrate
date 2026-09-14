@@ -2,11 +2,12 @@ import asyncio
 import json
 import os
 import re
-import signal
+import shutil
 import stat as stat_module
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
+from app.chat_features import legacy_chat_enabled
 from app.firstmate_producer import (
     ProducerContractError,
     producer_readiness,
@@ -233,7 +234,50 @@ class FirstmateClient:
             required=self.captain_producer_required,
         )
 
+    def get_execution_interface_readiness(self) -> Dict[str, Any]:
+        """Inspect configuration without launching or probing execution runtime."""
+        tool_path = self.get_trusted_tool_path()
+        runtime_home = self.get_trusted_runtime_home()
+        command = shutil.which('tasks-axi', path=tool_path) if tool_path else None
+        configured = False
+        if command and runtime_home:
+            try:
+                home_stat = os.lstat(self.fm_home)
+                resolved_command = os.path.realpath(command)
+                command_stat = os.stat(resolved_command)
+                configured = bool(
+                    stat_module.S_ISDIR(home_stat.st_mode)
+                    and not stat_module.S_ISLNK(home_stat.st_mode)
+                    and home_stat.st_uid == os.geteuid()
+                    and stat_module.S_ISREG(command_stat.st_mode)
+                    and command_stat.st_uid in {0, os.geteuid()}
+                    and not command_stat.st_mode & stat_module.S_IWOTH
+                    and os.access(resolved_command, os.X_OK)
+                )
+            except OSError:
+                configured = False
+        return {
+            'schema_version': 'firstmate.execution-interface-readiness.v1',
+            'status': 'configured' if configured else 'unavailable',
+            'delegation': 'explicit-authorized-action-only',
+            'event_ingress': 'ready',
+            'live_probe_performed': False,
+        }
+
     async def get_snapshot(self) -> Dict[str, Any]:
+        """Run the retired fleet scraper only in explicit legacy chat mode.
+
+        Modern Gateway startup and read routes use ``StructuredRuntimeProjection``.
+        This compatibility seam remains solely for an operator-selected rollback
+        and fails before filesystem or process access in native mode.
+        """
+        if not legacy_chat_enabled():
+            return {
+                'schema': 'fm-fleet-snapshot.v1', 'fm_home': self.fm_home,
+                'tasks': [], 'scout_reports': [], 'available': False,
+                'secondmate_current': {'records': []},
+                'error': 'Legacy fleet snapshot compatibility is disabled',
+            }
         if self.fm_root_is_explicit:
             try:
                 self.validate_producer_contract()
@@ -307,7 +351,6 @@ class FirstmateClient:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.fm_home,
                 env=environment,
-                start_new_session=True,
             )
             async def collect_output():
                 stdout, stderr, _ = await asyncio.gather(
@@ -322,17 +365,19 @@ class FirstmateClient:
                     collect_output(), timeout=self.snapshot_timeout,
                 )
             except asyncio.CancelledError:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
                 await proc.wait()
                 raise
             except (asyncio.TimeoutError, _SnapshotOutputTooLarge) as exc:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
                 await proc.wait()
                 reason = 'timed out' if isinstance(exc, asyncio.TimeoutError) else 'exceeded its bounded output size'
                 return {

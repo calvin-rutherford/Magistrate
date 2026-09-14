@@ -27,22 +27,22 @@ export default function FleetScreen() {
 
   return (
     <ScrollView style={styles.container}>
-      <Text style={styles.header}>MAGISTRATE AGENT FLEET</Text>
-      <Text style={styles.subHeader}>Live execution sessions</Text>
+      <Text style={styles.header}>MAGISTRATE EXECUTION FLEET</Text>
+      <Text style={styles.subHeader}>Persisted structured worker runs</Text>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>HERDR ACTIVE SESSIONS ({!loaded ? '…' : error ? '—' : agents.length})</Text>
+        <Text style={styles.sectionTitle}>ACTIVE RUN PROJECTIONS ({!loaded ? '…' : error ? '—' : agents.length})</Text>
         {error ? (
           <Text testID="fleet-error" accessibilityRole="alert" style={styles.errorText}>{error}</Text>
         ) : !loaded ? (
-          <Text style={styles.emptyText}>Reading live Herdr sessions…</Text>
+          <Text style={styles.emptyText}>Reading persisted execution state…</Text>
         ) : agents.length === 0 ? (
-          <Text style={styles.emptyText}>No Herdr agent sessions active.</Text>
+          <Text style={styles.emptyText}>No active structured worker runs.</Text>
         ) : (
           agents.map((ag) => (
             <View key={ag.id} style={styles.card}>
               <Text style={styles.cardTitle}>{agentDisplayName(ag)}</Text>
-              <Text style={styles.cardDetail}>Harness: {ag.harness || 'unknown'} | Model: {ag.model || 'unknown'} | Status: {String(ag.status || 'unknown').toUpperCase()}</Text>
+              <Text style={styles.cardDetail}>Task: {ag.task_id || ag.id} | Run: {ag.run_id || 'not reported'} | Status: {String(ag.status || 'unknown').toUpperCase()}</Text>
             </View>
           ))
         )}

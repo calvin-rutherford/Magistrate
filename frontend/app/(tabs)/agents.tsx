@@ -132,7 +132,7 @@ export default function AgentsScreen() {
             <Text style={styles.backText}>←</Text>
           </GlassSurface>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>HERDR AGENTS</Text>
+        <Text style={styles.headerTitle}>EXECUTION RUNS</Text>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open navigation" onPress={() => setShowDrawer(true)}>
           <GlassSurface variant="control" style={styles.headerCircleBtn}>
             <Text style={styles.backText}>≡</Text>
@@ -146,13 +146,13 @@ export default function AgentsScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={loadAgents} tintColor="#72F5B1" />}
       >
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>LIVE AGENT SESSIONS ({agents.length})</Text>
+          <Text style={styles.sectionTitle}>ACTIVE STRUCTURED RUNS ({agents.length})</Text>
         </View>
 
         {executionError && <GlassSurface variant="card" style={styles.card}><Text testID="agents-execution-error" style={styles.errorText}>{executionError}</Text></GlassSurface>}
-        {loading && <GlassSurface variant="card" style={styles.card}><Text style={styles.mutedText}>Loading live agent data…</Text></GlassSurface>}
+        {loading && <GlassSurface variant="card" style={styles.card}><Text style={styles.mutedText}>Loading persisted execution state…</Text></GlassSurface>}
         {!loading && error && <GlassSurface variant="card" style={styles.card}><Text style={styles.errorText}>{agents.length ? `Showing last known agents. ${error}` : error}</Text></GlassSurface>}
-        {!loading && !error && agents.length === 0 && <GlassSurface variant="card" style={styles.card}><Text style={styles.mutedText}>No Herdr agent sessions are active.</Text></GlassSurface>}
+        {!loading && !error && agents.length === 0 && <GlassSurface variant="card" style={styles.card}><Text style={styles.mutedText}>No active structured worker runs.</Text></GlassSurface>}
 
         {agents.map(agent => {
           const selected = agent.id === agentId;
@@ -162,46 +162,51 @@ export default function AgentsScreen() {
                 <Text style={styles.agentName}>{agentDisplayName(agent)}</Text>
                 <Text style={styles.statusText}>{agent.status ? agent.status.toUpperCase() : 'STATUS UNAVAILABLE'}</Text>
               </View>
-              <Text testID={`agent-${agent.id}-runtime`} style={styles.detailText}>Harness: {agent.harness || 'unknown'} · Model: {agent.model || 'unknown'}</Text>
-              <TouchableOpacity
-                testID={`agent-${agent.id}-chat-link`}
-                accessibilityRole="button"
-                accessibilityLabel={`Open chat with ${agentDisplayName(agent)}`}
-                onPress={() => router.push({ pathname: '/chat', params: { agentId: agent.id } } as any)}
-                style={styles.chatLink}
-              >
-                <Text style={styles.chatLinkText}>OPEN CHAT TARGET →</Text>
-              </TouchableOpacity>
-              <View style={styles.controlsHeader}>
-                <Text style={styles.controlsLabel}>AGENT CONTROLS</Text>
-                <Text style={styles.controlsHint}>Actions are sent to this live pane.</Text>
-              </View>
-              <View style={styles.controlsRow}>
-                {(['interrupt', 'Enter', 'Escape'] as AgentAction[]).map(action => {
-                  const actionKey = `${agent.id}:${action}`;
-                  const busy = busyAction === actionKey;
-                  return (
-                    <TouchableOpacity
-                      key={action}
-                      testID={`agent-${agent.id}-${action.toLowerCase()}-control`}
-                      accessibilityRole="button"
-                      accessibilityLabel={`${actionLabel(action)} ${agentDisplayName(agent)}`}
-                      accessibilityState={{ disabled: busyAction !== null || pendingAction !== null, busy }}
-                      disabled={busyAction !== null || pendingAction !== null}
-                      onPress={() => requestAgentAction(agent, action)}
-                      style={[styles.controlButton, action === 'interrupt' ? styles.interruptButton : undefined, busy ? styles.controlButtonBusy : undefined]}
-                    >
-                      <Text style={[styles.controlButtonText, action === 'interrupt' ? styles.interruptButtonText : undefined]}>{busy ? '…' : actionLabel(action)}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+              <Text testID={`agent-${agent.id}-runtime`} style={styles.detailText}>Task: {agent.task_id || agent.id} · Run: {agent.run_id || 'not reported'} · Harness/model: {agent.harness || 'unknown'}/{agent.model || 'unknown'}</Text>
+              {agent.pane_id ? <>
+                <TouchableOpacity
+                  testID={`agent-${agent.id}-chat-link`}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open legacy chat with ${agentDisplayName(agent)}`}
+                  onPress={() => router.push({ pathname: '/chat', params: { agentId: agent.id } } as any)}
+                  style={styles.chatLink}
+                >
+                  <Text style={styles.chatLinkText}>OPEN LEGACY CHAT TARGET →</Text>
+                </TouchableOpacity>
+                <View style={styles.controlsHeader}>
+                  <Text style={styles.controlsLabel}>LEGACY PANE CONTROLS</Text>
+                  <Text style={styles.controlsHint}>Available only for an explicitly observed rollback pane.</Text>
+                </View>
+                <View style={styles.controlsRow}>
+                  {(['interrupt', 'Enter', 'Escape'] as AgentAction[]).map(action => {
+                    const actionKey = `${agent.id}:${action}`;
+                    const busy = busyAction === actionKey;
+                    return (
+                      <TouchableOpacity
+                        key={action}
+                        testID={`agent-${agent.id}-${action.toLowerCase()}-control`}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${actionLabel(action)} ${agentDisplayName(agent)}`}
+                        accessibilityState={{ disabled: busyAction !== null || pendingAction !== null, busy }}
+                        disabled={busyAction !== null || pendingAction !== null}
+                        onPress={() => requestAgentAction(agent, action)}
+                        style={[styles.controlButton, action === 'interrupt' ? styles.interruptButton : undefined, busy ? styles.controlButtonBusy : undefined]}
+                      >
+                        <Text style={[styles.controlButtonText, action === 'interrupt' ? styles.interruptButtonText : undefined]}>{busy ? '…' : actionLabel(action)}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </> : <View style={styles.controlsHeader}>
+                <Text style={styles.controlsLabel}>STRUCTURED OBSERVATION ONLY</Text>
+                <Text style={styles.controlsHint}>Chat and process controls are not inferred from this persisted run.</Text>
+              </View>}
               <TouchableOpacity
                 testID={`agent-${agent.id}-move-runtime`}
                 accessibilityRole="button"
                 accessibilityLabel={`Plan stop and relaunch for ${agentDisplayName(agent)}`}
-                accessibilityState={{ disabled: !['working', 'running', 'active', 'executing'].includes(String(agent.status || '').toLowerCase()) || executionProfiles.length === 0 || migrationBusy }}
-                disabled={!['working', 'running', 'active', 'executing'].includes(String(agent.status || '').toLowerCase()) || executionProfiles.length === 0 || migrationBusy}
+                accessibilityState={{ disabled: !['working', 'blocked'].includes(String(agent.status || '').toLowerCase()) || executionProfiles.length === 0 || migrationBusy }}
+                disabled={!['working', 'blocked'].includes(String(agent.status || '').toLowerCase()) || executionProfiles.length === 0 || migrationBusy}
                 onPress={() => setMigrationAgent(current => current?.id === agent.id ? null : agent)}
                 style={[styles.moveButton, executionProfiles.length === 0 ? styles.controlButtonBusy : undefined]}
               >
@@ -224,7 +229,7 @@ export default function AgentsScreen() {
         <GlassSurface variant="alert" style={styles.confirmationCard}>
           <Text style={styles.confirmationTitle}>CONFIRM STOP + RELAUNCH PLAN</Text>
           <Text style={styles.confirmationText}>Move {agentDisplayName(pendingMigration.agent)} to {pendingMigration.profile.harness.label} / {pendingMigration.profile.model.label}?</Text>
-          <Text style={styles.confirmationText}>Planned preservation: worktree, checked-out branch, original brief, and recorded progress. Not preserved: the in-flight turn.</Text>
+          <Text style={styles.confirmationText}>Persisted context: objective, run identity, original brief, and structured progress. No worktree, branch, pane, or in-flight process is inferred by this read.</Text>
           <Text style={styles.confirmationWarning}>This app cannot execute the relaunch yet. Confirming only records a requested hand-off; an operator must confirm and run it in the Firstmate terminal.</Text>
           <View style={styles.confirmationActions}>
             <TouchableOpacity testID="agent-migration-cancel" accessibilityRole="button" onPress={() => setPendingMigration(null)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>CANCEL</Text></TouchableOpacity>
