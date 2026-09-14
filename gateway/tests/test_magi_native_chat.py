@@ -35,12 +35,7 @@ class FakeModel:
         return MagiModelResult(f"# Native reply\n\n{content}\n\n✓ café 🚀")
 
 
-@pytest.fixture
-def native_flags():
-    """Native Magi Chat is unconditional; retained name keeps focused fixtures concise."""
-
-
-def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastructure(native_flags, monkeypatch):
+def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastructure(monkeypatch):
     import app.magi_chat_api as native_api
     import app.main as gateway
 
@@ -104,7 +99,7 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     assert diagnostics['pi_ownership_chat_reads'] == 0
 
 
-def test_voice_only_principal_can_chat_but_is_never_offered_execution_tools(native_flags, monkeypatch):
+def test_voice_only_principal_can_chat_but_is_never_offered_execution_tools(monkeypatch):
     import app.magi_chat_api as native_api
 
     monkeypatch.setenv('MAGISTRATE_SESSION_SCOPES', 'read,voice')
@@ -124,7 +119,7 @@ def test_voice_only_principal_can_chat_but_is_never_offered_execution_tools(nati
     assert fake.offered_tools == [()]
 
 
-def test_native_websocket_replays_sqlite_messages_without_terminal_reads(native_flags):
+def test_native_websocket_replays_sqlite_messages_without_terminal_reads():
     import app.magi_chat_api as native_api
     import app.main as gateway
 
@@ -164,7 +159,7 @@ def test_native_websocket_replays_sqlite_messages_without_terminal_reads(native_
                 assert restored_response['revision'] == first_response['revision']
 
 
-def test_native_api_rejects_client_identity_and_cross_tenant_conversation(native_flags, monkeypatch):
+def test_native_api_rejects_client_identity_and_cross_tenant_conversation(monkeypatch):
     import app.magi_chat_api as native_api
 
     monkeypatch.setattr(native_api.magi_chat_service, 'model', FakeModel())

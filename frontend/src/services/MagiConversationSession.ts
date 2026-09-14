@@ -58,6 +58,7 @@ const PENDING_MESSAGE_KEYS = new Set([
 const listeners = new Set<() => void>();
 let messages: MagiMessage[] = [];
 let principalId: string | null = null;
+let latestChange = 0;
 let pendingWrite: Promise<void> = Promise.resolve();
 let principalTransition: Promise<void> = Promise.resolve();
 
@@ -218,11 +219,13 @@ function persist(next: MagiMessage[]): void {
     if (principalId !== principal) return;
     const authoritative = Object.fromEntries(next.filter(row => row.serverId)
       .map(row => [row.serverId as string, { ...row, attachments: row.attachments || [] }]));
+    const changeCursor = latestChange;
     const pending = Object.fromEntries(next.filter(isPending)
       .map(row => [row.id, { ...row, attachments: row.attachments || [] }]));
     await Promise.all([
       AsyncStorage.setItem(storageKey(CACHE_PREFIX, principal), JSON.stringify({
-        schema_version: 'magi-conversation-cache.v1', principal_id: principal, messages: authoritative,
+        schema_version: 'magi-conversation-cache.v1', principal_id: principal,
+        latest_change: changeCursor, messages: authoritative,
       })),
       AsyncStorage.setItem(storageKey(PENDING_PREFIX, principal), JSON.stringify({
         schema_version: 'magi-conversation-pending.v1', principal_id: principal, messages: pending,
@@ -241,6 +244,7 @@ export async function setMagiConversationPrincipal(principal: string | null): Pr
   const priorWrite = pendingWrite;
   principalId = principal;
   messages = [];
+  latestChange = 0;
   setCanonicalActivityPrincipal(principal);
   emit();
   const transition = principalTransition.catch(() => {}).then(async () => {
@@ -261,10 +265,15 @@ export async function setMagiConversationPrincipal(principal: string | null): Pr
 }
 
 export function getMagiConversationPrincipal(): string | null { return principalId; }
+export function setMagiConversationChangeCursor(cursor: number): void {
+  if (!Number.isSafeInteger(cursor) || cursor < latestChange) return;
+  latestChange = cursor;
+  persist(messages);
+}
 
-export async function loadCachedMagiConversation(): Promise<{ authoritative: MagiMessage[]; pending: MagiMessage[] }> {
+export async function loadCachedMagiConversation(): Promise<{ authoritative: MagiMessage[]; pending: MagiMessage[]; latestChange: number }> {
   const principal = principalId;
-  if (!principal) return { authoritative: [], pending: [] };
+  if (!principal) return { authoritative: [], pending: [], latestChange: 0 };
   try {
     await pendingWrite.catch(() => {});
     const [cachedRaw, pendingRaw] = await Promise.all([
@@ -272,7 +281,8 @@ export async function loadCachedMagiConversation(): Promise<{ authoritative: Mag
       AsyncStorage.getItem(storageKey(PENDING_PREFIX, principal)),
     ]);
     void removeRetiredCaches();
-    if (principalId !== principal) return { authoritative: [], pending: [] };
+    if (principalId !== principal) return { authoritative: [], pending: [], latestChange: 0 };
+
     const cachedPayload = cachedRaw ? JSON.parse(cachedRaw) as Record<string, unknown> : null;
     const pendingPayload = pendingRaw ? JSON.parse(pendingRaw) as Record<string, unknown> : null;
     if (cachedRaw && (!cachedPayload || typeof cachedPayload !== 'object' || Array.isArray(cachedPayload))) {
@@ -284,7 +294,10 @@ export async function loadCachedMagiConversation(): Promise<{ authoritative: Mag
     if (cachedPayload && (cachedPayload.schema_version !== 'magi-conversation-cache.v1'
       || cachedPayload.principal_id !== principal || !cachedPayload.messages
       || typeof cachedPayload.messages !== 'object' || Array.isArray(cachedPayload.messages)
-      || Object.keys(cachedPayload).some(key => !['schema_version', 'principal_id', 'messages'].includes(key)))) {
+      || (cachedPayload.latest_change !== undefined
+        && (typeof cachedPayload.latest_change !== 'number'
+          || !Number.isSafeInteger(cachedPayload.latest_change) || cachedPayload.latest_change < 0))
+      || Object.keys(cachedPayload).some(key => !['schema_version', 'principal_id', 'latest_change', 'messages'].includes(key)))) {
       throw new Error('Invalid canonical Magi cache.');
     }
     if (pendingPayload && (pendingPayload.schema_version !== 'magi-conversation-pending.v1'
@@ -337,13 +350,15 @@ export async function loadCachedMagiConversation(): Promise<{ authoritative: Mag
     if (pending.length !== Object.keys(pendingMap).length
       || new Set(pending.map(row => row.id)).size !== pending.length
       || pending.some(row => identityOwners.has(row.id))) throw new Error('Invalid pending Magi cache row.');
-    return principalId === principal ? { authoritative, pending } : { authoritative: [], pending: [] };
+    if (principalId !== principal) return { authoritative: [], pending: [], latestChange: 0 };
+    latestChange = cachedPayload?.latest_change as number || 0;
+    return { authoritative, pending, latestChange };
   } catch {
     await Promise.all([
       AsyncStorage.removeItem(storageKey(CACHE_PREFIX, principal)).catch(() => {}),
       AsyncStorage.removeItem(storageKey(PENDING_PREFIX, principal)).catch(() => {}),
     ]);
-    return { authoritative: [], pending: [] };
+    return { authoritative: [], pending: [], latestChange: 0 };
   }
 }
 

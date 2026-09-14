@@ -156,3 +156,32 @@ test('authoritative reads prune only server rows and retain genuine pending send
   const result = reconcileMagiMessages([old, pending], normalizeMagiMessageRecords([message()]), { authoritative: true });
   assert.deepEqual(result.map(row => row.id), ['client-native-1', 'u-local123']);
 });
+
+test('bounded change replay updates a cached row outside the newest history page', () => {
+  const oldPair = normalizeMagiMessageRecords([
+    message(),
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native',
+      status: 'pending', sequence_index: 1 }),
+  ]);
+  const cached = reconcileMagiMessages([], oldPair).map(row => ({ ...row, fromCache: true }));
+  const newerPage = normalizeMagiMessageRecords([
+    message({ id: 'mgm_user_2', client_message_id: 'client-native-2', turn_id: 'mgt_native_2',
+      sequence_index: 2, content: 'newer request' }),
+    message({ id: 'mgm_assistant_2', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_2', turn_id: 'mgt_native_2', sequence_index: 3,
+      content: 'newer response', source: 'magi-native' }),
+  ]);
+  const correction = normalizeMagiMessageRecords([message({
+    id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+    reply_to_message_id: 'mgm_user_1', content: 'Recovered after retry.', source: 'magi-native',
+    status: 'completed', sequence_index: 1, revision: 2,
+  })]);
+  const pageOnly = reconcileMagiMessages(cached, newerPage, { authoritative: true });
+  assert.equal(pageOnly.find(row => row.id === 'mgm_assistant_1')?.text, '');
+  const synchronized = reconcileMagiMessages(cached, [...newerPage, ...correction], { authoritative: true });
+  assert.equal(synchronized.find(row => row.id === 'mgm_assistant_1')?.text, 'Recovered after retry.');
+  assert.equal(synchronized.find(row => row.id === 'client-native-1')?.progress, 'complete');
+  assert.equal(synchronized.find(row => row.id === 'mgm_assistant_1')?.fromCache, false,
+    'the replayed row leaves cache-only status');
+});

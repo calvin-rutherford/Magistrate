@@ -15,6 +15,7 @@ import {
   fetchAuthProviders, fetchCanonicalActivitySnapshot,
   fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth,
   fetchMagiChatConversation, fetchRecentActivity, fetchUnifiedAttention,
+  replayMagiChatConversation,
   fetchUsage, fetchVoiceInputCapabilities, getGatewaySessionRevision, HealthInfo, logoutGatewaySession,
   RecentActivityItem, requestAgentMigration, saveExecutionCredential,
   sendMagiChatPrompt, transcribeVoiceAudio, UnifiedAttentionRecord,
@@ -36,6 +37,7 @@ import { hasMagiReconciliationConflict, MagiMessageRecord, normalizeMagiMessageR
 import {
   appendMagiMessage, getMagiConversationPrincipal, getMagiMessages,
   loadCachedMagiConversation, MagiAttachment, MagiMessage, resetMagiMessages,
+  setMagiConversationChangeCursor,
   updateMagiMessage, useMagiMessages,
 } from '../../src/services/MagiConversationSession';
 import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveVoiceCaptureBehavior, saveVoiceInputMode, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
@@ -143,7 +145,7 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false); const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [headerHeight, setHeaderHeight] = useState(0); const [composerHeight, setComposerHeight] = useState(0);
   const scrollRef = useRef<ScrollView>(null); const inputRef = useRef<TextInput>(null); const conversationIdRef = useRef<string | undefined>(undefined);
-  const conversationObservationRef = useRef(0);
+  const conversationChangeCursorRef = useRef(0); const conversationObservationRef = useRef(0);
   const activeControllerRef = useRef<AbortController | null>(null); const activeTokenRef = useRef(0); const pendingAttachmentsRef = useRef(new Map<string, ComposerAttachment[]>());
   const holdActiveRef = useRef(false); const capture = useVoiceInputAdapter(undefined, voiceInputMode); const captureRef = useRef(capture);
   const [greeting, setGreeting] = useState(() => magiGreeting(null));
@@ -171,13 +173,40 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
     const result = await fetchMagiChatConversation(conversationIdRef.current);
     if (!accept() || getMagiConversationPrincipal() !== owner
       || getGatewaySessionRevision() !== revision) return false;
+    conversationIdRef.current = result.conversation.id;
+    // The current-history page controls visible history, while the bounded
+    // change replay repairs cached rows outside that page without requiring
+    // the operator to paginate back to them.
+    const records: MagiMessageRecord[] = [...result.messages];
+    let cursor = conversationChangeCursorRef.current;
+    let replayLatest = Math.max(cursor, result.latest_change || 0);
+    let replayPages = 0;
+    while (cursor < replayLatest && replayPages < 4) {
+      const replay = await replayMagiChatConversation(result.conversation.id, cursor);
+      if (!accept() || getMagiConversationPrincipal() !== owner
+        || getGatewaySessionRevision() !== revision) return false;
+      if (replay.conversation_id !== result.conversation.id || replay.next_cursor < cursor) {
+        throw new Error('Gateway returned an invalid Native Magi replay cursor.');
+      }
+      records.push(...replay.messages);
+      if (replay.next_cursor === cursor && replay.messages.length) {
+        throw new Error('Gateway returned a stalled Native Magi replay cursor.');
+      }
+      cursor = replay.next_cursor;
+      replayLatest = Math.max(replayLatest, replay.latest_change);
+      replayPages += 1;
+      if (!replay.has_more) break;
+    }
     // A socket event accepted while this request was in flight is newer than
     // the HTTP snapshot's authority boundary; merge then, but never prune it.
     const mayPrune = authoritative && observation === conversationObservationRef.current;
-    if (!applyRecords(result.messages, mayPrune)) {
+    if (!applyRecords(records, mayPrune)) {
       throw new Error('Gateway returned conflicting Magi identity.');
     }
-    conversationIdRef.current = result.conversation.id;
+    if (cursor > conversationChangeCursorRef.current) {
+      conversationChangeCursorRef.current = cursor;
+      setMagiConversationChangeCursor(cursor);
+    }
     setConversationSync({ status: 'fresh', cachedRows: result.messages.length });
     return true;
   };
@@ -230,6 +259,8 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
       const cached = await loadCachedMagiConversation();
       if (!ownsLifecycle()) return;
       resetMagiMessages([...cached.authoritative, ...cached.pending]);
+      conversationChangeCursorRef.current = cached.latestChange;
+      setMagiConversationChangeCursor(cached.latestChange);
       // Cache hydration must win the startup race exactly once. Realtime starts
       // only afterward, so a delayed storage read cannot roll back a newer
       // canonical socket revision.

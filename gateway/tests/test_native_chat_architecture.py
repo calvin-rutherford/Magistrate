@@ -24,7 +24,7 @@ def route_methods() -> set[tuple[str, str]]:
     }
 
 
-def test_native_magi_is_the_only_registered_human_conversation_api(monkeypatch):
+def test_native_magi_is_the_only_registered_human_conversation_api():
     routes = route_methods()
     assert {
         ("POST", "/api/v1/magi/messages"),
@@ -47,9 +47,6 @@ def test_native_magi_is_the_only_registered_human_conversation_api(monkeypatch):
     }
     assert not ({path for _, path in routes} & retired_paths)
 
-    # Retired deployment flags have no authority over the unconditional API.
-    monkeypatch.setenv("MAGISTRATE_NATIVE_CHAT_ENABLED", "false")
-    monkeypatch.setenv("MAGISTRATE_LEGACY_CHAT_ENABLED", "true")
     assert magi_chat_readiness()["enabled"] is True
 
 

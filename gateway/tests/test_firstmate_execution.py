@@ -52,11 +52,6 @@ def execution_principal(monkeypatch):
     EXECUTION_HEADERS = {"Authorization": f"Bearer {token}"}
 
 
-@pytest.fixture
-def native_flags(monkeypatch):
-    monkeypatch.setenv("MAGISTRATE_NATIVE_CHAT_ENABLED", "true")
-    monkeypatch.setenv("MAGISTRATE_LEGACY_CHAT_ENABLED", "false")
-
 
 def native_origin(owner: str, suffix: str, *, store: MagiChatStore = magi_chat_store):
     prepared = store.prepare_submission(
@@ -151,7 +146,7 @@ def objective_activity(objective_id: str):
     ]
 
 
-def test_execution_event_route_is_authenticated_strict_and_principal_owned(native_flags, monkeypatch):
+def test_execution_event_route_is_authenticated_strict_and_principal_owned(monkeypatch):
     model = CompletionModel()
     monkeypatch.setattr(magi_chat_service, "model", model)
     origin = native_origin(EXECUTION_OWNER, "auth")
@@ -187,7 +182,7 @@ def test_execution_event_route_is_authenticated_strict_and_principal_owned(nativ
     assert post_event(progress_event("auth", "worker.started", 2), headers=other_headers).status_code == 404
 
 
-def test_structured_progress_projects_every_required_stage_without_chat_prose(native_flags, monkeypatch):
+def test_structured_progress_projects_every_required_stage_without_chat_prose(monkeypatch):
     model = CompletionModel()
     monkeypatch.setattr(magi_chat_service, "model", model)
     origin = native_origin(EXECUTION_OWNER, "timeline")
@@ -247,7 +242,7 @@ def test_structured_progress_projects_every_required_stage_without_chat_prose(na
     [("objective.failed", "failed"), ("objective.cancelled", "cancelled")],
 )
 def test_noncompletion_terminal_events_end_activity_without_chat(
-    native_flags, monkeypatch, phase, state,
+    monkeypatch, phase, state,
 ):
     model = CompletionModel()
     monkeypatch.setattr(magi_chat_service, "model", model)
@@ -268,7 +263,7 @@ def test_noncompletion_terminal_events_end_activity_without_chat(
     assert post_event(completed_event(suffix)).status_code == 409
 
 
-def test_verified_completion_persists_evidence_and_adds_one_native_assistant(native_flags, monkeypatch):
+def test_verified_completion_persists_evidence_and_adds_one_native_assistant(monkeypatch):
     model = CompletionModel()
     monkeypatch.setattr(magi_chat_service, "model", model)
     monkeypatch.setenv("MAGISTRATE_MAGI_PROJECT_CONTEXT", "UNTRUSTED DEPLOYMENT CONTEXT")
@@ -368,7 +363,7 @@ def test_verified_completion_persists_evidence_and_adds_one_native_assistant(nat
     assert len(payload_raw.encode("utf-8")) < 64 * 1024
 
 
-def test_completion_requires_closed_verified_evidence_and_known_causality(native_flags, monkeypatch):
+def test_completion_requires_closed_verified_evidence_and_known_causality(monkeypatch):
     model = CompletionModel()
     monkeypatch.setattr(magi_chat_service, "model", model)
     origin = native_origin(EXECUTION_OWNER, "evidence")
@@ -390,7 +385,7 @@ def test_completion_requires_closed_verified_evidence_and_known_causality(native
     assert model.calls == []
 
 
-def test_failed_completion_generation_retries_explicitly_in_same_canonical_row(native_flags, monkeypatch):
+def test_failed_completion_generation_retries_explicitly_in_same_canonical_row(monkeypatch):
     model = CompletionModel(fail_once=True)
     monkeypatch.setattr(magi_chat_service, "model", model)
     origin = native_origin(EXECUTION_OWNER, "retry")
@@ -489,7 +484,7 @@ async def test_interrupted_completion_claim_is_recovered_from_durable_evidence(m
     assert len(model.calls) == 1
 
 
-def test_execution_request_body_has_a_hard_preparse_bound(native_flags):
+def test_execution_request_body_has_a_hard_preparse_bound():
     oversized = b'{"padding":"' + (b"x" * (64 * 1024)) + b'"}'
     response = client.post(
         "/api/v1/firstmate/execution-events",

@@ -570,6 +570,16 @@ export interface MagiConversationResult {
 
 export type MagiChatPromptResult = MagiConversationResult;
 
+export interface MagiConversationReplayResult {
+  schema_version: 'magi.native-chat.v1';
+  conversation: { id: string; created_at: number; updated_at: number };
+  conversation_id: string;
+  messages: (MagiMessageRecord & { change_sequence: number })[];
+  next_cursor: number;
+  latest_change: number;
+  has_more: boolean;
+}
+
 export interface UsageWindow {
   id?: string;
   label?: string;
@@ -1395,7 +1405,12 @@ function normalizeMagiResult(raw: unknown): MagiConversationResult {
     || typeof conversation.created_at !== 'number' || !Number.isSafeInteger(conversation.created_at)
     || typeof conversation.updated_at !== 'number' || !Number.isSafeInteger(conversation.updated_at)
     || (value.conversation_id !== undefined && value.conversation_id !== conversation.id)
-    || !Array.isArray(value.messages)) throw new Error('Gateway returned an invalid Native Magi record.');
+    || !Array.isArray(value.messages)
+    || (value.latest_change !== undefined
+      && (typeof value.latest_change !== 'number'
+        || !Number.isSafeInteger(value.latest_change) || value.latest_change < 0))) {
+    throw new Error('Gateway returned an invalid Native Magi record.');
+  }
   const messages = normalizeMagiMessageRecords(value.messages);
   if (messages.length !== value.messages.length
     || messages.some(message => message.conversation_id !== conversation.id)) {
@@ -1438,6 +1453,69 @@ export async function fetchMagiChatConversation(conversationId?: string): Promis
     : '/magi/conversations/current';
   const res = await authorizedFetch(GATEWAY_URL + path);
   return normalizeMagiResult(await checkedJson<unknown>(res));
+}
+
+const MAGI_REPLAY_KEYS = new Set([
+  'id', 'conversation_id', 'turn_id', 'client_message_id', 'reply_to_message_id',
+  'role', 'content', 'status', 'source', 'sequence_index', 'revision',
+  'attachments', 'created_at', 'updated_at', 'change_sequence',
+]);
+
+function normalizeMagiReplayResult(raw: unknown): MagiConversationReplayResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Gateway returned an invalid Native Magi replay.');
+  }
+  const value = raw as Record<string, unknown>;
+  const conversation = value.conversation as Record<string, unknown> | undefined;
+  if (value.schema_version !== 'magi.native-chat.v1' || !conversation || Array.isArray(conversation)
+    || typeof conversation.id !== 'string' || !/^mgc_[A-Za-z0-9_-]{4,124}$/.test(conversation.id)
+    || typeof conversation.created_at !== 'number' || !Number.isSafeInteger(conversation.created_at)
+    || typeof conversation.updated_at !== 'number' || !Number.isSafeInteger(conversation.updated_at)
+    || value.conversation_id !== conversation.id || !Array.isArray(value.messages)
+    || value.messages.length > 200 || typeof value.next_cursor !== 'number'
+    || !Number.isSafeInteger(value.next_cursor) || value.next_cursor < 0
+    || typeof value.latest_change !== 'number' || !Number.isSafeInteger(value.latest_change)
+    || value.latest_change < value.next_cursor || typeof value.has_more !== 'boolean') {
+    throw new Error('Gateway returned an invalid Native Magi replay.');
+  }
+  const changes = value.messages.map(rawMessage => {
+    if (!rawMessage || typeof rawMessage !== 'object' || Array.isArray(rawMessage)) return null;
+    const message = rawMessage as Record<string, unknown>;
+    if (Object.keys(message).length !== MAGI_REPLAY_KEYS.size
+      || Object.keys(message).some(key => !MAGI_REPLAY_KEYS.has(key))
+      || typeof message.change_sequence !== 'number'
+      || !Number.isSafeInteger(message.change_sequence) || message.change_sequence < 1) return null;
+    const normalized = normalizeMagiMessageRecords(Object.fromEntries(
+      Object.entries(message).filter(([key]) => key !== 'change_sequence'),
+    ));
+    return normalized.length === 1 ? { ...normalized[0], change_sequence: message.change_sequence } : null;
+  });
+  if (changes.some(message => message === null)) throw new Error('Gateway returned an invalid Native Magi replay message.');
+  const records = changes as (MagiMessageRecord & { change_sequence: number })[];
+  if (records.some((message, index) => message.conversation_id !== conversation.id
+    || (index > 0 && message.change_sequence <= records[index - 1].change_sequence))) {
+    throw new Error('Gateway returned an invalid Native Magi replay cursor.');
+  }
+  return {
+    schema_version: 'magi.native-chat.v1',
+    conversation: conversation as MagiConversationReplayResult['conversation'],
+    conversation_id: conversation.id,
+    messages: records,
+    next_cursor: value.next_cursor,
+    latest_change: value.latest_change,
+    has_more: value.has_more,
+  };
+}
+
+/** Replay bounded canonical changes, including revisions outside the loaded page. */
+export async function replayMagiChatConversation(
+  conversationId: string, after = 0,
+): Promise<MagiConversationReplayResult> {
+  const params = new URLSearchParams({ after: String(after), limit: '200' });
+  const res = await authorizedFetch(
+    `${GATEWAY_URL}/magi/conversations/${encodeURIComponent(conversationId)}/replay?${params}`,
+  );
+  return normalizeMagiReplayResult(await checkedJson<unknown>(res));
 }
 
 /** Submit one complete non-streamed native Magi turn. */

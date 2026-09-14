@@ -14,13 +14,6 @@ function readJson(name) {
   return JSON.parse(fs.readFileSync(path.join(FRONTEND_ROOT, name), 'utf8'));
 }
 
-function booleanLiteral(value) {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-  return null;
-}
-
 export function evaluateFriendBetaRelease({ profile, env, app, eas, packageJson }) {
   const failures = [];
   const checks = [];
@@ -55,9 +48,6 @@ export function evaluateFriendBetaRelease({ profile, env, app, eas, packageJson 
   check(eas?.cli?.appVersionSource === 'remote', 'eas-remote-version', 'EAS must own monotonic store build numbers');
   const build = eas?.build?.[profile];
   check(Boolean(build), 'eas-profile', `eas.json is missing build.${profile}`);
-  check(booleanLiteral(build?.env?.EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED) === true
-    && booleanLiteral(build?.env?.EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED) === false,
-  'eas-native-only-env', `build.${profile}.env must commit the provider-native-only selection`);
   if (profile === 'development') {
     check(build?.developmentClient === true && build?.distribution === 'internal' && build?.ios?.simulator === false,
       'physical-development-profile', 'development must be an internal physical-device development client');
@@ -89,11 +79,6 @@ export function evaluateFriendBetaRelease({ profile, env, app, eas, packageJson 
       'gateway-url-public-config', 'Gateway URL must not contain credentials, query parameters, or a fragment');
     check(gateway.pathname.endsWith('/api/v1'), 'gateway-api-root', 'Gateway URL must end with /api/v1');
   }
-
-  check(booleanLiteral(env.EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED) === true,
-    'native-chat-selected', 'set EXPO_PUBLIC_MAGI_NATIVE_CHAT_ENABLED=true in the EAS environment');
-  check(booleanLiteral(env.EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED) === false,
-    'legacy-chat-disabled', 'set EXPO_PUBLIC_MAGI_LEGACY_CHAT_ENABLED=false in the EAS environment');
 
   const unsafePublicNames = Object.keys(env).filter(name => name.startsWith('EXPO_PUBLIC_') && SECRET_PUBLIC_NAME.test(name));
   check(unsafePublicNames.length === 0, 'no-public-secret-names', `remove secret-like public variables: ${unsafePublicNames.join(', ')}`);

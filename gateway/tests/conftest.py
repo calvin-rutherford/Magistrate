@@ -13,8 +13,7 @@ TEST_DB_PATH = Path(__file__).parent / '.gateway-test.sqlite3'
 TEST_DB_PATH.unlink(missing_ok=True)
 os.environ.setdefault('MAGISTRATE_DB_PATH', str(TEST_DB_PATH))
 os.environ.setdefault('MAGISTRATE_BOOTSTRAP_SECRET', 'test-bootstrap-secret')
-# Most Gateway integration fixtures exercise the explicit legacy compatibility
-# mode. Keep them hermetic from an operator's local Pi runtime; focused Pi tests
+# Keep tests hermetic from an operator's local Pi runtime; focused Pi tests
 # remove/override these values and supply private temporary boundaries.
 for name in (
     'MAGISTRATE_PI_RUNTIME_DIR', 'MAGISTRATE_PI_IPC_KEY_PATH',
@@ -25,11 +24,6 @@ for name in (
 ):
     os.environ.pop(name, None)
 os.environ['MAGISTRATE_PI_OWNERSHIP_ENABLED'] = 'false'
-# The pre-migration suites exercise the retained captain compatibility API.
-# Native-chat tests opt back into the production defaults explicitly.
-os.environ['MAGISTRATE_NATIVE_CHAT_ENABLED'] = 'false'
-os.environ['MAGISTRATE_LEGACY_CHAT_ENABLED'] = 'true'
-
 from app.auth import issue_session
 
 # All integration tests use a real bearer session rather than the retired

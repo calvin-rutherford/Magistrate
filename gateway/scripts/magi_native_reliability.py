@@ -238,8 +238,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="magistrate-magi-reliability-") as directory:
         os.environ["MAGISTRATE_ENV"] = "test"
         os.environ["MAGISTRATE_DB_PATH"] = str(Path(directory) / "magi.sqlite3")
-        os.environ["MAGISTRATE_NATIVE_CHAT_ENABLED"] = "true"
-        os.environ["MAGISTRATE_LEGACY_CHAT_ENABLED"] = "false"
         # Explicit test mode permits db.py's process-local ephemeral Fernet key.
         report = asyncio.run(run_gate())
     print(json.dumps(report, sort_keys=True))

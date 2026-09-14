@@ -40,6 +40,15 @@ function installNativeGatewayMock() {
         : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user', auth_method: 'operator-bootstrap', onboarding_required: false };
       return json(payload);
     }
+    if (url.includes('/api/v1/magi/conversations/') && url.includes('/replay')) {
+      const record = readRecord() || emptyRecord();
+      const after = Number(new URL(url).searchParams.get('after') || '0');
+      const changes = (record.messages || []).slice(after).map((message, index) => ({
+        ...message, change_sequence: after + index + 1,
+      }));
+      return json({ ...record, messages: changes, next_cursor: after + changes.length,
+        latest_change: (record.messages || []).length, has_more: false });
+    }
     if (url.includes('/api/v1/magi/conversations/current')) {
       increment('native-chat-get-count');
       return json(readRecord() || emptyRecord());

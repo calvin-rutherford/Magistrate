@@ -171,7 +171,7 @@ function reconciliationDisposition(
   previous: MagiMessage | undefined,
   record: MagiMessageRecord,
 ): 'accept' | 'stale' | 'conflict' {
-  if (!previous || previous.fromCache) return 'accept';
+  if (!previous) return 'accept';
   const localPending = !previous.serverId && previous.role === 'user'
     && previous.sequenceIndex === undefined;
   if (localPending) {
@@ -226,6 +226,7 @@ function mergeRecord(previous: MagiMessage | undefined, record: MagiMessageRecor
     revision: record.revision,
     turnId: record.turn_id,
     sequenceIndex: record.sequence_index,
+    fromCache: false,
   };
 }
 
@@ -301,7 +302,10 @@ export function reconcileMagiMessages(
   const pending: MagiMessage[] = [];
   for (const row of rows.values()) {
     if (typeof row.sequenceIndex === 'number') {
-      if (!authoritative || delivered.has(row.id)) recorded.push(row);
+      // A bounded page is authoritative only for rows it includes. Keep a
+      // validated cache row outside that window until history pagination loads
+      // its server observation; revision ordering still governs replacements.
+      if (!authoritative || delivered.has(row.id) || row.fromCache) recorded.push(row);
     } else if (row.role === 'user' && (row.delivery === 'sending' || row.delivery === 'failed')) pending.push(row);
   }
   recorded.sort((left, right) => (left.sequenceIndex as number) - (right.sequenceIndex as number));
