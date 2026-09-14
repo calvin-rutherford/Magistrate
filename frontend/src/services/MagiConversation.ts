@@ -164,7 +164,7 @@ function isMagiStatusTransitionAllowed(
 ): boolean {
   if (previous === next) return true;
   if (previous === 'pending') return next === 'completed' || next === 'failed' || next === 'cancelled';
-  return previous === 'failed' && next === 'pending';
+  return previous === 'failed' && (next === 'pending' || next === 'completed');
 }
 
 function reconciliationDisposition(
@@ -194,7 +194,7 @@ function reconciliationDisposition(
     || JSON.stringify(previous.attachments || []) !== JSON.stringify(record.attachments)
     || (previous.text !== record.content
       && (record.role === 'user' || previous.revision === record.revision
-        || previous.serverStatus !== 'pending'))
+        || (previous.serverStatus !== 'pending' && previous.serverStatus !== 'failed')))
     || (previous.revision === record.revision && previous.serverStatus !== record.status)
     || (previous.serverStatus !== undefined && previous.revision !== undefined
       && record.revision > previous.revision

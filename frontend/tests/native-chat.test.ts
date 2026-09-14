@@ -157,6 +157,28 @@ test('authoritative reads prune only server rows and retain genuine pending send
   assert.deepEqual(result.map(row => row.id), ['client-native-1', 'u-local123']);
 });
 
+test('a cached failed row accepts a newer canonical completed revision', () => {
+  const failedPair = normalizeMagiMessageRecords([
+    message(),
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: '', source: 'magi-native',
+      status: 'failed', sequence_index: 1, revision: 1 }),
+  ]);
+  const cached = reconcileMagiMessages([], failedPair).map(row => ({ ...row, fromCache: true }));
+  const completed = normalizeMagiMessageRecords([
+    message({ id: 'mgm_assistant_1', role: 'assistant', client_message_id: null,
+      reply_to_message_id: 'mgm_user_1', content: 'Recovered after retry.', source: 'magi-native',
+      status: 'completed', sequence_index: 1, revision: 3 }),
+  ]);
+
+  assert.equal(hasMagiReconciliationConflict(cached, completed), false);
+  const replayed = reconcileMagiMessages(cached, completed, { authoritative: true });
+  assert.equal(replayed.find(row => row.id === 'mgm_assistant_1')?.text, 'Recovered after retry.');
+  assert.equal(replayed.find(row => row.id === 'mgm_assistant_1')?.serverStatus, 'completed');
+  assert.equal(replayed.find(row => row.id === 'mgm_assistant_1')?.fromCache, false);
+  assert.equal(replayed.find(row => row.id === 'client-native-1')?.progress, 'complete');
+});
+
 test('bounded change replay updates a cached row outside the newest history page', () => {
   const oldPair = normalizeMagiMessageRecords([
     message(),
