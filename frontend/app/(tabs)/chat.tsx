@@ -3,9 +3,9 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Image, ImageSourcePropType, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, Animated as NativeAnimated, Image, ImageSourcePropType, Keyboard, type KeyboardEvent, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
@@ -87,8 +87,23 @@ const glassFill = (dark: boolean, strength: 'control' | 'surface' = 'control') =
 const glassEdge = (dark: boolean) => dark ? 'rgba(255,255,255,0.10)' : 'rgba(17,21,27,0.08)';
 const blurStyle = (radius: number) => Platform.OS === 'web' ? { backdropFilter: `blur(${radius}px)`, WebkitBackdropFilter: `blur(${radius}px)` } as any : null;
 
+// expo-blur has no web implementation. Keep the native material optional so
+// web retains its CSS blur and an unavailable native module falls back to the
+// translucent surface below.
+let NativeBlurView: any = null;
+if (Platform.OS !== 'web') {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    NativeBlurView = require('expo-blur').BlurView;
+  } catch {
+    NativeBlurView = null;
+  }
+}
+function NativeGlassBlur({ dark, intensity, borderRadius }: { dark: boolean; intensity: number; borderRadius: number }) {
+  return NativeBlurView ? <NativeBlurView pointerEvents="none" intensity={intensity} tint={dark ? 'dark' : 'light'} style={[StyleSheet.absoluteFill, { borderRadius }]} /> : null;
+}
 function GlassCircleButton({ dark, onPress, accessibilityLabel, accessibilityHint, accessibilityState, testID, children, badge }: { dark: boolean; onPress: () => void; accessibilityLabel: string; accessibilityHint?: string; accessibilityState?: object; testID?: string; children: React.ReactNode; badge?: boolean }) {
-  return <TouchableOpacity testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} accessibilityState={accessibilityState} onPress={onPress} activeOpacity={0.7} style={[styles.glassCircle, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}>{children}{badge ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</TouchableOpacity>;
+  return <TouchableOpacity testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} accessibilityState={accessibilityState} onPress={onPress} activeOpacity={0.7} style={[styles.glassCircle, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}><NativeGlassBlur dark={dark} intensity={20} borderRadius={23} />{children}{badge ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</TouchableOpacity>;
 }
 function EmptyStateMagi({ dark, visible, greeting, active }: { dark: boolean; visible: boolean; greeting: string; active: boolean }) {
   const progress = useSharedValue(visible ? 1 : 0); const breath = useSharedValue(0);
@@ -124,6 +139,8 @@ function AssistantMessage({ message, dark, text, muted, onActions }: { message: 
 // `target` remains an accepted shell prop for compatibility but is intentionally not read.
 export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voiceInputMode = 'automatic', voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {} }: { target?: string; onDrawerToggle?: () => void; drawerOpen?: boolean; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void }) {
   const router = useRouter(); const dark = isDarkTheme(useChatColorScheme());
+  const { bottom: safeAreaBottom } = useSafeAreaInsets(); const { height: windowHeight } = useWindowDimensions();
+  const composerKeyboardOffset = useRef(new NativeAnimated.Value(0)).current;
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight; const spectral = dark ? brand.cyan : brand.violet;
   const messages = useMagiMessages(); const canonicalActivity = useCanonicalActivity();
   const [promptText, setPromptText] = useState('');
@@ -247,6 +264,29 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
   };
 
   useEffect(() => { captureRef.current = capture; });
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    const animateComposer = (event: KeyboardEvent) => {
+      const screenY = event.endCoordinates?.screenY;
+      const keyboardHeight = typeof screenY === 'number' ? Math.max(0, windowHeight - screenY) : 0;
+      // The closed composer already sits above the home-indicator inset. Move
+      // only the keyboard overlap so the safe area is not counted twice.
+      const offset = -Math.max(0, keyboardHeight - safeAreaBottom);
+      composerKeyboardOffset.stopAnimation();
+      NativeAnimated.timing(composerKeyboardOffset, {
+        toValue: offset,
+        duration: typeof event.duration === 'number' && event.duration > 0 ? event.duration : 250,
+        useNativeDriver: true,
+      }).start();
+    };
+    const subscriptions = [
+      // Match KeyboardAvoidingView's iOS lifecycle: willShow/willHide carry
+      // the keyboard animation frame and also cover undocked/split keyboards.
+      Keyboard.addListener('keyboardWillShow', animateComposer),
+      Keyboard.addListener('keyboardWillHide', animateComposer),
+    ];
+    return () => subscriptions.forEach(subscription => subscription.remove());
+  }, [composerKeyboardOffset, safeAreaBottom, windowHeight]);
   useEffect(() => () => { void captureRef.current.cancel(); }, []);
   useEffect(() => { let mounted = true; loadMagiGreeting().then(value => { if (mounted) setGreeting(value); }).catch(() => {}); return () => { mounted = false; }; }, []);
   useEffect(() => notificationManager.subscribeUnread(events => setUnreadAttentionCount(events.length)), []);
@@ -445,7 +485,7 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
   const handleComposerLayout = (event: LayoutChangeEvent) => setComposerHeight(event.nativeEvent.layout.height);
   const showEmptyState = hydrated && messages.length === 0 && conversationSync.status !== 'stale';
 
-  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={styles.canvas}>
+  return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'android' ? 'height' : undefined} style={styles.canvas}>
     <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onScroll={onHistoryScroll} onContentSizeChange={onContentSizeChange} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} refreshControl={<RefreshControl refreshing={activityRefreshing} onRefresh={() => { void Promise.allSettled([refreshConversation(true), refreshActivity()]); }} />} accessibilityLabel="Magi conversation history" aria-busy={!hydrated}>
       {messages.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} onActions={() => setMessageActionsId(message.id)} />)}
       {canonicalWork.active ? <WorkingState dark={dark} muted={muted} operations={canonicalWork.operationCount} phase={canonicalWork.phase === 'idle' ? 'active' : canonicalWork.phase} onPress={onActivityOpen} /> : null}
@@ -454,20 +494,19 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
     <View testID="chat-header" style={styles.headerDock} pointerEvents="box-none" onLayout={handleHeaderLayout}><View style={styles.topBar} pointerEvents="box-none">
       <GlassCircleButton dark={dark} testID="brand-drawer-toggle" accessibilityLabel={`${drawerOpen ? 'Collapse' : 'Open'} Magistrate drawer${unreadAttentionCount ? `, ${unreadAttentionCount} unread attention item${unreadAttentionCount === 1 ? '' : 's'}` : ''}`} accessibilityState={{ expanded: drawerOpen }} onPress={onDrawerToggle} badge={unreadAttentionCount > 0}><MenuIcon size={ICON_SIZE} color={text} /></GlassCircleButton>
       <View style={styles.identityControl} accessibilityLabel="Magi, provider-native conversation"><Text style={[styles.identityName, { color: text }]}>Magi</Text></View>
-      <GlassCircleButton dark={dark} testID="chat-primary-action" accessibilityLabel={isThinking ? 'Stop Magi response' : 'Open Voice Mode'} onPress={() => isThinking ? void stopPendingResponse() : router.push('/voice' as any)}>{isThinking ? <StopIcon size={ICON_SIZE} color={spectral} /> : <SoundwaveIcon size={ICON_SIZE} color={text} />}</GlassCircleButton>
     </View>{conversationSync.status === 'stale' ? <View testID="conversation-stale-state" accessibilityRole="alert" style={[styles.staleConversation, { backgroundColor: glassFill(dark, 'surface'), borderColor: glassEdge(dark) }, blurStyle(18)]}><Text style={[styles.staleConversationText, { color: conversationSync.cachedRows ? muted : brand.attention }]}>{conversationSync.cachedRows ? 'Connection interrupted · showing saved conversation while reconnecting.' : 'Conversation unavailable · reconnecting.'}</Text></View> : null}</View>
     {(hasNewMessages || !followLatest) ? <TouchableOpacity testID="jump-to-latest" accessibilityRole="button" accessibilityLabel="Jump to latest message" style={[styles.jumpButton, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]} onPress={() => { setFollowLatest(true); setHasNewMessages(false); scrollRef.current?.scrollToEnd({ animated: true }); }}><Text style={[styles.jumpText, { color: text }]}>↓</Text></TouchableOpacity> : null}
     {copiedMessageId ? <Text testID="message-copied" accessibilityLiveRegion="polite" style={[styles.copiedLabel, { bottom: composerHeight + 52 }]}>Copied</Text> : null}
     {messageActionsId ? <View testID="message-actions" accessibilityViewIsModal style={[styles.messageActions, { bottom: composerHeight + FLOATING_CHROME_GAP, backgroundColor: dark ? brand.command : '#FFFFFF' }]}><TouchableOpacity accessibilityRole="button" accessibilityLabel="Copy message" onPress={() => void copyMessage()} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Copy</Text></TouchableOpacity>{activeMessage?.role === 'user' ? <TouchableOpacity accessibilityRole="button" onPress={() => { setSelectableMessageId(activeMessage.id); setMessageActionsId(null); }} style={styles.messageAction}><Text style={[styles.messageActionText, { color: text }]}>Select text</Text></TouchableOpacity> : null}<TouchableOpacity accessibilityRole="button" accessibilityLabel="Close message actions" onPress={() => setMessageActionsId(null)} style={styles.messageAction}><Text style={[styles.messageActionText, { color: muted }]}>×</Text></TouchableOpacity></View> : null}
-    <View testID="composer-dock" style={styles.composerDock} pointerEvents="box-none" onLayout={handleComposerLayout}>
+    <NativeAnimated.View testID="composer-dock" style={[styles.composerDock, { transform: [{ translateY: composerKeyboardOffset }] }]} pointerEvents="box-none" onLayout={handleComposerLayout}>
       {isRecording ? <View testID="active-voice-surface" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.activeVoiceSurface}><View style={styles.activeVoiceHalo} /><Image source={markActive} style={styles.activeVoiceMark} resizeMode="contain" accessibilityIgnoresInvertColors /><LiveWaveform samples={waveSamples} color={brand.cyan} /></View> : null}
       {attachments.length ? <ScrollView testID="attachment-preview" horizontal showsHorizontalScrollIndicator={false} style={styles.attachmentPreview} contentContainerStyle={styles.attachmentPreviewContent}>{attachments.map(attachment => <View key={attachment.id} style={[styles.attachmentChip, { backgroundColor: 'transparent' }]}>{attachment.kind === 'image' ? <Image source={{ uri: attachment.uri }} style={styles.attachmentThumbnail} /> : <View style={styles.attachmentFileIcon}><FileIcon color={spectral} /></View>}<View style={styles.attachmentCopy}><Text numberOfLines={1} style={[styles.attachmentName, { color: text }]}>{attachment.name}</Text><Text style={[styles.attachmentMeta, { color: attachment.status === 'failed' ? brand.critical : muted }]}>{attachment.status === 'uploading' ? 'Uploading…' : attachment.status === 'failed' ? 'Upload failed' : formatAttachmentSize(attachment.size)}</Text></View><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments(current => current.filter(item => item.id !== attachment.id))} style={styles.attachmentRemove}><Text style={[styles.attachmentRemoveText, { color: muted }]}>×</Text></TouchableOpacity></View>)}</ScrollView> : null}
-      <View testID="composer-surface" style={[styles.composer, { backgroundColor: 'transparent', borderColor: glassEdge(dark) }, blurStyle(24)]}><View style={styles.attachmentControl}><TouchableOpacity testID="attachment-menu-button" accessibilityRole="button" accessibilityLabel="Add attachment" accessibilityState={{ expanded: attachmentMenuOpen }} onPress={() => setAttachmentMenuOpen(value => !value)} style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: attachmentMenuOpen ? spectral : muted }]}>＋</Text></TouchableOpacity>{attachmentMenuOpen ? <View testID="attachment-menu" accessibilityViewIsModal style={[styles.attachmentMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}><Text style={[styles.menuTitle, { color: text }]}>Add to message</Text><TouchableOpacity testID="attachment-option-images" accessibilityRole="button" onPress={() => void pickImages()} style={styles.attachmentOption}><ImageIcon color={spectral} /><Text style={[styles.attachmentOptionTitle, { color: text }]}>Photos</Text></TouchableOpacity><TouchableOpacity testID="attachment-option-files" accessibilityRole="button" onPress={() => void pickFiles()} style={styles.attachmentOption}><FileIcon color={spectral} /><Text style={[styles.attachmentOptionTitle, { color: text }]}>Files</Text></TouchableOpacity></View> : null}</View>
+      <View testID="composer-surface" style={[styles.composer, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(24)]}><NativeGlassBlur dark={dark} intensity={24} borderRadius={30} /><View style={styles.attachmentControl}><TouchableOpacity testID="attachment-menu-button" accessibilityRole="button" accessibilityLabel="Add attachment" accessibilityState={{ expanded: attachmentMenuOpen }} onPress={() => setAttachmentMenuOpen(value => !value)} style={styles.composerIconButton}><Text style={[styles.composerIconText, { color: attachmentMenuOpen ? spectral : muted }]}>＋</Text></TouchableOpacity>{attachmentMenuOpen ? <View testID="attachment-menu" accessibilityViewIsModal style={[styles.attachmentMenu, { backgroundColor: dark ? brand.command : '#FFFFFF' }]}><Text style={[styles.menuTitle, { color: text }]}>Add to message</Text><TouchableOpacity testID="attachment-option-images" accessibilityRole="button" onPress={() => void pickImages()} style={styles.attachmentOption}><ImageIcon color={spectral} /><Text style={[styles.attachmentOptionTitle, { color: text }]}>Photos</Text></TouchableOpacity><TouchableOpacity testID="attachment-option-files" accessibilityRole="button" onPress={() => void pickFiles()} style={styles.attachmentOption}><FileIcon color={spectral} /><Text style={[styles.attachmentOptionTitle, { color: text }]}>Files</Text></TouchableOpacity></View> : null}</View>
       <TextInput ref={inputRef} testID="magi-prompt" style={[styles.composerInput, { color: text }]} placeholder="Message Magi" placeholderTextColor={muted} value={promptText} onChangeText={setPromptText} onSubmitEditing={handleSend} returnKeyType="send" accessibilityLabel="Message Magi" />
       <TouchableOpacity testID="inline-mic-button" accessibilityRole="button" accessibilityLabel={isRecording ? 'Stop microphone' : isTranscribing ? 'Transcribing microphone' : 'Start microphone'} accessibilityState={{ selected: isRecording, busy: isTranscribing || micStatus === 'requesting' }} style={[styles.composerIconButton, isRecording ? styles.micActiveButton : undefined]} onPress={voiceCaptureBehavior === 'tap-to-toggle' ? () => void handleMicPress() : undefined} onPressIn={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = true; if (!isRecording) void handleMicPress(); } : undefined} onPressOut={voiceCaptureBehavior === 'hold-to-talk' ? () => { holdActiveRef.current = false; if (isRecording) void handleMicPress(); } : undefined} disabled={isTranscribing || micStatus === 'requesting'}><MicIcon size={24} color={isRecording ? brand.cyan : muted} /></TouchableOpacity>
       <TouchableOpacity testID={isThinking ? 'stop-magi-response' : 'send-magi-prompt'} accessibilityRole="button" accessibilityLabel={isThinking ? 'Stop Magi response' : promptText.trim() || attachments.length ? 'Send message to Magi' : 'Open voice mode'} accessibilityState={{ busy: isThinking }} onPress={() => isThinking ? void stopPendingResponse() : handleSend()} style={[styles.sendButton, isThinking ? styles.stopButton : undefined]}>{isThinking ? <StopIcon size={20} color={brand.paper} /> : promptText.trim() || attachments.length ? <ArrowUpIcon size={22} color={brand.paper} /> : <SoundwaveIcon color={brand.paper} size={20} />}</TouchableOpacity></View>
       <View testID="composer-status" style={styles.composerStatus} accessibilityLiveRegion="polite">{micStatus === 'requesting' ? <Text style={styles.micTranscribingLabel}>Requesting microphone permission…</Text> : micStatus === 'listening' ? <Text style={styles.micListeningLabel}>Listening…</Text> : micStatus === 'transcribing' ? <Text style={styles.micTranscribingLabel}>Transcribing…</Text> : micStatus === 'ready' ? <Text style={styles.micReadyLabel}>Transcript ready — review before sending</Text> : null}{queuedPrompts.length ? <Text testID="queued-message-count" style={styles.queuedLabel}>{queuedPrompts.length} queued · sends in order</Text> : null}{sendError ? <Text testID="magi-send-error" accessibilityRole="alert" style={styles.sendError}>{sendError}</Text> : null}</View>
-    </View>
+    </NativeAnimated.View>
     <CanonicalActivitySurface visible={activityOpen} snapshot={canonicalActivity} work={canonicalWork} hasMore={activityHasMore} loadingMore={activityLoadingMore} refreshing={activityRefreshing} onClose={onActivityClose} onLoadMore={loadOlderCanonicalActivity} onRefresh={refreshActivity} onOpenDecision={itemId => { onActivityClose(); router.push({ pathname: '/attention', params: { item: itemId, source: 'activity' } } as any); }} />
   </KeyboardAvoidingView>;
 }
