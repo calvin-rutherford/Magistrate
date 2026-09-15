@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 
+import httpx
 import pytest
 
 from app import db
@@ -19,7 +20,7 @@ from app.magi_firstmate_tools import (
     _validate_tasks_axi_receipt,
     parse_submit_objective_arguments,
 )
-from app.magi_model import MagiModelResult, MagiModelToolCall
+from app.magi_model import MagiModelResult, MagiModelToolCall, OpenAIMagiModel
 from app.magi_tool_protocol import MagiToolContext, MagiToolError
 
 
@@ -326,6 +327,79 @@ class IntentRoutingModel:
                 ),),
             )
         return MagiModelResult('Here is a direct conversational answer.')
+
+
+@pytest.mark.asyncio
+async def test_responses_provider_service_keeps_ordinary_chat_and_objective_delegation(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'responses-service.sqlite3'))
+    dispatcher = FakeDispatcher()
+    objective_store = ObjectiveSubmissionStore()
+    tools = FirstmateObjectiveTools(store=objective_store, dispatcher=dispatcher)
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        assert request.url.path == '/v1/responses'
+        assert body['instructions']
+        if body.get('tools'):
+            assert body['reasoning'] == {'effort': 'high'}
+            assert 'messages' not in body
+            assert body['tools'][0]['name'] == 'firstmate__submit_objective'
+            assert set(body['tools'][0]) == {
+                'type', 'name', 'description', 'parameters', 'strict',
+            }
+        if len(requests) == 1:
+            return httpx.Response(200, json={
+                'status': 'completed',
+                'output': [{'type': 'message', 'role': 'assistant',
+                            'content': [{'type': 'output_text', 'text': 'Direct answer.'}]}],
+            })
+        if len(requests) == 2:
+            return httpx.Response(200, json={
+                'status': 'completed',
+                'output': [{'type': 'function_call', 'call_id': 'call_objective_service',
+                            'name': 'firstmate__submit_objective',
+                            'arguments': objective_arguments()}],
+            })
+        assert body['input'][-1]['type'] == 'function_call_output'
+        return httpx.Response(200, json={
+            'status': 'completed',
+            'output': [{'type': 'message', 'role': 'assistant',
+                        'content': [{'type': 'output_text', 'text': 'Accepted.'}]}],
+        })
+
+    model = OpenAIMagiModel(
+        api_key='server-only-secret', model='gpt-5.6-sol',
+        base_url='https://provider.invalid/v1', reasoning_effort='high',
+        transport=httpx.MockTransport(handler),
+    )
+    service = MagiChatService(
+        model, store=MagiChatStore(), profile_loader=lambda _: {}, tool_executor=tools,
+    )
+    ordinary = await service.submit(
+        'operator-a', 'responses-question-0001', 'What does a health endpoint report?',
+        allow_tools=True,
+    )
+    assert ordinary['status'] == 'completed'
+    assert ordinary['assistant_message']['content'] == 'Direct answer.'
+    assert dispatcher.calls == []
+    assert requests[0]['reasoning'] == {'effort': 'high'}
+    offered = requests[0]['tools'][0]
+    assert offered['type'] == 'function'
+    assert offered['name'] == 'firstmate__submit_objective'
+    assert offered['strict'] is True
+    assert 'function' not in offered
+
+    objective = await service.submit(
+        'operator-a', 'responses-objective-0001',
+        'Add a health endpoint to Magistrate and test it.', allow_tools=True,
+    )
+    assert objective['status'] == 'completed'
+    assert objective['assistant_message']['content'] == 'Accepted.'
+    assert len(dispatcher.calls) == 1
+    assert len(requests) == 3
+    assert requests[1]['reasoning'] == {'effort': 'high'}
 
 
 @pytest.mark.asyncio

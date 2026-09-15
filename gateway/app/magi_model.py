@@ -22,6 +22,7 @@ MAGI_MAX_TOOL_CALLS = 4
 MAGI_MAX_TOOL_DEFINITIONS = 5
 MAGI_MAX_TOOL_ARGUMENT_BYTES = 32 * 1024
 MAGI_MAX_TOOL_DEFINITION_BYTES = 64 * 1024
+_MAGI_REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _OPENAI_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _TOOL_CALL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -139,54 +140,75 @@ def _validated_tool_call(call: MagiModelToolCall) -> dict[str, Any]:
     }
 
 
-def _provider_message(message: MagiModelMessage) -> dict[str, Any]:
-    if not isinstance(message, MagiModelMessage):
-        raise MagiModelError("provider_invalid_request", retryable=False)
-    if message.role == "tool":
-        if (
-            message.tool_calls
-            or not isinstance(message.tool_call_id, str)
-            or not _TOOL_CALL_ID.fullmatch(message.tool_call_id)
-            or not isinstance(message.content, str)
-            or not message.content
-        ):
+def _response_input(messages: Sequence[MagiModelMessage]) -> list[dict[str, Any]]:
+    """Encode the internal transcript as Responses input items.
+
+    Responses does not use Chat Completions' assistant ``tool_calls`` and
+    ``tool`` roles. Function calls and their results are separate input items,
+    so keeping this conversion here prevents either protocol from leaking into
+    the service boundary.
+    """
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, MagiModelMessage):
             raise MagiModelError("provider_invalid_request", retryable=False)
-        _validated_utf8(
-            message.content,
-            maximum_bytes=MAGI_MAX_TOOL_ARGUMENT_BYTES,
-            code="provider_invalid_request",
-        )
-        return {
-            "role": "tool",
-            "tool_call_id": message.tool_call_id,
-            "content": message.content,
-        }
-    if message.role not in {"user", "assistant"} or message.tool_call_id is not None:
-        raise MagiModelError("provider_invalid_request", retryable=False)
-    if message.tool_calls:
-        if message.role != "assistant" or len(message.tool_calls) > MAGI_MAX_TOOL_CALLS:
-            raise MagiModelError("provider_invalid_request", retryable=False)
-        if message.content is not None:
-            if not isinstance(message.content, str):
+        if message.role == "tool":
+            if (
+                message.tool_calls
+                or not isinstance(message.tool_call_id, str)
+                or not _TOOL_CALL_ID.fullmatch(message.tool_call_id)
+                or not isinstance(message.content, str)
+                or not message.content
+            ):
                 raise MagiModelError("provider_invalid_request", retryable=False)
             _validated_utf8(
                 message.content,
-                maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
+                maximum_bytes=MAGI_MAX_TOOL_ARGUMENT_BYTES,
                 code="provider_invalid_request",
             )
-        return {
-            "role": "assistant",
-            "content": message.content,
-            "tool_calls": [_validated_tool_call(call) for call in message.tool_calls],
-        }
-    if not isinstance(message.content, str):
-        raise MagiModelError("provider_invalid_request", retryable=False)
-    _validated_utf8(
-        message.content,
-        maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
-        code="provider_invalid_request",
-    )
-    return {"role": message.role, "content": message.content}
+            items.append({
+                "type": "function_call_output",
+                "call_id": message.tool_call_id,
+                "output": message.content,
+            })
+            continue
+        if message.role not in {"user", "assistant"} or message.tool_call_id is not None:
+            raise MagiModelError("provider_invalid_request", retryable=False)
+        if message.tool_calls:
+            if message.role != "assistant" or len(message.tool_calls) > MAGI_MAX_TOOL_CALLS:
+                raise MagiModelError("provider_invalid_request", retryable=False)
+            if message.content is not None:
+                if not isinstance(message.content, str):
+                    raise MagiModelError("provider_invalid_request", retryable=False)
+                _validated_utf8(
+                    message.content,
+                    maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
+                    code="provider_invalid_request",
+                )
+                if message.content:
+                    items.append({
+                        "role": "assistant", "content": [
+                            {"type": "output_text", "text": message.content},
+                        ],
+                    })
+            for call in message.tool_calls:
+                encoded = _validated_tool_call(call)
+                items.append({
+                    "type": "function_call",
+                    "call_id": encoded["id"],
+                    "name": encoded["function"]["name"],
+                    "arguments": encoded["function"]["arguments"],
+                })
+            continue
+        if not isinstance(message.content, str):
+            raise MagiModelError("provider_invalid_request", retryable=False)
+        _validated_utf8(
+            message.content,
+            maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
+            code="provider_invalid_request",
+        )
+        items.append({"role": message.role, "content": message.content})
+    return items
 
 
 def _provider_tools(tools: Sequence[MagiToolDefinition]) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -224,47 +246,44 @@ def _provider_tools(tools: Sequence[MagiToolDefinition]) -> tuple[list[dict[str,
         provider_names[provider_name] = tool.name
         payloads.append({
             "type": "function",
-            "function": {
-                "name": provider_name,
-                "description": tool.description,
-                "parameters": parameters,
-                "strict": True,
-            },
+            "name": provider_name,
+            "description": tool.description,
+            "parameters": parameters,
+            "strict": True,
         })
     return payloads, provider_names
 
 
-def _parse_provider_tool_calls(
-    raw_calls: Any,
+def _parse_response_tool_calls(
+    raw_calls: list[Any],
     provider_names: Mapping[str, str],
 ) -> tuple[MagiModelToolCall, ...]:
-    if (
-        not isinstance(raw_calls, list)
-        or not 1 <= len(raw_calls) <= MAGI_MAX_TOOL_CALLS
-    ):
-        count = len(raw_calls) if isinstance(raw_calls, list) else 1
-        raise MagiModelError("provider_invalid_tool_call", retryable=False, tool_calls=count)
+    if not 1 <= len(raw_calls) <= MAGI_MAX_TOOL_CALLS:
+        raise MagiModelError(
+            "provider_invalid_tool_call", retryable=False, tool_calls=len(raw_calls),
+        )
     parsed: list[MagiModelToolCall] = []
     seen: set[str] = set()
     for raw in raw_calls:
         if (
-            not isinstance(raw, dict) or set(raw) != {"id", "type", "function"}
-            or raw.get("type") != "function"
-            or not isinstance(raw.get("function"), dict)
-            or set(raw["function"]) != {"name", "arguments"}
+            not isinstance(raw, dict)
+            or raw.get("type") != "function_call"
+            or not isinstance(raw.get("call_id"), str)
+            or not isinstance(raw.get("name"), str)
+            or not isinstance(raw.get("arguments"), str)
         ):
             raise MagiModelError(
                 "provider_invalid_tool_call", retryable=False, tool_calls=len(raw_calls),
             )
-        provider_name = raw["function"].get("name")
-        if not isinstance(provider_name, str) or provider_name not in provider_names:
+        provider_name = raw["name"]
+        if provider_name not in provider_names:
             raise MagiModelError(
                 "provider_unknown_tool_call", retryable=False, tool_calls=len(raw_calls),
             )
         call = MagiModelToolCall(
-            id=raw.get("id"),
+            id=raw["call_id"],
             name=provider_names[provider_name],
-            arguments_json=raw["function"].get("arguments"),
+            arguments_json=raw["arguments"],
         )
         _validated_tool_call(call)
         if call.id in seen:
@@ -276,8 +295,45 @@ def _parse_provider_tool_calls(
     return tuple(parsed)
 
 
+def _response_text(output: list[Any]) -> tuple[str | None, list[Any]]:
+    """Extract only assistant output text and function calls from Responses."""
+    text_parts: list[str] = []
+    calls: list[Any] = []
+    for item in output:
+        if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+            raise MagiModelError("provider_invalid_response", retryable=True)
+        item_type = item["type"]
+        if item_type == "function_call":
+            calls.append(item)
+            continue
+        if item_type == "reasoning":
+            # Reasoning is provider-private and must never become chat prose.
+            continue
+        if item_type != "message" or item.get("role") != "assistant":
+            raise MagiModelError("provider_invalid_response", retryable=True)
+        content = item.get("content")
+        if not isinstance(content, list):
+            raise MagiModelError("provider_invalid_response", retryable=True)
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                raise MagiModelError("provider_invalid_response", retryable=True)
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise MagiModelError("provider_invalid_response", retryable=True)
+            text_parts.append(text)
+    text = "".join(text_parts) if text_parts else None
+    if text is not None:
+        try:
+            encoded = text.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise MagiModelError("provider_invalid_unicode", retryable=True) from exc
+        if len(text) > MAGI_MAX_RESPONSE_CHARACTERS or len(encoded) > MAGI_MAX_RESPONSE_BYTES:
+            raise MagiModelError("response_too_large", retryable=True)
+    return text, calls
+
+
 class OpenAIMagiModel:
-    """Concrete OpenAI Chat Completions provider for native Magi chat.
+    """Concrete OpenAI Responses provider for native Magi chat.
 
     The existing deployment already supports server-side ``OPENAI_API_KEY`` and
     ``OPENAI_BASE_URL`` for speech transcription. Native chat uses the same
@@ -295,6 +351,7 @@ class OpenAIMagiModel:
         model: str | None = None,
         base_url: str | None = None,
         max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
         timeout_seconds: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -305,6 +362,16 @@ class OpenAIMagiModel:
             os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         )).rstrip("/")
         self._max_output_tokens = max_output_tokens if max_output_tokens is not None else self._configured_max_tokens()
+        configured_effort = reasoning_effort if reasoning_effort is not None else os.getenv(
+            "MAGISTRATE_MAGI_REASONING_EFFORT", "",
+        ).strip().lower()
+        if configured_effort and configured_effort not in _MAGI_REASONING_EFFORTS:
+            raise RuntimeError(
+                "MAGISTRATE_MAGI_REASONING_EFFORT must be minimal, low, medium, or high"
+            )
+        # An omitted effort preserves the provider/model default (including
+        # reasoning for GPT-5) and remains compatible with non-reasoning models.
+        self._reasoning_effort = configured_effort or None
         self._timeout_seconds = timeout_seconds if timeout_seconds is not None else self._configured_timeout()
         self._transport = transport
         if (not self.model or len(self.model) > 128
@@ -349,8 +416,11 @@ class OpenAIMagiModel:
         if not self._api_key:
             raise MagiModelError("provider_not_configured", retryable=True)
         tool_payloads, provider_tool_names = _provider_tools(tools)
-        payload_messages = [{"role": "system", "content": system_context}]
-        payload_messages.extend(_provider_message(message) for message in messages)
+        _validated_utf8(
+            system_context,
+            maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
+            code="provider_invalid_request",
+        )
         # The stable idempotency key lets a provider that supports that standard
         # header collapse a transport retry without exposing the client id.
         headers = {
@@ -359,10 +429,15 @@ class OpenAIMagiModel:
         }
         request_payload: dict[str, Any] = {
             "model": self.model,
-            "messages": payload_messages,
-            "max_completion_tokens": self._max_output_tokens,
+            "instructions": system_context,
+            "input": _response_input(messages),
+            "max_output_tokens": self._max_output_tokens,
             "stream": False,
         }
+        # Do not force a Chat Completions-compatible reasoning workaround. The
+        # Responses contract supports the model's native reasoning effort.
+        if self._reasoning_effort:
+            request_payload["reasoning"] = {"effort": self._reasoning_effort}
         if tool_payloads:
             request_payload.update({
                 "tools": tool_payloads,
@@ -375,7 +450,7 @@ class OpenAIMagiModel:
                 transport=self._transport,
             ) as client:
                 response = await client.post(
-                    f"{self._base_url}/chat/completions",
+                    f"{self._base_url}/responses",
                     headers=headers,
                     json=request_payload,
                 )
@@ -390,37 +465,31 @@ class OpenAIMagiModel:
             raise MagiModelError("provider_rejected_request", retryable=retryable)
         try:
             payload = response.json()
-            choice = payload["choices"][0]
-            message = choice["message"]
-            text = message.get("content")
-            finish_reason = choice.get("finish_reason")
-            raw_tool_calls = message.get("tool_calls")
-        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            status = payload["status"]
+            output = payload["output"]
+            if not isinstance(status, str) or not isinstance(output, list):
+                raise TypeError
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise MagiModelError("provider_invalid_response", retryable=True) from exc
-        if raw_tool_calls:
-            if not tool_payloads:
-                count = len(raw_tool_calls) if isinstance(raw_tool_calls, list) else 1
-                raise MagiModelError(
-                    "provider_tool_call_unsupported", retryable=False, tool_calls=count,
-                )
-            if finish_reason != "tool_calls":
-                raise MagiModelError("provider_incomplete_response", tool_calls=1)
-            if text is not None:
-                if not isinstance(text, str):
-                    raise MagiModelError("provider_invalid_response", tool_calls=1)
-                _validated_utf8(
-                    text,
-                    maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
-                    code="provider_invalid_response",
-                )
-            calls = _parse_provider_tool_calls(raw_tool_calls, provider_tool_names)
-            return MagiModelResult(text=text, finish_reason="tool_calls", tool_calls=calls)
-        if finish_reason == "tool_calls":
-            raise MagiModelError("provider_invalid_tool_call", retryable=False)
-        if finish_reason == "length":
-            raise MagiModelError("response_limit_reached", retryable=True)
-        if finish_reason != "stop":
+        if status != "completed":
+            incomplete = payload.get("incomplete_details")
+            if (
+                status == "incomplete" and isinstance(incomplete, dict)
+                and incomplete.get("reason") == "max_output_tokens"
+            ):
+                raise MagiModelError("response_limit_reached", retryable=True)
             raise MagiModelError("provider_incomplete_response", retryable=True)
+        try:
+            text, raw_calls = _response_text(output)
+        except MagiModelError:
+            raise
+        if raw_calls:
+            if not tool_payloads:
+                raise MagiModelError(
+                    "provider_tool_call_unsupported", retryable=False, tool_calls=len(raw_calls),
+                )
+            calls = _parse_response_tool_calls(raw_calls, provider_tool_names)
+            return MagiModelResult(text=text, finish_reason="tool_calls", tool_calls=calls)
         if not isinstance(text, str) or not text.strip():
             raise MagiModelError("provider_empty_response", retryable=True)
         if magi_text_has_unsafe_controls(text):
