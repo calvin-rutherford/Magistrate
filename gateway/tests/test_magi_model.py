@@ -5,6 +5,7 @@ import pytest
 
 from app.magi_chat_api import validate_magi_chat_configuration
 from app.magi_model import (
+    MAGI_MAX_RESPONSE_CHARACTERS,
     MagiModelError,
     MagiModelMessage,
     MagiModelToolCall,
@@ -19,11 +20,16 @@ async def test_openai_model_returns_exact_complete_text_without_logging_or_norma
 
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
+        assert request.url.path == '/v1/responses'
         assert body['stream'] is False
-        assert body['messages'][-1] == {'role': 'user', 'content': 'hello'}
+        assert body['instructions'] == 'system'
+        assert body['input'][-1] == {'role': 'user', 'content': 'hello'}
+        assert 'reasoning' not in body
         assert request.headers['idempotency-key'] == 'safe-request-id'
         return httpx.Response(200, json={
-            'choices': [{'finish_reason': 'stop', 'message': {'content': expected}}],
+            'status': 'completed',
+            'output': [{'type': 'message', 'role': 'assistant',
+                        'content': [{'type': 'output_text', 'text': expected}]}],
         })
 
     model = OpenAIMagiModel(
@@ -50,53 +56,39 @@ async def test_openai_model_round_trips_one_closed_tool_call_and_result_message(
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         requests.append((request.headers['idempotency-key'], body))
+        assert request.url.path == '/v1/responses'
         if len(requests) == 1:
             assert body['tool_choice'] == 'auto'
             assert body['parallel_tool_calls'] is False
             assert body['tools'] == [{
-                'type': 'function',
-                'function': {
-                    'name': 'firstmate__submit_objective',
-                    'description': 'Submit one objective.',
-                    'parameters': {
-                        'type': 'object', 'additionalProperties': False,
-                        'properties': {'objective': {'type': 'string'}},
-                        'required': ['objective'],
-                    },
-                    'strict': True,
+                'type': 'function', 'name': 'firstmate__submit_objective',
+                'description': 'Submit one objective.',
+                'parameters': {
+                    'type': 'object', 'additionalProperties': False,
+                    'properties': {'objective': {'type': 'string'}},
+                    'required': ['objective'],
                 },
+                'strict': True,
             }]
             return httpx.Response(200, json={
-                'choices': [{
-                    'finish_reason': 'tool_calls',
-                    'message': {
-                        'content': None,
-                        'tool_calls': [{
-                            'id': 'call_objective_1', 'type': 'function',
-                            'function': {
-                                'name': 'firstmate__submit_objective',
-                                'arguments': arguments,
-                            },
-                        }],
-                    },
+                'status': 'completed',
+                'output': [{
+                    'type': 'function_call', 'id': 'fc_objective_1',
+                    'call_id': 'call_objective_1',
+                    'name': 'firstmate__submit_objective', 'arguments': arguments,
                 }],
             })
         assert 'tools' not in body
-        assert body['messages'][-2] == {
-            'role': 'assistant', 'content': None,
-            'tool_calls': [{
-                'id': 'call_objective_1', 'type': 'function',
-                'function': {
-                    'name': 'firstmate__submit_objective', 'arguments': arguments,
-                },
-            }],
-        }
-        assert body['messages'][-1] == {
-            'role': 'tool', 'tool_call_id': 'call_objective_1',
-            'content': '{"status":"accepted"}',
-        }
+        assert body['input'][-2:] == [
+            {'type': 'function_call', 'call_id': 'call_objective_1',
+             'name': 'firstmate__submit_objective', 'arguments': arguments},
+            {'type': 'function_call_output', 'call_id': 'call_objective_1',
+             'output': '{"status":"accepted"}'},
+        ]
         return httpx.Response(200, json={
-            'choices': [{'finish_reason': 'stop', 'message': {'content': 'I accepted it.'}}],
+            'status': 'completed',
+            'output': [{'type': 'message', 'role': 'assistant',
+                        'content': [{'type': 'output_text', 'text': 'I accepted it.'}]}],
         })
 
     tool = MagiToolDefinition(
@@ -151,9 +143,13 @@ def test_openai_model_rejects_an_insecure_or_credentialed_provider_url():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('payload', 'code'), [
-    ({'choices': [{'finish_reason': 'length', 'message': {'content': 'partial'}}]}, 'response_limit_reached'),
-    ({'choices': [{'finish_reason': 'tool_calls', 'message': {'content': None, 'tool_calls': [{'id': 'x'}]}}]}, 'provider_tool_call_unsupported'),
-    ({'choices': [{'finish_reason': 'stop', 'message': {'content': 'unsafe\u001b[31m'}}]}, 'provider_unsafe_response'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'},
+      'output': []}, 'response_limit_reached'),
+    ({'status': 'completed', 'output': [{'type': 'function_call'}]},
+      'provider_tool_call_unsupported'),
+    ({'status': 'completed', 'output': [{'type': 'message', 'role': 'assistant',
+      'content': [{'type': 'output_text', 'text': 'unsafe\u001b[31m'}]}]},
+      'provider_unsafe_response'),
 ])
 async def test_openai_model_rejects_incomplete_or_tool_results(payload, code):
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -168,3 +164,42 @@ async def test_openai_model_rejects_incomplete_or_tool_results(payload, code):
             [MagiModelMessage('user', 'hello')], system_context='system', request_id='safe-request-id',
         )
     assert raised.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_responses_provider_redacts_provider_errors_and_rejects_oversized_text():
+    async def error_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == '/v1/responses'
+        return httpx.Response(400, json={
+            'error': {'message': 'secret prompt and reasoning_effort incompatibility'},
+        })
+
+    model = OpenAIMagiModel(
+        api_key='server-only-secret', model='gpt-5.6-sol',
+        base_url='https://provider.invalid/v1', transport=httpx.MockTransport(error_handler),
+    )
+    with pytest.raises(MagiModelError) as raised:
+        await model.complete(
+            [MagiModelMessage('user', 'hello')], system_context='system', request_id='error-id',
+        )
+    assert raised.value.code == 'provider_rejected_request'
+    assert str(raised.value) == 'provider_rejected_request'
+
+    oversized = 'x' * (MAGI_MAX_RESPONSE_CHARACTERS + 1)
+
+    async def oversized_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            'status': 'completed',
+            'output': [{'type': 'message', 'role': 'assistant',
+                        'content': [{'type': 'output_text', 'text': oversized}]}],
+        })
+
+    bounded_model = OpenAIMagiModel(
+        api_key='server-only-secret', model='gpt-5.6-sol',
+        base_url='https://provider.invalid/v1', transport=httpx.MockTransport(oversized_handler),
+    )
+    with pytest.raises(MagiModelError) as oversized_error:
+        await bounded_model.complete(
+            [MagiModelMessage('user', 'hello')], system_context='system', request_id='large-id',
+        )
+    assert oversized_error.value.code == 'response_too_large'
