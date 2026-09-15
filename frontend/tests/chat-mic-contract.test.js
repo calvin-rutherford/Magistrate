@@ -17,6 +17,24 @@ test('chat mic contract covers every truthful capture state and hold release gua
   assert.match(chat, /queuePrompt\(transcript, 'voice'/);
 });
 
+test('iOS composer follows keyboard frames without double-counting the home indicator', () => {
+  assert.match(chat, /useSafeAreaInsets/);
+  assert.match(chat, /new NativeAnimated\.Value\(0\)/);
+  assert.match(chat, /keyboardWillShow/);
+  assert.match(chat, /keyboardWillHide/);
+  assert.match(chat, /const offset = -Math\.max\(0, keyboardHeight - safeAreaBottom\)/);
+  assert.match(chat, /<NativeAnimated\.View testID="composer-dock"/);
+  assert.match(chat, /behavior=\{Platform\.OS === 'android' \? 'height' : undefined\}/);
+});
+
+test('chat keeps one voice entry point and restores native/web material fallbacks', () => {
+  assert.doesNotMatch(chat, /testID="chat-primary-action"/);
+  assert.match(chat, /testID="inline-mic-button"/);
+  assert.match(chat, /NativeGlassBlur dark=\{dark\} intensity=\{20\}/);
+  assert.match(chat, /NativeGlassBlur dark=\{dark\} intensity=\{24\}/);
+  assert.match(chat, /backdropFilter: `blur\(\$\{radius\}px\)`/);
+});
+
 test('voice preferences have durable keys, defaults, validation, and save functions', () => {
   assert.match(preferences, /magistrate\.voice\.capture-behavior/);
   assert.match(preferences, /magistrate\.voice\.transcript-behavior/);
