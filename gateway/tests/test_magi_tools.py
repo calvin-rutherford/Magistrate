@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app import db
-from app.magi_chat_service import MagiChatService
+from app.magi_chat_service import MAGI_DIRECT_RESPONSE, MagiChatService
 from app.magi_chat_store import MagiChatStore
 from app.magi_firstmate_tools import (
     FIRSTMATE_SUBMIT_OBJECTIVE,
@@ -309,6 +309,9 @@ class IntentRoutingModel:
             'request_id': request_id, 'tools': tuple(tools),
         })
         if messages[-1].role == 'tool':
+            selected = messages[-2].tool_calls[0].name
+            if selected == MAGI_DIRECT_RESPONSE:
+                return MagiModelResult('Here is a direct conversational answer.')
             if self.unsafe_ack:
                 result = json.loads(messages[-1].content)
                 return MagiModelResult(
@@ -324,6 +327,16 @@ class IntentRoutingModel:
                     id='call_submit_health',
                     name=FIRSTMATE_SUBMIT_OBJECTIVE,
                     arguments_json=objective_arguments(),
+                ),),
+            )
+        if tools:
+            return MagiModelResult(
+                None,
+                finish_reason='tool_calls',
+                tool_calls=(MagiModelToolCall(
+                    id='call_direct_answer',
+                    name=MAGI_DIRECT_RESPONSE,
+                    arguments_json='{}',
                 ),),
             )
         return MagiModelResult('Here is a direct conversational answer.')
@@ -344,18 +357,31 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
         assert body['instructions']
         if body.get('tools'):
             assert body['reasoning'] == {'effort': 'high'}
+            assert body['tool_choice'] == 'required'
             assert 'messages' not in body
-            assert body['tools'][0]['name'] == 'firstmate__submit_objective'
+            assert [tool['name'] for tool in body['tools']] == [
+                'firstmate__submit_objective', 'magi__respond',
+            ]
             assert set(body['tools'][0]) == {
                 'type', 'name', 'description', 'parameters', 'strict',
             }
         if len(requests) == 1:
             return httpx.Response(200, json={
                 'status': 'completed',
+                'output': [{'type': 'function_call', 'call_id': 'call_direct_service',
+                            'name': 'magi__respond', 'arguments': '{}'}],
+            })
+        if len(requests) == 2:
+            assert body['input'][-1] == {
+                'type': 'function_call_output', 'call_id': 'call_direct_service',
+                'output': '{"status":"respond"}',
+            }
+            return httpx.Response(200, json={
+                'status': 'completed',
                 'output': [{'type': 'message', 'role': 'assistant',
                             'content': [{'type': 'output_text', 'text': 'Direct answer.'}]}],
             })
-        if len(requests) == 2:
+        if len(requests) == 3:
             return httpx.Response(200, json={
                 'status': 'completed',
                 'output': [{'type': 'function_call', 'call_id': 'call_objective_service',
@@ -390,6 +416,7 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
     assert offered['name'] == 'firstmate__submit_objective'
     assert offered['strict'] is True
     assert 'function' not in offered
+    assert requests[0]['tools'][1]['name'] == 'magi__respond'
 
     objective = await service.submit(
         'operator-a', 'responses-objective-0001',
@@ -398,8 +425,38 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
     assert objective['status'] == 'completed'
     assert objective['assistant_message']['content'] == 'Accepted.'
     assert len(dispatcher.calls) == 1
-    assert len(requests) == 3
-    assert requests[1]['reasoning'] == {'effort': 'high'}
+    assert len(requests) == 4
+    assert requests[2]['reasoning'] == {'effort': 'high'}
+
+
+@pytest.mark.asyncio
+async def test_command_authorized_turn_cannot_mask_missing_tool_selection_as_prose(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'required-selection.sqlite3'))
+    dispatcher = FakeDispatcher()
+
+    class ProseFallbackModel:
+        async def complete(self, messages, *, system_context, request_id, tools=()):
+            assert [definition.name for definition in tools] == [
+                FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_DIRECT_RESPONSE,
+            ]
+            return MagiModelResult('I can help create that project.')
+
+    service = MagiChatService(
+        ProseFallbackModel(),
+        store=MagiChatStore(),
+        profile_loader=lambda _: {},
+        tool_executor=FirstmateObjectiveTools(
+            store=ObjectiveSubmissionStore(), dispatcher=dispatcher,
+        ),
+    )
+    result = await service.submit(
+        'operator-a', 'required-selection-0001',
+        'Create a small project and add a README.',
+        allow_tools=True,
+    )
+    assert result['status'] == 'failed'
+    assert result['assistant_message']['content'] == ''
+    assert dispatcher.calls == []
 
 
 @pytest.mark.asyncio
@@ -428,7 +485,7 @@ async def test_native_chat_routes_actionable_intent_once_but_answers_questions_d
     assert len(dispatcher.calls) == 1
     assert len(model.calls) == 2
     assert [definition.name for definition in model.calls[0]['tools']] == [
-        FIRSTMATE_SUBMIT_OBJECTIVE,
+        FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_DIRECT_RESPONSE,
     ]
     assert model.calls[1]['tools'] == ()
     assert [message.role for message in model.calls[1]['messages'][-2:]] == ['assistant', 'tool']
@@ -454,9 +511,9 @@ async def test_native_chat_routes_actionable_intent_once_but_answers_questions_d
     )
     assert question['assistant_message']['content'] == 'Here is a direct conversational answer.'
     assert len(dispatcher.calls) == 1
-    assert len(model.calls) == 3
+    assert len(model.calls) == 4
     diagnostics = await service.diagnostics('operator-a')
-    assert diagnostics['magi_tool_calls'] == 1
+    assert diagnostics['magi_tool_calls'] == 2
 
 
 @pytest.mark.asyncio

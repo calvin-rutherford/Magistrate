@@ -51,6 +51,21 @@ _TOOL_ACK_INTERNAL_MARKERS = (
     "firstmate", "submit_objective", "objective_id", "task_id",
     "tool call", "tool result", "orchestrat", "mgo_", "magi-",
 )
+MAGI_DIRECT_RESPONSE = "magi.respond"
+MAGI_DIRECT_RESPONSE_DEFINITION = MagiToolDefinition(
+    name=MAGI_DIRECT_RESPONSE,
+    description=(
+        "Select an ordinary conversational response instead of execution for questions, "
+        "explanations, or brainstorming. Never select this when the user asks Magi to "
+        "create, change, build, fix, test, investigate, or ship project work."
+    ),
+    parameters={
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -137,14 +152,17 @@ class MagiChatService:
         )
         if tools_enabled:
             tool_guidance = (
-                "For ordinary conversation, questions, explanations, and brainstorming, answer directly "
-                "without a tool. When the user asks you to take concrete engineering action—such as changing, "
-                "building, fixing, testing, investigating, or shipping project work—call the offered "
-                "Firstmate objective-submission function exactly once with the requested objective, configured project slug, "
-                "stated constraints, observable acceptance criteria, and only opaque context references. "
-                "Never invent product or security decisions. After its accepted result, immediately acknowledge "
-                "in the user's language. Say only that the objective was accepted and updates will follow; do not "
-                "claim the work is complete or expose tool names, ids, protocol, or orchestration internals."
+                "When functions are offered for an initial user request, select exactly one and return no prose "
+                "outside that selection. For ordinary conversation, questions, explanations, and brainstorming, "
+                "select the offered direct-response function. When the user asks "
+                "you to take concrete engineering action—such as creating, changing, building, fixing, testing, "
+                "investigating, or shipping project work—call the offered Firstmate objective-submission function "
+                "exactly once with the requested objective, configured project slug, stated constraints, observable "
+                "acceptance criteria, and only opaque context references. Never invent product or security decisions. "
+                "After a direct-response selection result, return the complete user-visible answer. After an "
+                "accepted objective result, immediately acknowledge in the user's language. Say only that the "
+                "objective was accepted and updates will follow; do not claim the work is complete or expose tool "
+                "names, ids, protocol, or orchestration internals."
             )
         else:
             tool_guidance = (
@@ -206,8 +224,8 @@ class MagiChatService:
         *,
         phase: str = "initial",
     ) -> str:
-        # Preserve the accepted Phase-1 key for the initial/direct completion.
-        # Only the additive post-tool acknowledgement needs a distinct key.
+        # Preserve the accepted Phase-1 key for the initial completion. Each
+        # additive post-selection provider turn receives a distinct stable key.
         material = f"magi-native-v1\0{owner_user_id}\0{client_message_id}\0{attempt}"
         if phase != "initial":
             material += f"\0{phase}"
@@ -271,6 +289,35 @@ class MagiChatService:
             and not any(marker in lowered for marker in _TOOL_ACK_INTERNAL_MARKERS)
             and not any(identity in lowered for identity in identities)
         )
+
+    @staticmethod
+    def _validate_direct_response_selection(
+        result: MagiModelResult, call: MagiModelToolCall,
+    ) -> None:
+        """Validate the argument-free non-execution branch of required routing."""
+        if (result.text is not None and result.text != "") or call.name != MAGI_DIRECT_RESPONSE:
+            raise MagiModelError(
+                "provider_invalid_tool_call", retryable=False, tool_calls=1,
+            )
+
+        def closed_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError("duplicate key")
+                value[key] = item
+            return value
+
+        try:
+            arguments = json.loads(call.arguments_json, object_pairs_hook=closed_object)
+        except (ValueError, TypeError, json.JSONDecodeError, RecursionError) as exc:
+            raise MagiModelError(
+                "provider_invalid_tool_call", retryable=False, tool_calls=1,
+            ) from exc
+        if not isinstance(arguments, dict) or arguments:
+            raise MagiModelError(
+                "provider_invalid_tool_call", retryable=False, tool_calls=1,
+            )
 
     async def _model_completion(
         self,
@@ -425,7 +472,11 @@ class MagiChatService:
             current_content = content + (f"\n\n{manifest}" if manifest else "")
             model_messages.append(MagiModelMessage(role="user", content=current_content))
             tools_enabled = allow_tools and self.tool_executor is not None
-            definitions = tuple(self.tool_executor.definitions) if tools_enabled else ()
+            execution_definitions = tuple(self.tool_executor.definitions) if tools_enabled else ()
+            definitions = (
+                (*execution_definitions, MAGI_DIRECT_RESPONSE_DEFINITION)
+                if tools_enabled else ()
+            )
             result = await self._model_completion(
                 model_messages,
                 system_context=self._system_context(owner_user_id, tools_enabled=tools_enabled),
@@ -436,19 +487,44 @@ class MagiChatService:
             )
             calls = self._tool_calls(result)
             observed_tool_calls = len(calls)
-            if calls:
-                if (
-                    not tools_enabled or self.tool_executor is None
-                    or result.finish_reason != "tool_calls"
-                    or len(calls) != 1
-                ):
-                    raise MagiModelError(
-                        "provider_tool_call_unauthorized" if not tools_enabled else "provider_invalid_tool_call",
-                        retryable=False,
-                        tool_calls=len(calls),
-                    )
-                call = calls[0]
-                if call.name not in {definition.name for definition in definitions}:
+            if tools_enabled and (result.finish_reason != "tool_calls" or len(calls) != 1):
+                raise MagiModelError(
+                    "provider_tool_selection_required", retryable=False,
+                    tool_calls=len(calls),
+                )
+            if calls and (
+                not tools_enabled or self.tool_executor is None
+                or result.finish_reason != "tool_calls"
+                or len(calls) != 1
+            ):
+                raise MagiModelError(
+                    "provider_tool_call_unauthorized" if not tools_enabled else "provider_invalid_tool_call",
+                    retryable=False,
+                    tool_calls=len(calls),
+                )
+            call = calls[0] if calls else None
+            if call is not None and call.name == MAGI_DIRECT_RESPONSE:
+                self._validate_direct_response_selection(result, call)
+                direct_messages = [
+                    *model_messages,
+                    MagiModelMessage(
+                        role="assistant", content=result.text, tool_calls=calls,
+                    ),
+                    MagiModelMessage(
+                        role="tool", content='{"status":"respond"}', tool_call_id=call.id,
+                    ),
+                ]
+                direct = await self._model_completion(
+                    direct_messages,
+                    system_context=self._system_context(owner_user_id, tools_enabled=True),
+                    request_id=self._provider_request_id(
+                        owner_user_id, client_message_id, prepared.attempt,
+                        phase="direct-response",
+                    ),
+                )
+                response = self._validated_result(direct)
+            elif call is not None:
+                if call.name not in {definition.name for definition in execution_definitions}:
                     raise MagiModelError(
                         "provider_unknown_tool_call", retryable=False, tool_calls=1,
                     )

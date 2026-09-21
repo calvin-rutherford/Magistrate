@@ -441,7 +441,11 @@ class OpenAIMagiModel:
         if tool_payloads:
             request_payload.update({
                 "tools": tool_payloads,
-                "tool_choice": "auto",
+                # Tool-bearing turns use a closed routing choice. Requiring a
+                # selection prevents actionable intent from silently falling
+                # through as unexecuted prose; the service offers an explicit
+                # non-execution branch to preserve ordinary chat.
+                "tool_choice": "required",
                 "parallel_tool_calls": False,
             })
         try:
