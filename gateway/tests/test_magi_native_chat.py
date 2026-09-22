@@ -5,9 +5,9 @@ import pytest
 
 from app import db
 from app.auth import issue_session
-from app.magi_chat_service import MagiChatService
+from app.magi_chat_service import MAGI_DIRECT_RESPONSE, MagiChatService
 from app.magi_chat_store import MagiChatStore
-from app.magi_model import MagiModelError, MagiModelResult
+from app.magi_model import MagiModelError, MagiModelResult, MagiModelToolCall
 from app.main import app
 from conftest import TEST_HEADERS
 from fastapi.testclient import TestClient
@@ -24,7 +24,7 @@ class FakeModel:
         self.offered_tools: list[tuple[str, ...]] = []
 
     async def complete(self, messages, *, system_context, request_id, tools=()):
-        content = messages[-1].content
+        content = next(message.content for message in reversed(messages) if message.role == 'user')
         self.calls.append((request_id, content))
         self.offered_tools.append(tuple(tool.name for tool in tools))
         if self.delay:
@@ -32,7 +32,18 @@ class FakeModel:
         if content in self.fail_once:
             self.fail_once.remove(content)
             raise MagiModelError('synthetic_provider_failure')
-        return MagiModelResult(f"# Native reply\n\n{content}\n\n✓ café 🚀")
+        response = f"# Native reply\n\n{content}\n\n✓ café 🚀"
+        if tools:
+            return MagiModelResult(
+                None,
+                finish_reason='tool_calls',
+                tool_calls=(MagiModelToolCall(
+                    id='call_direct_native',
+                    name=MAGI_DIRECT_RESPONSE,
+                    arguments_json='{}',
+                ),),
+            )
+        return MagiModelResult(response)
 
 
 def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastructure(monkeypatch):
@@ -72,13 +83,15 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     assert payload['user_message']['content'] == body['content']
     expected = f"# Native reply\n\n{body['content']}\n\n✓ café 🚀"
     assert payload['assistant_message']['content'].encode() == expected.encode()
-    assert len(fake.calls) == 1
-    assert fake.offered_tools == [('firstmate.submit_objective',)]
+    assert len(fake.calls) == 2
+    assert fake.offered_tools == [
+        ('firstmate.submit_objective', 'magi.respond'), (),
+    ]
 
     duplicate = client.post('/api/v1/magi/messages', headers=TEST_HEADERS, json=body).json()
     assert duplicate['duplicate'] is True
     assert duplicate['messages'] == payload['messages']
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
 
     conversation_id = payload['conversation']['id']
     replay = client.get(

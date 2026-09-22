@@ -58,7 +58,7 @@ async def test_openai_model_round_trips_one_closed_tool_call_and_result_message(
         requests.append((request.headers['idempotency-key'], body))
         assert request.url.path == '/v1/responses'
         if len(requests) == 1:
-            assert body['tool_choice'] == 'auto'
+            assert body['tool_choice'] == 'required'
             assert body['parallel_tool_calls'] is False
             assert body['tools'] == [{
                 'type': 'function', 'name': 'firstmate__submit_objective',
