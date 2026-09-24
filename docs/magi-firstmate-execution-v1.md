@@ -2,13 +2,16 @@
 
 ## Boundary
 
-This additive bridge implements the Activity and verified-completion seams after
-Native Chat Phase 1. It does not select model tools, submit objectives to
-Firstmate, answer decisions, read terminal state, or change normal Chat/Voice
-submission.
+This additive bridge implements objective submission, product-safe Fleet,
+Activity, cancellation requests, and verified completion after Native Chat
+Phase 1. Firstmate remains the only scheduler and worker owner.
 
-- **Activity** receives durable structured execution milestones.
-- **Chat** receives none of those event rows or source prose.
+- **Chat** offers one closed `firstmate.submit_objective` tool only for
+  actionable work; ordinary conversation remains provider-native Chat.
+- **Firstmate intake** receives one deterministic queued task plus a bounded
+  native inbox wake. Gateway never spawns or supervises a worker.
+- **Fleet and Activity** read persisted submission, execution-event, decision,
+  and cancellation rows only. They never probe a process or terminal.
 - A new Chat row is generated only after a typed `objective.completed` event
   carries closed, bounded verification evidence.
 
@@ -62,11 +65,43 @@ from that bearer session; an owner field is forbidden. Reads are
 `GET /api/v1/firstmate/execution-events/{event_id}` with `read` scope. These
 routes are available only while Native Chat is enabled.
 
-The Step 9 submit-objective handler should call the same
-`FirstmateExecutionService.ingest` seam after Firstmate has returned its stable
-accepted task/objective identity. Model-generated arguments must not be exposed
-to the event seam as evidence: only facts accepted by the trusted Firstmate
-adapter belong here.
+## Durable objective intake
+
+`firstmate.submit_objective` accepts a strict, bounded objective contract and
+derives owner, conversation, message, objective, and task identity outside model
+output. `tasks-axi add` publishes the deterministic task to Firstmate's durable
+queue. After validating the exact structured receipt, Gateway invokes
+`fm-inbox.sh note`; that script persists the note and Firstmate's normal `check`
+wake. It is a doorbell, not a second scheduler. Capacity, dependencies,
+classification, worker creation, and queued-work reevaluation remain Firstmate's
+responsibility.
+
+A submission stays `submitting` until queue publication and the wake succeed.
+A process crash or wake failure therefore leaves a retryable persisted row. One
+bounded startup recovery pass replays `tasks-axi add` and the wake; the task's
+deterministic identity and a dispatch lease make replay and concurrent client
+retries idempotent. A process-start cutoff excludes submissions created by the
+new process, so startup recovery cannot race fresh request delivery. Recovery is
+write-side startup work, never a read path or polling timer.
+
+## Product Fleet and cancellation
+
+`GET /api/v1/fleet` returns stable concise titles plus structured goal, status,
+activity, worker presence, allowlisted artifacts, decisions, and cancellation
+state. The product projection omits task IDs, run IDs, panes, PIDs, terminal
+controls, transcripts, and raw worker output. Internal compatibility projections
+remain separate.
+
+`POST /api/v1/fleet/objectives/{objective_id}/cancellation-requests` requires a
+`command` principal, explicit UI confirmation, and an idempotency key. It
+persists the request before handing a keyed note to Firstmate. The response says
+only `requested`; cancellation becomes `observed` solely when an authenticated
+`objective.cancelled` event arrives. Failed/pending note delivery is retried by
+the same key and by the bounded startup recovery pass. A different terminal
+event marks the request not applied instead of claiming cancellation.
+
+Model-generated arguments must not be exposed to the event seam as evidence:
+only facts accepted by the trusted Firstmate adapter belong there.
 
 ## Verified completion
 
@@ -126,7 +161,7 @@ and raw captures stay outside the repository.
 ## Non-claims
 
 This bridge does not prove that Firstmate performed work merely because a model
-asked it to. It accepts completion only at the structured producer boundary and
-does not infer phases from prose, pane state, PR text, or a harness stop. It does
-not implement Step 9 tool selection/submission, Step 11 Attention decisions,
-streaming, deployment, or physical-device acceptance.
+asked it to or a queued task exists. It accepts completion only at the structured
+producer boundary and does not infer phases from prose, pane state, PR text, or
+a harness stop. It does not implement streaming, deployment, real-provider
+console registration, or physical-device acceptance.

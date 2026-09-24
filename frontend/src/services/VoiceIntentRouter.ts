@@ -51,7 +51,7 @@ export class VoiceIntentRouter {
     if (lower.includes('agent') || lower.includes('running') || lower.includes('what is working')) {
       return {
         intent: 'agent_status',
-        targetPath: '/agents',
+        targetPath: '/chat',
         requiresHighImpactConfirmation: false,
         payloadText: text
       };

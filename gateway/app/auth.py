@@ -41,6 +41,10 @@ class Principal:
     session_id: str
     expires_at: int
     access_grant_id: Optional[str] = None
+    provider_session_id: Optional[str] = None
+    auth_account_id: Optional[str] = None
+    auth_provider: Optional[str] = None
+    refresh_expires_at: Optional[int] = None
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -130,16 +134,19 @@ def _insert_session(
     now: int,
     expires_at: int,
     access_grant_id: Optional[str] = None,
+    provider_session_id: Optional[str] = None,
+    auth_account_id: Optional[str] = None,
 ) -> dict[str, object]:
     token = secrets.token_urlsafe(32)
     session_id = secrets.token_urlsafe(16)
     connection.execute(
         """INSERT INTO gateway_sessions
-           (session_id, token_hash, user_id, scopes, issued_at, expires_at, access_grant_id)
-           VALUES(?,?,?,?,?,?,?)""",
+           (session_id, token_hash, user_id, scopes, issued_at, expires_at,
+            access_grant_id, provider_session_id, auth_account_id)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
         (
             session_id, _hash_token(token), user_id, ",".join(sorted(scopes)),
-            now, expires_at, access_grant_id,
+            now, expires_at, access_grant_id, provider_session_id, auth_account_id,
         ),
     )
     return {
@@ -376,9 +383,12 @@ def issue_friend_beta_session(access_code: str) -> dict[str, object]:
     }
 
 
-def friend_beta_onboarding_required(principal: Principal) -> bool:
-    """Tell the client whether this invited principal still needs a name."""
-    if principal.access_grant_id is None or not principal.has("account"):
+def account_onboarding_required(principal: Principal) -> bool:
+    """Tell the client whether this account principal still needs a name."""
+    if (
+        (principal.access_grant_id is None and principal.provider_session_id is None)
+        or not principal.has("account")
+    ):
         return False
     _session_db()
     with sqlite3.connect(database.DB_PATH) as connection:
@@ -386,6 +396,12 @@ def friend_beta_onboarding_required(principal: Principal) -> bool:
             "SELECT name FROM user_profiles WHERE user_id = ?", (principal.user_id,),
         ).fetchone()
     return not row or not isinstance(row[0], str) or not row[0].strip()
+
+
+# Retained for callers and older tests while onboarding now also covers
+# provider-backed principals.
+def friend_beta_onboarding_required(principal: Principal) -> bool:
+    return account_onboarding_required(principal)
 
 
 def cleanup_sessions(*, now: Optional[int] = None) -> int:
@@ -438,7 +454,8 @@ def revoke_session(token: str) -> None:
     with sqlite3.connect(database.DB_PATH) as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT access_grant_id, user_id FROM gateway_sessions WHERE token_hash = ?", (token_hash,),
+            """SELECT access_grant_id, user_id, provider_session_id
+               FROM gateway_sessions WHERE token_hash = ?""", (token_hash,),
         ).fetchone()
         connection.execute(
             "UPDATE gateway_sessions SET revoked_at = ? WHERE token_hash = ?", (now, token_hash),
@@ -453,6 +470,11 @@ def revoke_session(token: str) -> None:
                 (now, row[0]),
             )
             _revoke_push_delivery(connection, row[1], now)
+        elif row and row[2]:
+            # A provider refresh family is one device/browser session. Logout
+            # retires its rotating refresh authority and every short bearer.
+            from app.provider_auth import revoke_provider_family
+            revoke_provider_family(connection, row[2], row[1], now)
 
 
 def _principal_from_token(token: str) -> Principal:
@@ -467,14 +489,30 @@ def _principal_from_token(token: str) -> Principal:
     with sqlite3.connect(database.DB_PATH) as connection:
         row = connection.execute(
             """SELECT s.session_id, s.user_id, s.scopes, s.expires_at, s.revoked_at,
-                      s.access_grant_id, g.expires_at, g.revoked_at
+                      s.access_grant_id, g.expires_at, g.revoked_at,
+                      s.provider_session_id, s.auth_account_id,
+                      family.expires_at, family.revoked_at, family.provider,
+                      account.status, account.account_kind
                FROM gateway_sessions AS s
                LEFT JOIN friend_beta_access_grants AS g ON g.grant_id = s.access_grant_id
+               LEFT JOIN provider_session_families AS family
+                 ON family.family_id = s.provider_session_id
+                AND family.connected_account_id = s.auth_account_id
+                AND family.user_id = s.user_id
+               LEFT JOIN connected_accounts AS account
+                 ON account.id = s.auth_account_id AND account.user_id = s.user_id
                WHERE s.token_hash = ?""",
             (token_hash,),
         ).fetchone()
     scopes = frozenset(filter(None, row[2].split(","))) if row else frozenset()
     grant_invalid = bool(row and row[5] and (row[6] is None or row[6] <= now or row[7] is not None))
+    provider_invalid = bool(
+        row and row[8] and (
+            row[10] is None or row[10] <= now or row[11] is not None
+            or row[12] not in {"apple", "google"}
+            or row[13] != "connected" or row[14] != "login"
+        )
+    )
     if row and row[5]:
         try:
             if not _friend_beta_enabled():
@@ -483,11 +521,14 @@ def _principal_from_token(token: str) -> Principal:
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail="Friend Beta access configuration is invalid") from exc
     if (
-        not row or row[4] is not None or row[3] <= now or grant_invalid
+        not row or row[4] is not None or row[3] <= now or grant_invalid or provider_invalid
+        or (row[8] is None) != (row[9] is None)
         or not _valid_user_id(row[1]) or not scopes or not scopes.issubset(KNOWN_SCOPES)
     ):
         raise HTTPException(status_code=401, detail="Invalid or expired session")
-    return Principal(row[1], scopes, row[0], row[3], row[5])
+    return Principal(
+        row[1], scopes, row[0], row[3], row[5], row[8], row[9], row[12], row[10],
+    )
 
 
 def authenticate_request(request: Request, authorization: Optional[str]) -> Principal:

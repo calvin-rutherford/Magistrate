@@ -8,6 +8,7 @@ import type { ExpoConfig } from 'expo/config';
 export default ({ config }: { config: ExpoConfig }): ExpoConfig => {
   const gatewayUrl = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim();
   const easProjectId = process.env.EXPO_PUBLIC_EAS_PROJECT_ID?.trim();
+  const googleIosScheme = process.env.EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID?.trim();
 
   if (gatewayUrl) {
     const parsed = new URL(gatewayUrl);
@@ -27,10 +28,18 @@ export default ({ config }: { config: ExpoConfig }): ExpoConfig => {
   if (easProjectId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(easProjectId)) {
     throw new Error('EXPO_PUBLIC_EAS_PROJECT_ID must be a UUID from the linked EAS project.');
   }
+  if (googleIosScheme && !/^com\.googleusercontent\.apps\.[A-Za-z0-9._-]+$/.test(googleIosScheme)) {
+    throw new Error('EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID is invalid.');
+  }
+  const configuredSchemes = Array.isArray(config.scheme)
+    ? config.scheme : config.scheme ? [config.scheme] : [];
 
   return {
     ...config,
     owner: process.env.EXPO_OWNER?.trim() || config.owner,
+    scheme: googleIosScheme
+      ? [...new Set([...configuredSchemes, googleIosScheme])]
+      : config.scheme,
     runtimeVersion: { policy: 'appVersion' },
     extra: {
       ...config.extra,

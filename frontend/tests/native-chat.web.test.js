@@ -41,6 +41,7 @@ function installNativeGatewayMock() {
       return json(payload);
     }
     if (url.includes('/api/v1/magi/conversations/') && url.includes('/replay')) {
+      increment('workspace-chat-refresh-count');
       const record = readRecord() || emptyRecord();
       const after = Number(new URL(url).searchParams.get('after') || '0');
       const changes = (record.messages || []).slice(after).map((message, index) => ({
@@ -51,6 +52,12 @@ function installNativeGatewayMock() {
     }
     if (url.includes('/api/v1/magi/conversations/current')) {
       increment('native-chat-get-count');
+      increment('workspace-chat-refresh-count');
+      return json(readRecord() || emptyRecord());
+    }
+    if (url.includes('/api/v1/magi/conversations/mgc_')) {
+      increment('native-chat-get-count');
+      increment('workspace-chat-refresh-count');
       return json(readRecord() || emptyRecord());
     }
     if (url.includes('/api/v1/magi/messages') && options.method === 'POST') {
@@ -99,7 +106,32 @@ function installNativeGatewayMock() {
       increment('native-chat-forbidden-count');
       return json({ detail: 'legacy chat must not be called' }, 500);
     }
+    if (url.includes('/api/v1/fleet/objectives/') && url.includes('/cancellation-requests') && options.method === 'POST') {
+      increment('workspace-cancellation-count');
+      localStorage.setItem('workspace-cancellation-body', String(options.body || ''));
+      return json({ schema_version: 'objective-cancellation-request.v1', request_id: 'ocr_product_1',
+        objective_id: 'mgo_product_0001', status: 'requested', requested_at: 1789000005000,
+        observed_at: null, duplicate: false });
+    }
+    if (url.endsWith('/api/v1/fleet')) {
+      increment('workspace-fleet-refresh-count');
+      return json({ schema: 'magistrate.fleet-projection.v1', source: 'persisted-structured-state',
+        available: true, live_process_probe: false, tasks_count: 1, last_event_at: 1789000004000,
+        persisted_runtime_status: 'active', tasks: [{
+          objective_id: 'mgo_product_0001', title: 'Polish customer Fleet details',
+          goal: 'Deliver a polished Fleet detail view with durable structured progress and safe cancellation.',
+          project: 'Magistrate', state: 'in_flight', status: 'working', terminal: false,
+          accepted_at: 1789000000000, created_at: 1789000000000, updated_at: 1789000004000,
+          last_event_at: 1789000004000,
+          activity: [{ phase: 'worker.started', label: 'Worker started', occurred_at: 1789000004000 }],
+          workers: [{ label: 'Firstmate worker', status: 'working' }],
+          artifacts: [{ kind: 'pull-request', label: 'Pull request', url: 'https://example.test/pull/42' }],
+          decisions: [{ title: 'Choose release lane', question: 'Ship to beta?', state: 'pending', attention_item_id: 'captain-question-product', updated_at: 1789000003000 }],
+          cancellation: { state: 'none', requested_at: null, allowed: true },
+        }] });
+    }
     if (url.includes('/api/v1/activity/snapshot')) {
+      increment('workspace-activity-refresh-count');
       if (localStorage.getItem('native-chat-activity-unavailable') === '1') return Promise.reject(new TypeError('Activity service unavailable.'));
       return json({
         schema_version: 'activity.v1', records: [], focus_records: [], focus_truncated: false,
@@ -109,6 +141,7 @@ function installNativeGatewayMock() {
       });
     }
     if (url.includes('/api/v1/activity')) {
+      increment('workspace-activity-refresh-count');
       if (localStorage.getItem('native-chat-activity-unavailable') === '1') return Promise.reject(new TypeError('Activity service unavailable.'));
       return json({
       schema_version: 'activity.v1', records: [], next_cursor: 0, latest_cursor: 0,
@@ -121,11 +154,11 @@ function installNativeGatewayMock() {
     if (url.includes('/api/v1/voice/capabilities')) return json({ schema_version: 'voice-capabilities.v1', provider: 'openai', configured: true, modes: [{ id: 'openai', label: 'Gateway OpenAI', available: true }] });
     if (url.includes('/api/v1/notifications/')) return json({ events: [], unread: [], enabled: true, mode: 'moderate', quiet: false, suppressed_foreground: false, delivery: 'none' });
     if (url.includes('/api/v1/agents')) return json([]);
-    if (url.includes('/api/v1/attention')) return json([]);
-    if (url.includes('/api/v1/recent-activity')) return json({ items: [], sources: { firstmate: 'unavailable', github: 'unavailable' } });
-    if (url.includes('/api/v1/auth/providers')) return json([]);
+    if (url.includes('/api/v1/attention')) { increment('workspace-attention-refresh-count'); return json([]); }
+    if (url.includes('/api/v1/recent-activity')) { increment('workspace-recent-refresh-count'); return json({ items: [], sources: { firstmate: 'unavailable', github: 'unavailable' } }); }
+    if (url.includes('/api/v1/auth/providers')) { increment('workspace-providers-refresh-count'); return json([]); }
     if (url.includes('/api/v1/usage')) return json({ source: 'test', providers: [] });
-    if (url.includes('/api/v1/health')) return json({ status: 'healthy', service: 'gateway' });
+    if (url.includes('/api/v1/health')) { increment('workspace-health-refresh-count'); return json({ status: 'healthy', service: 'gateway' }); }
     if (url.includes('/api/v1/')) return json({});
     return nativeFetch(resource, options);
   };
@@ -176,6 +209,56 @@ test('production-default chat composer persists and restores only through native
   assert.equal((await page.$$('[data-testid="agent-message"]')).length, 1, 'reload must not duplicate the canonical reply');
   assert.ok(await page.evaluate(() => Number(localStorage.getItem('native-chat-get-count'))) >= 2);
   assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-forbidden-count') || '0')), 0);
+  await page.close();
+});
+
+test('one workspace refresh coordinates Chat, Fleet, Activity and Attention and opens product-safe Fleet details', async () => {
+  const page = await browser.newPage();
+  await page.evaluateOnNewDocument(installNativeGatewayMock);
+  await page.goto(`${server.base}/chat`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
+  await page.click('[data-testid="brand-drawer-toggle"]');
+  await page.waitForSelector('[data-testid="drawer-refresh"]');
+
+  const keys = [
+    'workspace-chat-refresh-count', 'workspace-fleet-refresh-count',
+    'workspace-activity-refresh-count', 'workspace-attention-refresh-count',
+    'workspace-recent-refresh-count', 'workspace-providers-refresh-count',
+    'workspace-health-refresh-count',
+  ];
+  const before = await page.evaluate(names => Object.fromEntries(names.map(name => [name, Number(localStorage.getItem(name) || '0')])), keys);
+  await page.$eval('[data-testid="drawer-refresh"]', button => { button.click(); button.click(); });
+  await page.waitForFunction((baseline) => Number(localStorage.getItem('workspace-fleet-refresh-count') || '0') >= baseline + 1, {}, before['workspace-fleet-refresh-count']);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const after = await page.evaluate(names => Object.fromEntries(names.map(name => [name, Number(localStorage.getItem(name) || '0')])), keys);
+  for (const key of keys) assert.equal(after[key] - before[key], 1, `${key} must have one single-flight refresh`);
+
+  await page.$eval('[data-testid="drawer-section-fleet"]', button => button.click());
+  await page.waitForSelector('[data-testid="drawer-panel-fleet"]');
+  assert.match(await page.$eval('[data-testid="drawer-panel-fleet"]', element => element.innerText), /Polish customer Fleet details/);
+  await page.waitForSelector('[data-testid="fleet-objective-row"]');
+  await page.click('[data-testid="fleet-objective-row"]');
+  await page.waitForSelector('[data-testid="fleet-detail-sheet"]');
+  const detail = await page.$eval('[data-testid="fleet-detail-sheet"]', element => element.innerText);
+  assert.match(detail, /Polish customer Fleet details/);
+  assert.match(detail, /durable structured progress/);
+  assert.match(detail, /Worker started/);
+  assert.match(detail, /Firstmate worker/);
+  assert.match(detail, /Pull request/);
+  assert.match(detail, /Choose release lane/);
+  assert.doesNotMatch(detail, /mgo_product|task[-_ ]?id|run[-_ ]?id|pane|terminal output/i);
+  const productMarkup = await page.$eval('[data-testid="fleet-detail-layer"]', element => element.outerHTML);
+  assert.doesNotMatch(productMarkup, /mgo_product_0001|magi-task-private|run-private|pane-private/i);
+
+  await page.click('[data-testid="fleet-request-cancellation"]');
+  await page.waitForSelector('[data-testid="fleet-confirm-cancellation"]');
+  await page.click('[data-testid="fleet-confirm-cancellation"]');
+  await page.waitForFunction(() => Number(localStorage.getItem('workspace-cancellation-count') || '0') === 1);
+  const cancellation = await page.evaluate(() => JSON.parse(localStorage.getItem('workspace-cancellation-body')));
+  assert.match(cancellation.idempotency_key, /^cancel_/);
+  assert.deepEqual(Object.keys(cancellation), ['idempotency_key']);
   await page.close();
 });
 

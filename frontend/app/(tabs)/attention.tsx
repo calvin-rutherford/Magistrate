@@ -5,7 +5,7 @@ import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { openExternalUrl } from '../../src/utils/externalLinks';
-import { AttentionAction, AttentionActionConfirmation, AttentionActionOutcome, executeAttentionAction, fetchAgents, fetchAttentionActionForItem, fetchGitHubPRs, fetchUnifiedAttention, prepareAttentionAction, UnifiedAttentionRecord } from '../../src/api/client';
+import { AttentionAction, AttentionActionConfirmation, AttentionActionOutcome, executeAttentionAction, fetchAttentionActionForItem, fetchGitHubPRs, fetchUnifiedAttention, prepareAttentionAction, UnifiedAttentionRecord } from '../../src/api/client';
 import { notificationManager } from '../../src/services/NotificationManager';
 
 function AttentionDetail({ item, confirmation, outcome, actionError, actionBusy, onPrepare, onCancel, onExecute }: {
@@ -65,7 +65,6 @@ export default function AttentionScreen() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
-  const [activeAgentsCount, setActiveAgentsCount] = useState(0);
   const [prsCount, setPrsCount] = useState(0);
   const [confirmation, setConfirmation] = useState<AttentionActionConfirmation | null>(null);
   const [actionOutcome, setActionOutcome] = useState<AttentionActionOutcome | null>(null);
@@ -76,10 +75,9 @@ export default function AttentionScreen() {
   const loadAttention = async () => {
     setLoading(true);
     setError(null);
-    const [attentionResult, agentsResult, prsResult] = await Promise.allSettled([fetchUnifiedAttention(), fetchAgents(), fetchGitHubPRs()]);
+    const [attentionResult, prsResult] = await Promise.allSettled([fetchUnifiedAttention(), fetchGitHubPRs()]);
     if (attentionResult.status === 'fulfilled') setItems(attentionResult.value);
     else setError(attentionResult.reason instanceof Error ? attentionResult.reason.message : 'Needs-your-attention items could not be loaded.');
-    if (agentsResult.status === 'fulfilled') setActiveAgentsCount(agentsResult.value.filter(agent => ['active', 'busy', 'executing', 'processing', 'running', 'working'].includes(String(agent.status || '').toLowerCase())).length);
     if (prsResult.status === 'fulfilled') setPrsCount(prsResult.value.items.length);
     if (attentionResult.status === 'rejected') {
       console.error('Error fetching unified attention:', attentionResult.reason);
@@ -230,7 +228,6 @@ export default function AttentionScreen() {
         visible={showDrawer}
         onClose={() => setShowDrawer(false)}
         onNavigate={(r) => router.push((r === 'index' ? '/' : '/' + r) as any)}
-        activeAgentsCount={activeAgentsCount}
         attentionCount={items.filter(item => item.requires_action !== false).length}
         prsCount={prsCount}
       />

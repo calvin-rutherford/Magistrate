@@ -225,8 +225,16 @@ async def test_tasks_axi_dispatch_is_argument_safe_minimal_and_receipt_bound(mon
         stdout = json.dumps({'ok': True, 'action': 'add', 'task': task}).encode()
         return Process(stdout)
 
+    class Inbox:
+        def __init__(self):
+            self.notes = []
+
+        async def note(self, text):
+            self.notes.append(text)
+
+    inbox = Inbox()
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_create_subprocess_exec)
-    dispatcher = TasksAxiObjectiveDispatcher(TrustedFirstmate())
+    dispatcher = TasksAxiObjectiveDispatcher(TrustedFirstmate(), inbox=inbox)
     receipt = await dispatcher.submit(
         task_id='magi-' + '3' * 32,
         title='Magi: Add endpoint; $(touch owned) (Magi objective)',
@@ -234,6 +242,10 @@ async def test_tasks_axi_dispatch_is_argument_safe_minimal_and_receipt_bound(mon
         body='bounded objective body',
     )
     assert receipt.already_present is False
+    assert inbox.notes == [
+        f"New authenticated Magi objective queued as {'magi-' + '3' * 32}. "
+        "Intake it through the normal Firstmate backlog lifecycle."
+    ]
     arguments = captured['arguments']
     assert arguments == (
         'tasks-axi', 'add', 'magi-' + '3' * 32,
@@ -254,6 +266,7 @@ def test_tasks_axi_receipt_must_confirm_the_exact_deterministic_task():
     body = _task_body('mgo_' + '1' * 32, json.dumps(
         contract.model_dump(), ensure_ascii=False, separators=(',', ':'), sort_keys=True,
     ))
+    assert not body.endswith('\n')
     task = {
         'id': 'magi-' + '2' * 32,
         'title': title,

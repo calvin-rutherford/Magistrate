@@ -13,6 +13,7 @@ import sqlite3
 from typing import Any, Optional
 
 from app import db
+from app.magi_firstmate_tools import concise_objective_title
 
 FLEET_PROJECTION_SCHEMA = "magistrate.fleet-projection.v1"
 RUNTIME_PROJECTION_SCHEMA = "magistrate.runtime-projection.v1"
@@ -25,6 +26,18 @@ _WORKING_PHASES = frozenset({
     "worker.started", "implementation.started", "tests.started",
     "tests.passed", "tests.failed", "review.started",
 })
+_PHASE_LABELS = {
+    "objective.accepted": "Objective accepted",
+    "worker.started": "Worker started",
+    "implementation.started": "Implementation started",
+    "tests.started": "Checks started",
+    "tests.passed": "Checks passed",
+    "tests.failed": "Checks need attention",
+    "review.started": "Review started",
+    "objective.completed": "Objective completed",
+    "objective.failed": "Objective failed",
+    "objective.cancelled": "Objective cancelled",
+}
 
 
 def _connect() -> sqlite3.Connection:
@@ -56,7 +69,7 @@ def _submission_contract(raw: Any) -> dict[str, Any]:
     objective = value.get("objective")
     project = value.get("project")
     return {
-        "title": objective if isinstance(objective, str) and 0 < len(objective) <= 4_000 else None,
+        "objective": objective if isinstance(objective, str) and 0 < len(objective) <= 4_000 else None,
         "project": project if isinstance(project, str) and 0 < len(project) <= 160 else None,
     }
 
@@ -87,6 +100,83 @@ class StructuredRuntimeProjection:
         ):
             raise ValueError("A bounded authenticated principal is required.")
 
+    @staticmethod
+    def _product_details(
+        *,
+        events: list[sqlite3.Row],
+        decisions: list[sqlite3.Row],
+        status: str,
+        cancellation: Optional[sqlite3.Row],
+    ) -> dict[str, Any]:
+        """Return only bounded customer-facing facts from structured rows."""
+        activity = [
+            {
+                "phase": str(event["phase"]),
+                "label": _PHASE_LABELS.get(str(event["phase"]), "Progress updated"),
+                "occurred_at": int(event["occurred_at"]),
+            }
+            for event in events[-20:]
+        ]
+        if not activity:
+            activity = [{"phase": "objective.accepted", "label": "Objective queued", "occurred_at": None}]
+
+        artifacts: list[dict[str, Any]] = []
+        completion = next(
+            (event for event in reversed(events) if event["phase"] == "objective.completed"),
+            None,
+        )
+        if completion is not None and completion["evidence_json"]:
+            try:
+                evidence = json.loads(completion["evidence_json"])
+            except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
+                evidence = {}
+            raw_artifacts = evidence.get("artifacts", []) if isinstance(evidence, dict) else []
+            if isinstance(raw_artifacts, list):
+                for artifact in raw_artifacts[:16]:
+                    if not isinstance(artifact, dict):
+                        continue
+                    kind = artifact.get("kind")
+                    if kind == "pull-request" and isinstance(artifact.get("url"), str):
+                        artifacts.append({"kind": kind, "label": "Pull request", "url": artifact["url"]})
+                    elif kind == "report" and isinstance(artifact.get("report_id"), str):
+                        artifacts.append({"kind": kind, "label": "Verification report", "reference": artifact["report_id"]})
+                    elif kind == "commit" and isinstance(artifact.get("commit_sha"), str):
+                        artifacts.append({"kind": kind, "label": "Commit", "reference": artifact["commit_sha"][:12]})
+
+        public_decisions = [{
+            "title": str(decision["title"]),
+            "question": str(decision["question"]),
+            "state": str(decision["state"]),
+            "attention_item_id": f"captain-question-{decision['decision_id']}",
+            "updated_at": int(decision["updated_at"]),
+        } for decision in decisions[-20:]]
+        worker_started = any(str(event["phase"]) == "worker.started" for event in events)
+        workers = [] if not worker_started else [{
+            "label": "Firstmate worker",
+            "status": (
+                "completed" if status == "done" else status
+            ),
+        }]
+        cancellation_state = "none"
+        requested_at = None
+        if cancellation is not None:
+            cancellation_state = str(cancellation["status"])
+            requested_at = int(cancellation["created_at"])
+        if status == "cancelled":
+            cancellation_state = "observed"
+        terminal = status in {"done", "failed", "cancelled"}
+        return {
+            "activity": activity,
+            "workers": workers,
+            "artifacts": artifacts,
+            "decisions": public_decisions,
+            "cancellation": {
+                "state": cancellation_state,
+                "requested_at": requested_at,
+                "allowed": not terminal and cancellation_state not in {"requested", "observed"},
+            },
+        }
+
     def _tasks(self, owner_user_id: str) -> list[dict[str, Any]]:
         self._validate_owner(owner_user_id)
         with closing(_connect()) as connection:
@@ -107,10 +197,17 @@ class StructuredRuntimeProjection:
                 (owner_user_id, _MAX_EXECUTION_EVENTS + 1),
             ).fetchall()
             decisions = connection.execute(
-                """SELECT task_id, COUNT(*) AS pending_count
+                """SELECT decision_id, task_id, state, title, question, revision,
+                          source_observed_at, updated_at
                    FROM firstmate_decisions
-                   WHERE owner_user_id = ? AND state IN ('pending','answering')
-                   GROUP BY task_id""",
+                   WHERE owner_user_id = ?
+                   ORDER BY source_observed_at, decision_id""",
+                (owner_user_id,),
+            ).fetchall()
+            cancellations = connection.execute(
+                """SELECT objective_id, status, created_at, updated_at
+                   FROM objective_cancellation_requests
+                   WHERE owner_user_id = ? ORDER BY updated_at, request_id""",
                 (owner_user_id,),
             ).fetchall()
         if (
@@ -123,7 +220,16 @@ class StructuredRuntimeProjection:
         events_by_objective: dict[str, list[sqlite3.Row]] = {}
         for event in events:
             events_by_objective.setdefault(str(event["objective_id"]), []).append(event)
-        pending_by_task = {str(row["task_id"]): int(row["pending_count"]) for row in decisions}
+        decisions_by_task: dict[str, list[sqlite3.Row]] = {}
+        for decision in decisions:
+            decisions_by_task.setdefault(str(decision["task_id"]), []).append(decision)
+        cancellation_by_objective = {
+            str(row["objective_id"]): row for row in cancellations
+        }
+        pending_by_task = {
+            task_id: sum(row["state"] in {"pending", "answering"} for row in rows)
+            for task_id, rows in decisions_by_task.items()
+        }
         execution_by_objective = {str(row["objective_id"]): row for row in objectives}
         execution_by_task = {str(row["task_id"]): row for row in objectives}
         tasks: list[dict[str, Any]] = []
@@ -153,10 +259,17 @@ class StructuredRuntimeProjection:
             if pending_by_task.get(task_id) and status not in {"done", "failed", "cancelled"}:
                 state, status = "in_flight", "blocked"
             latest_at = int(latest["occurred_at"]) if latest is not None else None
-            title = (
-                str(execution["title"]) if execution is not None
-                else contract.get("title") or task_id
+            persisted_title = (
+                str(submission["display_title"]).strip()
+                if "display_title" in submission.keys() and submission["display_title"]
+                else ""
             )
+            goal = (
+                contract.get("objective")
+                or (str(execution["title"]) if execution is not None else persisted_title)
+                or "Objective"
+            )
+            title = persisted_title or concise_objective_title(goal)
             project = (
                 execution["project"] if execution is not None and execution["project"]
                 else contract.get("project")
@@ -167,6 +280,7 @@ class StructuredRuntimeProjection:
                 "objective_id": str(execution["objective_id"]) if execution is not None else objective_id,
                 "run_id": str(execution["run_id"]) if execution is not None else None,
                 "title": title,
+                "goal": goal,
                 "project": project,
                 "state": state,
                 "status": status,
@@ -190,6 +304,14 @@ class StructuredRuntimeProjection:
                     "state": status,
                     "observed_at": latest_at,
                 },
+                **self._product_details(
+                    events=task_events,
+                    decisions=decisions_by_task.get(task_id, []),
+                    status=status,
+                    cancellation=cancellation_by_objective.get(
+                        str(execution["objective_id"]) if execution is not None else objective_id
+                    ),
+                ),
             })
 
         for execution in objectives:
@@ -206,12 +328,14 @@ class StructuredRuntimeProjection:
             if pending_by_task.get(task_id) and status not in {"done", "failed", "cancelled"}:
                 state, status = "in_flight", "blocked"
             latest_at = int(latest["occurred_at"]) if latest is not None else None
+            goal = str(execution["title"])
             tasks.append({
                 "id": task_id,
                 "task_id": task_id,
                 "objective_id": objective_id,
                 "run_id": str(execution["run_id"]),
-                "title": str(execution["title"]),
+                "title": concise_objective_title(goal),
+                "goal": goal,
                 "project": execution["project"],
                 "state": state,
                 "status": status,
@@ -231,6 +355,12 @@ class StructuredRuntimeProjection:
                     "state": status,
                     "observed_at": latest_at,
                 },
+                **self._product_details(
+                    events=task_events,
+                    decisions=decisions_by_task.get(task_id, []),
+                    status=status,
+                    cancellation=cancellation_by_objective.get(objective_id),
+                ),
             })
 
         tasks.sort(key=lambda item: (int(item["updated_at"]), str(item["task_id"])), reverse=True)
@@ -239,13 +369,22 @@ class StructuredRuntimeProjection:
     def fleet(self, owner_user_id: str) -> dict[str, Any]:
         tasks = self._tasks(owner_user_id)
         runtime = self._runtime_from_tasks(tasks)
+        product_fields = (
+            "objective_id", "title", "goal", "project", "state", "status",
+            "last_event_at", "accepted_at", "created_at", "updated_at", "terminal",
+            "activity", "workers", "artifacts", "decisions", "cancellation",
+        )
+        product_tasks = [
+            {field: task[field] for field in product_fields}
+            for task in tasks
+        ]
         return {
             "schema": FLEET_PROJECTION_SCHEMA,
             "source": "persisted-structured-state",
             "available": True,
             "live_process_probe": False,
-            "tasks": tasks,
-            "tasks_count": len(tasks),
+            "tasks": product_tasks,
+            "tasks_count": len(product_tasks),
             "last_event_at": runtime["last_event_at"],
             "persisted_runtime_status": runtime["status"],
         }

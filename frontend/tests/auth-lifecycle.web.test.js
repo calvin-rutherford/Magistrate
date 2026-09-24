@@ -9,6 +9,8 @@ let browser;
 let URL;
 
 test.before(async () => {
+  process.env.EXPO_PUBLIC_APPLE_SERVICE_ID = 'com.example.magistrate.web';
+  process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID = 'google-web-client.apps.example';
   server = await startWebServer({ readyPath: '/chat' });
   URL = `${server.base}/chat`;
   browser = await launchBrowser();
@@ -27,6 +29,9 @@ async function open(mode = 'normal', preserveStorage = false) {
       sessionStorage.clear();
       sessionStorage.setItem('__auth_test_initialized', '1');
     }
+    if (mode === 'provider-restore') {
+      localStorage.setItem('magistrate.provider-session-present.v1', '1');
+    }
     const nativeFetch = window.fetch.bind(window);
     const state = { mode, valid: false, calls: [], authCalls: [], userId: sessionStorage.getItem('__auth_test_user') || 'default_user', token: 'browser-test-session', profileName: '' };
     const expiresAt = mode === 'expiry' ? Math.floor(Date.now() / 1000) + 20 : 4102444800;
@@ -36,6 +41,39 @@ async function open(mode = 'normal', preserveStorage = false) {
     window.fetch = (resource, options = {}) => {
       const url = typeof resource === 'string' ? resource : resource.url;
       const method = options.method || 'GET';
+      if (url.includes('/api/v1/auth/provider/configuration')) {
+        state.authCalls.push({ url, method, body: null });
+        const enabled = mode !== 'providers-disabled';
+        return json({
+          schema_version: 'provider-auth-configuration.v1',
+          apple: enabled, apple_native: enabled, apple_web: enabled,
+          google: enabled, google_native: enabled, google_web: enabled,
+        });
+      }
+      if (url.includes('/api/v1/auth/provider/refresh')) {
+        state.authCalls.push({ url, method, body: options.body || null, credentials: options.credentials || null });
+        state.valid = true;
+        state.userId = 'provider-user';
+        state.token = 'provider-browser-session';
+        return json({
+          session_token: state.token, token_type: 'Bearer', expires_at: expiresAt,
+          scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'],
+          user_id: state.userId, auth_method: 'google', refresh_expires_at: 4102444800,
+          onboarding_required: false,
+        });
+      }
+      if (url.includes('/api/v1/auth/provider/challenge')) {
+        state.authCalls.push({ url, method, body: options.body || null });
+        let body = {};
+        try { body = JSON.parse(options.body || '{}'); } catch {}
+        const nonce = 'provider-nonce-value-that-is-long-enough-1234';
+        return json({
+          schema_version: 'provider-auth-challenge.v1',
+          challenge_id: `pac_${'A'.repeat(24)}`, provider: body.provider,
+          action: 'sign_in', nonce, authorization_nonce: nonce,
+          redirect_uri: body.redirect_uri || null, expires_at: Math.floor(Date.now() / 1000) + 600,
+        });
+      }
       if (url.includes('/api/v1/auth/friend-beta/session')) {
         state.authCalls.push({ url, method, body: options.body || null });
         let body = {};
@@ -64,7 +102,15 @@ async function open(mode = 'normal', preserveStorage = false) {
         if (authorization === `Bearer ${state.token}`) {
           state.valid = true;
           const friend = state.userId === 'friend-beta-user';
-          return json({ authenticated: true, expires_at: expiresAt, scopes: friend ? ['read', 'account', 'notifications'] : ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: state.userId, auth_method: friend ? 'friend-beta-access' : 'operator-bootstrap', onboarding_required: friend && !state.profileName });
+          const provider = state.userId === 'provider-user';
+          return json({
+            authenticated: true, expires_at: expiresAt,
+            scopes: friend ? ['read', 'account', 'notifications'] : ['read', 'account', 'providers', 'notifications', 'voice', 'command'],
+            user_id: state.userId,
+            auth_method: friend ? 'friend-beta-access' : provider ? 'google' : 'operator-bootstrap',
+            ...(provider ? { refresh_expires_at: 4102444800 } : {}),
+            onboarding_required: friend && !state.profileName,
+          });
         }
         return json({ detail: 'Invalid or expired session' }, 401);
       }
@@ -150,6 +196,46 @@ async function connect(page) {
   await page.waitForSelector('[data-testid="magi-prompt"]');
   await page.waitForFunction(() => window.__authLifecycle.calls.some(call => call.url.includes('/execution/settings')));
 }
+
+test('provider sign-in controls are product-visible without persisting browser authority', async () => {
+  const page = await open();
+  await page.waitForSelector('[data-testid="sign-in-apple"]');
+  await page.waitForSelector('[data-testid="sign-in-google"]');
+  assert.match(await page.$eval('[data-testid="sign-in-apple"]', node => node.textContent), /APPLE/);
+  assert.match(await page.$eval('[data-testid="sign-in-google"]', node => node.textContent), /GOOGLE/);
+  const storage = await page.evaluate(() => ({
+    providerMarker: localStorage.getItem('magistrate.provider-session-present.v1'),
+    session: localStorage.getItem('magistrate.gateway.session'),
+  }));
+  assert.deepEqual(storage, { providerMarker: null, session: null });
+  assert.ok(await page.evaluate(() => window.__authLifecycle.authCalls.filter(call => call.url.includes('/auth/provider/challenge')).length >= 2));
+  await page.close();
+});
+
+test('unconfigured provider sign-in stays fail-closed and is not offered', async () => {
+  const page = await open('providers-disabled');
+  await page.waitForSelector('[data-testid="session-status"]');
+  await page.waitForFunction(() => window.__authLifecycle.authCalls.some(call => call.url.includes('/auth/provider/configuration')));
+  assert.equal(await page.$('[data-testid="sign-in-apple"]'), null);
+  assert.equal(await page.$('[data-testid="sign-in-google"]'), null);
+  assert.equal(await page.evaluate(() => window.__authLifecycle.authCalls.filter(call => call.url.includes('/auth/provider/challenge')).length), 0);
+  await page.close();
+});
+
+test('web provider continuity restores through cookie refresh without JavaScript bearer persistence', async () => {
+  const page = await open('provider-restore');
+  await page.waitForSelector('[data-testid="branded-chat-shell"]');
+  const evidence = await page.evaluate(() => ({
+    marker: localStorage.getItem('magistrate.provider-session-present.v1'),
+    savedSession: localStorage.getItem('magistrate.gateway.session'),
+    refresh: window.__authLifecycle.authCalls.find(call => call.url.includes('/auth/provider/refresh')),
+  }));
+  assert.equal(evidence.marker, '1');
+  assert.equal(evidence.savedSession, null);
+  assert.deepEqual(JSON.parse(evidence.refresh.body), {});
+  assert.equal(evidence.refresh.credentials, 'include');
+  await page.close();
+});
 
 test('fresh browser gates protected routes, rejects invalid bootstrap, then reaches usable Chat after validation', async () => {
   const page = await open();
@@ -245,7 +331,7 @@ test('a validated bearer and expiry metadata survive reload without re-bootstrap
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   const authCalls = await page.evaluate(() => window.__authLifecycle.authCalls);
-  assert.equal(authCalls.filter(call => call.method === 'POST').length, 0);
+  assert.equal(authCalls.filter(call => call.method === 'POST' && !call.url.includes('/auth/provider/challenge')).length, 0);
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('magistrate.gateway.session')).expires_at), 4102444800);
   await page.close();
 });

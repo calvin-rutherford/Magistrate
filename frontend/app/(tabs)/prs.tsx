@@ -3,8 +3,7 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } 
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
-import { fetchAgents, fetchGitHubPRs, fetchUnifiedAttention, GitHubPR } from '../../src/api/client';
-import { summarizeAgents } from '../../src/services/AgentStatus';
+import { fetchGitHubPRs, fetchUnifiedAttention, GitHubPR } from '../../src/api/client';
 import { useRouter } from 'expo-router';
 
 export default function PRsScreen() {
@@ -15,7 +14,6 @@ export default function PRsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
-  const [activeAgentsCount, setActiveAgentsCount] = useState(0);
   const [attentionCount, setAttentionCount] = useState(0);
 
   const loadPRs = async (nextPage = 1, refresh = false) => {
@@ -35,8 +33,7 @@ export default function PRsScreen() {
 
   useEffect(() => {
     loadPRs(1);
-    Promise.allSettled([fetchAgents(), fetchUnifiedAttention()]).then(([agentsResult, attentionResult]) => {
-      if (agentsResult.status === 'fulfilled') setActiveAgentsCount(summarizeAgents(agentsResult.value).activeCount);
+    Promise.allSettled([fetchUnifiedAttention()]).then(([attentionResult]) => {
       if (attentionResult.status === 'fulfilled') setAttentionCount(attentionResult.value.filter(item => item.requires_action !== false).length);
     });
   }, []);
@@ -109,7 +106,6 @@ export default function PRsScreen() {
         visible={showDrawer}
         onClose={() => setShowDrawer(false)}
         onNavigate={handleNavigate}
-        activeAgentsCount={activeAgentsCount}
         attentionCount={attentionCount}
         prsCount={prs.length}
       />

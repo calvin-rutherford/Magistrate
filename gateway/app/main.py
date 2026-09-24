@@ -11,12 +11,19 @@ import time
 import re
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from app.auth import (Principal, friend_beta_onboarding_required, issue_friend_beta_session,
-                      issue_session, revoke_session, require_any_scope, require_scope,
+from app.auth import (Principal, account_onboarding_required, authenticate_request,
+                      issue_friend_beta_session, issue_session, revoke_session,
+                      require_any_scope, require_scope,
                       validate_friend_beta_configuration, verify_token)
+from app.provider_auth import (
+    PROVIDER_COOKIE_NAME, PROVIDER_COOKIE_PATH, create_challenge,
+    exchange_challenge, provider_availability, public_session_payload,
+    refresh_session as refresh_provider_session,
+    validate_provider_auth_configuration,
+)
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
@@ -59,10 +66,14 @@ from app.magi_chat_api import (magi_chat_readiness, magi_chat_service,
                                validate_magi_chat_configuration)
 from app.magi_chat_store import MagiChatStore
 from app.firstmate_execution import MAX_FIRSTMATE_EXECUTION_EVENT_BYTES
+from app.firstmate_intake import reconcile_pending_objective_intake
 from app.firstmate_execution_api import (
     firstmate_execution_service, router as firstmate_execution_router,
 )
 from app.firstmate_decision_api import router as firstmate_decision_router
+from app.objective_cancellation import (
+    ObjectiveCancellationError, objective_cancellation_service,
+)
 
 init_db()
 
@@ -172,6 +183,36 @@ structured_runtime = StructuredRuntimeProjection()
 recent_activity_service = RecentActivityService(structured_runtime, github_service)
 stt_adapter = VoiceInputAdapter()
 _notification_reconciler_task = None
+_firstmate_delivery_recovery_task = None
+_PROCESS_STARTED_AT_MS = int(time.time() * 1000)
+
+
+async def _recover_firstmate_deliveries_once() -> None:
+    """Run one bounded write-side recovery pass, never from a read or timer."""
+    try:
+        intake_recovery = await reconcile_pending_objective_intake(
+            updated_before_ms=_PROCESS_STARTED_AT_MS,
+        )
+        if intake_recovery["examined"]:
+            print("Firstmate objective intake recovery:", intake_recovery)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # Keep cancellation recovery independent: an unavailable objective
+        # queue must not strand a cancellation note (or vice versa).
+        print("Firstmate objective intake recovery unavailable:", exc)
+    try:
+        cancellation_recovery = await objective_cancellation_service.recover_pending(
+            updated_before_ms=_PROCESS_STARTED_AT_MS,
+        )
+        if cancellation_recovery["examined"]:
+            print("Firstmate cancellation delivery recovery:", cancellation_recovery)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # Persisted pending rows remain eligible for the next explicit restart;
+        # Firstmate availability must not make the observation API unavailable.
+        print("Firstmate cancellation delivery recovery unavailable:", exc)
 
 
 async def _reconcile_registered_notifications() -> None:
@@ -196,8 +237,9 @@ async def _reconcile_registered_notifications() -> None:
 
 @app.on_event('startup')
 async def start_notification_reconciler():
-    global _notification_reconciler_task
+    global _notification_reconciler_task, _firstmate_delivery_recovery_task
     validate_friend_beta_configuration()
+    validate_provider_auth_configuration()
     validate_magi_chat_configuration()
     # A process cannot resume an in-flight provider socket. Preserve the
     # reserved pair and expose a truthful, explicitly retryable failure.
@@ -207,17 +249,26 @@ async def start_notification_reconciler():
         producer = fm_client.get_producer_readiness()
         if producer['status'] != 'ready':
             raise RuntimeError('The required pinned Firstmate producer is unavailable.')
+    _firstmate_delivery_recovery_task = asyncio.create_task(
+        _recover_firstmate_deliveries_once()
+    )
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
-    global _notification_reconciler_task
-    if _notification_reconciler_task:
-        _notification_reconciler_task.cancel()
-        await asyncio.gather(_notification_reconciler_task, return_exceptions=True)
+    global _notification_reconciler_task, _firstmate_delivery_recovery_task
+    tasks = [
+        task for task in (_notification_reconciler_task, _firstmate_delivery_recovery_task)
+        if task is not None
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     _notification_reconciler_task = None
+    _firstmate_delivery_recovery_task = None
 
 
 async def _bounded_event_frame(websocket: WebSocket, timeout: float) -> str:
@@ -323,6 +374,56 @@ class FriendBetaSessionRequest(BaseModel):
     access_code: str = Field(min_length=1, max_length=128)
 
 
+class ProviderChallengeRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    provider: Literal['apple', 'google']
+    action: Literal['sign_in', 'link'] = 'sign_in'
+    client_platform: Literal['native', 'web']
+    redirect_uri: Optional[str] = Field(None, max_length=1024)
+
+
+class ProviderExchangeRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    provider: Literal['apple', 'google']
+    challenge_id: str = Field(min_length=1, max_length=64)
+    nonce: str = Field(min_length=32, max_length=128)
+    identity_token: Optional[str] = Field(None, max_length=24 * 1024)
+    authorization_code: Optional[str] = Field(None, max_length=4096)
+    redirect_uri: Optional[str] = Field(None, max_length=1024)
+    display_name: Optional[str] = Field(None, max_length=120)
+
+
+class ProviderRefreshRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    refresh_token: Optional[str] = Field(None, max_length=128)
+
+
+class ObjectiveCancellationRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+def _optional_principal(request: Request, authorization: Optional[str]) -> Optional[Principal]:
+    if authorization is None:
+        return None
+    return authenticate_request(request, authorization)
+
+
+def _provider_cookie(response: Response, token: str, expires_at: int) -> None:
+    production = os.getenv('MAGISTRATE_ENV', '').strip().lower() not in {
+        'dev', 'development', 'test', 'testing',
+    }
+    response.set_cookie(
+        PROVIDER_COOKIE_NAME, token, max_age=max(0, expires_at - int(time.time())),
+        expires=expires_at, path=PROVIDER_COOKIE_PATH, secure=production,
+        httponly=True, samesite='lax',
+    )
+
+
+def _clear_provider_cookie(response: Response) -> None:
+    response.delete_cookie(PROVIDER_COOKIE_NAME, path=PROVIDER_COOKIE_PATH)
+
+
 @app.post('/api/v1/auth/session')
 async def create_session(request: SessionRequest, response: Response):
     # Bearer issuance must never be cached by a browser, proxy, or shared CDN.
@@ -337,6 +438,81 @@ async def create_friend_beta_session(request: FriendBetaSessionRequest, response
     return issue_friend_beta_session(request.access_code)
 
 
+@app.get('/api/v1/auth/provider/configuration')
+async def provider_auth_configuration(response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+    return {'schema_version': 'provider-auth-configuration.v1', **provider_availability()}
+
+
+@app.post('/api/v1/auth/provider/challenge')
+async def create_provider_auth_challenge(
+    contract: ProviderChallengeRequest,
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    response.headers['Cache-Control'] = 'no-store'
+    principal = _optional_principal(request, authorization)
+    return create_challenge(
+        contract.provider, contract.action, contract.client_platform,
+        contract.redirect_uri, principal,
+    )
+
+
+@app.post('/api/v1/auth/provider/exchange')
+async def exchange_provider_auth_challenge(
+    contract: ProviderExchangeRequest,
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    response.headers['Cache-Control'] = 'no-store'
+    principal = _optional_principal(request, authorization)
+    payload = await exchange_challenge(
+        provider=contract.provider,
+        challenge_id=contract.challenge_id,
+        raw_nonce=contract.nonce,
+        identity_token=contract.identity_token,
+        authorization_code=contract.authorization_code,
+        redirect_uri=contract.redirect_uri,
+        display_name=contract.display_name,
+        principal=principal,
+    )
+    if payload.get('status') == 'linked':
+        return payload
+    client_platform = payload.pop('_client_platform', 'native')
+    include_refresh = client_platform == 'native'
+    if not include_refresh:
+        _provider_cookie(response, payload['_refresh_token'], int(payload['refresh_expires_at']))
+    return public_session_payload(payload, include_refresh_token=include_refresh)
+
+
+@app.post('/api/v1/auth/provider/refresh')
+async def refresh_provider_auth_session(
+    contract: ProviderRefreshRequest,
+    request: Request,
+    response: Response,
+):
+    response.headers['Cache-Control'] = 'no-store'
+    cookie_token = request.cookies.get(PROVIDER_COOKIE_NAME)
+    if contract.refresh_token and cookie_token and contract.refresh_token != cookie_token:
+        raise HTTPException(status_code=400, detail='The provider refresh request is ambiguous.')
+    token = contract.refresh_token or cookie_token
+    if not token:
+        raise HTTPException(status_code=401, detail='The provider session is invalid or expired.')
+    client_platform = 'native' if contract.refresh_token else 'web'
+    try:
+        payload = refresh_provider_session(token, client_platform=client_platform)
+    except HTTPException:
+        if cookie_token:
+            _clear_provider_cookie(response)
+        raise
+    native = bool(contract.refresh_token)
+    if not native:
+        _provider_cookie(response, payload['_refresh_token'], int(payload['refresh_expires_at']))
+    return public_session_payload(payload, include_refresh_token=native)
+
+
 @app.get('/api/v1/auth/session')
 async def inspect_session(response: Response, principal: Principal = Depends(verify_token)):
     """Small protected validation endpoint independent of Herdr/Firstmate."""
@@ -346,14 +522,19 @@ async def inspect_session(response: Response, principal: Principal = Depends(ver
         'user_id': principal.user_id,
         'scopes': sorted(principal.scopes),
         'expires_at': principal.expires_at,
-        'auth_method': 'friend-beta-access' if principal.access_grant_id else 'operator-bootstrap',
-        'onboarding_required': friend_beta_onboarding_required(principal),
+        'auth_method': (
+            'friend-beta-access' if principal.access_grant_id
+            else principal.auth_provider or 'operator-bootstrap'
+        ),
+        'refresh_expires_at': principal.refresh_expires_at,
+        'onboarding_required': account_onboarding_required(principal),
     }
 
 
 @app.post('/api/v1/auth/session/revoke')
 async def revoke_current_session(response: Response, principal: Principal = Depends(verify_token), authorization: Optional[str] = Header(None)):
     response.headers['Cache-Control'] = 'no-store'
+    _clear_provider_cookie(response)
     if not authorization:
         raise HTTPException(status_code=400, detail='Bearer session required')
     _, _, token = authorization.partition(' ')
@@ -1130,6 +1311,23 @@ async def list_agents(principal: Principal = Depends(require_scope('read'))):
 @app.get('/api/v1/fleet')
 async def get_fleet(principal: Principal = Depends(require_scope('read'))):
     return await asyncio.to_thread(structured_runtime.fleet, principal.user_id)
+
+
+@app.post('/api/v1/fleet/objectives/{objective_id}/cancellation-requests', status_code=202)
+async def request_objective_cancellation(
+    objective_id: str,
+    contract: ObjectiveCancellationRequest,
+    principal: Principal = Depends(require_scope('command')),
+):
+    try:
+        return await objective_cancellation_service.request(
+            owner_user_id=principal.user_id,
+            actor_session_id=principal.session_id,
+            objective_id=objective_id,
+            idempotency_key=contract.idempotency_key,
+        )
+    except ObjectiveCancellationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 @app.post('/api/v1/agents/{agent_id}/migration-requests')

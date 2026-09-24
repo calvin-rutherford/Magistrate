@@ -500,6 +500,27 @@ class FirstmateExecutionStore:
                         owner_user_id, event.objective_id,
                     ),
                 )
+                if event.phase == "objective.cancelled":
+                    connection.execute(
+                        """UPDATE objective_cancellation_requests
+                           SET status = 'observed', error_code = NULL,
+                               notification_status = 'delivered', updated_at = ?
+                           WHERE owner_user_id = ? AND objective_id = ?
+                             AND status IN ('requested','failed')""",
+                        (now, owner_user_id, event.objective_id),
+                    )
+                else:
+                    # Completion/failure won the race with a cancellation
+                    # request. Preserve the request as not applied rather than
+                    # claiming cancellation after a different terminal fact.
+                    connection.execute(
+                        """UPDATE objective_cancellation_requests
+                           SET status = 'failed', error_code = 'objective_terminal',
+                               notification_status = 'delivered', updated_at = ?
+                           WHERE owner_user_id = ? AND objective_id = ?
+                             AND status = 'requested'""",
+                        (now, owner_user_id, event.objective_id),
+                    )
             stored = connection.execute(
                 """SELECT * FROM firstmate_execution_events
                    WHERE owner_user_id = ? AND event_id = ?""",
