@@ -1,6 +1,5 @@
 import * as AppleAuthentication from 'expo-apple-authentication';
 import * as AuthSession from 'expo-auth-session';
-import * as Crypto from 'expo-crypto';
 import * as WebBrowser from 'expo-web-browser';
 import { Platform } from 'react-native';
 import {
@@ -31,13 +30,6 @@ function cancelled(provider: Provider): Error & { code: string } {
     new Error(`${provider === 'apple' ? 'Apple' : 'Google'} sign-in was cancelled.`),
     { code: 'ERR_REQUEST_CANCELED' },
   );
-}
-
-async function providerAuthorizationNonce(provider: Provider, rawNonce: string): Promise<string> {
-  if (provider !== 'apple') return rawNonce;
-  // Apple carries the SHA-256 digest in its ID token. The raw one-time nonce
-  // stays private to the challenge exchange so the Gateway can verify both.
-  return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, rawNonce);
 }
 
 function providerClientId(provider: Provider): string | null {
@@ -120,7 +112,7 @@ async function signInWithNativeApple(challenge: ProviderAuthChallenge): Promise<
       AppleAuthentication.AppleAuthenticationScope.EMAIL,
     ],
     state: challenge.challenge_id,
-    nonce: await providerAuthorizationNonce('apple', challenge.authorization_nonce),
+    nonce: challenge.authorization_nonce,
   });
   if (credential.state !== challenge.challenge_id || !credential.identityToken) {
     throw new Error('Apple returned an invalid sign-in response.');
@@ -140,7 +132,7 @@ async function signInWithWebApple(challenge: ProviderAuthChallenge): Promise<voi
     clientId, redirectUri: redirect, responseType: AuthSession.ResponseType.Code,
     scopes: [], state: challenge.challenge_id, usePKCE: false,
     extraParams: {
-      nonce: await providerAuthorizationNonce('apple', challenge.authorization_nonce),
+      nonce: challenge.authorization_nonce,
       response_mode: 'query',
     },
   });

@@ -51,6 +51,8 @@ PROVIDER_COOKIE_PATH = "/api/v1/auth"
 MAX_ID_TOKEN_BYTES = 24 * 1024
 MAX_JWKS_BYTES = 256 * 1024
 MAX_ACTIVE_CHALLENGES = 10_000
+JWKS_UNKNOWN_KEY_REFRESH_SECONDS = 60
+MAX_EXPIRED_SESSION_FAMILY_CLEANUP = 100
 _JWT_PART = re.compile(r"^[A-Za-z0-9_-]+$")
 _SAFE_SUBJECT = re.compile(r"^[^\x00-\x1f\x7f-\x9f]{1,255}$")
 _SAFE_CHALLENGE = re.compile(r"^pac_[A-Za-z0-9_-]{20,40}$")
@@ -64,6 +66,7 @@ _ISSUERS: dict[ProviderName, frozenset[str]] = {
     "google": frozenset({"https://accounts.google.com", "accounts.google.com"}),
 }
 _jwks_cache: dict[ProviderName, tuple[float, list[dict[str, Any]]]] = {}
+_jwks_refreshed_at: dict[ProviderName, float] = {}
 _jwks_lock = asyncio.Lock()
 
 
@@ -171,6 +174,31 @@ def _refresh_expiry(now: int) -> int:
     if ttl < 3600 or ttl > PROVIDER_REFRESH_MAX_TTL_SECONDS:
         raise HTTPException(status_code=503, detail="Provider session configuration is invalid.")
     return now + ttl
+
+
+def _cleanup_expired_session_families(connection: sqlite3.Connection, now: int) -> None:
+    family_ids = [
+        str(row[0]) for row in connection.execute(
+            """SELECT family_id FROM provider_session_families
+               WHERE expires_at <= ? ORDER BY expires_at LIMIT ?""",
+            (now, MAX_EXPIRED_SESSION_FAMILY_CLEANUP),
+        ).fetchall()
+    ]
+    if not family_ids:
+        return
+    placeholders = ",".join("?" for _ in family_ids)
+    connection.execute(
+        f"DELETE FROM gateway_sessions WHERE provider_session_id IN ({placeholders})",
+        family_ids,
+    )
+    connection.execute(
+        f"DELETE FROM provider_refresh_tokens WHERE family_id IN ({placeholders})",
+        family_ids,
+    )
+    connection.execute(
+        f"DELETE FROM provider_session_families WHERE family_id IN ({placeholders})",
+        family_ids,
+    )
 
 
 def validate_provider_auth_configuration() -> None:
@@ -321,6 +349,7 @@ def create_challenge(
     with sqlite3.connect(db.DB_PATH) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
+        _cleanup_expired_session_families(connection, now)
         # Assertions cannot be replayed while their token can still satisfy the
         # one-day issued-at bound. Retire older digests before their challenge
         # rows so routine sign-in does not grow either ledger forever.
@@ -387,11 +416,19 @@ async def _jwks(provider: ProviderName, *, force: bool = False) -> list[dict[str
     if not force and cached and cached[0] > now:
         return cached[1]
     async with _jwks_lock:
+        now = time.monotonic()
         cached = _jwks_cache.get(provider)
-        if not force and cached and cached[0] > time.monotonic():
+        if not force and cached and cached[0] > now:
+            return cached[1]
+        if (
+            force and cached
+            and _jwks_refreshed_at.get(provider, 0) + JWKS_UNKNOWN_KEY_REFRESH_SECONDS > now
+        ):
             return cached[1]
         keys = await _download_jwks(provider)
-        _jwks_cache[provider] = (time.monotonic() + 3600, keys)
+        refreshed_at = time.monotonic()
+        _jwks_cache[provider] = (refreshed_at + 3600, keys)
+        _jwks_refreshed_at[provider] = refreshed_at
         return keys
 
 
@@ -794,6 +831,7 @@ def refresh_session(refresh_token: str, *, client_platform: ClientPlatform) -> d
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
+        _cleanup_expired_session_families(connection, now)
         row = connection.execute(
             """SELECT token.consumed_at, token.expires_at AS token_expires_at,
                       family.*, account.status AS account_status,

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import sqlite3
 import time
 
 import pytest
@@ -9,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app import db, provider_auth
 from app.main import app
 from app.provider_auth import (
     ProviderClaims, validate_provider_auth_configuration, verify_identity_token,
@@ -76,6 +78,109 @@ async def test_apple_assertion_requires_the_sha256_bound_nonce(monkeypatch):
     with pytest.raises(HTTPException) as mismatch:
         await verify_identity_token("apple", token, "b" * 43, keys=[jwk], now=now)
     assert mismatch.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_unknown_signing_keys_cannot_force_repeated_jwks_downloads(monkeypatch):
+    monkeypatch.setenv("MAGISTRATE_GOOGLE_CLIENT_IDS", "google-client.apps.example")
+    published_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    published_numbers = published_key.public_key().public_numbers()
+    published_jwk = {
+        "kty": "RSA", "alg": "RS256", "use": "sig", "kid": "published-key",
+        "n": _b64(published_numbers.n.to_bytes((published_numbers.n.bit_length() + 7) // 8, "big")),
+        "e": _b64(published_numbers.e.to_bytes((published_numbers.e.bit_length() + 7) // 8, "big")),
+    }
+    downloads = 0
+
+    async def download(provider):
+        nonlocal downloads
+        assert provider == "google"
+        downloads += 1
+        return [published_jwk]
+
+    signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = int(time.time())
+    token = _jwt(signing_key, "attacker-selected-key", {
+        "iss": "https://accounts.google.com", "sub": "provider-subject-1",
+        "aud": "google-client.apps.example", "iat": now, "exp": now + 300,
+        "nonce": "n" * 43,
+    })
+    monkeypatch.setattr(provider_auth, "_download_jwks", download)
+    provider_auth._jwks_cache.pop("google", None)
+    provider_auth._jwks_refreshed_at.pop("google", None)
+    try:
+        for _ in range(3):
+            with pytest.raises(HTTPException) as unknown:
+                await verify_identity_token("google", token, "n" * 43, now=now)
+            assert unknown.value.status_code == 401
+        assert downloads == 1
+    finally:
+        provider_auth._jwks_cache.pop("google", None)
+        provider_auth._jwks_refreshed_at.pop("google", None)
+
+
+def test_provider_challenge_cleans_expired_session_ledgers(monkeypatch):
+    monkeypatch.setenv("MAGISTRATE_APPLE_CLIENT_IDS", "io.magistrate.test")
+    now = int(time.time())
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """INSERT OR IGNORE INTO user_profiles
+               (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
+               VALUES('cleanup-user', '', '', '', '', 'dusk-mountain', ?, ?)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO connected_accounts
+               (id, user_id, provider, provider_user_id, provider_username, status,
+                scopes, created_at, updated_at, account_kind, email_verified, last_authenticated_at)
+               VALUES('cleanup-account', 'cleanup-user', 'apple', 'cleanup-subject', '',
+                      'connected', 'openid,email,profile', ?, ?, 'login', 0, ?)""",
+            (now, now, now),
+        )
+        for family_id, expires_at in (("expired-family", now - 1), ("live-family", now + 3600)):
+            connection.execute(
+                """INSERT INTO provider_session_families
+                   (family_id, user_id, connected_account_id, provider, client_platform,
+                    scopes, created_at, expires_at, last_rotated_at)
+                   VALUES(?, 'cleanup-user', 'cleanup-account', 'apple', 'native',
+                          'read,account', ?, ?, ?)""",
+                (family_id, now - 100, expires_at, now - 100),
+            )
+            connection.execute(
+                """INSERT INTO provider_refresh_tokens
+                   (token_hash, family_id, issued_at, expires_at, consumed_at)
+                   VALUES(?, ?, ?, ?, ?)""",
+                (f"token-{family_id}", family_id, now - 100, expires_at, now - 50),
+            )
+            connection.execute(
+                """INSERT INTO gateway_sessions
+                   (session_id, token_hash, user_id, scopes, issued_at, expires_at,
+                    provider_session_id, auth_account_id)
+                   VALUES(?, ?, 'cleanup-user', 'read,account', ?, ?, ?, 'cleanup-account')""",
+                (f"session-{family_id}", f"access-{family_id}", now - 100, expires_at,
+                 family_id),
+            )
+
+    challenge = TestClient(app).post("/api/v1/auth/provider/challenge", json={
+        "provider": "apple", "client_platform": "native",
+    })
+    assert challenge.status_code == 200
+    body = challenge.json()
+    assert body["authorization_nonce"] == hashlib.sha256(body["nonce"].encode("ascii")).hexdigest()
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM provider_session_families WHERE family_id = 'expired-family'",
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM provider_refresh_tokens WHERE family_id = 'expired-family'",
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM gateway_sessions WHERE provider_session_id = 'expired-family'",
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT consumed_at FROM provider_refresh_tokens WHERE family_id = 'live-family'",
+        ).fetchone()[0] == now - 50
 
 
 def test_public_provider_configuration_is_platform_specific(monkeypatch):
