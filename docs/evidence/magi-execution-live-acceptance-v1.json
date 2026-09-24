@@ -1,0 +1,137 @@
+{
+  "schema_version": "magi.execution-live-acceptance-evidence.v1",
+  "result": "pass",
+  "request": "Create a small test project called magi-execution-test with a README containing \"Hello from Magistrate.\"",
+  "boundary": {
+    "candidate": "current merged default branch",
+    "production_equivalent_gateway": true,
+    "real_provider": true,
+    "mock_transport": false,
+    "real_objective_dispatcher": true,
+    "real_firstmate_worker": true,
+    "manual_artifact_creation": false
+  },
+  "provider": {
+    "completed_calls": 3,
+    "calls": [
+      {
+        "index": 1,
+        "finish_reason": "tool_calls",
+        "selected_tools": [
+          "firstmate.submit_objective"
+        ]
+      },
+      {
+        "index": 2,
+        "finish_reason": "stop",
+        "selected_tools": []
+      },
+      {
+        "index": 3,
+        "finish_reason": "stop",
+        "selected_tools": []
+      }
+    ],
+    "submit_objective_selections": 1
+  },
+  "objective": {
+    "tool_calls": 1,
+    "dispatcher_starts": 1,
+    "dispatcher_acceptances": 1,
+    "dispatcher_already_present": false,
+    "magi_objective_rows": 1,
+    "firstmate_objective_rows": 1,
+    "attempts": 1
+  },
+  "execution": {
+    "real_worker_started": true,
+    "observed_phases": [
+      "objective.accepted",
+      "worker.started",
+      "objective.completed"
+    ],
+    "artifact_created_by_worker": true,
+    "artifact_verified_before_completion_event_submission": true,
+    "completion_event_persisted_before_completion_provider_call": true
+  },
+  "artifact": {
+    "project_relative_path": "magi-execution-test",
+    "readme_relative_path": "magi-execution-test/README.md",
+    "readme_regular_file": true,
+    "readme_symlink": false,
+    "readme_utf8": "Hello from Magistrate.\n",
+    "readme_bytes": 23,
+    "readme_sha256": "fa412454cc59e13c016f2569ceab7cff88d2af3f928ef9d6494fd63a4c96cc6f",
+    "worker_commit_created": true,
+    "only_path_in_worker_commit": "magi-execution-test/README.md",
+    "worker_worktree_clean": true
+  },
+  "chat": {
+    "messages_before_completion_evidence": 2,
+    "completion_claims_before_completion_evidence": 0,
+    "final_messages": 3,
+    "final_roles": [
+      "user",
+      "assistant",
+      "assistant"
+    ],
+    "failed_messages": 0,
+    "legacy_chat_reads": 0,
+    "terminal_chat_reads": 0,
+    "pi_ownership_chat_reads": 0,
+    "leak_sentinels": [
+      "firstmate",
+      "submit_objective",
+      "tool call",
+      "tool result",
+      "objective_id",
+      "task_id",
+      "herdr",
+      "terminal",
+      "harness",
+      "opaque objective id",
+      "opaque task id"
+    ],
+    "canonical_leak_hits": [],
+    "rendered_leak_hits": []
+  },
+  "idempotency": {
+    "duplicate_chat_delivery": true,
+    "duplicate_chat_provider_call_delta": 0,
+    "duplicate_chat_objective_delta": 0,
+    "duplicate_completion_delivery": true,
+    "duplicate_completion_provider_call_delta": 0,
+    "duplicate_completion_message_delta": 0
+  },
+  "temporary_https": {
+    "captain_approved": true,
+    "loopback_only": true,
+    "gateway_authentication_retained": true,
+    "unauthenticated_magi_status": 401,
+    "authenticated_magi_status": 200,
+    "unknown_route_status": 404,
+    "rendered_with_chrome_devtools_axi": true,
+    "listener_absent_after_capture": true,
+    "private_key_absent_after_capture": true,
+    "certificate_absent_after_capture": true
+  },
+  "cleanup": {
+    "gateway_listener_absent": true,
+    "herdr_lab_session_absent": true,
+    "default_herdr_session_unchanged": true,
+    "raw_auth_material_removed": true,
+    "retained_secret_scan_hits": 0
+  },
+  "redactions": {
+    "credentials": "omitted",
+    "bearer_and_session_material": "omitted",
+    "raw_auth": "omitted",
+    "raw_provider_content": "omitted",
+    "database": "omitted",
+    "environment_identifiers": "omitted",
+    "run_specific_ids": "omitted",
+    "timestamps": "omitted",
+    "commit_ids": "omitted",
+    "screenshots": "omitted"
+  }
+}

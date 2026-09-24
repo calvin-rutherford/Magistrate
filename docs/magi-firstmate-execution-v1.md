@@ -116,6 +116,13 @@ failure, then interrupted completion claims are requeued from persisted
 evidence and woken. A completed native row discovered after a crash is adopted
 without a second provider call.
 
+## Live acceptance
+
+Use [`magi-execution-live-acceptance.md`](magi-execution-live-acceptance.md) for
+the opt-in real-provider, real-dispatcher, and real-worker verification. Its
+committed evidence is deliberately sanitized; run-specific secrets, identities,
+and raw captures stay outside the repository.
+
 ## Non-claims
 
 This bridge does not prove that Firstmate performed work merely because a model
