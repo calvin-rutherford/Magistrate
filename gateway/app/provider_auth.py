@@ -420,15 +420,21 @@ async def _jwks(provider: ProviderName, *, force: bool = False) -> list[dict[str
         cached = _jwks_cache.get(provider)
         if not force and cached and cached[0] > now:
             return cached[1]
-        if (
-            force and cached
-            and _jwks_refreshed_at.get(provider, 0) + JWKS_UNKNOWN_KEY_REFRESH_SECONDS > now
-        ):
-            return cached[1]
-        keys = await _download_jwks(provider)
+        if _jwks_refreshed_at.get(provider, 0) + JWKS_UNKNOWN_KEY_REFRESH_SECONDS > now:
+            if cached:
+                return cached[1]
+            raise HTTPException(status_code=503, detail="The identity provider could not be verified.")
+        # Record the attempt before I/O so provider failures cannot turn
+        # attacker-selected key IDs into one outbound request per assertion.
+        _jwks_refreshed_at[provider] = now
+        try:
+            keys = await _download_jwks(provider)
+        except HTTPException:
+            if cached:
+                return cached[1]
+            raise
         refreshed_at = time.monotonic()
         _jwks_cache[provider] = (refreshed_at + 3600, keys)
-        _jwks_refreshed_at[provider] = refreshed_at
         return keys
 
 

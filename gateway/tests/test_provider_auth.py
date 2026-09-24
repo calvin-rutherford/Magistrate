@@ -119,6 +119,45 @@ async def test_unknown_signing_keys_cannot_force_repeated_jwks_downloads(monkeyp
         provider_auth._jwks_refreshed_at.pop("google", None)
 
 
+@pytest.mark.asyncio
+async def test_failed_unknown_key_refresh_is_throttled_and_uses_stale_keys(monkeypatch):
+    monkeypatch.setenv("MAGISTRATE_GOOGLE_CLIENT_IDS", "google-client.apps.example")
+    published_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    published_numbers = published_key.public_key().public_numbers()
+    published_jwk = {
+        "kty": "RSA", "alg": "RS256", "use": "sig", "kid": "published-key",
+        "n": _b64(published_numbers.n.to_bytes((published_numbers.n.bit_length() + 7) // 8, "big")),
+        "e": _b64(published_numbers.e.to_bytes((published_numbers.e.bit_length() + 7) // 8, "big")),
+    }
+    downloads = 0
+
+    async def unavailable(provider):
+        nonlocal downloads
+        assert provider == "google"
+        downloads += 1
+        raise HTTPException(status_code=503, detail="provider unavailable")
+
+    signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = int(time.time())
+    token = _jwt(signing_key, "attacker-selected-key", {
+        "iss": "https://accounts.google.com", "sub": "provider-subject-1",
+        "aud": "google-client.apps.example", "iat": now, "exp": now + 300,
+        "nonce": "n" * 43,
+    })
+    monkeypatch.setattr(provider_auth, "_download_jwks", unavailable)
+    provider_auth._jwks_cache["google"] = (time.monotonic() + 3600, [published_jwk])
+    provider_auth._jwks_refreshed_at["google"] = 0
+    try:
+        for _ in range(3):
+            with pytest.raises(HTTPException) as unknown:
+                await verify_identity_token("google", token, "n" * 43, now=now)
+            assert unknown.value.status_code == 401
+        assert downloads == 1
+    finally:
+        provider_auth._jwks_cache.pop("google", None)
+        provider_auth._jwks_refreshed_at.pop("google", None)
+
+
 def test_provider_challenge_cleans_expired_session_ledgers(monkeypatch):
     monkeypatch.setenv("MAGISTRATE_APPLE_CLIENT_IDS", "io.magistrate.test")
     now = int(time.time())
