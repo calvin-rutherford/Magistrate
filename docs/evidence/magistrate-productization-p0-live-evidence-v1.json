@@ -1,0 +1,74 @@
+{
+  "schema_version": "magistrate.productization-p0-live-evidence.v1",
+  "result": "execution_pass_with_external_auth_gaps",
+  "candidate": "feature branch under review",
+  "objective_intake": {
+    "real_tasks_axi": true,
+    "real_firstmate_inbox_note": true,
+    "real_durable_check_wake": true,
+    "injected_boundary": "queue publication succeeded before inbox wake",
+    "interrupted_submission_status": "failed",
+    "startup_recovery_examined": 1,
+    "startup_recovery_recovered": 1,
+    "startup_recovery_failed": 0,
+    "second_recovery_examined": 0,
+    "objective_rows": 1,
+    "queued_tasks": 1,
+    "durable_inbox_notes": 1,
+    "durable_check_wakes": 1,
+    "final_submission_status": "accepted",
+    "final_attempt_count": 2,
+    "receipt_body_canonicalization_verified": true
+  },
+  "worker": {
+    "real_firstmate_spawn": true,
+    "real_model_worker": true,
+    "isolated_disposable_worktree": true,
+    "unsupported_initial_profile_replaced_through_control_plane": true,
+    "supported_relaunches": 1,
+    "worker_reported_done": true,
+    "branch_created": true,
+    "commit_created": true,
+    "worktree_clean": true,
+    "only_path_in_commit": "worker-proof.txt"
+  },
+  "artifact": {
+    "regular_file": true,
+    "symlink": false,
+    "utf8": "Firstmate worker proof.\n",
+    "bytes": 24,
+    "sha256": "4e7f28b7ee3710aed090ac513cf927dc75a876fae07cc34649962e40a336163a"
+  },
+  "isolation": {
+    "generated_non_default_herdr_session": true,
+    "compatible_before_restart": true,
+    "guarded_stop_and_reprovision": true,
+    "compatible_after_restart": true,
+    "worker_endpoint_removed": true,
+    "lab_session_absent_after_teardown": true,
+    "default_session_tripwire_unchanged": true,
+    "temporary_evidence_material_removed": true
+  },
+  "external_gaps": {
+    "apple_registered_deployment_credentials_present": false,
+    "google_registered_deployment_credentials_present": false,
+    "real_apple_login_run": false,
+    "real_google_login_run": false,
+    "physical_iphone_run": false,
+    "testflight_run": false,
+    "real_magi_provider_run": false,
+    "reason": "Provider client IDs, registered redirects, Apple key material, provider test accounts, and Magi provider credentials were not available in the validation environment. Automated cryptographic and browser lifecycle tests are retained separately; they are not represented as provider-console or physical-device proof."
+  },
+  "redactions": {
+    "credentials": "none retained",
+    "bearer_and_refresh_material": "none retained",
+    "raw_model_content": "omitted",
+    "database": "removed",
+    "environment_paths": "omitted",
+    "run_specific_ids": "omitted",
+    "timestamps": "omitted",
+    "commit_ids": "omitted",
+    "session_names": "omitted",
+    "raw_logs": "removed"
+  }
+}

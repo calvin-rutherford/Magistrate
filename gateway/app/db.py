@@ -375,9 +375,29 @@ def init_db():
         scopes TEXT,
         created_at INTEGER,
         updated_at INTEGER,
+        account_kind TEXT NOT NULL DEFAULT 'oauth',
+        email_verified INTEGER NOT NULL DEFAULT 0,
+        last_authenticated_at INTEGER,
         FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
     )
     ''')
+    connected_account_columns = {
+        row[1] for row in cursor.execute('PRAGMA table_info(connected_accounts)')
+    }
+    if 'account_kind' not in connected_account_columns:
+        cursor.execute("ALTER TABLE connected_accounts ADD COLUMN account_kind TEXT NOT NULL DEFAULT 'oauth'")
+    if 'email_verified' not in connected_account_columns:
+        cursor.execute('ALTER TABLE connected_accounts ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0')
+    if 'last_authenticated_at' not in connected_account_columns:
+        cursor.execute('ALTER TABLE connected_accounts ADD COLUMN last_authenticated_at INTEGER')
+    # Login subjects are provider-stable account identities. OAuth connections
+    # remain separately addressable and cannot accidentally become sign-in
+    # authority merely because they carry the same provider name.
+    cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_connected_login_subject
+                      ON connected_accounts(provider, provider_user_id)
+                      WHERE account_kind = 'login' ''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS idx_connected_login_user
+                      ON connected_accounts(user_id, account_kind, status)''')
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS oauth_credentials (
@@ -470,6 +490,66 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_friend_beta_grants_user ON friend_beta_access_grants(user_id, expires_at)')
 
     cursor.execute('''
+    CREATE TABLE IF NOT EXISTS provider_session_families (
+        family_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        connected_account_id TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK(provider IN ('apple','google')),
+        client_platform TEXT NOT NULL CHECK(client_platform IN ('native','web')),
+        scopes TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        last_rotated_at INTEGER NOT NULL,
+        revoked_at INTEGER,
+        revoke_reason TEXT,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id),
+        FOREIGN KEY(connected_account_id) REFERENCES connected_accounts(id)
+    )
+    ''')
+    provider_family_columns = {
+        row[1] for row in cursor.execute('PRAGMA table_info(provider_session_families)')
+    }
+    if 'client_platform' not in provider_family_columns:
+        cursor.execute("ALTER TABLE provider_session_families ADD COLUMN client_platform TEXT NOT NULL DEFAULT 'native' CHECK(client_platform IN ('native','web'))")
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_provider_families_user ON provider_session_families(user_id, revoked_at, expires_at)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS provider_refresh_tokens (
+        token_hash TEXT PRIMARY KEY,
+        family_id TEXT NOT NULL,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        consumed_at INTEGER,
+        FOREIGN KEY(family_id) REFERENCES provider_session_families(family_id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_provider_refresh_family ON provider_refresh_tokens(family_id, consumed_at, expires_at)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS provider_auth_challenges (
+        challenge_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL CHECK(provider IN ('apple','google')),
+        action TEXT NOT NULL CHECK(action IN ('sign_in','link')),
+        nonce_hash TEXT NOT NULL,
+        owner_user_id TEXT,
+        client_platform TEXT NOT NULL CHECK(client_platform IN ('native','web')),
+        redirect_uri TEXT,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        consumed_at INTEGER
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_provider_challenges_expiry ON provider_auth_challenges(expires_at, consumed_at)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS provider_assertions (
+        assertion_hash TEXT PRIMARY KEY,
+        challenge_id TEXT NOT NULL UNIQUE,
+        connected_account_id TEXT NOT NULL,
+        accepted_at INTEGER NOT NULL,
+        FOREIGN KEY(challenge_id) REFERENCES provider_auth_challenges(challenge_id),
+        FOREIGN KEY(connected_account_id) REFERENCES connected_accounts(id)
+    )
+    ''')
+
+    cursor.execute('''
     CREATE TABLE IF NOT EXISTS gateway_sessions (
         session_id TEXT PRIMARY KEY,
         token_hash TEXT NOT NULL UNIQUE,
@@ -479,13 +559,22 @@ def init_db():
         expires_at INTEGER NOT NULL,
         revoked_at INTEGER,
         access_grant_id TEXT,
-        FOREIGN KEY(access_grant_id) REFERENCES friend_beta_access_grants(grant_id)
+        provider_session_id TEXT,
+        auth_account_id TEXT,
+        FOREIGN KEY(access_grant_id) REFERENCES friend_beta_access_grants(grant_id),
+        FOREIGN KEY(provider_session_id) REFERENCES provider_session_families(family_id),
+        FOREIGN KEY(auth_account_id) REFERENCES connected_accounts(id)
     )
     ''')
     gateway_session_columns = {row[1] for row in cursor.execute("PRAGMA table_info(gateway_sessions)")}
     if 'access_grant_id' not in gateway_session_columns:
         cursor.execute('ALTER TABLE gateway_sessions ADD COLUMN access_grant_id TEXT')
+    if 'provider_session_id' not in gateway_session_columns:
+        cursor.execute('ALTER TABLE gateway_sessions ADD COLUMN provider_session_id TEXT')
+    if 'auth_account_id' not in gateway_session_columns:
+        cursor.execute('ALTER TABLE gateway_sessions ADD COLUMN auth_account_id TEXT')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_gateway_sessions_access_grant ON gateway_sessions(access_grant_id, revoked_at, expires_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_gateway_sessions_provider ON gateway_sessions(provider_session_id, revoked_at, expires_at)')
 
     # Attention actions are a separate authority from notification state.  The
     # action key binds one live source revision and exact target; outcomes are
@@ -1150,6 +1239,7 @@ def init_db():
         assistant_message_id TEXT NOT NULL,
         contract_json TEXT NOT NULL,
         contract_sha256 TEXT NOT NULL,
+        display_title TEXT,
         status TEXT NOT NULL CHECK(status IN ('submitting','accepted','failed')),
         attempt_count INTEGER NOT NULL DEFAULT 1,
         last_error_code TEXT,
@@ -1159,8 +1249,45 @@ def init_db():
         UNIQUE(owner_user_id, invocation_key)
     )
     ''')
+    objective_submission_columns = {
+        row[1] for row in cursor.execute('PRAGMA table_info(magi_objective_submissions)')
+    }
+    if 'display_title' not in objective_submission_columns:
+        cursor.execute('ALTER TABLE magi_objective_submissions ADD COLUMN display_title TEXT')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_owner_task ON magi_objective_submissions(owner_user_id, task_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_chat_turn ON magi_objective_submissions(owner_user_id, conversation_id, turn_id)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS objective_cancellation_requests (
+        request_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('requested','observed','failed')),
+        error_code TEXT,
+        notification_status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(notification_status IN ('pending','delivered','failed')),
+        notification_attempt_count INTEGER NOT NULL DEFAULT 0,
+        notified_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )
+    ''')
+    cancellation_columns = {
+        row[1] for row in cursor.execute('PRAGMA table_info(objective_cancellation_requests)')
+    }
+    if 'notification_status' not in cancellation_columns:
+        cursor.execute("ALTER TABLE objective_cancellation_requests ADD COLUMN notification_status TEXT NOT NULL DEFAULT 'delivered' CHECK(notification_status IN ('pending','delivered','failed'))")
+    if 'notification_attempt_count' not in cancellation_columns:
+        cursor.execute('ALTER TABLE objective_cancellation_requests ADD COLUMN notification_attempt_count INTEGER NOT NULL DEFAULT 0')
+    if 'notified_at' not in cancellation_columns:
+        cursor.execute('ALTER TABLE objective_cancellation_requests ADD COLUMN notified_at INTEGER')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_objective_cancellation_target ON objective_cancellation_requests(owner_user_id, objective_id, updated_at)')
+    cursor.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_objective_cancellation_active
+                      ON objective_cancellation_requests(owner_user_id, objective_id)
+                      WHERE status = 'requested'""")
 
     # Structured Firstmate execution events are a separate immutable producer
     # ledger. They project into canonical Activity, while only a verified
@@ -1354,7 +1481,7 @@ def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]
            c.access_token_enc, c.expires_at
     FROM connected_accounts a
     LEFT JOIN oauth_credentials c ON c.connected_account_id = a.id
-    WHERE a.user_id = ?
+    WHERE a.user_id = ? AND a.account_kind = 'oauth'
     ''', (user_id,))
     rows = cursor.fetchall()
     conn.close()

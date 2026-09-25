@@ -11,6 +11,7 @@
       "icon": "./assets/expo.icon",
       "bundleIdentifier": "io.magistrate.cockpit",
       "supportsTablet": false,
+      "usesAppleSignIn": true,
       "buildNumber": "1",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Magistrate requires microphone access for voice interactions.",
@@ -59,6 +60,7 @@
         }
       ],
       "expo-secure-store",
+      "expo-apple-authentication",
       "expo-asset"
     ],
     "experiments": {

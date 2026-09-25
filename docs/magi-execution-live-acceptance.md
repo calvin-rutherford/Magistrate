@@ -50,8 +50,8 @@ Do not infer one gate from another.
    temporary HTTPS route.
 2. Start from the intended clean merged revision and record its commit privately.
 3. Use a disposable Gateway database, a disposable Firstmate home, and a
-   generated non-default Herdr lab session. Use only
-   `$FM_HOME/bin/fm-herdr-lab.sh` for the lab session lifecycle; never stop or
+   generated non-default Herdr lab session. Use only the tracked
+   `$FM_ROOT/bin/fm-herdr-lab.sh` for the lab session lifecycle; never stop or
    delete the default Herdr session.
 4. Keep the Gateway and temporary HTTPS listener on loopback. Use a dedicated
    test principal and a task-local browser profile.

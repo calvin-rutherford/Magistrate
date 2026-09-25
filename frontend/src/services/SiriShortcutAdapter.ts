@@ -27,7 +27,8 @@ export const SIRI_INTENT_REGISTRY: SiriIntentTrigger[] = [
   {
     id: 'siri_what_running',
     phrase: "Ask Magistrate what's running",
-    targetPath: '/agents'
+    targetPath: '/chat',
+    params: { agentId: 'fleet' }
   },
   {
     id: 'siri_needs_attention',

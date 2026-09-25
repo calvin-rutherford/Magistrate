@@ -22,7 +22,7 @@ export function FleetMetric({
 
   return (
     <View style={styles.grid}>
-      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/chat' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
             <Text style={styles.valueText}>{runningCount ?? '—'}</Text>
@@ -31,7 +31,7 @@ export function FleetMetric({
         </GlassSurface>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/chat' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
             <Text style={styles.valueText}>{idleCount ?? '—'}</Text>
@@ -40,7 +40,7 @@ export function FleetMetric({
         </GlassSurface>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/chat' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
             <Text style={styles.valueText}>{blockedCount ?? '—'}</Text>
@@ -49,7 +49,7 @@ export function FleetMetric({
         </GlassSurface>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/chat' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
             <Text style={styles.valueText}>{prsOpenCount ?? '—'}</Text>
@@ -58,7 +58,7 @@ export function FleetMetric({
         </GlassSurface>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/agents' as any)}>
+      <TouchableOpacity style={styles.cardTouch} onPress={() => router.push('/chat' as any)}>
         <GlassSurface variant="card" intensity={10} style={styles.card}>
           <View style={styles.cardInner}>
             <Text style={styles.valueText}>{needsYouCount ?? '—'}</Text>

@@ -39,6 +39,18 @@ regular file with mode `0600`; keep the database directory restrictive as well.
 Rotate the bootstrap and Fernet keys through the approved secret-management
 procedure; never commit them or put them in a frontend build.
 
+## Apple and Google account sign-in
+
+Provider-backed sign-in is optional and fail-closed. Production enables a
+provider only with complete iPhone and web client/audience configuration,
+registered exact redirects, and (for Apple web) server-side code-exchange key
+material. Native rotating refresh authority stays in SecureStore; web refresh
+authority is a Secure HttpOnly cookie and requires a same-site Gateway
+deployment. See [`provider-sign-in.md`](./provider-sign-in.md) for the complete
+Gateway/Expo variables, provider-console setup, migration order, and release
+evidence requirements. No Apple private key, Google credential, provider
+assertion, access bearer, or refresh token belongs in an `EXPO_PUBLIC_` value.
+
 ## Restricted Friend Beta provisioning
 
 Friend access is default-off and independent of the owner bootstrap credential.

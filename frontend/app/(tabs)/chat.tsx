@@ -2,22 +2,22 @@ import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, Alert, Animated as NativeAnimated, Image, ImageSourcePropType, Keyboard, type KeyboardEvent, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  AgentInfo, AgentMigration, AuthProviderInfo, cancelMagiChatTurn,
+  AuthProviderInfo, cancelMagiChatTurn,
   CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ChatUpload,
-  ExecutionProfile, ExecutionSettings, fetchAgentMigration, fetchAgents,
-  fetchAuthProviders, fetchCanonicalActivitySnapshot,
+  ExecutionProfile, ExecutionSettings, fetchAuthProviders,
+  fetchCanonicalActivitySnapshot, fetchFleet, FleetObjective,
   fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth,
   fetchMagiChatConversation, fetchRecentActivity, fetchUnifiedAttention,
   replayMagiChatConversation,
   fetchUsage, fetchVoiceInputCapabilities, getGatewaySessionRevision, HealthInfo, logoutGatewaySession,
-  RecentActivityItem, requestAgentMigration, saveExecutionCredential,
+  RecentActivityItem, requestObjectiveCancellation, saveExecutionCredential,
   sendMagiChatPrompt, transcribeVoiceAudio, UnifiedAttentionRecord,
   updateExecutionSettings, uploadChatFile, UsageProvider, validateChatAttachment,
 } from '../../src/api/client';
@@ -26,7 +26,6 @@ import { EnvironmentBackground } from '../../src/components/EnvironmentBackgroun
 import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
 import { SafeMarkdown } from '../../src/components/SafeMarkdown';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
-import { agentDisplayName, displayAgentStatus, summarizeAgents } from '../../src/services/AgentStatus';
 import {
   deriveCanonicalWorkState, getCanonicalActivityCursor, hydrateCanonicalActivity,
   ingestCanonicalActivityPage, ingestCanonicalActivitySnapshot,
@@ -75,6 +74,11 @@ const profilesFromCapabilities = (data: { profiles?: ExecutionProfile[]; harness
   })));
 };
 
+const fleetStatusLabel = (status?: string | null) => ({
+  submitting: 'Preparing', queued: 'Queued', working: 'In progress', blocked: 'Needs input',
+  done: 'Completed', failed: 'Needs review', cancelled: 'Cancelled',
+}[String(status || '').toLowerCase()] || 'Status unavailable');
+
 function statusColor(status?: string | null) {
   const normalized = (status || '').toLowerCase();
   if (['working', 'running', 'active', 'executing'].includes(normalized)) return brand.success;
@@ -116,7 +120,6 @@ function EmptyStateMagi({ dark, visible, greeting, active }: { dark: boolean; vi
 function MicIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Rect x="9" y="2.5" width="6" height="11" rx="3" stroke={color} strokeWidth={1.6} /><Path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5v3M9 20.5h6" stroke={color} strokeWidth={1.6} strokeLinecap="round" fill="none" /></Svg>; }
 function GearIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg testID="settings-gear-icon" width={size} height={size} viewBox="0 0 24 24" fill="none"><Circle cx="12" cy="12" r="3.1" stroke={color} strokeWidth={1.6} /><Path d="M9.8 3.1h4.4l.5 2.1c.5.2.9.4 1.3.7l2-.6 2.2 3.8-1.5 1.5v2.8l1.5 1.5-2.2 3.8-2-.6c-.4.3-.8.5-1.3.7l-.5 2.1H9.8l-.5-2.1c-.5-.2-.9-.4-1.3-.7l-2 .6-2.2-3.8 1.5-1.5v-2.8L3.8 9.1 6 5.3l2 .6c.4-.3.8-.5 1.3-.7z" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
 function SoundwaveIcon({ color, size = 18 }: { color: string; size?: number }) { const bars = [0.32, 0.62, 1, 0.72, 0.42]; return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">{bars.map((ratio, index) => { const height = 16 * ratio; return <Rect key={index} x={2 + index * 4.6} y={(24 - height) / 2} width="2.4" height={height} rx="1.2" fill={color} />; })}</Svg>; }
-function EllipsisIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Circle cx="5" cy="12" r="1.5" fill={color} /><Circle cx="12" cy="12" r="1.5" fill={color} /><Circle cx="19" cy="12" r="1.5" fill={color} /></Svg>; }
 function ImageIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Rect x="3" y="4" width="18" height="16" rx="3" stroke={color} strokeWidth={1.6} /><Path d="m6.5 16 3.6-3.8 2.8 2.6 2.3-2.3 2.8 3.5M15.8 9h.01" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
 function FileIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Path d="M6 3.5h7l5 5v12H6zM13 3.5v5h5" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
 const attachmentStateLabel = (status?: MagiAttachment['status']) => status === 'uploading' ? ' · Uploading…' : status === 'stored' ? ' · Stored, not yet sent' : status === 'attached' ? ' · Attached' : status === 'failed' ? ' · Upload failed' : '';
@@ -137,7 +140,7 @@ function AssistantMessage({ message, dark, text, muted, onActions }: { message: 
 }
 
 // `target` remains an accepted shell prop for compatibility but is intentionally not read.
-export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voiceInputMode = 'automatic', voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {} }: { target?: string; onDrawerToggle?: () => void; drawerOpen?: boolean; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void }) {
+export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voiceInputMode = 'automatic', voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {}, onRegisterRefresh, onRefreshAll, globalRefreshing = false }: { target?: string; onDrawerToggle?: () => void; drawerOpen?: boolean; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void; onRegisterRefresh?: (refresh: (() => Promise<void>) | null) => void; onRefreshAll?: () => Promise<void>; globalRefreshing?: boolean }) {
   const router = useRouter(); const dark = isDarkTheme(useChatColorScheme());
   const { bottom: safeAreaBottom } = useSafeAreaInsets(); const { height: windowHeight } = useWindowDimensions();
   const composerKeyboardOffset = useRef(new NativeAnimated.Value(0)).current;
@@ -264,6 +267,15 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
   };
 
   useEffect(() => { captureRef.current = capture; });
+  const workspaceRefreshRef = useRef<() => Promise<void>>(async () => undefined);
+  workspaceRefreshRef.current = async () => {
+    await Promise.allSettled([refreshConversation(true), refreshActivity()]);
+  };
+  useEffect(() => {
+    if (!onRegisterRefresh) return;
+    onRegisterRefresh(() => workspaceRefreshRef.current());
+    return () => onRegisterRefresh(null);
+  }, [onRegisterRefresh]);
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
     const animateComposer = (event: KeyboardEvent) => {
@@ -486,7 +498,7 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
   const showEmptyState = hydrated && messages.length === 0 && conversationSync.status !== 'stale';
 
   return <KeyboardAvoidingView testID="branded-chat-shell" behavior={Platform.OS === 'android' ? 'height' : undefined} style={styles.canvas}>
-    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onScroll={onHistoryScroll} onContentSizeChange={onContentSizeChange} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} refreshControl={<RefreshControl refreshing={activityRefreshing} onRefresh={() => { void Promise.allSettled([refreshConversation(true), refreshActivity()]); }} />} accessibilityLabel="Magi conversation history" aria-busy={!hydrated}>
+    <ScrollView ref={scrollRef} testID="chat-history" style={styles.chatHistory} contentContainerStyle={[styles.chatHistoryContent, { paddingTop: headerHeight + FLOATING_CHROME_GAP, paddingBottom: composerHeight + FLOATING_CHROME_GAP }]} onScroll={onHistoryScroll} onContentSizeChange={onContentSizeChange} scrollEventThrottle={16} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'} refreshControl={<RefreshControl refreshing={globalRefreshing || activityRefreshing} onRefresh={() => { if (onRefreshAll) void onRefreshAll(); else void Promise.allSettled([refreshConversation(true), refreshActivity()]); }} />} accessibilityLabel="Magi conversation history" aria-busy={!hydrated}>
       {messages.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} dark={dark} textColor={text} selectable={selectableMessageId === message.id} onLongPress={() => setMessageActionsId(message.id)} onActions={() => setMessageActionsId(message.id)} onRetry={message.delivery === 'failed' ? () => retryMessage(message) : undefined} /> : <AssistantMessage key={message.id} message={message} dark={dark} text={text} muted={muted} onActions={() => setMessageActionsId(message.id)} />)}
       {canonicalWork.active ? <WorkingState dark={dark} muted={muted} operations={canonicalWork.operationCount} phase={canonicalWork.phase === 'idle' ? 'active' : canonicalWork.phase} onPress={onActivityOpen} /> : null}
     </ScrollView>
@@ -513,39 +525,13 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
 
 function PanelText({ text, muted }: { text: string; muted: string }) { return <Text style={[styles.panelText, { color: muted }]}>{text}</Text>; }
 
-function FleetAgentRow({ agent, activeStatus, dark, profiles, onOpenDetails }: { agent: AgentInfo; activeStatus: string; dark: boolean; profiles: ExecutionProfile[]; onOpenDetails: () => void }) {
+function FleetObjectiveRow({ objective, dark, onOpen }: { objective: FleetObjective; dark: boolean; onOpen: () => void }) {
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
-  const [menuOpen, setMenuOpen] = useState(false); const [choosingRuntime, setChoosingRuntime] = useState(false);
-  const [migrationTarget, setMigrationTarget] = useState<{ profile: ExecutionProfile; idempotencyKey: string } | null>(null);
-  const [migration, setMigration] = useState<AgentMigration | null>(null); const [busy, setBusy] = useState(false); const [message, setMessage] = useState<string | null>(null);
-  const displayName = agentDisplayName(agent); const availableProfiles = profiles.filter(profile => profile.available);
-  useEffect(() => {
-    if (!migration || migration.status === 'running-on-new' || migration.status === 'failed') return;
-    let mounted = true;
-    const refresh = () => fetchAgentMigration(agent.id, migration.request_id).then(value => { if (mounted) setMigration(value); }).catch(error => { if (mounted) setMessage(errorText(error, 'Migration status could not be refreshed.')); });
-    const interval = setInterval(refresh, 3000); return () => { mounted = false; clearInterval(interval); };
-  }, [agent.id, migration]);
-  const confirmMigration = async () => {
-    if (!migrationTarget) return; setBusy(true); setMessage(null);
-    try { const requested = await requestAgentMigration(agent.id, migrationTarget.profile.id, migrationTarget.idempotencyKey); setMigration(requested); setMigrationTarget(null); setChoosingRuntime(false); setMessage('Request recorded. Operator confirmation is still required.'); }
-    catch (error) { setMessage(errorText(error, 'Migration request failed. Retry uses the same request key.')); }
-    finally { setBusy(false); }
-  };
-  return <View style={[styles.fleetAgentWrap, menuOpen ? styles.fleetAgentWrapOpen : undefined]}>
-    <View style={styles.fleetPanelRow}><TouchableOpacity testID={`fleet-agent-${agent.id}`} accessibilityRole="button" accessibilityLabel={`Open structured run details for ${displayName}`} onPress={onOpenDetails} activeOpacity={0.75} style={styles.fleetAgentMain}><View style={[styles.tinyDot, { backgroundColor: statusColor(agent.status) }]} /><Text style={[styles.fleetPanelName, { color: text }]}>{displayName}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{displayAgentStatus(activeStatus as any)}</Text></TouchableOpacity><TouchableOpacity testID={`fleet-agent-${agent.id}-menu`} accessibilityRole="button" accessibilityLabel={`Execution actions for ${displayName}`} accessibilityState={{ expanded: menuOpen }} onPress={() => { setMenuOpen(value => !value); setChoosingRuntime(false); setMigrationTarget(null); setMessage(null); }} style={styles.ellipsisButton}><EllipsisIcon size={21.6} color={muted} /></TouchableOpacity></View>
-    {menuOpen ? <View testID={`fleet-agent-${agent.id}-popover`} accessibilityViewIsModal style={[styles.agentPopover, { backgroundColor: dark ? '#171E2A' : '#F4F6F9' }]}>
-      <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>STATUS</Text><Text style={[styles.agentMetaValue, { color: text }]}>{String(agent.status || 'unavailable').toUpperCase()}</Text></View>
-      <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>TASK</Text><Text style={[styles.agentMetaValue, { color: text }]}>{agent.task_id || agent.id}</Text></View>
-      <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>RUN</Text><Text style={[styles.agentMetaValue, { color: text }]}>{agent.run_id || 'not reported'}</Text></View>
-      <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>HARNESS</Text><Text testID={`fleet-agent-${agent.id}-harness`} style={[styles.agentMetaValue, { color: text }]}>{agent.harness || 'unknown'}</Text></View>
-      <View style={styles.agentMetaRow}><Text style={[styles.agentMetaLabel, { color: muted }]}>MODEL</Text><Text testID={`fleet-agent-${agent.id}-model`} style={[styles.agentMetaValue, { color: text }]}>{agent.model || 'unknown'}</Text></View>
-      {choosingRuntime && !migrationTarget ? <View testID={`fleet-agent-${agent.id}-migration-targets`} style={styles.migrationTargets}><Text style={[styles.migrationNotice, { color: muted }]}>Choose a verified runtime target. This records an operator hand-off; it does not stop the run.</Text>{availableProfiles.map(profile => <TouchableOpacity key={profile.id} testID={`fleet-agent-${agent.id}-migration-${optionId(profile.harness.id, profile.model.id)}`} accessibilityRole="button" onPress={() => setMigrationTarget({ profile, idempotencyKey: `move_${Date.now()}_${agent.id.replace(/[^A-Za-z0-9]/g, '')}` })} style={styles.migrationTarget}><Text style={[styles.migrationTargetText, { color: text }]}>{profile.harness.label} · {profile.model.label}</Text></TouchableOpacity>)}</View> : null}
-      {migrationTarget ? <View testID={`fleet-agent-${agent.id}-migration-confirmation`} style={styles.migrationConfirmation}><Text style={[styles.migrationTitle, { color: text }]}>Stop + relaunch with context?</Text><Text style={[styles.migrationNotice, { color: muted }]}>Target: {migrationTarget.profile.harness.label} / {migrationTarget.profile.model.label}</Text><Text style={styles.migrationWarning}>Confirming records a request only. An operator must perform the relaunch.</Text><View style={styles.popoverActions}><TouchableOpacity accessibilityRole="button" disabled={busy} onPress={() => setMigrationTarget(null)} style={styles.popoverAction}><Text style={[styles.popoverActionText, { color: muted }]}>CANCEL</Text></TouchableOpacity><TouchableOpacity testID={`fleet-agent-${agent.id}-migration-confirm`} accessibilityRole="button" disabled={busy} onPress={() => void confirmMigration()} style={styles.popoverAction}><Text style={styles.popoverActionText}>{busy ? 'REQUESTING…' : 'CONFIRM REQUEST'}</Text></TouchableOpacity></View></View> : null}
-      {!choosingRuntime && !migrationTarget ? <View style={styles.popoverActions}><TouchableOpacity testID={`fleet-agent-${agent.id}-move-runtime`} accessibilityRole="button" disabled={availableProfiles.length === 0 || !['working', 'blocked'].includes(String(agent.status || '').toLowerCase())} onPress={() => setChoosingRuntime(true)} style={[styles.popoverAction, availableProfiles.length === 0 ? styles.modelOptionDisabled : undefined]}><Text style={styles.popoverActionText}>MOVE RUNTIME</Text></TouchableOpacity></View> : null}
-      {migration ? <Text testID={`fleet-agent-${agent.id}-migration-state`} accessibilityLiveRegion="polite" style={[styles.agentActionMessage, { color: migration.status === 'failed' ? brand.critical : migration.status === 'running-on-new' ? brand.success : brand.attention }]}>Migration: {migration.status}. {migration.status === 'running-on-new' ? `${migration.target.harness}/${migration.target.model} was reported running by the operator.` : migration.status === 'failed' ? `${migration.error || 'Relaunch failed.'} Retry this request.` : 'Requires operator confirmation.'}</Text> : null}
-      {message ? <Text accessibilityLiveRegion="polite" style={[styles.agentActionMessage, { color: muted }]}>{message}</Text> : null}
-    </View> : null}
-  </View>;
+  return <TouchableOpacity testID="fleet-objective-row" accessibilityRole="button" accessibilityLabel={`${objective.title}. ${objective.status}`} onPress={onOpen} activeOpacity={0.75} style={styles.fleetObjectiveRow}>
+    <View style={[styles.tinyDot, { backgroundColor: statusColor(objective.status) }]} />
+    <View style={styles.fleetObjectiveCopy}><Text numberOfLines={2} style={[styles.fleetPanelName, { color: text }]}>{objective.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{objective.project || 'Magi'} · {fleetStatusLabel(objective.status)}</Text></View>
+    <ChevronRightIcon size={16} color={muted} />
+  </TouchableOpacity>;
 }
 
 function activityDate(value: string) {
@@ -553,16 +539,16 @@ function activityDate(value: string) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenActivity, agents, executionProfiles, attention, activity, providers, errors, loading }: {
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenActivity, objectives, onOpenObjective, attention, activity, providers, errors, loading, refreshing, onRefresh }: {
   open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onClose: () => void; onOpenSettings: () => void;
-  onOpenHome: () => void; onOpenActivity: () => void;
-  agents: AgentInfo[]; executionProfiles: ExecutionProfile[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean;
+  onOpenHome: () => void; onOpenActivity: () => void; onOpenObjective: (objective: FleetObjective) => void;
+  objectives: FleetObjective[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { fleet?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean; refreshing: boolean; onRefresh: () => void;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
-  const fleet = summarizeAgents(agents); const activeAttention = attention.filter(item => item.requires_action !== false);
+  const activeObjectives = objectives.filter(objective => !objective.terminal); const activeAttention = attention.filter(item => item.requires_action !== false);
   const toggleSection = (section: DrawerSection) => setActiveSection(activeSection === section ? null : section);
   const openAttentionItem = async (item: UnifiedAttentionRecord) => {
     if (item.url?.startsWith('/')) router.push(item.url as any);
@@ -581,25 +567,26 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
   }, [activity]);
   const matches = (label: string) => !searching || !query.trim() || label.toLowerCase().includes(query.trim().toLowerCase());
   const rows = [
-    { key: 'fleet' as const, icon: FleetIcon, title: 'Fleet', count: agents.length },
+    { key: 'fleet' as const, icon: FleetIcon, title: 'Fleet', count: activeObjectives.length },
     { key: 'attention' as const, icon: AttentionIcon, title: 'Attention', count: activeAttention.length, alert: activeAttention.length > 0 },
     { key: 'activity' as const, icon: ActivityIcon, title: 'Activity' },
     { key: 'projects' as const, icon: ProjectsIcon, title: 'Projects', count: projects.length || undefined },
     { key: 'connections' as const, icon: ConnectionsIcon, title: 'Connections' },
   ].filter(row => matches(row.title));
   // Ongoing work is structured execution state, separate from Magi Chat.
-  const activeWork = fleet.ordered.filter(entry => matches(agentDisplayName(entry.agent))).slice(0, 5);
+  const activeWork = activeObjectives.filter(objective => matches(objective.title)).slice(0, 5);
   return <Animated.View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} testID="magistrate-drawer" style={[styles.drawer, isNarrow ? styles.drawerMobile : styles.drawerDesktop, { backgroundColor: glassFill(dark, 'surface') }, blurStyle(28), animatedStyle]} {...panHandlers}>
     <View testID="drawer-header" style={[styles.drawerFixedHeader, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}><View style={styles.drawerTitleRow}>
       <TouchableOpacity testID="drawer-close" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={onClose} activeOpacity={0.7} style={[styles.drawerCloseButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><CloseIcon size={20} color={text} /></TouchableOpacity>
       {searching
         ? <TextInput testID="drawer-search-input" autoFocus accessibilityLabel="Search Magistrate navigation" placeholder="Search" placeholderTextColor={muted} value={query} onChangeText={setQuery} style={[styles.drawerSearchInput, { color: text, borderColor: glassEdge(dark) }]} />
         : <Text testID="drawer-wordmark" accessibilityRole="header" style={[styles.drawerWordmark, { color: text }]}>Magistrate</Text>}
+      <TouchableOpacity testID="drawer-refresh" accessibilityRole="button" accessibilityLabel="Refresh Chat and workspace" accessibilityState={{ busy: refreshing }} disabled={refreshing} onPress={onRefresh} activeOpacity={0.7} style={[styles.drawerHeaderButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><Text style={[styles.drawerRefreshText, { color: text }]}>↻</Text></TouchableOpacity>
       <TouchableOpacity testID="drawer-search" accessibilityRole="button" accessibilityLabel={searching ? 'Close search' : 'Search Magistrate'} accessibilityState={{ expanded: searching }} onPress={() => { setSearching(value => !value); setQuery(''); }} activeOpacity={0.7} style={[styles.drawerSearchButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}>
         {searching ? <CloseIcon size={20} color={text} /> : <SearchIcon size={20} color={text} />}
       </TouchableOpacity>
     </View></View>
-    <ScrollView testID="drawer-scroll" style={styles.drawerScroll} contentContainerStyle={styles.drawerScrollContent} keyboardShouldPersistTaps="handled">
+    <ScrollView testID="drawer-scroll" style={styles.drawerScroll} contentContainerStyle={styles.drawerScrollContent} keyboardShouldPersistTaps="handled" refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={dark ? brand.cyan : brand.violet} />}>
       {matches('Magi') ? <TouchableOpacity testID="drawer-home" accessibilityRole="button" accessibilityLabel="Magi, the main conversation" onPress={onOpenHome} style={styles.drawerRow}>
         <View testID="drawer-home-icon" style={styles.drawerIcon}><HomeIcon size={ICON_SIZE} color={muted} /></View><Text style={[styles.drawerRowText, { color: text }]}>Magi</Text>
       </TouchableOpacity> : null}
@@ -612,7 +599,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
         {activeSection === row.key ? <View testID={`drawer-panel-${row.key}`} style={styles.sectionPanel}>{row.key === 'attention' ? (
           loading ? <PanelText text="Loading attention…" muted={muted} /> : errors.attention ? <PanelText text={errors.attention} muted={brand.critical} /> : activeAttention.length === 0 ? <PanelText text="Nothing requires your attention." muted={muted} /> : activeAttention.slice(0, 5).map(item => <TouchableOpacity key={item.id} testID={`attention-item-${item.id}`} accessibilityRole="button" accessibilityLabel={`${item.title}. ${providerLabel(item.provider)}. ${item.subtitle}`} onPress={() => void openAttentionItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{providerLabel(item.provider)} · {item.subtitle}</Text></TouchableOpacity>)
         ) : row.key === 'fleet' ? (
-          loading ? <PanelText text="Loading fleet…" muted={muted} /> : errors.agents ? <PanelText text={errors.agents} muted={brand.critical} /> : agents.length === 0 ? <PanelText text="No active structured worker runs." muted={muted} /> : fleet.ordered.map(({ agent, displayStatus }) => <FleetAgentRow key={agent.id} agent={agent} activeStatus={displayStatus} dark={dark} profiles={executionProfiles} onOpenDetails={() => router.push({ pathname: '/agents', params: { agentId: agent.id } } as any)} />)
+          loading ? <PanelText text="Loading Fleet…" muted={muted} /> : errors.fleet ? <PanelText text={errors.fleet} muted={brand.critical} /> : objectives.length === 0 ? <PanelText text="No objectives yet." muted={muted} /> : objectives.slice(0, 10).map(objective => <FleetObjectiveRow key={objective.objective_id} objective={objective} dark={dark} onOpen={() => onOpenObjective(objective)} />)
         ) : row.key === 'activity' ? (
           <><TouchableOpacity testID="open-canonical-activity" accessibilityRole="button" accessibilityLabel="Open durable Magi activity" onPress={onOpenActivity} style={[styles.panelItem, { backgroundColor: glassFill(dark) }]}><Text style={[styles.panelItemTitle, { color: text }]}>Magi operations</Text><Text style={[styles.panelItemMeta, { color: muted }]}>Inspect Gateway-confirmed lifecycle and decisions</Text></TouchableOpacity>{loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} accessibilityRole="button" accessibilityLabel={`${item.title}. ${item.description}. ${item.project}`} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)}</>
         ) : row.key === 'projects' ? (
@@ -621,10 +608,10 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
       </View>)}
       {activeWork.length ? <View testID="drawer-active-work">
         <Text style={[styles.drawerGroupLabel, { color: muted }]}>ACTIVE WORK</Text>
-        {activeWork.map(({ agent, displayStatus }) => <TouchableOpacity key={agent.id} testID={`drawer-work-${agent.id}`} accessibilityRole="button" accessibilityLabel={`${agentDisplayName(agent)}, ${displayAgentStatus(displayStatus)}`} onPress={() => router.push({ pathname: '/agents', params: { agentId: agent.id } } as any)} style={styles.drawerWorkRow}>
-          <View style={[styles.workDot, { backgroundColor: statusColor(displayStatus) }]} />
-          <Text numberOfLines={1} style={[styles.drawerWorkName, { color: text }]}>{agentDisplayName(agent)}</Text>
-          <Text numberOfLines={1} style={[styles.drawerWorkStatus, { color: muted }]}>{displayAgentStatus(displayStatus)}</Text>
+        {activeWork.map(objective => <TouchableOpacity key={objective.objective_id} testID="drawer-work-row" accessibilityRole="button" accessibilityLabel={`${objective.title}, ${fleetStatusLabel(objective.status)}`} onPress={() => onOpenObjective(objective)} style={styles.drawerWorkRow}>
+          <View style={[styles.workDot, { backgroundColor: statusColor(objective.status) }]} />
+          <Text numberOfLines={1} style={[styles.drawerWorkName, { color: text }]}>{objective.title}</Text>
+          <Text numberOfLines={1} style={[styles.drawerWorkStatus, { color: muted }]}>{fleetStatusLabel(objective.status)}</Text>
         </TouchableOpacity>)}
       </View> : null}
     </ScrollView>
@@ -633,6 +620,49 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
       <TouchableOpacity testID="settings-open" accessibilityRole="button" accessibilityLabel="Open Account settings" onPress={onOpenSettings} activeOpacity={0.75} style={styles.accountRow}><View testID="drawer-account-icon" style={styles.accountIcon}><AccountIcon size={ICON_SIZE} color={muted} /></View></TouchableOpacity>
     </View>
   </Animated.View>;
+}
+
+function fleetTimestamp(value: number | null | undefined): string {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+}
+
+function FleetDetailSheet({ objective, dark, onClose, onRefresh, onOpenDecision }: {
+  objective: FleetObjective | null; dark: boolean; onClose: () => void;
+  onRefresh: () => Promise<void>; onOpenDecision: (itemId: string) => void;
+}) {
+  const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
+  const [confirming, setConfirming] = useState(false); const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null); const cancellationKey = useRef<string | null>(null);
+  if (!objective) return null;
+  const cancel = async () => {
+    setCancelling(true); setCancelError(null);
+    cancellationKey.current ||= `cancel_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    try {
+      await requestObjectiveCancellation(objective.objective_id, cancellationKey.current);
+      setConfirming(false);
+      await onRefresh();
+    } catch (error) {
+      setCancelError(errorText(error, 'Cancellation could not be requested.'));
+    } finally { setCancelling(false); }
+  };
+  return <View testID="fleet-detail-layer" style={styles.fleetDetailLayer} accessibilityViewIsModal>
+    <TouchableOpacity testID="fleet-detail-dismiss" accessibilityRole="button" accessibilityLabel="Close Fleet details" activeOpacity={1} onPress={onClose} style={styles.fleetDetailScrim} />
+    <View testID="fleet-detail-sheet" style={[styles.fleetDetailSheet, { backgroundColor: glassFill(dark, 'surface'), borderColor: glassEdge(dark) }, blurStyle(30)]}>
+      <View style={[styles.fleetDetailHeader, { borderBottomColor: glassEdge(dark) }]}><View style={styles.fleetDetailHeading}><Text style={[styles.fleetDetailEyebrow, { color: muted }]}>FLEET</Text><Text accessibilityRole="header" style={[styles.fleetDetailTitle, { color: text }]}>{objective.title}</Text><View style={styles.fleetDetailStatusRow}><View style={[styles.workDot, { backgroundColor: statusColor(objective.status) }]} /><Text style={[styles.fleetDetailStatus, { color: muted }]}>{fleetStatusLabel(objective.status)}</Text></View></View><TouchableOpacity testID="fleet-detail-close" accessibilityRole="button" accessibilityLabel="Close Fleet details" onPress={onClose} style={[styles.drawerCloseButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><CloseIcon size={20} color={text} /></TouchableOpacity></View>
+      <ScrollView testID="fleet-detail-scroll" style={styles.fleetDetailScroll} contentContainerStyle={styles.fleetDetailContent}>
+        <View style={styles.fleetDetailSection}><Text style={[styles.fleetDetailLabel, { color: muted }]}>GOAL</Text><Text style={[styles.fleetDetailBody, { color: text }]}>{objective.goal}</Text>{objective.project ? <Text style={[styles.fleetDetailMeta, { color: muted }]}>{objective.project}</Text> : null}</View>
+        <View style={styles.fleetDetailSection}><Text style={[styles.fleetDetailLabel, { color: muted }]}>ACTIVITY</Text>{objective.activity.length ? [...objective.activity].reverse().map((item, index) => <View key={`${item.phase}-${item.occurred_at}-${index}`} style={styles.fleetTimelineRow}><View style={[styles.fleetTimelineDot, { backgroundColor: index === 0 ? statusColor(objective.status) : muted }]} /><View style={styles.fleetTimelineCopy}><Text style={[styles.fleetTimelineTitle, { color: text }]}>{item.label}</Text>{fleetTimestamp(item.occurred_at) ? <Text style={[styles.fleetDetailMeta, { color: muted }]}>{fleetTimestamp(item.occurred_at)}</Text> : null}</View></View>) : <PanelText text="No activity has been reported yet." muted={muted} />}</View>
+        <View style={styles.fleetDetailSection}><Text style={[styles.fleetDetailLabel, { color: muted }]}>WORKERS</Text>{objective.workers.length ? objective.workers.map((worker, index) => <View key={`${worker.label}-${index}`} style={styles.fleetFactRow}><Text style={[styles.fleetTimelineTitle, { color: text }]}>{worker.label}</Text><Text style={[styles.fleetDetailMeta, { color: muted }]}>{fleetStatusLabel(worker.status)}</Text></View>) : <PanelText text={objective.terminal ? 'No active workers.' : 'Waiting for Firstmate capacity.'} muted={muted} />}</View>
+        <View style={styles.fleetDetailSection}><Text style={[styles.fleetDetailLabel, { color: muted }]}>ARTIFACTS</Text>{objective.artifacts.length ? objective.artifacts.map((artifact, index) => artifact.url ? <TouchableOpacity key={`${artifact.kind}-${index}`} accessibilityRole="link" onPress={() => void openExternalUrl(artifact.url as string)} style={styles.fleetArtifactRow}><Text style={[styles.fleetTimelineTitle, { color: text }]}>{artifact.label}</Text><Text style={[styles.fleetArtifactArrow, { color: muted }]}>↗</Text></TouchableOpacity> : <View key={`${artifact.kind}-${index}`} style={styles.fleetFactRow}><Text style={[styles.fleetTimelineTitle, { color: text }]}>{artifact.label}</Text><Text numberOfLines={1} style={[styles.fleetDetailMeta, { color: muted }]}>{artifact.reference}</Text></View>) : <PanelText text="No artifacts reported yet." muted={muted} />}</View>
+        <View style={styles.fleetDetailSection}><Text style={[styles.fleetDetailLabel, { color: muted }]}>DECISIONS</Text>{objective.decisions.length ? objective.decisions.map((decision, index) => <TouchableOpacity key={`${decision.attention_item_id}-${index}`} accessibilityRole="button" onPress={() => onOpenDecision(decision.attention_item_id)} style={styles.fleetDecisionRow}><View style={styles.fleetTimelineCopy}><Text style={[styles.fleetTimelineTitle, { color: text }]}>{decision.title}</Text><Text style={[styles.fleetDetailMeta, { color: muted }]}>{decision.question} · {decision.state}</Text></View><ChevronRightIcon size={16} color={muted} /></TouchableOpacity>) : <PanelText text="No decisions are waiting." muted={muted} />}</View>
+        <View style={styles.fleetDetailSection}><Text style={[styles.fleetDetailLabel, { color: muted }]}>CANCELLATION</Text>{objective.cancellation.state === 'requested' ? <PanelText text="Cancellation requested. Firstmate will confirm it through structured activity." muted={brand.attention} /> : objective.cancellation.state === 'observed' ? <PanelText text="Cancellation confirmed." muted={muted} /> : objective.cancellation.allowed ? confirming ? <View style={styles.fleetCancelConfirmation}><Text style={[styles.fleetDetailBody, { color: text }]}>Request cancellation of this objective?</Text><Text style={[styles.fleetDetailMeta, { color: muted }]}>Firstmate will apply its normal cancellation policy. This does not signal a process or claim success early.</Text><View style={styles.fleetCancelActions}><TouchableOpacity accessibilityRole="button" disabled={cancelling} onPress={() => setConfirming(false)} style={[styles.fleetCancelButton, { borderColor: glassEdge(dark) }]}><Text style={[styles.fleetCancelButtonText, { color: text }]}>KEEP RUNNING</Text></TouchableOpacity><TouchableOpacity testID="fleet-confirm-cancellation" accessibilityRole="button" disabled={cancelling} onPress={() => void cancel()} style={[styles.fleetCancelButton, styles.fleetCancelButtonDanger]}><Text style={styles.fleetCancelDangerText}>{cancelling ? 'REQUESTING…' : 'REQUEST CANCELLATION'}</Text></TouchableOpacity></View></View> : <TouchableOpacity testID="fleet-request-cancellation" accessibilityRole="button" onPress={() => setConfirming(true)} style={[styles.fleetCancelButton, { borderColor: brand.critical }]}><Text style={[styles.fleetCancelButtonText, { color: brand.critical }]}>REQUEST CANCELLATION</Text></TouchableOpacity> : <PanelText text="Cancellation is no longer available for this objective." muted={muted} />}{cancelError ? <Text accessibilityRole="alert" style={styles.settingsError}>{cancelError}</Text> : null}</View>
+      </ScrollView>
+    </View>
+  </View>;
 }
 
 // Environment choices are shown as what they actually look like. Each key maps
@@ -801,6 +831,7 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
 }
 
 export default function ChatScreen() {
+  const router = useRouter();
   const { record } = useLocalSearchParams<{ record?: string | string[] }>(); const autoStartRecording = (Array.isArray(record) ? record[0] : record) === 'true';
   const dark = isDarkTheme(useChatColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
   const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activityOpen, setActivityOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES); const [preferencesReady, setPreferencesReady] = useState(false);
@@ -808,9 +839,14 @@ export default function ChatScreen() {
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({ profile_id: null, routing_profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
-  const [agents, setAgents] = useState<AgentInfo[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
-  const [loading, setLoading] = useState(true); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
-  const [errors, setErrors] = useState<{ agents?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }>({});
+  const [objectives, setObjectives] = useState<FleetObjective[]>([]); const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | null>(null); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [loading, setLoading] = useState(true); const [refreshing, setRefreshing] = useState(false); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
+  const [errors, setErrors] = useState<{ fleet?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }>({});
+  const chatRefreshRef = useRef<(() => Promise<void>) | null>(null); const refreshPromiseRef = useRef<Promise<void> | null>(null); const mountedRef = useRef(true);
+  const selectedObjective = selectedObjectiveId ? objectives.find(objective => objective.objective_id === selectedObjectiveId) || null : null;
+  const registerChatRefresh = useCallback((refresh: (() => Promise<void>) | null) => {
+    chatRefreshRef.current = refresh;
+  }, []);
   const drawerProgress = useSharedValue(0); const settingsProgress = useSharedValue(0);
   useEffect(() => { let mounted = true; loadChatPreferences().then(value => { if (mounted) setPreferences(value); }).catch(() => {}).finally(() => { if (mounted) setPreferencesReady(true); }); return () => { mounted = false; }; }, []);
   useEffect(() => {
@@ -832,28 +868,36 @@ export default function ChatScreen() {
   useEffect(() => { AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion); const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion); return () => sub.remove(); }, []);
   useEffect(() => { drawerProgress.value = withTiming(drawerOpen ? 1 : 0, { duration: reducedMotion ? 1 : drawerOpen ? 260 : 340, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [drawerOpen, drawerProgress, reducedMotion]);
   useEffect(() => { settingsProgress.value = withTiming(settingsOpen ? 1 : 0, { duration: reducedMotion ? 1 : 300, easing: Easing.bezier(0.2, 0.8, 0.2, 1) }); }, [settingsOpen, settingsProgress, reducedMotion]);
-  useEffect(() => {
-    let mounted = true;
-    let refreshInFlight = false;
-    const refresh = async () => {
-      // One bounded refresh at a time prevents a slow gateway from creating a
-      // polling backlog. This is the fallback for valid realtime events too:
-      // the gateway has no attention push channel yet.
-      if (refreshInFlight) return;
-      refreshInFlight = true;
-      const results = await Promise.allSettled([fetchAgents(), fetchUnifiedAttention(), fetchRecentActivity(), fetchAuthProviders(), fetchHealth()]);
-      refreshInFlight = false;
-      if (!mounted) return;
-      const [agentResult, attentionResult, activityResult, providerResult, healthResult] = results;
-      setErrors({ agents: agentResult.status === 'rejected' ? errorText(agentResult.reason, 'Agent data could not be loaded.') : null, attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null, activity: activityResult.status === 'rejected' ? errorText(activityResult.reason, 'Recent activity could not be loaded.') : null, providers: providerResult.status === 'rejected' ? errorText(providerResult.reason, 'Connections data could not be loaded.') : null });
-      if (agentResult.status === 'fulfilled') setAgents(agentResult.value); if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value); if (activityResult.status === 'fulfilled') setActivity(activityResult.value.items); if (providerResult.status === 'fulfilled') setProviders(providerResult.value);
-      if (healthResult.status === 'fulfilled') setHealth(healthResult.value); else setHealthError(errorText(healthResult.reason, 'Network status could not be loaded.'));
+  const refreshAll = useCallback(async (includeChat = true): Promise<void> => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+    setRefreshing(true);
+    const request = (async () => {
+      // One read-only owner refreshes canonical Chat, Fleet, Activity, and
+      // Attention. No timer, snapshot command, or execution reconciliation is
+      // attached to this gesture.
+      const results = await Promise.allSettled([
+        fetchFleet(), fetchUnifiedAttention(), fetchRecentActivity(),
+        fetchAuthProviders(), fetchHealth(),
+        includeChat ? (chatRefreshRef.current?.() || Promise.resolve()) : Promise.resolve(),
+      ]);
+      if (!mountedRef.current) return;
+      const [fleetResult, attentionResult, activityResult, providerResult, healthResult] = results;
+      setErrors({ fleet: fleetResult.status === 'rejected' ? errorText(fleetResult.reason, 'Fleet could not be loaded.') : null, attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null, activity: activityResult.status === 'rejected' ? errorText(activityResult.reason, 'Recent activity could not be loaded.') : null, providers: providerResult.status === 'rejected' ? errorText(providerResult.reason, 'Connections data could not be loaded.') : null });
+      if (fleetResult.status === 'fulfilled') setObjectives(fleetResult.value.tasks); if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value); if (activityResult.status === 'fulfilled') setActivity(activityResult.value.items); if (providerResult.status === 'fulfilled') setProviders(providerResult.value);
+      if (healthResult.status === 'fulfilled') { setHealth(healthResult.value); setHealthError(null); } else setHealthError(errorText(healthResult.reason, 'Network status could not be loaded.'));
       setLoading(false); setHealthLoading(false);
-    };
-    void refresh();
-    const interval = setInterval(() => void refresh(), 15000);
-    return () => { mounted = false; clearInterval(interval); };
+    })().finally(() => {
+      refreshPromiseRef.current = null;
+      if (mountedRef.current) setRefreshing(false);
+    });
+    refreshPromiseRef.current = request;
+    return request;
   }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    void refreshAll(false);
+    return () => { mountedRef.current = false; };
+  }, [refreshAll]);
   useEffect(() => {
     if (!settingsOpen) return;
     setUsageLoading(true); setUsageError(null);
@@ -872,12 +916,13 @@ export default function ChatScreen() {
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls preserveCanvas><SafeAreaView style={styles.page}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
-      <DrawerPanel open={drawerOpen && !settingsOpen} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => setDrawerOpen(false)} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} agents={agents} executionProfiles={executionProfiles} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} />
-      <Animated.View style={styles.chatStage}><ChatCanvas drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} />
+      <DrawerPanel open={drawerOpen && !settingsOpen && !selectedObjective} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => setDrawerOpen(false)} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} objectives={objectives} onOpenObjective={objective => { setDrawerOpen(false); setSelectedObjectiveId(objective.objective_id); }} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} refreshing={refreshing} onRefresh={() => { void refreshAll(); }} />
+      <Animated.View style={styles.chatStage}><ChatCanvas drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onRegisterRefresh={registerChatRefresh} onRefreshAll={refreshAll} globalRefreshing={refreshing} />
         <Animated.View testID="chat-dim" pointerEvents={drawerOpen ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
           <TouchableOpacity testID="drawer-dismiss" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={() => setDrawerOpen(false)} activeOpacity={1} style={styles.chatDimPress} />
         </Animated.View>
       </Animated.View>
+      <FleetDetailSheet key={selectedObjective?.objective_id || 'closed'} objective={selectedObjective} dark={dark} onClose={() => setSelectedObjectiveId(null)} onRefresh={refreshAll} onOpenDecision={itemId => { setSelectedObjectiveId(null); router.push({ pathname: '/attention', params: { item: itemId, source: 'fleet' } } as any); }} />
       <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} scrimStyle={settingsScrimStyle} health={health} loading={healthLoading} error={healthError} executionError={executionError} preferences={preferences} onPreferencesChange={setPreferences} executionProfiles={executionProfiles} voiceCapabilities={voiceCapabilities} executionSettings={executionSettings} onExecutionSettingsChange={update => { void updateExecutionSettings(update).then(saved => { setExecutionSettings(saved); setExecutionError(null); }).catch(error => setExecutionError(errorText(error, 'The execution setting could not be saved.'))); }} onSaveCredential={async (credentialKey, credential) => { try { await saveExecutionCredential(credentialKey, credential); setExecutionError(null); const capabilities = await fetchExecutionCapabilities(); setExecutionProfiles(profilesFromCapabilities(capabilities)); } catch (error) { setExecutionError(errorText(error, 'The credential could not be saved.')); } }} usage={usage} usageLoading={usageLoading} usageError={usageError} onClose={() => setSettingsOpen(false)} onLogout={() => { setSettingsOpen(false); void logoutGatewaySession(); }} />
     </>}
   </SafeAreaView></EnvironmentBackground>;
@@ -965,6 +1010,8 @@ const styles = StyleSheet.create({
   drawerCloseButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   drawerWordmark: { flex: 1, fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 26, lineHeight: 34, fontWeight: '500' },
   drawerSearchInput: { flex: 1, minWidth: 0, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 14, fontSize: 16, outlineStyle: 'none' as any },
+  drawerHeaderButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
+  drawerRefreshText: { fontSize: 24, lineHeight: 27, fontWeight: '500' },
   drawerSearchButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   drawerScroll: { flex: 1, minHeight: 0, touchAction: 'pan-y', overscrollBehaviorY: 'contain' } as any, drawerScrollContent: { paddingTop: 4, paddingBottom: 18 },
   drawerRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 8, paddingHorizontal: 6, borderRadius: 14 },
@@ -981,7 +1028,18 @@ const styles = StyleSheet.create({
   accountIcon: { width: ICON_SIZE, height: ICON_SIZE, alignItems: 'center', justifyContent: 'center' },
   gearIconContainer: { width: 20, alignItems: 'center', justifyContent: 'center' }, chevron: { width: 18, fontSize: 13, textAlign: 'center' },
   sectionPanel: { paddingLeft: 44, paddingRight: 4, paddingBottom: 12, gap: 8 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { minHeight: 40, justifyContent: 'center', paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '700', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 },
-  fleetAgentWrap: { borderRadius: 14 }, fleetAgentWrapOpen: { zIndex: 4 }, fleetPanelRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3 }, fleetAgentMain: { flex: 1, minWidth: 0, minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 8 }, fleetPanelName: { flex: 1, fontSize: 13, fontWeight: '700' }, ellipsisButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 }, agentPopover: { borderRadius: 15, padding: 12, marginBottom: 6, gap: 8, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 16, elevation: 7 }, agentMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, agentMetaLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.7 }, agentMetaValue: { fontSize: 11, fontWeight: '800' }, popoverActions: { flexDirection: 'row', gap: 8, marginTop: 2 }, popoverAction: { minHeight: 34, justifyContent: 'center', paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(142,153,170,0.3)', borderRadius: 10 }, popoverActionText: { color: '#24D8FF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, agentActionMessage: { fontSize: 10, lineHeight: 14 }, migrationTargets: { marginTop: 4, gap: 6 }, migrationNotice: { fontSize: 10, lineHeight: 14 }, migrationTarget: { minHeight: 34, borderWidth: 1, borderColor: 'rgba(142,153,170,0.35)', borderRadius: 9, paddingHorizontal: 9, justifyContent: 'center' }, migrationTargetText: { fontSize: 10, fontWeight: '800' }, migrationConfirmation: { gap: 6 }, migrationTitle: { fontSize: 12, fontWeight: '800' }, migrationWarning: { color: brand.attention, fontSize: 10, lineHeight: 14 },
+  fleetObjectiveRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, fleetObjectiveCopy: { flex: 1, minWidth: 0 }, fleetPanelName: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: '700' },
+
+  // Product Fleet details are an independent sibling drawer. It never exposes
+  // panes, run ids, terminal controls, or raw worker output.
+  fleetDetailLayer: { ...StyleSheet.absoluteFill, zIndex: 70, alignItems: 'flex-end' },
+  fleetDetailScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(5,7,10,0.48)' },
+  fleetDetailSheet: { height: '100%', width: '92%', maxWidth: 460, borderLeftWidth: StyleSheet.hairlineWidth, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 32, elevation: 24, ...Platform.select({ web: { paddingTop: 'env(safe-area-inset-top, 0px)' as any, paddingBottom: 'env(safe-area-inset-bottom, 0px)' as any }, default: {} }) },
+  fleetDetailHeader: { flexShrink: 0, minHeight: 94, flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingHorizontal: 18, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth },
+  fleetDetailHeading: { flex: 1, minWidth: 0 }, fleetDetailEyebrow: { fontSize: 10, fontWeight: '800', letterSpacing: 1.1, marginBottom: 5 }, fleetDetailTitle: { fontSize: 21, lineHeight: 27, fontWeight: '700', letterSpacing: -0.3 }, fleetDetailStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 8 }, fleetDetailStatus: { fontSize: 12, fontWeight: '600' },
+  fleetDetailScroll: { flex: 1, minHeight: 0, touchAction: 'pan-y', overscrollBehaviorY: 'contain' } as any, fleetDetailContent: { padding: 20, paddingBottom: 44, gap: 24 }, fleetDetailSection: { gap: 10 }, fleetDetailLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1 }, fleetDetailBody: { fontSize: 15, lineHeight: 22 }, fleetDetailMeta: { flexShrink: 1, fontSize: 11, lineHeight: 16 },
+  fleetTimelineRow: { minHeight: 42, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, fleetTimelineDot: { width: 7, height: 7, borderRadius: 4, marginTop: 6 }, fleetTimelineCopy: { flex: 1, minWidth: 0 }, fleetTimelineTitle: { flexShrink: 1, fontSize: 13, lineHeight: 18, fontWeight: '700' }, fleetFactRow: { minHeight: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, fleetArtifactRow: { minHeight: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, fleetArtifactArrow: { fontSize: 17 }, fleetDecisionRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  fleetCancelConfirmation: { gap: 9 }, fleetCancelActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 }, fleetCancelButton: { minHeight: 42, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 13, borderRadius: 12, borderWidth: 1 }, fleetCancelButtonDanger: { backgroundColor: 'rgba(255,98,95,0.16)', borderColor: brand.critical }, fleetCancelButtonText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5 }, fleetCancelDangerText: { color: '#FF8E8B', fontSize: 10, fontWeight: '800', letterSpacing: 0.4 },
 
   settingsLayer: { ...StyleSheet.absoluteFill, zIndex: 20, justifyContent: 'flex-end' },
   settingsScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(5,7,10,0.46)' },

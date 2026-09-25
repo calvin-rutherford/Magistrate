@@ -249,6 +249,19 @@ def test_noncompletion_terminal_events_end_activity_without_chat(
     suffix = phase.replace(".", "-")
     origin = native_origin(EXECUTION_OWNER, suffix)
     assert post_event(accepted_event(origin, suffix)).status_code == 200
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute(
+            """INSERT INTO objective_cancellation_requests
+               (request_id, owner_user_id, objective_id, task_id, actor_session_id,
+                idempotency_key, status, notification_status,
+                notification_attempt_count, created_at, updated_at)
+               VALUES(?,?,?,?,?,?,'requested','delivered',1,?,?)""",
+            (
+                f"ocr-terminal-{suffix}", EXECUTION_OWNER, f"objective-{suffix}",
+                f"task-{suffix}", "session-terminal-race", f"cancel-terminal-{suffix}",
+                1_789_330_000_050, 1_789_330_000_050,
+            ),
+        )
 
     terminal = post_event(progress_event(suffix, phase, 90))
     assert terminal.status_code == 200
@@ -257,6 +270,16 @@ def test_noncompletion_terminal_events_end_activity_without_chat(
     assert records[-1]["kind"] == phase
     assert records[-1]["state"] == state
     assert model.calls == []
+    with sqlite3.connect(db.DB_PATH) as connection:
+        cancellation = connection.execute(
+            """SELECT status, error_code FROM objective_cancellation_requests
+               WHERE request_id = ?""",
+            (f"ocr-terminal-{suffix}",),
+        ).fetchone()
+    assert cancellation == (
+        ("observed", None) if phase == "objective.cancelled"
+        else ("failed", "objective_terminal")
+    )
     assert f"objective-{suffix}" not in {
         record["objective_id"] for record in snapshot_activity(EXECUTION_OWNER)["focus_records"]
     }

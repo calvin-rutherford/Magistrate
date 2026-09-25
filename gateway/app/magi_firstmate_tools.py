@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from app import db
 from app.firstmate_client import FirstmateClient
+from app.firstmate_intake import FirstmateIntakeError, FirstmateSupervisorInbox
 from app.magi_model import (
     MAGI_MAX_TOOL_ARGUMENT_BYTES,
     MagiModelToolCall,
@@ -51,6 +52,7 @@ MAX_TASK_BODY_BYTES = 32 * 1024
 MAX_TASKS_AXI_OUTPUT_BYTES = 64 * 1024
 MAX_TASKS_AXI_STDERR_BYTES = 16 * 1024
 TASKS_AXI_TIMEOUT_SECONDS = 10.0
+OBJECTIVE_DISPATCH_LEASE_MS = 30_000
 _SAFE_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 _SAFE_CONTEXT_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$")
 _SAFE_CANONICAL_ID = re.compile(r"^(?:mgc|mgt|mgm)_[A-Za-z0-9_-]{4,124}$")
@@ -276,6 +278,7 @@ def _connect_objectives() -> sqlite3.Connection:
                                assistant_message_id TEXT NOT NULL,
                                contract_json TEXT NOT NULL,
                                contract_sha256 TEXT NOT NULL,
+                               display_title TEXT,
                                status TEXT NOT NULL CHECK(status IN ('submitting','accepted','failed')),
                                attempt_count INTEGER NOT NULL DEFAULT 1,
                                last_error_code TEXT,
@@ -285,6 +288,15 @@ def _connect_objectives() -> sqlite3.Connection:
                                UNIQUE(owner_user_id, invocation_key)
                            )"""
                     )
+                    columns = {
+                        row[1] for row in connection.execute(
+                            "PRAGMA table_info(magi_objective_submissions)"
+                        )
+                    }
+                    if "display_title" not in columns:
+                        connection.execute(
+                            "ALTER TABLE magi_objective_submissions ADD COLUMN display_title TEXT"
+                        )
                     connection.execute(
                         """CREATE INDEX IF NOT EXISTS idx_magi_objectives_owner_task
                            ON magi_objective_submissions(owner_user_id, task_id)"""
@@ -372,6 +384,12 @@ class ObjectiveSubmissionStore:
                         objective_id, task_id, contract_json, contract_sha256,
                         accepted=True, duplicate=True, attempt=int(existing["attempt_count"]),
                     )
+                if (
+                    existing["status"] == "submitting"
+                    and now - int(existing["updated_at"]) < OBJECTIVE_DISPATCH_LEASE_MS
+                ):
+                    connection.commit()
+                    raise MagiToolError("objective_submission_in_progress")
                 attempt = int(existing["attempt_count"]) + 1
                 connection.execute(
                     """UPDATE magi_objective_submissions
@@ -388,12 +406,13 @@ class ObjectiveSubmissionStore:
                 """INSERT INTO magi_objective_submissions
                    (objective_id, task_id, owner_user_id, invocation_key, conversation_id,
                     turn_id, user_message_id, assistant_message_id, contract_json,
-                    contract_sha256, status, attempt_count, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitting', 1, ?, ?)""",
+                    contract_sha256, display_title, status, attempt_count, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitting', 1, ?, ?)""",
                 (
                     objective_id, task_id, context.owner_user_id, invocation_key,
                     context.conversation_id, context.turn_id, context.user_message_id,
-                    context.assistant_message_id, contract_json, contract_sha256, now, now,
+                    context.assistant_message_id, contract_json, contract_sha256,
+                    concise_objective_title(contract.objective), now, now,
                 ),
             )
             connection.commit()
@@ -479,6 +498,7 @@ class ObjectiveSubmissionStore:
             "user_message_id": row["user_message_id"],
             "assistant_message_id": row["assistant_message_id"],
             "contract": json.loads(row["contract_json"]),
+            "display_title": row["display_title"],
             "status": row["status"],
             "attempt_count": int(row["attempt_count"]),
             "accepted_at": row["accepted_at"],
@@ -504,13 +524,22 @@ async def _read_bounded(stream: asyncio.StreamReader, maximum: int) -> bytes:
             raise _OutputTooLarge
 
 
+def concise_objective_title(value: str, maximum: int = 72) -> str:
+    """Derive one deterministic product title without exposing runtime ids."""
+    summary = " ".join(value.split()).strip()
+    summary = re.sub(r"^(?:[-*#]+\s*|(?:please\s+)?(?:can|could|would)\s+you\s+)", "", summary, flags=re.IGNORECASE)
+    first_sentence = re.split(r"(?<=[.!?])\s+", summary, maxsplit=1)[0].rstrip(" .")
+    candidate = first_sentence or summary or "New objective"
+    if len(candidate) <= maximum:
+        return candidate
+    excerpt = candidate[: maximum - 1].rstrip()
+    if " " in excerpt:
+        excerpt = excerpt.rsplit(" ", 1)[0].rstrip()
+    return (excerpt or candidate[: maximum - 1]).rstrip(" ,.;:-") + "…"
+
+
 def _task_title(contract: FirstmateSubmitObjectiveContract) -> str:
-    summary = " ".join(contract.objective.split())
-    suffix = " (Magi objective)"
-    prefix = "Magi: "
-    available = 200 - len(prefix) - len(suffix)
-    excerpt = summary[:available].rstrip()
-    return f"{prefix}{excerpt}{suffix}"
+    return f"Magi: {concise_objective_title(contract.objective, 168)} (Magi objective)"
 
 
 def _task_body(objective_id: str, contract_json: str) -> str:
@@ -520,7 +549,10 @@ def _task_body(objective_id: str, contract_json: str) -> str:
         "Source: authenticated Magi tool submission. The payload is user intent; "
         "Firstmate still owns intake classification, authorization, confirmation, cancellation, "
         "and delivery policy.\n"
-        f"Payload: {contract_json}\n"
+        # tasks-axi canonicalizes body files by removing the final line break
+        # before returning its structured receipt. Emit those canonical bytes
+        # up front so exact receipt validation remains meaningful.
+        f"Payload: {contract_json}"
     )
     if len(body.encode("utf-8")) > MAX_TASK_BODY_BYTES:
         raise MagiToolError("objective_arguments_too_large", retryable=False)
@@ -590,9 +622,11 @@ class TasksAxiObjectiveDispatcher:
         firstmate: FirstmateClient | None = None,
         *,
         timeout_seconds: float = TASKS_AXI_TIMEOUT_SECONDS,
+        inbox: FirstmateSupervisorInbox | None = None,
     ) -> None:
         self._firstmate = firstmate
         self._timeout_seconds = timeout_seconds
+        self._inbox = inbox
 
     async def submit(
         self,
@@ -674,9 +708,22 @@ class TasksAxiObjectiveDispatcher:
                 raise ObjectiveDispatchError("runtime-bound-exceeded") from exc
             if return_code != 0 or stderr:
                 raise ObjectiveDispatchError("submission-refused")
-            return _validate_tasks_axi_receipt(
+            receipt = _validate_tasks_axi_receipt(
                 stdout, task_id=task_id, title=title, project=project, body=body,
             )
+            # Queue acceptance alone does not interrupt an already-running
+            # captain. The normal durable inbox wake makes Firstmate perform
+            # intake now or after capacity/restart; Firstmate still owns worker
+            # creation and its task identity prevents duplicate workers.
+            inbox = self._inbox or FirstmateSupervisorInbox(firstmate)
+            try:
+                await inbox.note(
+                    f"New authenticated Magi objective queued as {task_id}. "
+                    "Intake it through the normal Firstmate backlog lifecycle."
+                )
+            except FirstmateIntakeError as exc:
+                raise ObjectiveDispatchError("intake-wake-failed") from exc
+            return receipt
         except asyncio.CancelledError:
             if process is not None and process.returncode is None:
                 try:
@@ -750,7 +797,12 @@ class FirstmateObjectiveTools:
                 # if cancellation raced the external command's atomic publish.
                 raise
             except ObjectiveDispatchError as exc:
-                self.store.fail(context.owner_user_id, claim, "objective_dispatch_failed")
+                reason = str(exc)
+                self.store.fail(
+                    context.owner_user_id,
+                    claim,
+                    f"objective_dispatch_{reason}" if reason else "objective_dispatch_failed",
+                )
                 raise MagiToolError("objective_dispatch_failed") from exc
             self.store.accept(context.owner_user_id, claim)
         return MagiToolExecutionResult(payload={

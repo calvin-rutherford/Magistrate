@@ -41,11 +41,14 @@ export interface GatewaySession {
   expiresAt: number;
   scopes: string[];
   userId: string;
-  authMethod?: 'operator-bootstrap' | 'friend-beta-access';
+  authMethod?: 'operator-bootstrap' | 'friend-beta-access' | 'apple' | 'google';
   onboardingRequired?: boolean;
-  /** Native-only renewal credential; persisted only through SecureStore. */
+  /** Native-only Friend Beta renewal credential; persisted only through SecureStore. */
   renewalCode?: string;
   renewableUntil?: number;
+  /** Rotating provider refresh authority. Native persists it in Keychain. */
+  providerRefreshToken?: string;
+  refreshExpiresAt?: number;
 }
 export interface GatewaySessionSnapshot {
   status: GatewaySessionStatus;
@@ -73,8 +76,19 @@ let sessionStorageMutation: Promise<void> = Promise.resolve();
 let sessionSnapshot: GatewaySessionSnapshot = { status: 'checking', session: null, error: null };
 const ACCOUNT_DISPLAY_NAME_STORAGE_KEY = 'magistrate.account.display-name';
 const FRIEND_BETA_ACCESS_CODE = /^mgb_[A-Za-z0-9_-]{32,64}$/;
+const PROVIDER_REFRESH_TOKEN = /^mgr_[A-Za-z0-9_-]{32,80}$/;
 const SAFE_SESSION_TOKEN = /^[A-Za-z0-9_-]{32,64}$/;
+const PROVIDER_SESSION_MARKER_KEY = 'magistrate.provider-session-present.v1';
 const sessionListeners = new Set<() => void>();
+
+function browserProviderMarker(present?: boolean): boolean {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return false;
+  try {
+    if (present === true) window.localStorage.setItem(PROVIDER_SESSION_MARKER_KEY, '1');
+    else if (present === false) window.localStorage.removeItem(PROVIDER_SESSION_MARKER_KEY);
+    return window.localStorage.getItem(PROVIDER_SESSION_MARKER_KEY) === '1';
+  } catch { return false; }
+}
 
 function publish(snapshot: GatewaySessionSnapshot): void {
   sessionSnapshot = snapshot;
@@ -115,8 +129,9 @@ function sessionFromPayload(payload: unknown, allowExpiredAccess = false): Gatew
   const now = Math.floor(Date.now() / 1000);
   if (!token || !token.trim() || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= 0
     || (!allowExpiredAccess && expiresAt <= now) || !validGatewayUserId(userId) || !scopes) return null;
-  const authMethod = value.auth_method === 'friend-beta-access' || value.auth_method === 'operator-bootstrap'
-    ? value.auth_method : undefined;
+  const authMethod = value.auth_method === 'friend-beta-access'
+    || value.auth_method === 'operator-bootstrap' || value.auth_method === 'apple'
+    || value.auth_method === 'google' ? value.auth_method : undefined;
   const onboardingRequired = value.onboarding_required === true;
   const renewalCode = typeof value.renewal_code === 'string' ? value.renewal_code : undefined;
   const renewableUntil = typeof value.renewable_until === 'number' && Number.isSafeInteger(value.renewable_until)
@@ -124,7 +139,19 @@ function sessionFromPayload(payload: unknown, allowExpiredAccess = false): Gatew
   if (renewalCode && (Platform.OS === 'web' || !FRIEND_BETA_ACCESS_CODE.test(renewalCode)
     || !renewableUntil || renewableUntil <= now)) return null;
   if (renewableUntil !== undefined && renewableUntil <= now) return null;
-  return { token, expiresAt, scopes, userId, authMethod, onboardingRequired, renewalCode, renewableUntil };
+  const providerRefreshToken = typeof value.refresh_token === 'string'
+    ? value.refresh_token : typeof value.provider_refresh_token === 'string'
+      ? value.provider_refresh_token : undefined;
+  const refreshExpiresAt = typeof value.refresh_expires_at === 'number'
+    && Number.isSafeInteger(value.refresh_expires_at) ? value.refresh_expires_at : undefined;
+  const providerAuth = authMethod === 'apple' || authMethod === 'google';
+  if (providerAuth && (!refreshExpiresAt || refreshExpiresAt <= now
+    || (providerRefreshToken && (Platform.OS === 'web' || !PROVIDER_REFRESH_TOKEN.test(providerRefreshToken))))) return null;
+  if (providerRefreshToken && !providerAuth) return null;
+  return {
+    token, expiresAt, scopes, userId, authMethod, onboardingRequired,
+    renewalCode, renewableUntil, providerRefreshToken, refreshExpiresAt,
+  };
 }
 
 function storedSessionPayload(session: GatewaySession): Record<string, unknown> {
@@ -136,6 +163,10 @@ function storedSessionPayload(session: GatewaySession): Record<string, unknown> 
     ...(session.authMethod ? { auth_method: session.authMethod } : {}),
     ...(session.onboardingRequired ? { onboarding_required: true } : {}),
     ...(session.renewalCode ? { renewal_code: session.renewalCode, renewable_until: session.renewableUntil } : {}),
+    ...(session.providerRefreshToken ? {
+      provider_refresh_token: session.providerRefreshToken,
+      refresh_expires_at: session.refreshExpiresAt,
+    } : session.refreshExpiresAt ? { refresh_expires_at: session.refreshExpiresAt } : {}),
   };
 }
 
@@ -150,8 +181,10 @@ function scheduleExpiry(session: GatewaySession): void {
   if (delay <= 0) {
     if (session.renewalCode && (session.renewableUntil || 0) * 1000 > Date.now()) {
       void renewGatewaySession(session).catch(() => undefined);
-    }
-    else void invalidateGatewaySession('Your session has expired.');
+    } else if ((session.authMethod === 'apple' || session.authMethod === 'google')
+      && (session.refreshExpiresAt || 0) * 1000 > Date.now()) {
+      void renewProviderGatewaySession(session).catch(() => undefined);
+    } else void invalidateGatewaySession('Your session has expired.');
     return;
   }
   // Browsers clamp delays above the signed 32-bit timer limit. Re-arm for
@@ -160,7 +193,9 @@ function scheduleExpiry(session: GatewaySession): void {
     if (sessionInfo?.token !== session.token || sessionInfo.expiresAt !== session.expiresAt) return;
     if (delay > 2_147_000_000) scheduleExpiry(session);
     else if (session.renewalCode) void renewGatewaySession(session).catch(() => undefined);
-    else void invalidateGatewaySession('Your session has expired.');
+    else if (session.authMethod === 'apple' || session.authMethod === 'google') {
+      void renewProviderGatewaySession(session).catch(() => undefined);
+    } else void invalidateGatewaySession('Your session has expired.');
   }, Math.min(delay, 2_147_000_000));
 }
 
@@ -175,8 +210,16 @@ async function persistSession(session: GatewaySession, revision: number): Promis
   sessionToken = session.token;
   sessionInfo = session;
   await mutateSessionStorage(async () => {
-    if (revision === sessionRevision) {
+    if (revision !== sessionRevision) return;
+    const providerAuth = session.authMethod === 'apple' || session.authMethod === 'google';
+    if (Platform.OS === 'web' && providerAuth) {
+      // The browser's durable authority is its HttpOnly cookie. Never persist
+      // either provider access or refresh authority in JavaScript storage.
+      await clearGatewaySessionPayload();
+      browserProviderMarker(true);
+    } else {
       await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(session)));
+      if (Platform.OS === 'web') browserProviderMarker(false);
     }
   });
   if (revision !== sessionRevision || sessionInfo?.token !== session.token) return false;
@@ -213,6 +256,97 @@ function responseError(response: Response, payload: unknown): Error {
 async function fetchRaw(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   try { return await rawFetch(input, init); }
   catch { throw new GatewayNetworkError(); }
+}
+
+export interface ProviderAuthConfiguration {
+  schema_version: 'provider-auth-configuration.v1';
+  apple: boolean;
+  apple_native: boolean;
+  apple_web: boolean;
+  google: boolean;
+  google_native: boolean;
+  google_web: boolean;
+}
+
+export async function fetchProviderAuthConfiguration(): Promise<ProviderAuthConfiguration> {
+  const response = await fetchRaw(`${GATEWAY_URL}/auth/provider/configuration`, {
+    credentials: 'include',
+  });
+  const payload = await readResponsePayload(response);
+  if (!response.ok) throw responseError(response, payload);
+  const value = payload as Partial<ProviderAuthConfiguration> | null;
+  if (!value || value.schema_version !== 'provider-auth-configuration.v1'
+    || typeof value.apple !== 'boolean' || typeof value.apple_native !== 'boolean'
+    || typeof value.apple_web !== 'boolean' || typeof value.google !== 'boolean'
+    || typeof value.google_native !== 'boolean' || typeof value.google_web !== 'boolean') {
+    throw new Error('Gateway returned an invalid provider sign-in configuration.');
+  }
+  return value as ProviderAuthConfiguration;
+}
+
+export interface ProviderAuthChallenge {
+  schema_version: 'provider-auth-challenge.v1';
+  challenge_id: string;
+  provider: 'apple' | 'google';
+  action: 'sign_in' | 'link';
+  nonce: string;
+  authorization_nonce: string;
+  redirect_uri: string | null;
+  expires_at: number;
+}
+
+export async function createProviderAuthChallenge(
+  provider: 'apple' | 'google', redirectUri?: string,
+): Promise<ProviderAuthChallenge> {
+  const response = await fetchRaw(`${GATEWAY_URL}/auth/provider/challenge`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider, action: 'sign_in', client_platform: Platform.OS === 'web' ? 'web' : 'native',
+      ...(redirectUri ? { redirect_uri: redirectUri } : {}),
+    }),
+  });
+  const payload = await readResponsePayload(response);
+  if (!response.ok) throw responseError(response, payload);
+  if (!payload || typeof payload !== 'object') throw new Error('Gateway returned an invalid sign-in challenge.');
+  const value = payload as Record<string, unknown>;
+  if (value.schema_version !== 'provider-auth-challenge.v1' || value.provider !== provider
+    || typeof value.challenge_id !== 'string' || typeof value.nonce !== 'string'
+    || typeof value.authorization_nonce !== 'string' || typeof value.expires_at !== 'number') {
+    throw new Error('Gateway returned an invalid sign-in challenge.');
+  }
+  return value as unknown as ProviderAuthChallenge;
+}
+
+export async function exchangeProviderAuthChallenge(input: {
+  provider: 'apple' | 'google'; challengeId: string; nonce: string;
+  identityToken?: string; authorizationCode?: string; redirectUri?: string;
+  displayName?: string;
+}): Promise<GatewaySession> {
+  const revision = ++sessionRevision;
+  const response = await fetchRaw(`${GATEWAY_URL}/auth/provider/exchange`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider: input.provider, challenge_id: input.challengeId, nonce: input.nonce,
+      ...(input.identityToken ? { identity_token: input.identityToken } : {}),
+      ...(input.authorizationCode ? { authorization_code: input.authorizationCode } : {}),
+      ...(input.redirectUri ? { redirect_uri: input.redirectUri } : {}),
+      ...(input.displayName ? { display_name: input.displayName } : {}),
+    }),
+  });
+  const payload = await readResponsePayload(response);
+  if (!response.ok) throw responseError(response, payload);
+  const session = sessionFromPayload(payload);
+  if (!session || session.authMethod !== input.provider || !session.refreshExpiresAt) {
+    throw new Error('Gateway returned an invalid provider session.');
+  }
+  if (Platform.OS !== 'web' && !session.providerRefreshToken) {
+    throw new Error('Gateway did not return native refresh authority.');
+  }
+  if (!(await persistSession(session, revision))) {
+    throw new GatewayAuthError('Provider sign-in was superseded.');
+  }
+  setSessionCandidate(session);
+  return session;
 }
 
 export async function createGatewaySession(accessCredential?: string): Promise<GatewaySession> {
@@ -313,6 +447,72 @@ async function renewGatewaySession(expected: GatewaySession): Promise<GatewaySes
   return renewalPromise;
 }
 
+async function renewProviderGatewaySession(expected: GatewaySession | null): Promise<GatewaySession | null> {
+  if (renewalPromise) return renewalPromise;
+  const provider = expected?.authMethod;
+  if (expected && (provider !== 'apple' && provider !== 'google')) return null;
+  if (expected && (!expected.refreshExpiresAt || expected.refreshExpiresAt * 1000 <= Date.now())) {
+    await invalidateGatewaySession('Your sign-in has expired.');
+    return null;
+  }
+  if (Platform.OS !== 'web' && !expected?.providerRefreshToken) {
+    await invalidateGatewaySession('Your saved provider session is invalid.');
+    return null;
+  }
+  const revision = sessionRevision;
+  const stillCurrent = () => revision === sessionRevision && (
+    expected ? sessionInfo?.token === expected.token : sessionInfo === null
+  );
+  renewalPromise = (async () => {
+    if (!stillCurrent()) return null;
+    publish({ status: 'checking', session: expected, error: null });
+    let response: Response;
+    try {
+      response = await fetchRaw(`${GATEWAY_URL}/auth/provider/refresh`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(expected?.providerRefreshToken
+          ? { refresh_token: expected.providerRefreshToken } : {}),
+      });
+    } catch (error) {
+      if (stillCurrent()) publish({
+        status: 'authentication-required', session: expected,
+        error: error instanceof Error ? error.message : 'Provider session could not be renewed.',
+      });
+      throw error;
+    }
+    const payload = await readResponsePayload(response);
+    if (!stillCurrent()) {
+      const stale = sessionFromPayload(payload);
+      if (stale?.token) await revokeSupersededFriendSession(stale.token);
+      return null;
+    }
+    if (!response.ok) {
+      if (response.status === 401) {
+        await invalidateGatewaySession('Your provider sign-in is no longer valid.');
+        throw new GatewayAuthError('Your provider sign-in is no longer valid.');
+      }
+      publish({
+        status: 'authentication-required', session: expected,
+        error: responseDetail(payload) || 'Provider session could not be renewed.',
+      });
+      throw responseError(response, payload);
+    }
+    const renewed = sessionFromPayload(payload);
+    if (!renewed || (renewed.authMethod !== 'apple' && renewed.authMethod !== 'google')
+      || (expected && (renewed.userId !== expected.userId || renewed.authMethod !== expected.authMethod))
+      || !renewed.refreshExpiresAt
+      || (Platform.OS !== 'web' && !renewed.providerRefreshToken)) {
+      await invalidateGatewaySession('The gateway returned an invalid renewed identity.');
+      throw new GatewayAuthError('Gateway returned an invalid provider renewal response.');
+    }
+    if (!(await persistSession(renewed, revision))
+      || revision !== sessionRevision || sessionInfo?.token !== renewed.token) return null;
+    setSessionCandidate(renewed);
+    return validateGatewaySession();
+  })().finally(() => { renewalPromise = null; });
+  return renewalPromise;
+}
+
 export async function validateGatewaySession(): Promise<GatewaySession> {
   const revision = sessionRevision;
   const session = sessionInfo;
@@ -341,11 +541,19 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
   if (revision !== sessionRevision || sessionInfo?.token !== session.token) {
     throw new GatewayAuthError('Session validation was superseded.');
   }
-  const authMethod = value.auth_method === 'friend-beta-access' || value.auth_method === 'operator-bootstrap'
-    ? value.auth_method : session.authMethod;
+  const authMethod = value.auth_method === 'friend-beta-access'
+    || value.auth_method === 'operator-bootstrap' || value.auth_method === 'apple'
+    || value.auth_method === 'google' ? value.auth_method : session.authMethod;
   if (session.authMethod && authMethod && session.authMethod !== authMethod) {
     await invalidateGatewaySession('The gateway returned an invalid session identity.');
     throw new GatewayAuthError('Gateway returned an invalid session validation response.');
+  }
+  if ((authMethod === 'apple' || authMethod === 'google')
+    && (typeof value.refresh_expires_at !== 'number'
+      || !Number.isSafeInteger(value.refresh_expires_at)
+      || value.refresh_expires_at <= Math.floor(Date.now() / 1000))) {
+    await invalidateGatewaySession('The gateway returned an invalid provider session.');
+    throw new GatewayAuthError('Gateway returned an invalid provider session validation response.');
   }
   const previousPrincipal = session.userId;
   const validated: GatewaySession = {
@@ -355,6 +563,9 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
     userId: value.user_id,
     authMethod,
     onboardingRequired: value.onboarding_required === true,
+    refreshExpiresAt: typeof value.refresh_expires_at === 'number'
+      && Number.isSafeInteger(value.refresh_expires_at)
+      ? value.refresh_expires_at : session.refreshExpiresAt,
   };
   if (serverSession?.token) validated.token = serverSession.token;
   // Principal isolation is established before publishing authenticated state,
@@ -374,7 +585,11 @@ export async function validateGatewaySession(): Promise<GatewaySession> {
   sessionToken = validated.token;
   sessionInfo = validated;
   await mutateSessionStorage(async () => {
-    if (revision === sessionRevision && sessionInfo?.token === validated.token) {
+    if (revision !== sessionRevision || sessionInfo?.token !== validated.token) return;
+    if (Platform.OS === 'web' && (validated.authMethod === 'apple' || validated.authMethod === 'google')) {
+      await clearGatewaySessionPayload();
+      browserProviderMarker(true);
+    } else {
       await setGatewaySessionPayload(JSON.stringify(storedSessionPayload(validated)));
     }
   }).catch(() => {});
@@ -413,6 +628,10 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
     if (stored && !candidate) {
       await invalidateGatewaySession('Your saved session is invalid or expired.');
     }
+    if (!candidate && browserProviderMarker()) {
+      try { return await renewProviderGatewaySession(null); }
+      catch { return null; }
+    }
     if (!candidate && process.env.NODE_ENV !== 'production') {
       // Development may explicitly opt into server-side auto-session. A
       // production bundle never probes issuance without the operator secret.
@@ -436,6 +655,11 @@ export async function restoreGatewaySession(): Promise<GatewaySession | null> {
       try { return await renewGatewaySession(candidate); }
       catch { return null; }
     }
+    if (candidate.expiresAt * 1000 <= Date.now()
+      && (candidate.authMethod === 'apple' || candidate.authMethod === 'google')) {
+      try { return await renewProviderGatewaySession(candidate); }
+      catch { return null; }
+    }
     try { return await validateGatewaySession(); }
     catch (error) {
       if (!(error instanceof GatewayAuthError)) publish({ status: 'authentication-required', session: candidate, error: error instanceof Error ? error.message : 'Gateway session could not be validated.' });
@@ -456,6 +680,7 @@ export async function invalidateGatewaySession(
   if (retireFriendGrant) friendRetirementRevision = sessionRevision;
   sessionToken = null;
   sessionInfo = null;
+  browserProviderMarker(false);
   clearExpiryTimer();
   publish({ status: 'authentication-required', session: null, error: message });
   invalidationPromise = (async () => {
@@ -481,7 +706,9 @@ export async function logoutGatewaySession(): Promise<void> {
       await fetchRaw(`${GATEWAY_URL}/notifications/register`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     } catch { /* Best effort while offline. The next authenticated session can re-register. */ }
     try {
-      await fetchRaw(`${GATEWAY_URL}/auth/session/revoke`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      await fetchRaw(`${GATEWAY_URL}/auth/session/revoke`, {
+        method: 'POST', credentials: 'include', headers: { Authorization: `Bearer ${token}` },
+      });
     } catch { /* Local logout must complete even if the gateway is unavailable. */ }
   }
   await localLogout;
@@ -502,6 +729,10 @@ export async function getGatewaySessionToken(): Promise<string | null> {
   if (sessionInfo && sessionInfo.expiresAt * 1000 <= Date.now()) {
     if (sessionInfo.renewalCode) {
       try { return (await renewGatewaySession(sessionInfo))?.token || null; }
+      catch { return null; }
+    }
+    if (sessionInfo.authMethod === 'apple' || sessionInfo.authMethod === 'google') {
+      try { return (await renewProviderGatewaySession(sessionInfo))?.token || null; }
       catch { return null; }
     }
     await invalidateGatewaySession('Your session has expired.');
@@ -1016,9 +1247,54 @@ export async function fetchAgentMigration(agentId: string, requestId: string): P
   return checkedJson<AgentMigration>(res);
 }
 
-export async function fetchFleet() {
-  const res = await authorizedFetch(GATEWAY_URL + '/fleet', {
-  });
+export interface FleetObjective {
+  objective_id: string;
+  title: string;
+  goal: string;
+  project?: string | null;
+  status: 'submitting' | 'queued' | 'working' | 'blocked' | 'done' | 'failed' | 'cancelled' | string;
+  state: 'queued' | 'in_flight' | 'done' | 'failed' | 'cancelled' | string;
+  terminal: boolean;
+  created_at: number;
+  updated_at: number;
+  last_event_at?: number | null;
+  activity: { phase: string; label: string; occurred_at: number | null }[];
+  workers: { label: string; status: string }[];
+  artifacts: { kind: 'pull-request' | 'report' | 'commit'; label: string; url?: string; reference?: string }[];
+  decisions: { title: string; question: string; state: string; attention_item_id: string; updated_at: number }[];
+  cancellation: { state: 'none' | 'requested' | 'observed' | 'failed'; requested_at?: number | null; allowed: boolean };
+}
+
+export interface FleetProjection {
+  schema: 'magistrate.fleet-projection.v1';
+  source: 'persisted-structured-state';
+  available: boolean;
+  live_process_probe: false;
+  tasks: FleetObjective[];
+  tasks_count: number;
+  last_event_at?: number | null;
+  persisted_runtime_status: string;
+}
+
+export async function fetchFleet(): Promise<FleetProjection> {
+  const res = await authorizedFetch(GATEWAY_URL + '/fleet');
+  const value = await checkedJson<FleetProjection>(res);
+  if (value?.schema !== 'magistrate.fleet-projection.v1' || !Array.isArray(value.tasks)) {
+    throw new Error('Gateway returned an invalid Fleet projection.');
+  }
+  return value;
+}
+
+export async function requestObjectiveCancellation(
+  objectiveId: string, idempotencyKey: string,
+): Promise<{ status: string; objective_id: string; requested_at: number; duplicate: boolean }> {
+  const res = await authorizedFetch(
+    `${GATEWAY_URL}/fleet/objectives/${encodeURIComponent(objectiveId)}/cancellation-requests`,
+    {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+  );
   return checkedJson(res);
 }
 

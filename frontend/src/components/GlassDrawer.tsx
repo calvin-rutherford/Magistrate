@@ -7,7 +7,6 @@ interface GlassDrawerProps {
   visible: boolean;
   onClose: () => void;
   onNavigate: (route: string) => void;
-  activeAgentsCount: number;
   attentionCount: number;
   prsCount: number;
 }
@@ -16,7 +15,6 @@ export const GlassDrawer: React.FC<GlassDrawerProps> = ({
   visible,
   onClose,
   onNavigate,
-  activeAgentsCount,
   attentionCount,
   prsCount
 }) => {
@@ -44,13 +42,6 @@ export const GlassDrawer: React.FC<GlassDrawerProps> = ({
 
               <TouchableOpacity style={styles.menuItem} onPress={() => { onNavigate('index'); onClose(); }}>
                 <Text style={styles.menuItemText}>Situation Room</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.menuItem} onPress={() => { onNavigate('agents'); onClose(); }}>
-                <Text style={styles.menuItemText}>Running Agents</Text>
-                <View style={[styles.badge, { backgroundColor: GlassTokens.colors.operational }]}>
-                  <Text style={styles.badgeText}>{activeAgentsCount}</Text>
-                </View>
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.menuItem} onPress={() => { onNavigate('attention'); onClose(); }}>

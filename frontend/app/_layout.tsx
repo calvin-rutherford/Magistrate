@@ -2,6 +2,7 @@ import '../src/global.css';
 import { Stack, usePathname, useRouter } from 'expo-router';
 import Head from 'expo-router/head';
 import * as Linking from 'expo-linking';
+import * as AppleAuthentication from 'expo-apple-authentication';
 import React, { useEffect, useState } from 'react';
 import { Platform, Text, TextInput, TouchableOpacity, View, StyleSheet } from 'react-native';
 import { notificationManager } from '../src/services/NotificationManager';
@@ -9,12 +10,14 @@ import { NotificationPermissionPrompt } from '../src/components/NotificationPerm
 import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import {
   createGatewaySession,
+  fetchProviderAuthConfiguration,
   invalidateGatewaySession,
   logoutGatewaySession,
   restoreGatewaySession,
   updateUserProfile,
   useGatewaySession,
   validateGatewaySession,
+  ProviderAuthConfiguration,
 } from '../src/api/client';
 import {
   consumePendingIntent,
@@ -22,6 +25,9 @@ import {
   pendingIntentPath,
   usePendingIntent,
 } from '../src/services/PendingIntentRouter';
+import {
+  prepareProviderSignIn, providerSignInAvailable, signInWithProvider,
+} from '../src/services/ProviderSignIn';
 
 export default function RootLayout() {
   const pathname = usePathname();
@@ -31,14 +37,33 @@ export default function RootLayout() {
   const [bootstrapSecret, setBootstrapSecret] = useState('');
   const [sessionError, setSessionError] = useState('');
   const [sessionSubmitting, setSessionSubmitting] = useState(false);
+  const [providerSubmitting, setProviderSubmitting] = useState<'apple' | 'google' | null>(null);
+  const [providerConfiguration, setProviderConfiguration] = useState<ProviderAuthConfiguration | null>(null);
   const [displayName, setDisplayName] = useState('');
   const [onboardingError, setOnboardingError] = useState('');
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
     notificationManager.installNotificationRouting();
     void restoreGatewaySession();
+    void fetchProviderAuthConfiguration()
+      .then(value => { if (mounted) setProviderConfiguration(value); })
+      .catch(() => { if (mounted) setProviderConfiguration(null); });
+    return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    if (session.status !== 'authentication-required' || !providerConfiguration) return;
+    if (providerConfiguration.apple && (
+      (Platform.OS === 'web' && providerConfiguration.apple_web)
+      || (Platform.OS === 'ios' && providerConfiguration.apple_native)
+    )) prepareProviderSignIn('apple');
+    if (providerConfiguration.google && (
+      (Platform.OS === 'web' && providerConfiguration.google_web)
+      || (Platform.OS === 'ios' && providerConfiguration.google_native)
+    )) prepareProviderSignIn('google');
+  }, [providerConfiguration, session.status]);
 
   useEffect(() => {
     // Capture URL launches before auth validation. This covers terminated and
@@ -108,6 +133,22 @@ export default function RootLayout() {
     }
   };
 
+  const submitProvider = async (provider: 'apple' | 'google') => {
+    setProviderSubmitting(provider);
+    setSessionError('');
+    try {
+      await signInWithProvider(provider);
+      if (Platform.OS === 'web') window.scrollTo(0, 0);
+    } catch (error) {
+      const value = error as { code?: string };
+      if (value?.code !== 'ERR_REQUEST_CANCELED') {
+        setSessionError(error instanceof Error ? error.message : `${provider} sign-in could not be completed.`);
+      }
+    } finally {
+      setProviderSubmitting(null);
+    }
+  };
+
   const submitProfile = async () => {
     const name = displayName.trim();
     if (!name || Array.from(name).length > 80) {
@@ -128,6 +169,18 @@ export default function RootLayout() {
   };
 
   const viewportHead = Platform.OS === 'web' ? <Head><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" /></Head> : null;
+  const appleSignInEnabled = Boolean(
+    providerConfiguration?.apple
+    && ((Platform.OS === 'web' && providerConfiguration.apple_web)
+      || (Platform.OS === 'ios' && providerConfiguration.apple_native))
+    && providerSignInAvailable('apple'),
+  );
+  const googleSignInEnabled = Boolean(
+    providerConfiguration?.google
+    && ((Platform.OS === 'web' && providerConfiguration.google_web)
+      || (Platform.OS === 'ios' && providerConfiguration.google_native))
+    && providerSignInAvailable('google'),
+  );
 
   if (session.status === 'authenticated' && session.session?.onboardingRequired) {
     return (
@@ -136,7 +189,7 @@ export default function RootLayout() {
         <View style={styles.sessionOverlay} accessibilityViewIsModal>
           <View style={styles.sessionCard}>
             <Text testID="friend-beta-onboarding-title" style={styles.sessionTitle}>WELCOME TO MAGI</Text>
-            <Text style={styles.sessionCopy}>Your access code is verified. Choose the name Magi should use for this beta account.</Text>
+            <Text style={styles.sessionCopy}>Your sign-in is verified. Choose the name Magi should use for this account.</Text>
             <TextInput
               testID="friend-beta-display-name"
               value={displayName}
@@ -164,7 +217,7 @@ export default function RootLayout() {
               onPress={() => void logoutGatewaySession()}
               style={styles.retryButton}
             >
-              <Text style={styles.retryText}>USE A DIFFERENT ACCESS CODE</Text>
+              <Text style={styles.retryText}>USE A DIFFERENT ACCOUNT</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -185,10 +238,32 @@ export default function RootLayout() {
           </Text>
           <Text style={styles.sessionCopy}>
             {checking
-              ? 'Validating the saved server session. Protected routes stay closed until validation succeeds.'
-              : 'Enter the Friend Beta access code supplied for this device. Deployment operators can also use their owner credential. Neither is stored in the app bundle.'}
+              ? 'Validating your saved session. Protected routes stay closed until validation succeeds.'
+              : 'Sign in to continue your Magi conversation and work across this device.'}
           </Text>
           {!checking ? <>
+            <View style={styles.providerButtons}>
+              {Platform.OS === 'ios' && appleSignInEnabled ? <AppleAuthentication.AppleAuthenticationButton
+                testID="sign-in-apple"
+                buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN}
+                buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.WHITE}
+                cornerRadius={10}
+                style={styles.appleButton}
+                onPress={() => void submitProvider('apple')}
+              /> : appleSignInEnabled ? <TouchableOpacity
+                testID="sign-in-apple" accessibilityRole="button"
+                disabled={providerSubmitting !== null}
+                onPress={() => void submitProvider('apple')}
+                style={[styles.providerButton, providerSubmitting && styles.sessionButtonDisabled]}
+              ><Text style={styles.providerButtonText}>{providerSubmitting === 'apple' ? 'CONNECTING…' : 'CONTINUE WITH APPLE'}</Text></TouchableOpacity> : null}
+              {googleSignInEnabled ? <TouchableOpacity
+                testID="sign-in-google" accessibilityRole="button"
+                disabled={providerSubmitting !== null}
+                onPress={() => void submitProvider('google')}
+                style={[styles.providerButton, providerSubmitting && styles.sessionButtonDisabled]}
+              ><Text style={styles.providerButtonText}>{providerSubmitting === 'google' ? 'CONNECTING…' : 'CONTINUE WITH GOOGLE'}</Text></TouchableOpacity> : null}
+            </View>
+            <View style={styles.accessDivider}><View style={styles.accessDividerLine} /><Text style={styles.accessDividerText}>BETA OR OPERATOR ACCESS</Text><View style={styles.accessDividerLine} /></View>
             <TextInput
               testID="bootstrap-secret"
               value={bootstrapSecret}
@@ -204,9 +279,9 @@ export default function RootLayout() {
             {error ? <Text testID="session-error" style={styles.sessionError}>{error}</Text> : null}
             <TouchableOpacity
               testID="connect-session"
-              disabled={sessionSubmitting || !bootstrapSecret}
+              disabled={sessionSubmitting || providerSubmitting !== null || !bootstrapSecret}
               onPress={() => void submitSession()}
-              style={[styles.sessionButton, (sessionSubmitting || !bootstrapSecret) && styles.sessionButtonDisabled]}
+              style={[styles.sessionButton, (sessionSubmitting || providerSubmitting !== null || !bootstrapSecret) && styles.sessionButtonDisabled]}
             >
               <Text style={styles.sessionButtonText}>{sessionSubmitting ? 'VALIDATING…' : 'CONNECT SECURELY'}</Text>
             </TouchableOpacity>
@@ -241,6 +316,13 @@ const styles = StyleSheet.create({
   sessionCopy: { color: '#b5c1c8', lineHeight: 20, marginBottom: 18 },
   sessionInput: { color: '#fff', borderWidth: 1, borderColor: '#6d8490', borderRadius: 10, padding: 12, marginBottom: 10, fontSize: 16 },
   sessionError: { color: '#ffaaa5', marginBottom: 10 },
+  providerButtons: { gap: 10, marginBottom: 16 },
+  providerButton: { minHeight: 46, borderRadius: 10, borderWidth: 1, borderColor: '#dce3e7', alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff' },
+  providerButtonText: { color: '#101820', fontFamily: 'monospace', fontSize: 12, fontWeight: '700' },
+  appleButton: { width: '100%', height: 46 },
+  accessDivider: { flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 14 },
+  accessDividerLine: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: '#6d8490' },
+  accessDividerText: { color: '#8999a3', fontFamily: 'monospace', fontSize: 9, fontWeight: '700', letterSpacing: 0.6 },
   sessionButton: { padding: 13, borderRadius: 10, backgroundColor: '#fff', alignItems: 'center' },
   sessionButtonDisabled: { opacity: 0.55 },
   sessionButtonText: { color: '#101820', fontFamily: 'monospace', fontWeight: '700' },
