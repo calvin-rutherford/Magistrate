@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -628,11 +628,102 @@ def _migration_github_app(connection: sqlite3.Connection) -> None:
     )""")
 
 
+def _migration_project_context_plane(connection: sqlite3.Connection) -> None:
+    """Install the provider-independent, owner/project-qualified memory ledger."""
+    statements = (
+        """CREATE TABLE IF NOT EXISTS project_memory_entries (
+            entry_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL DEFAULT '',
+            memory_key TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            importance INTEGER NOT NULL CHECK(importance BETWEEN 1 AND 5),
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            deleted_at INTEGER,
+            UNIQUE(owner_user_id, tenant_id, organization_id, workspace_id,
+                   project_id, repository_id, memory_key)
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_project_memory_scope
+            ON project_memory_entries(owner_user_id, tenant_id, organization_id,
+               workspace_id, project_id, repository_id, updated_at)""",
+        """CREATE TABLE IF NOT EXISTS project_memory_terms (
+            entry_id TEXT NOT NULL,
+            term TEXT NOT NULL,
+            PRIMARY KEY(entry_id, term),
+            FOREIGN KEY(entry_id) REFERENCES project_memory_entries(entry_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_project_memory_term ON project_memory_terms(term, entry_id)",
+        """CREATE TABLE IF NOT EXISTS project_memory_revisions (
+            entry_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            actor_session_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(entry_id, revision),
+            FOREIGN KEY(entry_id) REFERENCES project_memory_entries(entry_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS project_memory_audit (
+            owner_user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            entry_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('created','updated','deleted')),
+            actor_session_id TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            previous_event_sha256 TEXT NOT NULL,
+            event_sha256 TEXT NOT NULL,
+            occurred_at INTEGER NOT NULL,
+            PRIMARY KEY(owner_user_id, tenant_id, organization_id, workspace_id,
+                        project_id, repository_id, sequence),
+            UNIQUE(event_sha256),
+            FOREIGN KEY(entry_id) REFERENCES project_memory_entries(entry_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS project_memory_retrievals (
+            retrieval_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            actor_session_id TEXT NOT NULL,
+            query_sha256 TEXT NOT NULL,
+            selected_ids_json TEXT NOT NULL,
+            result_count INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_project_memory_retrieval_scope
+            ON project_memory_retrievals(owner_user_id, tenant_id, organization_id,
+               workspace_id, project_id, repository_id, created_at)""",
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
     (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
     (4, "tenant-github-app", _migration_github_app),
     (5, "credit-billing-ledgers", _migration_credit_billing),
+    (6, "project-context-plane", _migration_project_context_plane),
 )
 
 
@@ -1637,6 +1728,10 @@ def _initialize_db() -> None:
     }
     if 'display_title' not in objective_submission_columns:
         cursor.execute('ALTER TABLE magi_objective_submissions ADD COLUMN display_title TEXT')
+    if 'context_json' not in objective_submission_columns:
+        cursor.execute("ALTER TABLE magi_objective_submissions ADD COLUMN context_json TEXT NOT NULL DEFAULT '{\"schema_version\":\"magi.context-plane.v1\",\"objective_context\":[]}'")
+    if 'context_sha256' not in objective_submission_columns:
+        cursor.execute("ALTER TABLE magi_objective_submissions ADD COLUMN context_sha256 TEXT NOT NULL DEFAULT ''")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_owner_task ON magi_objective_submissions(owner_user_id, task_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_chat_turn ON magi_objective_submissions(owner_user_id, conversation_id, turn_id)')
     cursor.execute('''

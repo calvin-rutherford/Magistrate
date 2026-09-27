@@ -80,6 +80,7 @@ from app.firstmate_execution_api import (
 from app.firstmate_decision_api import router as firstmate_decision_router
 from app.billing import MAX_WEBHOOK_BYTES, validate_billing_configuration
 from app.billing_api import router as billing_router
+from app.project_memory_api import router as project_memory_router
 from app.objective_cancellation import (
     ObjectiveCancellationError, objective_cancellation_service,
 )
@@ -126,6 +127,7 @@ app.include_router(magi_chat_router)
 app.include_router(firstmate_execution_router)
 app.include_router(firstmate_decision_router)
 app.include_router(billing_router)
+app.include_router(project_memory_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -144,8 +146,11 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
     if request.url.path == '/api/v1/uploads' and length > MAX_UPLOAD_REQUEST_BYTES:
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
-    if request.url.path == '/api/v1/magi/messages' and length > MAX_PROMPT_REQUEST_BYTES:
-        return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
+    if (
+        request.url.path == '/api/v1/magi/messages'
+        or request.url.path.startswith('/api/v1/magi/memory/entries/')
+    ) and length > MAX_PROMPT_REQUEST_BYTES:
+        return JSONResponse({'detail': 'The Magi request is too large.'}, status_code=413)
     github_webhook = request.method == 'POST' and request.url.path == '/api/v1/github/webhooks'
     github_install = request.method == 'POST' and request.url.path == '/api/v1/github/app/install'
     stripe_webhook = request.method == 'POST' and request.url.path in {
