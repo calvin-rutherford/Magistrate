@@ -151,6 +151,28 @@ else
     exit 1
   fi
 fi
+STRIPE_SECRET="$(env_value STRIPE_SECRET_KEY)"
+STRIPE_WEBHOOK_SECRET_VALUE="$(env_value STRIPE_WEBHOOK_SECRET)"
+if [[ -n "$STRIPE_SECRET" || -n "$STRIPE_WEBHOOK_SECRET_VALUE" ]]; then
+  if [[ ! "$STRIPE_SECRET" =~ ^sk_live_ || ! "$STRIPE_WEBHOOK_SECRET_VALUE" =~ ^whsec_ ]]; then
+    echo "refusing deploy: production Stripe API and webhook secrets must be configured together with live/valid prefixes" >&2
+    exit 1
+  fi
+  BILLING_CATALOG_PATH="$(env_value MAGISTRATE_BILLING_CATALOG_PATH)"
+  BILLING_RETURN_ORIGINS="$(env_value MAGISTRATE_BILLING_RETURN_ORIGINS)"
+  if [[ "$BILLING_CATALOG_PATH" != /* || "$BILLING_CATALOG_PATH" == "$DEPLOY_DIR"/* || ! -f "$BILLING_CATALOG_PATH" || -L "$BILLING_CATALOG_PATH" ]]; then
+    echo "refusing deploy: activated Stripe billing requires an absolute external regular catalog file" >&2
+    exit 1
+  fi
+  if [[ "$(stat -c '%u' "$BILLING_CATALOG_PATH")" != "$(id -u)" || "$(stat -c '%a' "$BILLING_CATALOG_PATH")" != 600 ]]; then
+    echo "refusing deploy: the external billing catalog must be service-owned mode 0600" >&2
+    exit 1
+  fi
+  if [[ -z "$BILLING_RETURN_ORIGINS" ]]; then
+    echo "refusing deploy: activated Stripe billing requires MAGISTRATE_BILLING_RETURN_ORIGINS" >&2
+    exit 1
+  fi
+fi
 CORS_ORIGINS="$(awk -F= '$1 == "MAGISTRATE_CORS_ORIGINS" { sub(/^[[:space:]]+/, "", $2); print $2; exit }' "$ENV_FILE")"
 CORS_ORIGINS="${CORS_ORIGINS%\"}"; CORS_ORIGINS="${CORS_ORIGINS#\"}"
 if [[ "$CORS_ORIGINS" == *\** ]]; then

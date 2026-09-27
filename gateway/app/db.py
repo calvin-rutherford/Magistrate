@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -480,6 +480,94 @@ def _migration_provider_onboarding_and_billing(connection: sqlite3.Connection) -
     )""")
 
 
+def _migration_credit_billing(connection: sqlite3.Connection) -> None:
+    """Extend the tenant billing account into the credit execution authority."""
+    billing_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(billing_accounts)")
+    }
+    for column, definition in (
+        ("catalog_id", "TEXT"),
+        ("current_period_start", "BIGINT"),
+        ("cancel_at_period_end", "BIGINT NOT NULL DEFAULT 0"),
+        ("grace_ends_at", "BIGINT"),
+        ("available_microcredits", "BIGINT NOT NULL DEFAULT 0"),
+        ("reserved_microcredits", "BIGINT NOT NULL DEFAULT 0"),
+        ("period_spend_microcredits", "BIGINT NOT NULL DEFAULT 0"),
+        ("period_key", "TEXT"),
+    ):
+        if column not in billing_columns:
+            connection.execute(f"ALTER TABLE billing_accounts ADD COLUMN {column} {definition}")
+    connection.execute("UPDATE billing_accounts SET catalog_id = 'free' WHERE catalog_id IS NULL")
+
+    webhook_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(billing_webhook_events)")
+    }
+    for column, definition in (
+        ("payload_sha256", "TEXT"),
+        ("processed_at", "BIGINT"),
+    ):
+        if column not in webhook_columns:
+            connection.execute(f"ALTER TABLE billing_webhook_events ADD COLUMN {column} {definition}")
+
+    connection.execute("""CREATE TABLE IF NOT EXISTS credit_ledger (
+        entry_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        entry_type TEXT NOT NULL CHECK(entry_type IN
+            ('included_grant','topup','reservation','release','settlement','refund','adjustment')),
+        amount_microcredits BIGINT NOT NULL,
+        balance_after_microcredits BIGINT NOT NULL,
+        reservation_id TEXT,
+        objective_id TEXT,
+        source TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_owner ON credit_ledger(owner_user_id, created_at DESC, entry_id)")
+    connection.execute("""CREATE TABLE IF NOT EXISTS credit_reservations (
+        reservation_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        estimated_microcredits BIGINT NOT NULL,
+        actual_microcredits BIGINT,
+        status TEXT NOT NULL CHECK(status IN ('reserved','settled','released')),
+        usage_json TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, objective_id),
+        UNIQUE(owner_user_id, idempotency_key)
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_reservations_active ON credit_reservations(owner_user_id, status)")
+    connection.execute("""CREATE TABLE IF NOT EXISTS execution_usage_ledger (
+        usage_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        reservation_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens BIGINT NOT NULL,
+        output_tokens BIGINT NOT NULL,
+        compute_milliseconds BIGINT NOT NULL,
+        cost_microcredits BIGINT NOT NULL,
+        created_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, event_id),
+        UNIQUE(owner_user_id, objective_id)
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_execution_usage_owner ON execution_usage_ledger(owner_user_id, created_at DESC, usage_id)")
+    connection.execute("""CREATE TABLE IF NOT EXISTS billing_checkout_sessions (
+        stripe_session_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        catalog_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('subscription','credit_pack')),
+        idempotency_key TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )""")
+
+
 def _migration_github_app(connection: sqlite3.Connection) -> None:
     # Customer repository authority comes only from a GitHub App installation.
     # Installation tokens are short-lived and memory-only; no token column is
@@ -544,6 +632,7 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
     (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
     (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
     (4, "tenant-github-app", _migration_github_app),
+    (5, "credit-billing-ledgers", _migration_credit_billing),
 )
 
 
@@ -1638,6 +1727,106 @@ def _initialize_db() -> None:
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_objective ON firstmate_execution_events(owner_user_id, objective_id, occurred_at, created_at)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_wake ON firstmate_execution_events(generation_state, updated_at)')
+
+    # Billing uses integer microcredits throughout. Ledger rows are immutable;
+    # account balances are a transactionally maintained projection that makes
+    # reservation decisions cheap without weakening the audit trail.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS billing_accounts (
+        owner_user_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL DEFAULT 'stripe',
+        external_customer_ref TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        subscription_id TEXT,
+        current_period_end INTEGER,
+        provider_event_created INTEGER,
+        catalog_id TEXT,
+        current_period_start INTEGER,
+        cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+        grace_ends_at INTEGER,
+        available_microcredits INTEGER NOT NULL DEFAULT 0,
+        reserved_microcredits INTEGER NOT NULL DEFAULT 0,
+        period_spend_microcredits INTEGER NOT NULL DEFAULT 0,
+        period_key TEXT,
+        FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS credit_ledger (
+        entry_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        entry_type TEXT NOT NULL CHECK(entry_type IN
+            ('included_grant','topup','reservation','release','settlement','refund','adjustment')),
+        amount_microcredits INTEGER NOT NULL,
+        balance_after_microcredits INTEGER NOT NULL,
+        reservation_id TEXT,
+        objective_id TEXT,
+        source TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_owner ON credit_ledger(owner_user_id, created_at DESC, entry_id)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS credit_reservations (
+        reservation_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        estimated_microcredits INTEGER NOT NULL,
+        actual_microcredits INTEGER,
+        status TEXT NOT NULL CHECK(status IN ('reserved','settled','released')),
+        usage_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, objective_id),
+        UNIQUE(owner_user_id, idempotency_key)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_credit_reservations_active ON credit_reservations(owner_user_id, status)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS execution_usage_ledger (
+        usage_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        reservation_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        compute_milliseconds INTEGER NOT NULL,
+        cost_microcredits INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, event_id),
+        UNIQUE(owner_user_id, objective_id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_execution_usage_owner ON execution_usage_ledger(owner_user_id, created_at DESC, usage_id)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS billing_webhook_events (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        payload_sha256 TEXT,
+        processed_at INTEGER
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS billing_checkout_sessions (
+        stripe_session_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        catalog_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('subscription','credit_pack')),
+        idempotency_key TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )
+    ''')
 
     # Bounded counters make the soak's known loss mode observable without
     # retaining terminal bytes, prompts, replies, tool payloads, or identifiers

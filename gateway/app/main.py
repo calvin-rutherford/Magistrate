@@ -24,11 +24,6 @@ from app.provider_auth import (
     public_session_payload, refresh_session as refresh_provider_session,
     unlink_login_method, validate_provider_auth_configuration,
 )
-from app.billing import (
-    MAX_WEBHOOK_BYTES as BILLING_MAX_WEBHOOK_BYTES, accept_webhook,
-    billing_status, create_checkout, create_portal,
-    validate_billing_configuration,
-)
 from app.onboarding import acknowledge_welcome, onboarding_state
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
@@ -83,6 +78,8 @@ from app.firstmate_execution_api import (
     firstmate_execution_service, router as firstmate_execution_router,
 )
 from app.firstmate_decision_api import router as firstmate_decision_router
+from app.billing import MAX_WEBHOOK_BYTES, validate_billing_configuration
+from app.billing_api import router as billing_router
 from app.objective_cancellation import (
     ObjectiveCancellationError, objective_cancellation_service,
 )
@@ -128,6 +125,7 @@ app.include_router(github_app_router)
 app.include_router(magi_chat_router)
 app.include_router(firstmate_execution_router)
 app.include_router(firstmate_decision_router)
+app.include_router(billing_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -148,21 +146,26 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
     if request.url.path == '/api/v1/magi/messages' and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
-    if request.url.path == '/api/v1/billing/webhook' and length > BILLING_MAX_WEBHOOK_BYTES:
-        return JSONResponse({'detail': 'Billing webhook is too large.'}, status_code=413)
     github_webhook = request.method == 'POST' and request.url.path == '/api/v1/github/webhooks'
     github_install = request.method == 'POST' and request.url.path == '/api/v1/github/app/install'
-    if github_webhook and length > GITHUB_MAX_WEBHOOK_BYTES:
-        return JSONResponse({'detail': 'Webhook payload is too large.'}, status_code=413)
-    if github_install and length > 4096:
-        return JSONResponse({'detail': 'The GitHub App request is too large.'}, status_code=413)
-    if github_webhook or github_install:
-        body_cap = GITHUB_MAX_WEBHOOK_BYTES if github_webhook else 4096
+    stripe_webhook = request.method == 'POST' and request.url.path in {
+        '/api/v1/billing/webhook', '/api/v1/billing/webhooks/stripe',
+    }
+    if github_webhook:
+        body_cap, too_large = GITHUB_MAX_WEBHOOK_BYTES, 'Webhook payload is too large.'
+    elif github_install:
+        body_cap, too_large = 4096, 'The GitHub App request is too large.'
+    elif stripe_webhook:
+        body_cap, too_large = MAX_WEBHOOK_BYTES, 'The Stripe webhook is too large.'
+    else:
+        body_cap, too_large = 0, ''
+    if body_cap and length > body_cap:
+        return JSONResponse({'detail': too_large}, status_code=413)
+    if body_cap:
         body = bytearray()
         async for chunk in request.stream():
             if len(body) + len(chunk) > body_cap:
-                detail = 'Webhook payload is too large.' if github_webhook else 'The GitHub App request is too large.'
-                return JSONResponse({'detail': detail}, status_code=413)
+                return JSONResponse({'detail': too_large}, status_code=413)
             body.extend(chunk)
         request._body = bytes(body)
     firstmate_execution_contract = request.method == 'POST' and bool(re.fullmatch(
@@ -756,31 +759,6 @@ async def delete_account_login_method(
     principal: Principal = Depends(require_scope('account')),
 ):
     return unlink_login_method(principal, provider)
-
-
-@app.get('/api/v1/billing/status')
-async def get_billing_status(principal: Principal = Depends(require_scope('account'))):
-    return billing_status(principal.user_id)
-
-
-@app.post('/api/v1/billing/checkout')
-async def post_billing_checkout(principal: Principal = Depends(require_scope('account'))):
-    profile = get_profile(principal.user_id)
-    email = profile.get('email') if isinstance(profile, dict) else None
-    return await create_checkout(principal.user_id, email if isinstance(email, str) else None)
-
-
-@app.post('/api/v1/billing/portal')
-async def post_billing_portal(principal: Principal = Depends(require_scope('account'))):
-    return await create_portal(principal.user_id)
-
-
-@app.post('/api/v1/billing/webhook')
-async def post_billing_webhook(
-    request: Request,
-    stripe_signature: str = Header('', alias='Stripe-Signature'),
-):
-    return accept_webhook(await request.body(), stripe_signature)
 
 
 @app.post('/api/v1/account/avatar')

@@ -3,16 +3,16 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Animated as NativeAnimated, Image, ImageSourcePropType, Keyboard, type KeyboardEvent, KeyboardAvoidingView, LayoutChangeEvent, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, Animated as NativeAnimated, Image, ImageSourcePropType, Keyboard, type KeyboardEvent, KeyboardAvoidingView, LayoutChangeEvent, Linking, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  AuthProviderInfo, cancelMagiChatTurn,
-  CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ChatUpload,
+  AuthProviderInfo, BillingAccount, cancelMagiChatTurn,
+  CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ChatUpload, createBillingCheckout, createBillingPortal,
   ExecutionProfile, ExecutionSettings, fetchAuthProviders,
-  fetchCanonicalActivitySnapshot, fetchFleet, FleetObjective,
+  fetchBillingAccount, fetchCanonicalActivitySnapshot, fetchFleet, FleetObjective,
   fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth,
   fetchMagiChatConversation, fetchRecentActivity, fetchUnifiedAttention,
   replayMagiChatConversation,
@@ -702,7 +702,7 @@ function SettingsSectionControl({ id, title, expanded, onPress, summary, color, 
   </View>;
 }
 
-function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading, error, executionError, preferences, onPreferencesChange, executionProfiles, executionSettings, onExecutionSettingsChange, onSaveCredential, voiceCapabilities, usage, usageLoading, usageError, onClose, onLogout }: { open: boolean; dark: boolean; animatedStyle: object; scrimStyle: object; health: HealthInfo | null; loading: boolean; error: string | null; executionError?: string | null; preferences: ChatPreferences; onPreferencesChange: (preferences: ChatPreferences) => void; executionProfiles: ExecutionProfile[]; executionSettings: ExecutionSettings; onExecutionSettingsChange: (update: Partial<Pick<ExecutionSettings, 'profile_id' | 'routing_profile_id' | 'switching_behavior' | 'unavailable_behavior'>>) => void; onSaveCredential: (credentialKey: string, credential: string) => Promise<void>; voiceCapabilities: VoiceInputCapabilities; usage: UsageProvider[]; usageLoading: boolean; usageError: string | null; onClose: () => void; onLogout: () => void }) {
+function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading, error, executionError, preferences, onPreferencesChange, executionProfiles, executionSettings, onExecutionSettingsChange, onSaveCredential, voiceCapabilities, usage, usageLoading, usageError, billing, billingError, onBillingAction, onClose, onLogout }: { open: boolean; dark: boolean; animatedStyle: object; scrimStyle: object; health: HealthInfo | null; loading: boolean; error: string | null; executionError?: string | null; preferences: ChatPreferences; onPreferencesChange: (preferences: ChatPreferences) => void; executionProfiles: ExecutionProfile[]; executionSettings: ExecutionSettings; onExecutionSettingsChange: (update: Partial<Pick<ExecutionSettings, 'profile_id' | 'routing_profile_id' | 'switching_behavior' | 'unavailable_behavior'>>) => void; onSaveCredential: (credentialKey: string, credential: string) => Promise<void>; voiceCapabilities: VoiceInputCapabilities; usage: UsageProvider[]; usageLoading: boolean; usageError: string | null; billing: BillingAccount | null; billingError: string | null; onBillingAction: (action: 'portal' | 'topup') => void; onClose: () => void; onLogout: () => void }) {
   const router = useRouter(); const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
   const [expandedSection, setExpandedSection] = useState<SettingsSectionKey | null>(null);
   const [credentialKey, setCredentialKey] = useState('');
@@ -783,10 +783,17 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
     </View> : null}
     </View>
     <View testID="settings-usage-section" style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
-      <SettingsSectionControl first id="usage" title="Usage" expanded={expandedSection === 'usage'} onPress={() => toggleSection('usage')} color={text} muted={muted} summary={usage.length ? `${usage[0].provider}${usage[0].plan ? ` · ${usage[0].plan}` : ''}` : undefined} />
+      <SettingsSectionControl first id="usage" title="Usage" expanded={expandedSection === 'usage'} onPress={() => toggleSection('usage')} color={text} muted={muted} summary={billing ? `${billing.plan_name} · ${(billing.balance_microcredits / 1_000_000).toLocaleString()} credits` : usage.length ? `${usage[0].provider}${usage[0].plan ? ` · ${usage[0].plan}` : ''}` : undefined} />
       {expandedSection === 'usage' ? <View testID="settings-usage-content">
-      <Text style={[styles.settingsToggleDescription, { color: muted }]}>Authenticated quota data only. Missing or unavailable amounts stay explicitly unknown.</Text>
-      {usageLoading ? <PanelText text="Loading authenticated usage…" muted={muted} /> : usageError ? <PanelText text={usageError} muted={brand.critical} /> : usage.length === 0 ? <PanelText text="Usage is unknown; no authenticated quota data is available." muted={muted} /> : usage.map(item => <View key={item.provider} style={styles.settingsUsageItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.provider}{item.plan ? ` · ${item.plan}` : ''}</Text><Text style={[styles.panelItemMeta, { color: item.status === 'fresh' ? muted : brand.attention }]}>{item.status === 'fresh' && item.windows.length ? item.windows.map(window => `${window.label || window.id || 'window'}: ${typeof window.percentRemaining === 'number' ? `${window.percentRemaining}% left` : typeof window.spentUsd === 'number' && typeof window.limitUsd === 'number' ? `$${window.spentUsd} / $${window.limitUsd}` : 'amount unknown'}`).join(' · ') : item.status === 'auth_required' ? 'Authentication required' : item.error || 'Quota unknown'}</Text></View>)}
+      <Text style={[styles.settingsToggleDescription, { color: muted }]}>Execution is reserved before a worker starts and settled from measured provider/model/compute usage. One credit represents one cent of normalized billable cost.</Text>
+      {usageLoading ? <PanelText text="Loading account usage…" muted={muted} /> : billingError ? <PanelText text={billingError} muted={brand.critical} /> : billing ? <View testID="billing-account-summary" style={styles.settingsUsageItem}>
+        <Text style={[styles.panelItemTitle, { color: text }]}>{billing.plan_name} · {(billing.balance_microcredits / 1_000_000).toLocaleString()} credits</Text>
+        <Text style={[styles.panelItemMeta, { color: billing.low_credit_warning ? brand.attention : muted }]}>{billing.low_credit_warning ? 'Low credit balance · ' : ''}{(billing.reserved_microcredits / 1_000_000).toLocaleString()} reserved · {(billing.period_spend_microcredits / 1_000_000).toLocaleString()} used this period · {billing.subscription_status}</Text>
+        <View style={styles.optionRow}><TouchableOpacity testID="billing-add-credits" accessibilityRole="button" onPress={() => onBillingAction('topup')} style={styles.secondaryAction}><Text style={[styles.secondaryActionText, { color: dark ? brand.cyan : brand.violet }]}>Add credits</Text></TouchableOpacity><TouchableOpacity testID="billing-manage" accessibilityRole="button" onPress={() => onBillingAction('portal')} style={styles.secondaryAction}><Text style={[styles.secondaryActionText, { color: dark ? brand.cyan : brand.violet }]}>Manage billing</Text></TouchableOpacity></View>
+        {billing.ledger.slice(0, 5).map(entry => <Text key={entry.entry_id} style={[styles.panelItemMeta, { color: muted }]}>{entry.type.replace('_', ' ')} · {entry.amount_microcredits >= 0 ? '+' : ''}{(entry.amount_microcredits / 1_000_000).toLocaleString()} credits</Text>)}
+      </View> : null}
+      <Text style={[styles.preferenceLabel, { color: muted }]}>PROVIDER QUOTAS</Text>
+      {usageError ? <PanelText text={usageError} muted={brand.critical} /> : usage.length === 0 ? <PanelText text="No authenticated provider quota data is available." muted={muted} /> : usage.map(item => <View key={item.provider} style={styles.settingsUsageItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.provider}{item.plan ? ` · ${item.plan}` : ''}</Text><Text style={[styles.panelItemMeta, { color: item.status === 'fresh' ? muted : brand.attention }]}>{item.status === 'fresh' && item.windows.length ? item.windows.map(window => `${window.label || window.id || 'window'}: ${typeof window.percentRemaining === 'number' ? `${window.percentRemaining}% left` : typeof window.spentUsd === 'number' && typeof window.limitUsd === 'number' ? `$${window.spentUsd} / $${window.limitUsd}` : 'amount unknown'}`).join(' · ') : item.status === 'auth_required' ? 'Authentication required' : item.error || 'Quota unknown'}</Text></View>)}
     </View> : null}
     </View>
     <View testID="settings-appearance-section" style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
@@ -839,7 +846,7 @@ export default function ChatScreen() {
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({ profile_id: null, routing_profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
-  const [objectives, setObjectives] = useState<FleetObjective[]>([]); const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | null>(null); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [objectives, setObjectives] = useState<FleetObjective[]>([]); const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | null>(null); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [billing, setBilling] = useState<BillingAccount | null>(null); const [billingError, setBillingError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
   const [loading, setLoading] = useState(true); const [refreshing, setRefreshing] = useState(false); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
   const [errors, setErrors] = useState<{ fleet?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }>({});
   const chatRefreshRef = useRef<(() => Promise<void>) | null>(null); const refreshPromiseRef = useRef<Promise<void> | null>(null); const mountedRef = useRef(true);
@@ -900,9 +907,27 @@ export default function ChatScreen() {
   }, [refreshAll]);
   useEffect(() => {
     if (!settingsOpen) return;
-    setUsageLoading(true); setUsageError(null);
-    fetchUsage().then(result => setUsage(result.providers)).catch(error => setUsageError(errorText(error, 'Usage data could not be loaded.'))).finally(() => setUsageLoading(false));
+    setUsageLoading(true); setUsageError(null); setBillingError(null);
+    Promise.allSettled([fetchUsage(), fetchBillingAccount()]).then(([usageResult, billingResult]) => {
+      if (usageResult.status === 'fulfilled') setUsage(usageResult.value.providers);
+      else setUsageError(errorText(usageResult.reason, 'Provider usage could not be loaded.'));
+      if (billingResult.status === 'fulfilled') setBilling(billingResult.value);
+      else setBillingError(errorText(billingResult.reason, 'Account balance could not be loaded.'));
+    }).finally(() => setUsageLoading(false));
   }, [settingsOpen]);
+  const onBillingAction = useCallback(async (action: 'portal' | 'topup') => {
+    const returnUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? `${window.location.origin}/chat` : 'magistrate://chat';
+    const key = `billing-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    try {
+      setBillingError(null);
+      const url = action === 'portal'
+        ? await createBillingPortal(returnUrl, key)
+        : await createBillingCheckout('credits-10k', returnUrl, key);
+      await Linking.openURL(url);
+    } catch (error) {
+      setBillingError(errorText(error, 'Billing is not available.'));
+    }
+  }, []);
   const drawerAnimatedStyle = useAnimatedStyle(() => ({ opacity: drawerProgress.value, transform: [{ translateX: interpolate(drawerProgress.value, [0, 1], [-(drawerWidth + 70), 0]) }] }), [drawerWidth]);
   // Drawer, chat, and Settings are sibling layers. The drawer translates only
   // itself; the transcript keeps the same viewport and scroll geometry while a
@@ -923,7 +948,7 @@ export default function ChatScreen() {
         </Animated.View>
       </Animated.View>
       <FleetDetailSheet key={selectedObjective?.objective_id || 'closed'} objective={selectedObjective} dark={dark} onClose={() => setSelectedObjectiveId(null)} onRefresh={refreshAll} onOpenDecision={itemId => { setSelectedObjectiveId(null); router.push({ pathname: '/attention', params: { item: itemId, source: 'fleet' } } as any); }} />
-      <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} scrimStyle={settingsScrimStyle} health={health} loading={healthLoading} error={healthError} executionError={executionError} preferences={preferences} onPreferencesChange={setPreferences} executionProfiles={executionProfiles} voiceCapabilities={voiceCapabilities} executionSettings={executionSettings} onExecutionSettingsChange={update => { void updateExecutionSettings(update).then(saved => { setExecutionSettings(saved); setExecutionError(null); }).catch(error => setExecutionError(errorText(error, 'The execution setting could not be saved.'))); }} onSaveCredential={async (credentialKey, credential) => { try { await saveExecutionCredential(credentialKey, credential); setExecutionError(null); const capabilities = await fetchExecutionCapabilities(); setExecutionProfiles(profilesFromCapabilities(capabilities)); } catch (error) { setExecutionError(errorText(error, 'The credential could not be saved.')); } }} usage={usage} usageLoading={usageLoading} usageError={usageError} onClose={() => setSettingsOpen(false)} onLogout={() => { setSettingsOpen(false); void logoutGatewaySession(); }} />
+      <SettingsSheet open={settingsOpen} dark={dark} animatedStyle={settingsAnimatedStyle} scrimStyle={settingsScrimStyle} health={health} loading={healthLoading} error={healthError} executionError={executionError} preferences={preferences} onPreferencesChange={setPreferences} executionProfiles={executionProfiles} voiceCapabilities={voiceCapabilities} executionSettings={executionSettings} onExecutionSettingsChange={update => { void updateExecutionSettings(update).then(saved => { setExecutionSettings(saved); setExecutionError(null); }).catch(error => setExecutionError(errorText(error, 'The execution setting could not be saved.'))); }} onSaveCredential={async (credentialKey, credential) => { try { await saveExecutionCredential(credentialKey, credential); setExecutionError(null); const capabilities = await fetchExecutionCapabilities(); setExecutionProfiles(profilesFromCapabilities(capabilities)); } catch (error) { setExecutionError(errorText(error, 'The credential could not be saved.')); } }} usage={usage} usageLoading={usageLoading} usageError={usageError} billing={billing} billingError={billingError} onBillingAction={action => { void onBillingAction(action); }} onClose={() => setSettingsOpen(false)} onLogout={() => { setSettingsOpen(false); void logoutGatewaySession(); }} />
     </>}
   </SafeAreaView></EnvironmentBackground>;
 }

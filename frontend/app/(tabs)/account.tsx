@@ -258,8 +258,10 @@ export default function AccountScreen() {
   const openBillingPortal = async () => {
     setIdentityBusy('billing'); setIdentityNotice(null);
     try {
-      const portal = await createBillingPortal();
-      await WebBrowser.openBrowserAsync(portal.url);
+      const returnUrl = Platform.OS === 'web' && typeof window !== 'undefined'
+        ? `${window.location.origin}/account` : 'magistrate://chat';
+      const portalUrl = await createBillingPortal(returnUrl, `billing-portal-${Date.now()}`);
+      await WebBrowser.openBrowserAsync(portalUrl);
     } catch (error) { setIdentityNotice(errorText(error, 'Billing management is unavailable.')); }
     finally { setIdentityBusy(null); }
   };

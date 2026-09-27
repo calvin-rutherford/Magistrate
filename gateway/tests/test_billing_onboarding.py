@@ -65,6 +65,43 @@ def test_billing_migration_extends_tenant_schema_and_backfills_login(tmp_path):
     connection.close()
 
 
+def test_credit_billing_migration_evolves_the_canonical_account_and_webhook_tables(tmp_path):
+    connection = sqlite3.connect(tmp_path / "credit-billing-migration.sqlite3")
+    connection.execute(
+        """CREATE TABLE billing_accounts(
+             owner_user_id TEXT PRIMARY KEY, provider TEXT NOT NULL,
+             external_customer_ref TEXT, status TEXT NOT NULL,
+             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+             subscription_id TEXT, current_period_end INTEGER, provider_event_created INTEGER
+           )"""
+    )
+    connection.execute(
+        """CREATE TABLE billing_webhook_events(
+             event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, received_at INTEGER NOT NULL
+           )"""
+    )
+    connection.execute(
+        """INSERT INTO billing_accounts
+           (owner_user_id,provider,status,created_at,updated_at)
+           VALUES('existing-owner','stripe','active',1,1)"""
+    )
+
+    db.apply_schema_migrations(connection, ((
+        5, "credit-billing-ledgers", db._migration_credit_billing,
+    ),))
+
+    account = connection.execute(
+        "SELECT catalog_id, available_microcredits, reserved_microcredits FROM billing_accounts"
+    ).fetchone()
+    assert account == ("free", 0, 0)
+    webhook_columns = {row[1] for row in connection.execute("PRAGMA table_info(billing_webhook_events)")}
+    assert {"payload_sha256", "processed_at"} <= webhook_columns
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"credit_ledger", "credit_reservations", "execution_usage_ledger", "billing_checkout_sessions"} <= tables
+    assert "billing_customers" not in tables
+    connection.close()
+
+
 def test_partial_billing_configuration_refuses_startup(monkeypatch):
     for name in (
         "MAGISTRATE_STRIPE_SECRET_KEY", "MAGISTRATE_STRIPE_WEBHOOK_SECRET",

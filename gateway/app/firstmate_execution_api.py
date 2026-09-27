@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Path
 
 from app.auth import Principal, require_any_scope, require_scope
+from app.billing import BillingError
 from app.firstmate_execution import (
     FirstmateCompletionWakeContract,
     FirstmateExecutionConflict,
@@ -23,6 +24,8 @@ def _execution_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, FirstmateExecutionConflict):
         return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, BillingError):
+        return HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)})
     return HTTPException(status_code=422, detail=str(exc))
 
 
@@ -34,7 +37,7 @@ async def post_firstmate_execution_event(
     """Persist one owner-scoped event and wake verified completion if present."""
     try:
         return await firstmate_execution_service.ingest(principal.user_id, event)
-    except (FirstmateExecutionNotFound, FirstmateExecutionConflict, ValueError) as exc:
+    except (FirstmateExecutionNotFound, FirstmateExecutionConflict, BillingError, ValueError) as exc:
         raise _execution_error(exc) from exc
 
 
@@ -62,5 +65,5 @@ async def wake_firstmate_completion_event(
             event_id,
             retry_failed=contract.retry_failed,
         )
-    except (FirstmateExecutionNotFound, FirstmateExecutionConflict, ValueError) as exc:
+    except (FirstmateExecutionNotFound, FirstmateExecutionConflict, BillingError, ValueError) as exc:
         raise _execution_error(exc) from exc

@@ -859,6 +859,37 @@ export interface UsageSummary {
   source: 'quota-axi' | string;
 }
 
+export interface BillingLedgerEntry {
+  entry_id: string;
+  type: 'included_grant' | 'topup' | 'reservation' | 'release' | 'settlement' | 'refund' | 'adjustment';
+  amount_microcredits: number;
+  balance_after_microcredits: number;
+  objective_id?: string | null;
+  created_at: number;
+}
+
+export interface BillingAccount {
+  schema_version: 'magistrate.billing-account.v1';
+  catalog_id: string;
+  plan_name: string;
+  subscription_status: string;
+  current_period_end: number | null;
+  cancel_at_period_end: boolean;
+  grace_ends_at: number | null;
+  balance_microcredits: number;
+  reserved_microcredits: number;
+  period_spend_microcredits: number;
+  low_credit_warning: boolean;
+  entitlements: Record<string, boolean>;
+  limits: { concurrency: number; monthly_spend_microcredits: number };
+  ledger: BillingLedgerEntry[];
+  usage: {
+    usage_id: string; event_id: string; objective_id: string; provider: string; model: string;
+    input_tokens: number; output_tokens: number; compute_milliseconds: number;
+    cost_microcredits: number; created_at: number;
+  }[];
+}
+
 export interface HealthInfo {
   status: 'healthy' | 'degraded' | string;
   service: string;
@@ -1542,16 +1573,6 @@ export async function acknowledgeAccountWelcome(): Promise<AccountOnboardingStat
   return checkedJson<AccountOnboardingState>(res);
 }
 
-export interface BillingSession { schema_version: 'billing-checkout.v1' | 'billing-portal.v1'; url: string; checkout_session_id?: string }
-export async function createBillingCheckout(): Promise<BillingSession> {
-  const res = await authorizedFetch(`${GATEWAY_URL}/billing/checkout`, { method: 'POST' });
-  return checkedJson<BillingSession>(res);
-}
-export async function createBillingPortal(): Promise<BillingSession> {
-  const res = await authorizedFetch(`${GATEWAY_URL}/billing/portal`, { method: 'POST' });
-  return checkedJson<BillingSession>(res);
-}
-
 export interface ProviderLoginMethod {
   provider: 'apple' | 'google'; label: string; current: boolean;
   linked_at: number; last_authenticated_at: number | null;
@@ -1684,6 +1705,35 @@ export async function fetchUsage(): Promise<UsageSummary> {
   const data = await checkedJson<UsageSummary>(res);
   if (!data || !Array.isArray(data.providers)) throw new Error('Gateway returned invalid usage data.');
   return data;
+}
+
+export async function fetchBillingAccount(): Promise<BillingAccount> {
+  const res = await authorizedFetch(GATEWAY_URL + '/billing/account', {});
+  const data = await checkedJson<BillingAccount>(res);
+  if (!data || data.schema_version !== 'magistrate.billing-account.v1' || typeof data.balance_microcredits !== 'number' || !Array.isArray(data.ledger) || !Array.isArray(data.usage)) {
+    throw new Error('Gateway returned invalid billing data.');
+  }
+  return data;
+}
+
+export async function createBillingPortal(returnUrl: string, idempotencyKey: string): Promise<string> {
+  const res = await authorizedFetch(GATEWAY_URL + '/billing/portal', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ return_url: returnUrl, idempotency_key: idempotencyKey }),
+  });
+  const data = await checkedJson<{ portal_url: string }>(res);
+  if (!data || typeof data.portal_url !== 'string' || !data.portal_url.startsWith('https://')) throw new Error('Gateway returned an invalid billing portal.');
+  return data.portal_url;
+}
+
+export async function createBillingCheckout(catalogId: string, returnUrl: string, idempotencyKey: string): Promise<string> {
+  const res = await authorizedFetch(GATEWAY_URL + '/billing/checkout', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ catalog_id: catalogId, return_url: returnUrl, idempotency_key: idempotencyKey }),
+  });
+  const data = await checkedJson<{ checkout_url: string }>(res);
+  if (!data || typeof data.checkout_url !== 'string' || !data.checkout_url.startsWith('https://')) throw new Error('Gateway returned an invalid checkout.');
+  return data.checkout_url;
 }
 
 export async function fetchExecutionCapabilities(): Promise<ExecutionCapabilities> {

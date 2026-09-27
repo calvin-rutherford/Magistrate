@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 from app import db
+from app.billing import BillingError, CreditLedger
 from app.firstmate_client import FirstmateClient
 from app.firstmate_producer import ProducerContractError
 
@@ -237,6 +238,13 @@ async def reconcile_pending_objective_intake(
             attempt=attempt,
         )
         try:
+            # A crash may have landed after the objective row but before its
+            # reservation. Recovery must restore the same pre-start hard gate.
+            CreditLedger().reserve_objective(
+                str(row["owner_user_id"]),
+                claim.objective_id,
+                idempotency_key=f"objective:{claim.objective_id}",
+            )
             await objective_dispatcher.submit(
                 task_id=claim.task_id,
                 title=_task_title(contract),
@@ -244,11 +252,13 @@ async def reconcile_pending_objective_intake(
                 body=_task_body(claim.objective_id, claim.contract_json),
             )
             store.accept(str(row["owner_user_id"]), claim)
-        except ObjectiveDispatchError as exc:
+        except (ObjectiveDispatchError, BillingError) as exc:
             reason = str(exc)
+            prefix = "objective_dispatch" if isinstance(exc, ObjectiveDispatchError) else "objective_billing"
+            safe_reason = getattr(exc, "code", reason)
             store.fail(
                 str(row["owner_user_id"]), claim,
-                f"objective_dispatch_{reason}" if reason else "objective_dispatch_failed",
+                f"{prefix}_{safe_reason}" if safe_reason else f"{prefix}_failed",
             )
             counts["failed"] += 1
         else:

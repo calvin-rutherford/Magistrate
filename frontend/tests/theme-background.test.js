@@ -25,7 +25,9 @@ test('the MVP appearance defaults and persistence contract are explicit', () => 
   assert.match(preferences, /removeItem\(CHAT_CUSTOM_BACKGROUND_KEY\)/);
   const settings = read('app/(tabs)/chat.tsx');
   assert.match(settings, /settings-usage-section/);
-  assert.match(settings, /Authenticated quota data only/);
+  assert.match(settings, /Execution is reserved before a worker starts/);
+  assert.match(settings, /billing-account-summary/);
+  assert.match(settings, /PROVIDER QUOTAS/);
   assert.doesNotMatch(settings, /key: 'usage'/);
   assert.match(settings, /settings-execution-section/);
   assert.match(settings, /settings-theme-options/);

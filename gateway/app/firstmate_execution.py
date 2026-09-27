@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import sqlite3
 from app.persistence import connect
 import time
@@ -20,6 +21,7 @@ from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app import db
+from app.billing import CreditLedger
 from app.activity_store import (
     _contains_sensitive_text,
     _upsert_activity,
@@ -272,13 +274,23 @@ class FirstmateProgressEvent(_FirstmateExecutionEventBase):
     ]
 
 
+class FirstmateMeasuredUsage(_StrictExecutionContract):
+    provider: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    model: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    input_tokens: int = Field(ge=0, le=MAX_SAFE_INTEGER)
+    output_tokens: int = Field(ge=0, le=MAX_SAFE_INTEGER)
+    compute_milliseconds: int = Field(ge=0, le=MAX_SAFE_INTEGER)
+
+
 class FirstmateObjectiveCompletedEvent(_FirstmateExecutionEventBase):
     phase: Literal["objective.completed"]
     evidence: FirstmateCompletionEvidence
+    usage: FirstmateMeasuredUsage | None = None
 
 
 class FirstmateObjectiveTerminalEvent(_FirstmateExecutionEventBase):
     phase: Literal["objective.failed", "objective.cancelled"]
+    usage: FirstmateMeasuredUsage | None = None
 
 
 FirstmateExecutionEventContract = Annotated[
@@ -309,7 +321,9 @@ def _connect() -> sqlite3.Connection:
 
 
 def _event_payload(event: _FirstmateExecutionEventBase) -> tuple[str, str]:
-    payload = canonical_json(event.model_dump(mode="json"))
+    # Preserve the historical immutable bytes when optional additive billing
+    # usage is absent; present measured usage remains part of event identity.
+    payload = canonical_json(event.model_dump(mode="json", exclude_none=True))
     return payload, hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -807,7 +821,32 @@ class FirstmateExecutionService:
     async def ingest(
         self, owner_user_id: str, event: _FirstmateExecutionEventBase,
     ) -> dict[str, Any]:
+        production = os.getenv("MAGISTRATE_ENV", "").strip().lower() not in {
+            "dev", "development", "test", "testing",
+        }
+        if production and event.phase in _TERMINAL_PHASES and getattr(event, "usage", None) is None:
+            raise ValueError("Terminal execution events require measured billing usage in production.")
         stored = await asyncio.to_thread(self.store.ingest, owner_user_id, event)
+        usage = getattr(event, "usage", None)
+        if event.phase in _TERMINAL_PHASES:
+            ledger = CreditLedger()
+            if usage is not None:
+                await asyncio.to_thread(
+                    ledger.settle_objective,
+                    owner_user_id,
+                    event.objective_id,
+                    usage.model_dump(mode="json"),
+                    event_id=event.event_id,
+                )
+            else:
+                # Development/test compatibility may omit usage; release the
+                # reservation for every terminal phase rather than stranding it.
+                await asyncio.to_thread(
+                    ledger.release_objective,
+                    owner_user_id,
+                    event.objective_id,
+                    reason=event.phase,
+                )
         if event.phase == "objective.completed":
             woken = await self.wake(owner_user_id, event.event_id)
             # Preserve whether this call accepted the immutable source event;
