@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import time
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -346,7 +347,7 @@ def create_challenge(
     nonce = secrets.token_urlsafe(32)
     nonce_hash = hashlib.sha256(nonce.encode("ascii")).hexdigest()
     db.init_db()
-    with sqlite3.connect(db.DB_PATH) as connection:
+    with connect(db.DB_PATH) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
         _cleanup_expired_session_families(connection, now)
@@ -662,7 +663,7 @@ async def exchange_challenge(
         raise HTTPException(status_code=401, detail="The sign-in challenge is invalid or expired.")
     db.init_db()
     now = int(time.time())
-    with sqlite3.connect(db.DB_PATH) as connection:
+    with connect(db.DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
         challenge = connection.execute(
             "SELECT * FROM provider_auth_challenges WHERE challenge_id = ?", (challenge_id,),
@@ -695,7 +696,7 @@ async def exchange_challenge(
     requested_name = _display_name(display_name) or claims.name
     scopes = _provider_scopes()
 
-    connection = sqlite3.connect(db.DB_PATH, timeout=10)
+    connection = connect(db.DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys = ON")
@@ -832,7 +833,7 @@ def refresh_session(refresh_token: str, *, client_platform: ClientPlatform) -> d
     now = int(time.time())
     token_hash = _hash_token(refresh_token)
     db.init_db()
-    connection = sqlite3.connect(db.DB_PATH, timeout=10)
+    connection = connect(db.DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys = ON")

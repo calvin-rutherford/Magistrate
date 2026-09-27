@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sqlite3
+from app.persistence import connect
 import time
 import unicodedata
 from typing import Annotated, Any, Literal, Union
@@ -301,7 +302,7 @@ def _now_ms() -> int:
 
 def _connect() -> sqlite3.Connection:
     db.init_db()
-    connection = sqlite3.connect(db.DB_PATH, timeout=10)
+    connection = connect(db.DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection

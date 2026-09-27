@@ -6,16 +6,25 @@ The production gateway and its static Expo web build live together in
 that persistent checkout. The deployment checkout owns its `.env`; keep that
 file out of Git and do not copy it from a dirty development checkout during a
 routine update. Production startup is fail-closed: the file must set
-`MAGISTRATE_ENV=production`, `MAGISTRATE_DB_PATH` to an absolute path outside
-the checkout, `MAGISTRATE_BOOTSTRAP_SECRET`, `MAGISTRATE_SECRET_KEY`, and
-`MAGISTRATE_CORS_ORIGINS` (HTTPS origins only). The SQLite file and its
-rollback/backup copies therefore survive frontend exports and Git updates.
+`MAGISTRATE_ENV=production`, exactly one database backend,
+`MAGISTRATE_BOOTSTRAP_SECRET`, `MAGISTRATE_SECRET_KEY`, and
+`MAGISTRATE_CORS_ORIGINS` (HTTPS origins only). Single-instance SQLite uses an
+absolute `MAGISTRATE_DB_PATH` outside the checkout. Multi-instance PostgreSQL
+uses `MAGISTRATE_DATABASE_URL`, a mode-0700 `MAGISTRATE_STATE_DIR`, and a
+restorable managed snapshot acknowledged with
+`MAGISTRATE_POSTGRES_BACKUP_CONFIRMED=true` for each deploy. See
+[`identity-tenancy-data-lifecycle.md`](./identity-tenancy-data-lifecycle.md).
 
 The base Phase 1 production settings are:
 
 ```dotenv
 MAGISTRATE_ENV=production
+# Choose SQLite (single instance):
 MAGISTRATE_DB_PATH=/var/lib/magistrate/magistrate.sqlite3
+# Or PostgreSQL (multi instance), omitting MAGISTRATE_DB_PATH:
+# MAGISTRATE_DATABASE_URL=postgresql://magistrate:...@db.internal/magistrate?sslmode=verify-full
+# MAGISTRATE_STATE_DIR=/var/lib/magistrate
+# MAGISTRATE_POSTGRES_BACKUP_CONFIRMED=true
 MAGISTRATE_BOOTSTRAP_SECRET=<operator-generated-secret>
 MAGISTRATE_SECRET_KEY=<generated-fernet-key>
 MAGISTRATE_CORS_ORIGINS=https://magistrate.example

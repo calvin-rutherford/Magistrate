@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -41,7 +42,7 @@ def _root() -> Path:
 
 def init_upload_db() -> None:
     db.init_db()
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         conn.execute('''CREATE TABLE IF NOT EXISTS chat_uploads (
             upload_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, filename TEXT NOT NULL,
             media_type TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL,
@@ -165,7 +166,7 @@ def save_upload(user_id: str, filename: str, media_type: Optional[str], content:
         handle.write(content)
     os.chmod(destination, 0o600)
     try:
-        with sqlite3.connect(db.DB_PATH) as conn:
+        with connect(db.DB_PATH) as conn:
             conn.execute('INSERT INTO chat_uploads(upload_id,user_id,filename,media_type,size,path,created_at) VALUES(?,?,?,?,?,?,?)',
                          (upload_id, user_id, safe_name, kind, len(content), str(destination), int(time.time())))
     except Exception:
@@ -185,7 +186,7 @@ def associate_uploads(user_id: str, message_id: str, upload_ids: list[str]) -> N
         raise ValueError('Invalid attachment reference.')
     init_upload_db()
     now = int(time.time())
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         for upload_id in upload_ids:
             row = conn.execute('SELECT 1 FROM chat_uploads WHERE upload_id=? AND user_id=?', (upload_id, user_id)).fetchone()
             if not row:
@@ -198,7 +199,7 @@ def get_upload(user_id: str, upload_id: str) -> Optional[dict[str, Any]]:
     if not _SAFE_UPLOAD_ID.fullmatch(upload_id):
         return None
     init_upload_db()
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute('SELECT * FROM chat_uploads WHERE upload_id=? AND user_id=?', (upload_id, user_id)).fetchone()
     if not row or not Path(row['path']).is_file():

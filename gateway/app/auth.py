@@ -12,8 +12,8 @@ import os
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import time
-import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -32,6 +32,7 @@ FRIEND_BETA_DEFAULT_SCOPES = frozenset({"read", "account", "notifications"})
 FRIEND_BETA_SHARED_RUNTIME_SCOPES = frozenset({"voice", "command"})
 _FRIEND_BETA_ACCESS_PATTERN = re.compile(r"^mgb_[A-Za-z0-9_-]{32,64}$")
 _FRIEND_BETA_USER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -59,14 +60,7 @@ def _truthy(name: str) -> bool:
 
 
 def _valid_user_id(value: object) -> bool:
-    return (
-        isinstance(value, str) and 0 < len(value) <= 128
-        and not any(
-            unicodedata.category(character).startswith('C')
-            or unicodedata.category(character) in {'Zl', 'Zp'}
-            for character in value
-        )
-    )
+    return isinstance(value, str) and _USER_ID_PATTERN.fullmatch(value) is not None
 
 
 def _session_db() -> None:
@@ -90,7 +84,7 @@ def _revoke_push_delivery(connection: sqlite3.Connection, user_id: str, revoked_
 def _suspend_friend_beta_sessions_and_push(now: int) -> None:
     """Apply the default-off feature flag as an authorization/delivery kill switch."""
     _session_db()
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             """UPDATE gateway_sessions SET revoked_at = ?
@@ -219,7 +213,7 @@ def create_friend_beta_access_grant(
     access_code = FRIEND_BETA_ACCESS_PREFIX + secrets.token_urlsafe(32)
     grant_id = "fbg_" + secrets.token_urlsafe(18)
     _session_db()
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         connection.execute("BEGIN IMMEDIATE")
         existing = connection.execute(
             """SELECT 1 FROM friend_beta_access_grants
@@ -273,7 +267,7 @@ def list_friend_beta_access_grants(
         query += " WHERE user_id = ?"
         parameters = (user_id,)
     query += " ORDER BY created_at, grant_id"
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         rows = connection.execute(query, parameters).fetchall()
     grants = []
     for row in rows:
@@ -299,7 +293,7 @@ def revoke_friend_beta_access_grant(grant_id: str, *, now: Optional[int] = None)
         raise ValueError("Friend Beta grant_id is invalid")
     revoked_at = int(time.time() if now is None else now)
     _session_db()
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         connection.execute("BEGIN IMMEDIATE")
         grant = connection.execute(
             "SELECT user_id FROM friend_beta_access_grants WHERE grant_id = ?",
@@ -333,7 +327,7 @@ def issue_friend_beta_session(access_code: str) -> dict[str, object]:
 
     now = int(time.time())
     _session_db()
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             """SELECT grant_id, user_id, scopes, expires_at, revoked_at
@@ -391,7 +385,7 @@ def account_onboarding_required(principal: Principal) -> bool:
     ):
         return False
     _session_db()
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         row = connection.execute(
             "SELECT name FROM user_profiles WHERE user_id = ?", (principal.user_id,),
         ).fetchone()
@@ -408,7 +402,7 @@ def cleanup_sessions(*, now: Optional[int] = None) -> int:
     """Delete old revoked/expired rows without touching active sessions."""
     _session_db()
     cutoff = int(time.time() if now is None else now) - SESSION_RETENTION_SECONDS
-    with sqlite3.connect(database.DB_PATH) as conn:
+    with connect(database.DB_PATH) as conn:
         result = conn.execute(
             "DELETE FROM gateway_sessions WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR expires_at < ?",
             (cutoff, cutoff),
@@ -438,7 +432,16 @@ def issue_session(bootstrap_secret: Optional[str] = None) -> dict[str, object]:
 
     _session_db()
     cleanup_sessions(now=now)
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
+        # Successful possession of the configured bootstrap credential may
+        # intentionally create a fresh account after prior erasure; passive DB
+        # initialization and rejected/old sessions never recreate it.
+        connection.execute(
+            """INSERT OR IGNORE INTO user_profiles
+               (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
+               VALUES (?, '', '', '', '', 'dusk-mountain', ?, ?)""",
+            (user_id, now, now),
+        )
         return _insert_session(
             connection, user_id=user_id, scopes=scopes, now=now, expires_at=expires_at,
         )
@@ -451,7 +454,7 @@ def revoke_session(token: str) -> None:
     except (UnicodeEncodeError, TypeError):
         return
     now = int(time.time())
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
             """SELECT access_grant_id, user_id, provider_session_id
@@ -486,7 +489,7 @@ def _principal_from_token(token: str) -> Principal:
         raise HTTPException(status_code=401, detail="Invalid or expired session") from None
     _session_db()
     now = int(time.time())
-    with sqlite3.connect(database.DB_PATH) as connection:
+    with connect(database.DB_PATH) as connection:
         row = connection.execute(
             """SELECT s.session_id, s.user_id, s.scopes, s.expires_at, s.revoked_at,
                       s.access_grant_id, g.expires_at, g.revoked_at,

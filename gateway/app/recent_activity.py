@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any, Dict, List
 
 from app.github_service import GitHubService
@@ -8,9 +9,16 @@ from app.structured_runtime import StructuredRuntimeProjection
 class RecentActivityService:
     """Merge persisted structured execution facts with forge merge events."""
 
-    def __init__(self, runtime: StructuredRuntimeProjection, github: GitHubService):
+    def __init__(
+        self,
+        runtime: StructuredRuntimeProjection,
+        github: GitHubService,
+        *,
+        shared_provider_owner_only: bool = False,
+    ):
         self.runtime = runtime
         self.github = github
+        self.shared_provider_owner_only = shared_provider_owner_only
 
     async def get_recent_activity(
         self,
@@ -18,9 +26,15 @@ class RecentActivityService:
         limit: int = 20,
         refresh: bool = False,
     ) -> Dict[str, Any]:
+        github_read = (
+            self.github.get_merged_pull_requests(limit=limit, refresh=refresh)
+            if not self.shared_provider_owner_only
+            or owner_user_id == os.getenv('MAGISTRATE_BOOTSTRAP_USER_ID', 'default_user').strip()
+            else asyncio.sleep(0, result=PermissionError('shared provider data is owner-only'))
+        )
         fleet_result, github_result = await asyncio.gather(
             asyncio.to_thread(self.runtime.recent_activity, owner_user_id, limit=limit),
-            self.github.get_merged_pull_requests(limit=limit, refresh=refresh),
+            github_read,
             return_exceptions=True,
         )
         source_status = {

@@ -3,12 +3,14 @@ import sqlite3
 import base64
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Dict, Any, List, Optional, Tuple
 from cryptography.fernet import Fernet
 from cryptography.fernet import InvalidToken
+from app.persistence import connect, is_postgres
 
 # Deployments must provide an absolute path outside the checkout so upgrades
 # cannot replace or strand the operator's SQLite state. Development and tests
@@ -16,10 +18,17 @@ from cryptography.fernet import InvalidToken
 # was omitted.
 _environment_at_import = os.getenv('MAGISTRATE_ENV', '').strip().lower()
 _configured_db_path = os.getenv('MAGISTRATE_DB_PATH', '').strip()
+_database_url = os.getenv('MAGISTRATE_DATABASE_URL', '').strip()
+_state_dir = os.getenv('MAGISTRATE_STATE_DIR', '').strip()
 DEFAULT_CIPHERTEXT_VERSION = 'v1'
 DEVELOPMENT_MODES = frozenset({'dev', 'development', 'test', 'testing'})
 DB_PATH = _configured_db_path
-if not DB_PATH and _environment_at_import in DEVELOPMENT_MODES:
+if _database_url:
+    if not _state_dir and _environment_at_import not in DEVELOPMENT_MODES:
+        raise RuntimeError('MAGISTRATE_STATE_DIR is required with PostgreSQL outside development/test mode')
+    state_root = Path(_state_dir) if _state_dir else Path(__file__).resolve().parents[1]
+    DB_PATH = str(state_root / 'postgresql.state')
+elif not DB_PATH and _environment_at_import in DEVELOPMENT_MODES:
     DB_PATH = str(Path(__file__).resolve().parents[1] / 'magistrate.db')
 LEGACY_MIGRATION_FLAG = 'MAGISTRATE_ALLOW_LEGACY_MIGRATION'
 ROTATION_FLAG = 'MAGISTRATE_KEY_ROTATION_ENABLED'
@@ -256,7 +265,7 @@ def _rewrite_oauth_credentials(
     if limit < 1 or limit > MAX_ROTATION_ROWS:
         raise SecretRotationError(f'limit must be between 1 and {MAX_ROTATION_ROWS}')
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         rows = conn.execute(
             'SELECT id, access_token_enc, refresh_token_enc FROM oauth_credentials LIMIT ?',
@@ -336,7 +345,184 @@ def rotate_oauth_credentials(
     """Rotate OAuth and live Pi ciphertext; retain the historical API name."""
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
-def init_db():
+
+SCHEMA_VERSION = 2
+
+
+def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
+    statements = (
+        """CREATE TABLE IF NOT EXISTS workspaces (
+            workspace_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK(kind IN ('personal')),
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS projects (
+            project_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            owner_user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL CHECK(kind IN ('standalone','github')),
+            status TEXT NOT NULL CHECK(status IN ('active','archived')),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, slug),
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id),
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_projects_owner_status ON projects(owner_user_id, status, updated_at)",
+        """CREATE TABLE IF NOT EXISTS project_repositories (
+            repository_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            provider TEXT NOT NULL CHECK(provider IN ('github')),
+            provider_repository_id TEXT,
+            full_name TEXT NOT NULL,
+            html_url TEXT NOT NULL,
+            default_branch TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, provider, full_name),
+            FOREIGN KEY(project_id) REFERENCES projects(project_id),
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_project_repositories_project ON project_repositories(owner_user_id, project_id)",
+        """CREATE TABLE IF NOT EXISTS project_memories (
+            memory_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            memory_key TEXT NOT NULL,
+            value_enc TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, project_id, memory_key),
+            FOREIGN KEY(project_id) REFERENCES projects(project_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS billing_accounts (
+            owner_user_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            external_customer_ref TEXT,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS account_credit_ledger (
+            credit_event_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT,
+            amount_microunits INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            provider_event_id TEXT,
+            created_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, provider_event_id),
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id),
+            FOREIGN KEY(project_id) REFERENCES projects(project_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_credit_ledger_owner ON account_credit_ledger(owner_user_id, created_at)",
+    )
+    for statement in statements:
+        connection.execute(statement)
+    objective_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(magi_objective_submissions)")
+    }
+    if "project_id" not in objective_columns:
+        connection.execute("ALTER TABLE magi_objective_submissions ADD COLUMN project_id TEXT")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_magi_objectives_project ON magi_objective_submissions(owner_user_id, project_id, created_at)"
+    )
+
+
+_SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
+    (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
+)
+
+
+def apply_schema_migrations(
+    connection: sqlite3.Connection,
+    migrations: Optional[tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...]] = None,
+) -> None:
+    """Apply pending migrations with one rollback boundary per migration."""
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            applied_at INTEGER NOT NULL
+        )"""
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES (1, 'legacy-baseline', ?)",
+        (int(time.time()),),
+    )
+    applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+    selected = _SCHEMA_MIGRATIONS if migrations is None else migrations
+    for version, name, migration in selected:
+        if version in applied:
+            continue
+        connection.execute(f"SAVEPOINT migration_{version}")
+        try:
+            migration(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                (version, name, int(time.time())),
+            )
+            connection.execute(f"RELEASE SAVEPOINT migration_{version}")
+        except Exception:
+            connection.execute(f"ROLLBACK TO SAVEPOINT migration_{version}")
+            connection.execute(f"RELEASE SAVEPOINT migration_{version}")
+            raise
+
+
+def database_health() -> Dict[str, Any]:
+    """Return content-free migration and integrity evidence."""
+    init_db()
+    started = time.monotonic()
+    connection = connect(DB_PATH, timeout=5)
+    try:
+        if is_postgres():
+            connection.execute("SELECT 1").fetchone()
+            integrity = "reachable"
+        else:
+            integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        return {
+            "status": "healthy" if integrity in {"ok", "reachable"} and version == SCHEMA_VERSION else "degraded",
+            "backend": "postgresql" if is_postgres() else "sqlite",
+            "schema_version": version,
+            "expected_schema_version": SCHEMA_VERSION,
+            "integrity": integrity,
+            "latency_ms": max(0, int((time.monotonic() - started) * 1000)),
+            "multi_instance_safe": is_postgres(),
+        }
+    finally:
+        connection.close()
+
+
+_DATABASE_INIT_LOCK = threading.Lock()
+_INITIALIZED_DATABASES: set[tuple[str, str]] = set()
+
+
+def init_db() -> None:
+    """Initialize/migrate PostgreSQL once; retain SQLite's repair-on-open behavior."""
+    if not is_postgres():
+        _initialize_db()
+        return
+    identity = (os.getenv('MAGISTRATE_DATABASE_URL', '').strip(), DB_PATH)
+    if identity in _INITIALIZED_DATABASES:
+        return
+    with _DATABASE_INIT_LOCK:
+        if identity in _INITIALIZED_DATABASES:
+            return
+        _initialize_db()
+        _INITIALIZED_DATABASES.add(identity)
+
+
+def _initialize_db() -> None:
     validate_secret_configuration()
     if not DB_PATH:
         raise SecretConfigurationError(
@@ -348,8 +534,12 @@ def init_db():
     if not os.path.isabs(DB_PATH):
         raise SecretConfigurationError('MAGISTRATE_DB_PATH must be an absolute persistent path')
     os.makedirs(db_parent, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
+    if is_postgres():
+        # One transaction-scoped lock makes concurrent instance startup and
+        # additive schema migration deterministic without a separate migrator.
+        cursor.execute("SELECT pg_advisory_xact_lock(1296126537)")
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -1398,20 +1588,35 @@ def init_db():
     )
     ''')
 
-    cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = 'default_user'")
-    if not cursor.fetchone():
-        now = int(time.time())
-        cursor.execute('''
-        INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
-        VALUES ('default_user', 'Spectre Operator', 'spectre@magistrate.io', '/uploads/avatars/default_avatar.png', 'Firstmate Master Operator', 'dusk-mountain', ?, ?)
-        ''', (now, now))
+    cursor.execute('''CREATE TABLE IF NOT EXISTS deployment_metadata (
+        metadata_key TEXT PRIMARY KEY, metadata_value TEXT NOT NULL, updated_at INTEGER NOT NULL
+    )''')
+    bootstrap_user_id = os.getenv('MAGISTRATE_BOOTSTRAP_USER_ID', 'default_user').strip()
+    bootstrap_seeded = cursor.execute(
+        "SELECT 1 FROM deployment_metadata WHERE metadata_key = 'bootstrap-profile-seeded'"
+    ).fetchone()
+    if not bootstrap_seeded:
+        cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (bootstrap_user_id,))
+        if not cursor.fetchone():
+            now = int(time.time())
+            cursor.execute('''
+            INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
+            VALUES (?, 'Spectre Operator', 'spectre@magistrate.io', '/uploads/avatars/default_avatar.png', 'Firstmate Master Operator', 'dusk-mountain', ?, ?)
+            ''', (bootstrap_user_id, now, now))
+        cursor.execute(
+            "INSERT INTO deployment_metadata(metadata_key, metadata_value, updated_at) VALUES ('bootstrap-profile-seeded', 'true', ?)",
+            (int(time.time()),),
+        )
 
+    apply_schema_migrations(conn)
+    if is_postgres():
+        conn.apply_deferred_foreign_keys()
     conn.commit()
     conn.close()
 
 def get_profile(user_id: str = 'default_user') -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at FROM user_profiles WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
@@ -1441,7 +1646,7 @@ def get_profile(user_id: str = 'default_user') -> Dict[str, Any]:
 
 def update_profile(user_id: str = 'default_user', name: Optional[str] = None, email: Optional[str] = None, avatar_url: Optional[str] = None, bio: Optional[str] = None, active_theme: Optional[str] = None) -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     now = int(time.time())
 
@@ -1471,7 +1676,7 @@ def update_profile(user_id: str = 'default_user', name: Optional[str] = None, em
 
 def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     # A stored 'connected' row is not by itself evidence of a usable account.
     # Join the credential so callers can tell a real, unexpired OAuth grant from
@@ -1511,7 +1716,7 @@ def upsert_connected_account(
     provider_user_id: str = '',
 ) -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     now = int(time.time())
 
@@ -1552,7 +1757,7 @@ def upsert_connected_account(
 
 def disconnect_account(user_id: str, provider: str) -> bool:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     account_id = f'{user_id}_{provider}'
     now = int(time.time())
@@ -1569,7 +1774,7 @@ def disconnect_account(user_id: str, provider: str) -> bool:
 def get_execution_credential_status(user_id: str = 'default_user') -> Dict[str, bool]:
     """Return only credential-presence flags; secret values never leave this module."""
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         rows = conn.execute(
             'SELECT credential_key, secret_enc FROM execution_credentials WHERE user_id = ?',
@@ -1587,7 +1792,7 @@ def save_execution_credential(user_id: str, credential_key: str, secret: str) ->
     now = int(time.time())
     encrypted = encrypt_token(secret)
     credential_id = f'{user_id}_{credential_key}'
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         conn.execute('''
         INSERT INTO execution_credentials (id, user_id, credential_key, secret_enc, created_at, updated_at)
@@ -1602,7 +1807,7 @@ def save_execution_credential(user_id: str, credential_key: str, secret: str) ->
 
 def delete_execution_credential(user_id: str, credential_key: str) -> bool:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         conn.execute('DELETE FROM execution_credentials WHERE user_id = ? AND credential_key = ?', (user_id, credential_key))
         conn.commit()
@@ -1613,7 +1818,7 @@ def delete_execution_credential(user_id: str, credential_key: str) -> bool:
 
 def get_execution_preferences(user_id: str = 'default_user') -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         row = conn.execute(
             'SELECT profile_id, routing_profile_id, switching_behavior, unavailable_behavior FROM execution_preferences WHERE user_id = ?',
@@ -1643,7 +1848,7 @@ def save_execution_preferences(
         raise ValueError('Unavailable behavior must be error or fallback.')
     init_db()
     now = int(time.time())
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         conn.execute('''
         INSERT INTO execution_preferences (user_id, profile_id, routing_profile_id, switching_behavior, unavailable_behavior, updated_at)
@@ -1674,7 +1879,7 @@ def _migration_row(row: sqlite3.Row | tuple) -> Dict[str, Any]:
 
 def get_agent_migration(user_id: str, request_id: str) -> Optional[Dict[str, Any]]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         row = conn.execute('''
             SELECT request_id, agent_id, idempotency_key, target_profile_id, target_harness,
@@ -1688,7 +1893,7 @@ def get_agent_migration(user_id: str, request_id: str) -> Optional[Dict[str, Any
 
 def get_agent_migration_by_idempotency(user_id: str, idempotency_key: str) -> Optional[Dict[str, Any]]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         row = conn.execute('''
             SELECT request_id, agent_id, idempotency_key, target_profile_id, target_harness,
@@ -1706,7 +1911,7 @@ def create_agent_migration(
     init_db()
     request_id = 'migration_' + hashlib.sha256(f'{user_id}\0{idempotency_key}'.encode()).hexdigest()[:20]
     now = int(time.time())
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         existing = get_agent_migration_by_idempotency(user_id, idempotency_key)
         if existing:
@@ -1744,7 +1949,7 @@ def transition_agent_migration(
         raise ValueError(f"Migration cannot move from {current['status']} to {state}.")
     now = int(time.time())
     error = evidence if state == 'failed' else None
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         with conn:
             conn.execute('''

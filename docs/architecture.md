@@ -57,7 +57,7 @@ contract.
 The additive `activity.v1` ledger consumes authenticated, pushed
 `firstmate.execution-event.v1` facts and persists principal-scoped objective,
 task, run, phase, and evidence identity. Fleet/runtime/agent, Attention,
-notification, recent-activity, and Activity reads are SQLite projections; they
+notification, recent-activity, and Activity reads are database projections; they
 do not run a Firstmate snapshot or inspect Herdr. Structured decisions arrive
 through a separate complete push projection. The historical snapshot/journal
 adapter is retained only for explicit legacy migration/rollback and has no

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import stat as stat_module
 import sqlite3
+from app.persistence import connect
 import time
 from typing import Any
 
@@ -177,7 +178,7 @@ async def reconcile_pending_objective_intake(
     if not isinstance(cutoff, int) or isinstance(cutoff, bool) or cutoff < 0:
         raise ValueError("updated_before_ms must be a non-negative integer")
     db.init_db()
-    with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+    with connect(db.DB_PATH, timeout=10) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """SELECT * FROM magi_objective_submissions
@@ -196,7 +197,7 @@ async def reconcile_pending_objective_intake(
         try:
             contract = FirstmateSubmitObjectiveContract.model_validate_json(row["contract_json"])
         except (ValueError, TypeError):
-            with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+            with connect(db.DB_PATH, timeout=10) as connection:
                 connection.execute(
                     """UPDATE magi_objective_submissions
                        SET status = 'failed', attempt_count = ?,
@@ -212,7 +213,7 @@ async def reconcile_pending_objective_intake(
             continue
 
         attempt = int(row["attempt_count"]) + 1
-        with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+        with connect(db.DB_PATH, timeout=10) as connection:
             changed = connection.execute(
                 """UPDATE magi_objective_submissions
                    SET status = 'submitting', attempt_count = ?, last_error_code = NULL,
