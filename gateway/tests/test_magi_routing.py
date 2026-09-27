@@ -248,6 +248,23 @@ def test_capability_and_configuration_validation_fail_closed():
         validate_routing_config(config)
 
 
+def test_attachment_route_excludes_models_without_multimodal_capability():
+    catalog = validate_routing_config(route_config([
+        candidate('openai:text-only', 'openai', input_price='0.01', multimodal=False),
+        candidate('google:file-capable', 'google', input_price='1', multimodal=True),
+    ]))
+    providers = {
+        'openai:text-only': FakeProvider([]),
+        'google:file-capable': FakeProvider([]),
+    }
+    router = RoutedMagiModel(catalog, providers=providers)
+    eligible = router._eligible(ModelRouteContext(
+        owner_user_id='owner', category=RouteCategory.DIRECT_CONVERSATION,
+        permission_granted=True, requires_multimodal=True,
+    ), 10)
+    assert [item[0].id for item in eligible] == ['google:file-capable']
+
+
 def test_turn_categories_require_bound_decisions_and_mark_high_impact():
     assert classify_turn('Hello there', command_authorized=True) == RouteCategory.DIRECT_CONVERSATION
     assert classify_turn('Investigate the flaky test', command_authorized=True) == RouteCategory.READ_ONLY_INVESTIGATION

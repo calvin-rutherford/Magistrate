@@ -53,6 +53,7 @@ _DIRECT_OWNER_TABLES: tuple[tuple[str, str], ...] = (
     ("canonical_source_events", "user_id"),
     ("activity_sources", "user_id"),
     ("magi_chat_diagnostics", "owner_user_id"),
+    ("perception_events", "owner_user_id"),
     ("execution_preferences", "user_id"),
     ("execution_credentials", "user_id"),
     ("provider_auth_challenges", "owner_user_id"),
@@ -78,11 +79,18 @@ def _stage_files(connection: sqlite3.Connection, user_id: str) -> tuple[Path, li
     candidates: list[Path] = []
     tables = _tables(connection)
     if "chat_uploads" in tables:
-        candidates.extend(
-            Path(row[0]) for row in connection.execute(
-                "SELECT path FROM chat_uploads WHERE user_id = ?", (user_id,)
-            ) if row[0]
-        )
+        from app.uploads import _object_path
+
+        for path, object_key in connection.execute(
+            "SELECT path, object_key FROM chat_uploads WHERE user_id = ?", (user_id,)
+        ):
+            if object_key:
+                try:
+                    candidates.append(_object_path(object_key))
+                except ValueError:
+                    continue
+            elif path:
+                candidates.append(Path(path))
     profile = connection.execute(
         "SELECT avatar_url FROM user_profiles WHERE user_id = ?", (user_id,)
     ).fetchone()

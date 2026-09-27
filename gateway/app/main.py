@@ -69,7 +69,9 @@ from app.providers.teams import TeamsProviderAdapter
 from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
 from app.usage import get_usage
 from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BYTES,
-                         associate_uploads, save_upload, get_upload, validate_content)
+                         SIGNED_ACCESS_TTL_SECONDS, associate_uploads, delete_upload,
+                         get_upload, save_upload, signed_access_token, validate_content,
+                         verify_signed_access)
 from app.magi_chat_api import (magi_chat_readiness, magi_chat_service,
                                router as magi_chat_router,
                                validate_magi_chat_configuration)
@@ -89,6 +91,7 @@ from app.objective_cancellation import (
 from app.hosted_execution import (
     HostedExecutionConfig, get_hosted_controller, router as hosted_execution_router,
 )
+from app.perception import MAX_PERCEPTION_EVENT_BYTES, router as perception_router
 
 init_db()
 
@@ -134,6 +137,7 @@ app.include_router(firstmate_decision_router)
 app.include_router(billing_router)
 app.include_router(project_memory_router)
 app.include_router(hosted_execution_router)
+app.include_router(perception_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -157,12 +161,20 @@ async def enforce_bounded_request_size(request: Request, call_next):
         or request.url.path.startswith('/api/v1/magi/memory/entries/')
     ) and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The Magi request is too large.'}, status_code=413)
+    perception_contract = request.method == 'POST' and (
+        request.url.path == '/api/v1/perception/events'
+        or bool(re.fullmatch(r'/api/v1/perception/events/pev_[A-Za-z0-9_-]{12,96}/confirm', request.url.path))
+    )
+    if perception_contract and content_length is None:
+        return JSONResponse({'detail': 'A perception request size is required.'}, status_code=411)
     github_webhook = request.method == 'POST' and request.url.path == '/api/v1/github/webhooks'
     github_install = request.method == 'POST' and request.url.path == '/api/v1/github/app/install'
     stripe_webhook = request.method == 'POST' and request.url.path in {
         '/api/v1/billing/webhook', '/api/v1/billing/webhooks/stripe',
     }
-    if github_webhook:
+    if perception_contract:
+        body_cap, too_large = MAX_PERCEPTION_EVENT_BYTES, 'The perception request is too large.'
+    elif github_webhook:
         body_cap, too_large = GITHUB_MAX_WEBHOOK_BYTES, 'Webhook payload is too large.'
     elif github_install:
         body_cap, too_large = 4096, 'The GitHub App request is too large.'
@@ -1405,7 +1417,19 @@ async def upload_chat_files(
             uploaded.append(save_upload(principal.user_id, file.filename or 'upload', file.content_type, content))
         if message_id:
             associate_uploads(principal.user_id, message_id, [item['upload_id'] for item in uploaded])
+    except HTTPException:
+        for item in uploaded:
+            try:
+                delete_upload(principal.user_id, item['upload_id'])
+            except ValueError:
+                pass
+        raise
     except ValueError as exc:
+        for item in uploaded:
+            try:
+                delete_upload(principal.user_id, item['upload_id'])
+            except ValueError:
+                pass
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     # The client must not infer processing success from a 200 alone. Report the
     # state the server actually reached: bytes stored and validated, and whether
@@ -1414,14 +1438,57 @@ async def upload_chat_files(
     return {'uploads': [{**item, 'attached': attached} for item in uploaded]}
 
 
-@app.get('/api/v1/uploads/{upload_id}')
-async def download_chat_file(upload_id: str, principal: Principal = Depends(require_scope('command'))):
-    if not re.fullmatch(r'^[A-Za-z0-9_-]{16,64}$', upload_id):
-        raise HTTPException(status_code=404, detail='Upload not found.')
+@app.post('/api/v1/uploads/{upload_id}/access')
+async def create_chat_file_access(upload_id: str, principal: Principal = Depends(require_scope('command'))):
+    """Mint a short-lived, owner-bound URL without exposing a storage path."""
     upload = get_upload(principal.user_id, upload_id)
     if not upload:
         raise HTTPException(status_code=404, detail='Upload not found.')
-    return FileResponse(upload['path'], media_type=upload['media_type'], filename=upload['filename'])
+    expires_at = int(time.time()) + SIGNED_ACCESS_TTL_SECONDS
+    signature = signed_access_token(principal.user_id, upload_id, expires_at)
+    return {
+        'schema_version': 'magistrate.artifact-access.v1',
+        'artifact_id': upload_id,
+        'expires_at': expires_at,
+        'url': f'/api/v1/uploads/{upload_id}?expires={expires_at}&signature={signature}',
+    }
+
+
+@app.get('/api/v1/uploads/{upload_id}')
+async def download_chat_file(
+    upload_id: str,
+    expires: Optional[int] = Query(None),
+    signature: Optional[str] = Query(None),
+    principal: Principal = Depends(require_scope('command')),
+):
+    if not re.fullmatch(r'^[A-Za-z0-9_-]{16,64}$', upload_id):
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    # Ordinary authenticated URLs remain compatible with persisted chat rows.
+    # If a signed URL is supplied, both its owner-bound signature and the
+    # current authenticated principal must validate; signatures never replace auth.
+    if (expires is None) != (signature is None) or (
+        expires is not None and signature is not None
+        and not verify_signed_access(principal.user_id, upload_id, expires, signature)
+    ):
+        raise HTTPException(status_code=403, detail='Artifact access has expired.')
+    upload = get_upload(principal.user_id, upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    return FileResponse(
+        upload['path'], media_type=upload['media_type'], filename=upload['filename'],
+        headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store'},
+    )
+
+
+@app.delete('/api/v1/uploads/{upload_id}', status_code=204)
+async def remove_chat_file(upload_id: str, principal: Principal = Depends(require_scope('command'))):
+    try:
+        removed = delete_upload(principal.user_id, upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    return Response(status_code=204)
 
 
 @app.post('/api/v1/voice/transcribe')

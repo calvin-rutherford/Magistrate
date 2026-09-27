@@ -6,9 +6,11 @@ error bodies, and credentials remain in headers.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import re
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote, urlsplit
 
@@ -19,6 +21,7 @@ from app.magi_model import (
     MAGI_MAX_RESPONSE_BYTES,
     MAGI_MAX_RESPONSE_CHARACTERS,
     MAGI_MAX_TOOL_CALLS,
+    MagiModelAttachment,
     MagiModelError,
     MagiModelMessage,
     MagiModelResult,
@@ -30,6 +33,18 @@ from app.magi_model import (
     _validated_utf8,
     magi_text_has_unsafe_controls,
 )
+
+
+def _encoded_attachment(attachment: MagiModelAttachment) -> str:
+    if (
+        not isinstance(attachment, MagiModelAttachment)
+        or not attachment.filename or len(attachment.filename) > 160
+        or not isinstance(attachment.content, bytes)
+        or not 0 < len(attachment.content) <= 25 * 1024 * 1024
+        or not re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+", attachment.media_type)
+    ):
+        raise MagiModelError("provider_invalid_attachment", retryable=False)
+    return base64.b64encode(attachment.content).decode("ascii")
 
 
 def _safe_url(value: str, variable: str) -> str:
@@ -148,7 +163,38 @@ class AnthropicMagiModel:
                     message.content, maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
                     code="provider_invalid_request",
                 )
-                content = message.content
+                if message.attachments:
+                    if message.role != "user" or len(message.attachments) > 10:
+                        raise MagiModelError("provider_invalid_attachment", retryable=False)
+                    content = [{"type": "text", "text": message.content}]
+                    for attachment in message.attachments:
+                        encoded = _encoded_attachment(attachment)
+                        if attachment.media_type.startswith("image/") and attachment.media_type != "image/bmp":
+                            content.append({
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": attachment.media_type, "data": encoded},
+                            })
+                        elif attachment.media_type == "application/pdf":
+                            content.append({
+                                "type": "document",
+                                "source": {"type": "base64", "media_type": attachment.media_type, "data": encoded},
+                                "title": attachment.filename,
+                            })
+                        elif attachment.media_type.startswith("text/") or attachment.media_type in {
+                            "application/json", "application/xml", "application/javascript",
+                        }:
+                            try:
+                                text = attachment.content.decode("utf-8")
+                            except UnicodeDecodeError as exc:
+                                raise MagiModelError("provider_invalid_attachment", retryable=False) from exc
+                            content.append({
+                                "type": "text",
+                                "text": f"<attachment name={json.dumps(attachment.filename)}>{text}</attachment>",
+                            })
+                        else:
+                            raise MagiModelError("provider_invalid_attachment", retryable=False)
+                else:
+                    content = message.content
                 role = message.role
             else:
                 raise MagiModelError("provider_invalid_request", retryable=False)
@@ -315,6 +361,14 @@ class GoogleMagiModel:
                         code="provider_invalid_request",
                     )
                     parts.append({"text": message.content})
+                if message.attachments:
+                    if message.role != "user" or len(message.attachments) > 10:
+                        raise MagiModelError("provider_invalid_attachment", retryable=False)
+                    for attachment in message.attachments:
+                        parts.append({"inlineData": {
+                            "mimeType": attachment.media_type,
+                            "data": _encoded_attachment(attachment),
+                        }})
                 for call in message.tool_calls:
                     checked = _validated_tool_call(call)
                     try:

@@ -83,7 +83,9 @@ def _default_routing_config() -> dict[str, Any]:
                 "capability_class": "general-tools",
                 "capabilities": {
                     "reasoning": 4, "context_tokens": 200_000,
-                    "tools": True, "multimodal": True,
+                    # This adapter supports images, PDFs, and UTF-8 text but not
+                    # the complete admitted office/archive set.
+                    "tools": True, "multimodal": False,
                 },
                 "reliability": "0.99", "latency_ms": 1600, "safety_tier": 4,
                 "billing_mode": "metered",
@@ -514,6 +516,9 @@ def _estimate_input_tokens(messages: Sequence[MagiModelMessage], system_context:
     for message in messages:
         characters += len(message.content or "")
         characters += sum(len(call.arguments_json) for call in message.tool_calls)
+        # Provider payloads base64-expand file bytes. Reserve conservatively so
+        # large documents cannot bypass route context and budget limits.
+        characters += sum((len(item.content) * 4 + 2) // 3 for item in message.attachments)
     for tool in tools:
         characters += len(tool.description) + len(json.dumps(tool.parameters, separators=(",", ":")))
     return max(1, (characters + 3) // 4)

@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -718,6 +718,48 @@ def _migration_project_context_plane(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _migration_files_and_perception(connection: sqlite3.Connection) -> None:
+    """Install owner-scoped file retention and device-neutral perception state."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS chat_uploads (
+        upload_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, filename TEXT NOT NULL,
+        media_type TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL,
+        created_at INTEGER NOT NULL, object_key TEXT, sha256 TEXT,
+        scan_status TEXT NOT NULL DEFAULT 'legacy', expires_at INTEGER,
+        deleted_at INTEGER
+    )""")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(chat_uploads)")}
+    additions = {
+        "object_key": "ALTER TABLE chat_uploads ADD COLUMN object_key TEXT",
+        "sha256": "ALTER TABLE chat_uploads ADD COLUMN sha256 TEXT",
+        "scan_status": "ALTER TABLE chat_uploads ADD COLUMN scan_status TEXT NOT NULL DEFAULT 'legacy'",
+        "expires_at": "ALTER TABLE chat_uploads ADD COLUMN expires_at INTEGER",
+        "deleted_at": "ALTER TABLE chat_uploads ADD COLUMN deleted_at INTEGER",
+    }
+    for column, statement in additions.items():
+        if column not in columns:
+            connection.execute(statement)
+    connection.execute("""CREATE TABLE IF NOT EXISTS chat_message_attachments (
+        message_id TEXT NOT NULL, user_id TEXT NOT NULL, upload_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (message_id, upload_id),
+        FOREIGN KEY(upload_id) REFERENCES chat_uploads(upload_id)
+    )""")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_uploads_expiry ON chat_uploads(expires_at, deleted_at)"
+    )
+    connection.execute("""CREATE TABLE IF NOT EXISTS perception_events (
+        event_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+        modality TEXT NOT NULL, confidence REAL NOT NULL, intent_kind TEXT NOT NULL,
+        impact TEXT NOT NULL, artifact_ref TEXT, authorization_state TEXT NOT NULL,
+        reason TEXT, revision INTEGER NOT NULL DEFAULT 1, observed_at_ms INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, confirmed_at INTEGER,
+        PRIMARY KEY(owner_user_id, event_id)
+    )""")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_perception_owner_expiry ON perception_events(owner_user_id, expires_at)"
+    )
+
+
 def _install_hosted_execution_schema(connection: sqlite3.Connection) -> None:
     """Install the durable provider-neutral execution queue and answer outbox."""
     connection.execute("""CREATE TABLE IF NOT EXISTS hosted_execution_runs (
@@ -771,6 +813,7 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
     (5, "credit-billing-ledgers", _migration_credit_billing),
     (6, "project-context-plane", _migration_project_context_plane),
     (7, "hosted-execution", _install_hosted_execution_schema),
+    (8, "files-and-perception", _migration_files_and_perception),
 )
 
 

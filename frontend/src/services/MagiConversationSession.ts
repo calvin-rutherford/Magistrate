@@ -9,6 +9,8 @@ export interface MagiAttachment {
   mediaType: string;
   size?: number;
   status?: 'uploading' | 'stored' | 'attached' | 'failed';
+  /** Observed upload lifecycle progress; transient rows only. */
+  uploadProgress?: number;
   uploadId?: string;
   url?: string;
 }
@@ -46,7 +48,8 @@ const RETIRED_PREFIXES = [
   'magistrate.chat.pending.v1.',
 ];
 const ATTACHMENT_STATES = new Set(['uploading', 'stored', 'attached', 'failed']);
-const ATTACHMENT_KEYS = new Set(['name', 'mediaType', 'size', 'status', 'uploadId', 'url']);
+const AUTHORITATIVE_ATTACHMENT_KEYS = new Set(['name', 'mediaType', 'size', 'status', 'uploadId', 'url']);
+const ATTACHMENT_KEYS = new Set([...AUTHORITATIVE_ATTACHMENT_KEYS, 'uploadProgress']);
 const CACHED_MESSAGE_KEYS = new Set([
   'id', 'role', 'text', 'sentAt', 'source', 'attachments', 'progress', 'delivery',
   'serverId', 'conversationId', 'clientMessageId', 'replyToServerId',
@@ -89,13 +92,16 @@ function normalizeAttachments(raw: unknown, authoritative: boolean): MagiAttachm
     const value = item as Record<string, unknown>;
     const keys = Object.keys(value);
     if (keys.some(key => !ATTACHMENT_KEYS.has(key))
-      || (authoritative && (keys.length !== ATTACHMENT_KEYS.size
-        || ![...ATTACHMENT_KEYS].every(key => key in value)))
+      || (authoritative && (keys.length !== AUTHORITATIVE_ATTACHMENT_KEYS.size
+        || ![...AUTHORITATIVE_ATTACHMENT_KEYS].every(key => key in value)))
       || !bounded(value.name) || !bounded(value.mediaType, 128)
       || (authoritative
         && !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/.test(value.mediaType))
       || (value.size !== undefined && (typeof value.size !== 'number'
-        || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > 25 * 1024 * 1024))) return null;
+        || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > 25 * 1024 * 1024))
+      || (value.uploadProgress !== undefined && (authoritative
+        || typeof value.uploadProgress !== 'number' || !Number.isFinite(value.uploadProgress)
+        || value.uploadProgress < 0 || value.uploadProgress > 1))) return null;
     const status = ATTACHMENT_STATES.has(String(value.status))
       ? value.status as MagiAttachment['status'] : undefined;
     const uploadId = typeof value.uploadId === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(value.uploadId)
@@ -103,7 +109,10 @@ function normalizeAttachments(raw: unknown, authoritative: boolean): MagiAttachm
     const url = uploadId && value.url === `/api/v1/uploads/${uploadId}` ? value.url as string : undefined;
     if ((authoritative && (status !== 'attached' || !uploadId || !url))
       || (!authoritative && !status)) return null;
-    attachments.push({ name: value.name, mediaType: value.mediaType, size: value.size as number | undefined, status, uploadId, url });
+    attachments.push({
+      name: value.name, mediaType: value.mediaType, size: value.size as number | undefined,
+      status, uploadProgress: value.uploadProgress as number | undefined, uploadId, url,
+    });
   }
   if (new Set(attachments.map(attachment => attachment.uploadId).filter(Boolean)).size
     !== attachments.filter(attachment => attachment.uploadId).length) return null;
