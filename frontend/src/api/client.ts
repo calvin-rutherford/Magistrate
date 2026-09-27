@@ -719,6 +719,16 @@ export async function invalidateGatewaySession(
   return invalidationPromise;
 }
 
+export async function deleteGatewayAccount(confirmation: string): Promise<void> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmation }),
+  });
+  await checkedJson<{ status: 'deleted' }>(res);
+  await invalidateGatewaySession('Your Magistrate account was deleted.');
+}
+
 export async function logoutGatewaySession(): Promise<void> {
   const token = sessionToken;
   // Close protected UI and cancel any in-flight renewal before waiting on the
@@ -1338,6 +1348,43 @@ export async function requestAgentMigration(agentId: string, profileId: string, 
 export async function fetchAgentMigration(agentId: string, requestId: string): Promise<AgentMigration> {
   const res = await authorizedFetch(`${GATEWAY_URL}/agents/${encodeURIComponent(agentId)}/migration-requests/${encodeURIComponent(requestId)}`);
   return checkedJson<AgentMigration>(res);
+}
+
+export interface ProjectRepository {
+  id: string;
+  provider: 'github' | string;
+  full_name: string;
+  html_url: string;
+  default_branch: string | null;
+}
+
+export interface CustomerProject {
+  schema_version: 'project.v1';
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  kind: 'standalone' | 'github';
+  status: 'active' | 'archived';
+  created_at: number;
+  updated_at: number;
+  repositories: ProjectRepository[];
+}
+
+export async function fetchProjects(): Promise<CustomerProject[]> {
+  const res = await authorizedFetch(GATEWAY_URL + '/projects');
+  const value = await checkedJson<{ schema_version: 'projects.v1'; projects: CustomerProject[] }>(res);
+  if (value?.schema_version !== 'projects.v1' || !Array.isArray(value.projects)) throw new Error('Gateway returned invalid project data.');
+  return value.projects;
+}
+
+export async function createProject(input: { name: string; description?: string; slug?: string }): Promise<CustomerProject> {
+  const res = await authorizedFetch(GATEWAY_URL + '/projects', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+  const value = await checkedJson<CustomerProject>(res);
+  if (value?.schema_version !== 'project.v1' || typeof value.id !== 'string') throw new Error('Gateway returned invalid project data.');
+  return value;
 }
 
 export interface FleetObjective {

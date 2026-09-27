@@ -10,10 +10,12 @@ export default function TabLayout() {
       }}
     >
       <Tabs.Screen name='index' options={{ title: 'Chat' }} />
-      <Tabs.Screen name='attention' options={{ title: 'Attention' }} />
-      <Tabs.Screen name='prs' options={{ title: 'PRs' }} />
       <Tabs.Screen name='chat' options={{ title: 'Chat' }} />
-      <Tabs.Screen name='diagnostics' options={{ title: 'Diagnostics' }} />
+      <Tabs.Screen name='attention' options={{ title: 'Attention' }} />
+      <Tabs.Screen name='account' options={{ title: 'Account & Settings' }} />
+      <Tabs.Screen name='prs' options={{ href: null }} />
+      <Tabs.Screen name='diagnostics' options={{ href: null }} />
+      <Tabs.Screen name='map' options={{ href: null }} />
     </Tabs>
   );
 }

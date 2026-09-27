@@ -3,16 +3,15 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Animated as NativeAnimated, Image, ImageSourcePropType, Keyboard, type KeyboardEvent, KeyboardAvoidingView, LayoutChangeEvent, Linking, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, Alert, Animated as NativeAnimated, Image, Keyboard, type KeyboardEvent, KeyboardAvoidingView, LayoutChangeEvent, Linking, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle, Path, Rect } from 'react-native-svg';
-import { LinearGradient } from 'expo-linear-gradient';
+import Svg, { Path, Rect } from 'react-native-svg';
 import {
-  AuthProviderInfo, BillingAccount, cancelMagiChatTurn,
+  BillingAccount, cancelMagiChatTurn, createProject, CustomerProject,
   CHAT_MAX_UPLOAD_COUNT, CHAT_MAX_UPLOAD_TOTAL_BYTES, ChatUpload, createBillingCheckout, createBillingPortal,
   ExecutionProfile, ExecutionSettings, fetchAuthProviders,
-  fetchBillingAccount, fetchCanonicalActivitySnapshot, fetchFleet, FleetObjective,
+  fetchBillingAccount, fetchCanonicalActivitySnapshot, fetchFleet, FleetObjective, fetchProjects,
   fetchExecutionCapabilities, fetchExecutionSettings, fetchHealth,
   fetchMagiChatConversation, fetchRecentActivity, fetchUnifiedAttention,
   replayMagiChatConversation,
@@ -23,7 +22,7 @@ import {
 } from '../../src/api/client';
 import { CanonicalActivitySurface } from '../../src/components/CanonicalActivitySurface';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
-import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, ConnectionsIcon, FleetIcon, HomeIcon, ICON_SIZE, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, ShieldIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
+import { AccountIcon, ActivityIcon, ArrowUpIcon, AttentionIcon, BellIcon, ChevronRightIcon, CloseIcon, FleetIcon, HomeIcon, ICON_SIZE, MenuIcon, PaletteIcon, ProjectsIcon, SearchIcon, SlidersIcon, StopIcon } from '../../src/components/MagistrateIcons';
 import { SafeMarkdown } from '../../src/components/SafeMarkdown';
 import { useVoiceInputAdapter } from '../../src/input/VoiceInputAdapter';
 import {
@@ -39,8 +38,7 @@ import {
   setMagiConversationChangeCursor,
   updateMagiMessage, useMagiMessages,
 } from '../../src/services/MagiConversationSession';
-import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveThemeMode, saveVoiceCaptureBehavior, saveVoiceInputMode, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
-import { setActiveBackground, TIME_IMAGES, WeatherSceneKey } from '../../src/services/environmentTheme';
+import { ChatPreferences, ChatThemeMode, DEFAULT_CHAT_PREFERENCES, loadChatPreferences, saveThemeMode, saveVoiceCaptureBehavior, saveVoiceInputMode, saveVoiceTranscriptBehavior, VoiceCaptureBehavior, VoiceTranscriptBehavior, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { loadMagiGreeting, magiGreeting } from '../../src/services/Greeting';
 import { notificationManager } from '../../src/services/NotificationManager';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
@@ -55,7 +53,7 @@ const brand = { obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: 
 
 type ComposerAttachment = { id: string; name: string; uri: string; mimeType?: string; size?: number; kind: 'image' | 'file'; status?: 'ready' | 'uploading' | 'uploaded' | 'failed'; uploadProgress?: number; uploaded?: ChatUpload };
 type QueuedPrompt = { messageId: string; text: string; source: 'text' | 'voice'; attachments: ComposerAttachment[]; retryFailed?: boolean };
-type DrawerSection = 'attention' | 'fleet' | 'activity' | 'projects' | 'connections' | null;
+type DrawerSection = 'attention' | 'fleet' | 'activity' | 'projects' | null;
 type ConversationSyncState = { status: 'loading' | 'fresh' | 'stale'; cachedRows: number; error?: string };
 const FLOATING_CHROME_GAP = 12;
 const CANONICAL_ACTIVITY_PAGE_SIZE = 100;
@@ -87,24 +85,12 @@ function statusColor(status?: string | null) {
   return brand.mutedDark;
 }
 function BrandMark({ dark, style }: { dark: boolean; style?: object }) { return <Image source={dark ? markPaper : markInk} style={[styles.mark, style]} resizeMode="contain" accessibilityIgnoresInvertColors />; }
-const glassFill = (dark: boolean, strength: 'control' | 'surface' = 'control') => dark ? strength === 'control' ? 'rgba(12,17,26,0.52)' : 'rgba(10,14,20,0.80)' : strength === 'control' ? 'rgba(255,255,255,0.66)' : 'rgba(255,255,255,0.88)';
-const glassEdge = (dark: boolean) => dark ? 'rgba(255,255,255,0.10)' : 'rgba(17,21,27,0.08)';
-const blurStyle = (radius: number) => Platform.OS === 'web' ? { backdropFilter: `blur(${radius}px)`, WebkitBackdropFilter: `blur(${radius}px)` } as any : null;
+const glassFill = (dark: boolean, strength: 'control' | 'surface' = 'control') => dark ? strength === 'control' ? '#1C1D20' : '#111214' : strength === 'control' ? '#F0F1F3' : '#FFFFFF';
+const glassEdge = (dark: boolean) => dark ? '#303238' : '#D9DCE1';
+const blurStyle = (_radius: number) => null;
 
-// expo-blur has no web implementation. Keep the native material optional so
-// web retains its CSS blur and an unavailable native module falls back to the
-// translucent surface below.
-let NativeBlurView: any = null;
-if (Platform.OS !== 'web') {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    NativeBlurView = require('expo-blur').BlurView;
-  } catch {
-    NativeBlurView = null;
-  }
-}
-function NativeGlassBlur({ dark, intensity, borderRadius }: { dark: boolean; intensity: number; borderRadius: number }) {
-  return NativeBlurView ? <NativeBlurView pointerEvents="none" intensity={intensity} tint={dark ? 'dark' : 'light'} style={[StyleSheet.absoluteFill, { borderRadius }]} /> : null;
+function NativeGlassBlur({ dark: _dark, intensity: _intensity, borderRadius: _borderRadius }: { dark: boolean; intensity: number; borderRadius: number }) {
+  return null;
 }
 function GlassCircleButton({ dark, onPress, accessibilityLabel, accessibilityHint, accessibilityState, testID, children, badge }: { dark: boolean; onPress: () => void; accessibilityLabel: string; accessibilityHint?: string; accessibilityState?: object; testID?: string; children: React.ReactNode; badge?: boolean }) {
   return <TouchableOpacity testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} accessibilityState={accessibilityState} onPress={onPress} activeOpacity={0.7} style={[styles.glassCircle, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }, blurStyle(20)]}><NativeGlassBlur dark={dark} intensity={20} borderRadius={23} />{children}{badge ? <View testID="unread-attention-dot" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.unreadAttentionDot} /> : null}</TouchableOpacity>;
@@ -118,7 +104,6 @@ function EmptyStateMagi({ dark, visible, greeting, active }: { dark: boolean; vi
   return <Animated.View testID="chat-empty-state" pointerEvents="none" accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'} style={[styles.emptyState, style]}><View style={styles.emptyStateMarkWrap}><Animated.View testID="empty-state-halo" style={[styles.emptyStateHalo, haloStyle]} /><BrandMark dark={dark} style={styles.emptyStateMark} /></View><Text testID="chat-greeting" accessibilityRole="header" style={[styles.greeting, { color: dark ? '#F4F5F7' : brand.ink }]}>{greeting}</Text></Animated.View>;
 }
 function MicIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Rect x="9" y="2.5" width="6" height="11" rx="3" stroke={color} strokeWidth={1.6} /><Path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5v3M9 20.5h6" stroke={color} strokeWidth={1.6} strokeLinecap="round" fill="none" /></Svg>; }
-function GearIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg testID="settings-gear-icon" width={size} height={size} viewBox="0 0 24 24" fill="none"><Circle cx="12" cy="12" r="3.1" stroke={color} strokeWidth={1.6} /><Path d="M9.8 3.1h4.4l.5 2.1c.5.2.9.4 1.3.7l2-.6 2.2 3.8-1.5 1.5v2.8l1.5 1.5-2.2 3.8-2-.6c-.4.3-.8.5-1.3.7l-.5 2.1H9.8l-.5-2.1c-.5-.2-.9-.4-1.3-.7l-2 .6-2.2-3.8 1.5-1.5v-2.8L3.8 9.1 6 5.3l2 .6c.4-.3.8-.5 1.3-.7z" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
 function SoundwaveIcon({ color, size = 18 }: { color: string; size?: number }) { const bars = [0.32, 0.62, 1, 0.72, 0.42]; return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">{bars.map((ratio, index) => { const height = 16 * ratio; return <Rect key={index} x={2 + index * 4.6} y={(24 - height) / 2} width="2.4" height={height} rx="1.2" fill={color} />; })}</Svg>; }
 function ImageIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Rect x="3" y="4" width="18" height="16" rx="3" stroke={color} strokeWidth={1.6} /><Path d="m6.5 16 3.6-3.8 2.8 2.6 2.3-2.3 2.8 3.5M15.8 9h.01" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
 function FileIcon({ color, size = 18 }: { color: string; size?: number }) { return <Svg width={size} height={size} viewBox="0 0 24 24" fill="none"><Path d="M6 3.5h7l5 5v12H6zM13 3.5v5h5" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg>; }
@@ -556,14 +541,18 @@ function activityDate(value: string) {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenActivity, objectives, onOpenObjective, attention, activity, providers, errors, loading, refreshing, onRefresh }: {
+function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeSection, setActiveSection, onClose, onOpenSettings, onOpenHome, onOpenActivity, objectives, onOpenObjective, projects, onCreateProject, attention, activity, errors, loading, refreshing, onRefresh }: {
   open: boolean; dark: boolean; isNarrow: boolean; animatedStyle: object; panHandlers: object; activeSection: DrawerSection; setActiveSection: (section: DrawerSection) => void; onClose: () => void; onOpenSettings: () => void;
   onOpenHome: () => void; onOpenActivity: () => void; onOpenObjective: (objective: FleetObjective) => void;
-  objectives: FleetObjective[]; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; providers: AuthProviderInfo[]; errors: { fleet?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }; loading: boolean; refreshing: boolean; onRefresh: () => void;
+  objectives: FleetObjective[]; projects: CustomerProject[]; onCreateProject: (name: string, description: string) => Promise<void>; attention: UnifiedAttentionRecord[]; activity: RecentActivityItem[]; errors: { fleet?: string | null; projects?: string | null; attention?: string | null; activity?: string | null }; loading: boolean; refreshing: boolean; onRefresh: () => void;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [projectName, setProjectName] = useState('');
+  const [projectDescription, setProjectDescription] = useState('');
+  const [projectError, setProjectError] = useState<string | null>(null);
   const text = dark ? '#F4F5F7' : brand.ink; const muted = dark ? brand.mutedDark : brand.mutedLight;
   const activeObjectives = objectives.filter(objective => !objective.terminal); const activeAttention = attention.filter(item => item.requires_action !== false);
   const toggleSection = (section: DrawerSection) => setActiveSection(activeSection === section ? null : section);
@@ -575,20 +564,22 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
     if (item.pull_request_number) router.push(`/pr-detail?number=${item.pull_request_number}${item.repository_id ? `&repositoryId=${item.repository_id}` : ''}` as any);
     else if (item.url) { const result = await openExternalUrl(item.url); if (!result.ok) Alert.alert('Unable to open activity', result.message); }
   };
-  // Projects are the real project names the fleet and activity feed already
-  // carry - the drawer groups them, it does not invent a hierarchy.
-  const projects = useMemo(() => {
-    const counts = new Map<string, number>();
-    activity.forEach(item => { if (item.project) counts.set(item.project, (counts.get(item.project) || 0) + 1); });
-    return Array.from(counts.entries()).sort((left, right) => right[1] - left[1]);
-  }, [activity]);
+  const submitProject = async () => {
+    if (!projectName.trim()) return;
+    setCreatingProject(true); setProjectError(null);
+    try {
+      await onCreateProject(projectName.trim(), projectDescription.trim());
+      setProjectName(''); setProjectDescription('');
+    } catch (error) {
+      setProjectError(errorText(error, 'Project could not be created.'));
+    } finally { setCreatingProject(false); }
+  };
   const matches = (label: string) => !searching || !query.trim() || label.toLowerCase().includes(query.trim().toLowerCase());
   const rows = [
-    { key: 'fleet' as const, icon: FleetIcon, title: 'Fleet', count: activeObjectives.length },
-    { key: 'attention' as const, icon: AttentionIcon, title: 'Attention', count: activeAttention.length, alert: activeAttention.length > 0 },
-    { key: 'activity' as const, icon: ActivityIcon, title: 'Activity' },
     { key: 'projects' as const, icon: ProjectsIcon, title: 'Projects', count: projects.length || undefined },
-    { key: 'connections' as const, icon: ConnectionsIcon, title: 'Connections' },
+    { key: 'fleet' as const, icon: FleetIcon, title: 'Fleet', count: activeObjectives.length },
+    { key: 'activity' as const, icon: ActivityIcon, title: 'Activity' },
+    { key: 'attention' as const, icon: AttentionIcon, title: 'Attention', count: activeAttention.length, alert: activeAttention.length > 0 },
   ].filter(row => matches(row.title));
   // Ongoing work is structured execution state, separate from Magi Chat.
   const activeWork = activeObjectives.filter(objective => matches(objective.title)).slice(0, 5);
@@ -604,8 +595,8 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
       </TouchableOpacity>
     </View></View>
     <ScrollView testID="drawer-scroll" style={styles.drawerScroll} contentContainerStyle={styles.drawerScrollContent} keyboardShouldPersistTaps="handled" refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={dark ? brand.cyan : brand.violet} />}>
-      {matches('Magi') ? <TouchableOpacity testID="drawer-home" accessibilityRole="button" accessibilityLabel="Magi, the main conversation" onPress={onOpenHome} style={styles.drawerRow}>
-        <View testID="drawer-home-icon" style={styles.drawerIcon}><HomeIcon size={ICON_SIZE} color={muted} /></View><Text style={[styles.drawerRowText, { color: text }]}>Magi</Text>
+      {matches('Chat') ? <TouchableOpacity testID="drawer-home" accessibilityRole="button" accessibilityLabel="Chat with Magi" onPress={onOpenHome} style={styles.drawerRow}>
+        <View testID="drawer-home-icon" style={styles.drawerIcon}><HomeIcon size={ICON_SIZE} color={muted} /></View><Text style={[styles.drawerRowText, { color: text }]}>Chat</Text>
       </TouchableOpacity> : null}
       {rows.map(row => <View key={row.key}>
         <TouchableOpacity testID={`drawer-section-${row.key}`} accessibilityRole="button" accessibilityLabel={`${row.title} section`} accessibilityState={{ expanded: activeSection === row.key }} onPress={() => toggleSection(row.key)} style={styles.drawerRow}>
@@ -620,8 +611,8 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
         ) : row.key === 'activity' ? (
           <><TouchableOpacity testID="open-canonical-activity" accessibilityRole="button" accessibilityLabel="Open durable Magi activity" onPress={onOpenActivity} style={[styles.panelItem, { backgroundColor: glassFill(dark) }]}><Text style={[styles.panelItemTitle, { color: text }]}>Magi operations</Text><Text style={[styles.panelItemMeta, { color: muted }]}>Inspect Gateway-confirmed lifecycle and decisions</Text></TouchableOpacity>{loading ? <PanelText text="Loading recent activity…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : activity.length === 0 ? <PanelText text="No recent activity is available." muted={muted} /> : activity.slice(0, 8).map(item => <TouchableOpacity key={item.id} disabled={!item.url && !item.pull_request_number} accessibilityRole="button" accessibilityLabel={`${item.title}. ${item.description}. ${item.project}`} onPress={() => void openActivityItem(item)} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{item.title}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{item.description} · {item.project}{activityDate(item.occurred_at) ? ` · ${activityDate(item.occurred_at)}` : ''}</Text></TouchableOpacity>)}</>
         ) : row.key === 'projects' ? (
-          loading ? <PanelText text="Loading projects…" muted={muted} /> : errors.activity ? <PanelText text={errors.activity} muted={brand.critical} /> : projects.length === 0 ? <PanelText text="No project activity is available." muted={muted} /> : projects.map(([name, count]) => <View key={name} testID={`drawer-project-${name}`} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{name}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{count} recent item{count === 1 ? '' : 's'}</Text></View>)
-        ) : errors.providers ? <PanelText text={errors.providers} muted={brand.critical} /> : providers.length === 0 ? <PanelText text="No connected account data is available." muted={muted} /> : providers.map(provider => <View key={provider.provider} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{provider.provider}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{provider.status}{provider.username ? ` · ${provider.username}` : ''}</Text></View>)}</View> : null}
+          <><View testID="project-create-form" style={styles.projectCreateForm}><TextInput testID="project-name-input" accessibilityLabel="Project name" maxLength={100} placeholder="Project name" placeholderTextColor={muted} value={projectName} onChangeText={setProjectName} style={[styles.projectInput, { color: text, borderColor: glassEdge(dark) }]} /><TextInput testID="project-description-input" accessibilityLabel="Project description" maxLength={1000} placeholder="Description (optional)" placeholderTextColor={muted} value={projectDescription} onChangeText={setProjectDescription} style={[styles.projectInput, { color: text, borderColor: glassEdge(dark) }]} /><TouchableOpacity testID="project-create-submit" accessibilityRole="button" accessibilityLabel="Create standalone project" accessibilityState={{ disabled: creatingProject || !projectName.trim(), busy: creatingProject }} disabled={creatingProject || !projectName.trim()} onPress={() => void submitProject()} style={[styles.projectCreateButton, (!projectName.trim() || creatingProject) ? styles.disabled : undefined]}><Text style={styles.projectCreateButtonText}>{creatingProject ? 'Creating…' : 'New project'}</Text></TouchableOpacity>{projectError ? <Text accessibilityRole="alert" style={styles.settingsError}>{projectError}</Text> : null}</View>{loading ? <PanelText text="Loading projects…" muted={muted} /> : errors.projects ? <PanelText text={errors.projects} muted={brand.critical} /> : projects.length === 0 ? <PanelText text="No projects yet. Create a standalone project above." muted={muted} /> : projects.map(project => <View key={project.id} testID={`drawer-project-${project.id}`} style={styles.panelItem}><Text style={[styles.panelItemTitle, { color: text }]}>{project.name}</Text><Text style={[styles.panelItemMeta, { color: muted }]}>{project.description || 'Standalone project'}{project.repositories.length ? ` · ${project.repositories.length} GitHub ${project.repositories.length === 1 ? 'repository' : 'repositories'} linked` : ''}</Text></View>)}</>
+        ) : null}</View> : null}
       </View>)}
       {activeWork.length ? <View testID="drawer-active-work">
         <Text style={[styles.drawerGroupLabel, { color: muted }]}>ACTIVE WORK</Text>
@@ -633,8 +624,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
       </View> : null}
     </ScrollView>
     <View style={[styles.drawerBottom, { borderTopColor: glassEdge(dark) }]}>
-      <TouchableOpacity testID="drawer-settings-control" accessibilityRole="button" accessibilityLabel="Open Settings" onPress={onOpenSettings} activeOpacity={0.75} style={[styles.drawerSettingsButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><GearIcon size={21.6} color={text} /><Text style={[styles.drawerSettingsText, { color: text }]}>Settings</Text></TouchableOpacity>
-      <TouchableOpacity testID="settings-open" accessibilityRole="button" accessibilityLabel="Open Account settings" onPress={onOpenSettings} activeOpacity={0.75} style={styles.accountRow}><View testID="drawer-account-icon" style={styles.accountIcon}><AccountIcon size={ICON_SIZE} color={muted} /></View></TouchableOpacity>
+      <TouchableOpacity testID="drawer-settings-control" accessibilityRole="button" accessibilityLabel="Open Account and Settings" onPress={onOpenSettings} activeOpacity={0.75} style={[styles.drawerSettingsButton, { backgroundColor: glassFill(dark), borderColor: glassEdge(dark) }]}><View testID="settings-open" style={styles.drawerSettingsContent}><AccountIcon size={21.6} color={text} /><Text style={[styles.drawerSettingsText, { color: text }]}>Account & Settings</Text></View></TouchableOpacity>
     </View>
   </Animated.View>;
 }
@@ -682,29 +672,14 @@ function FleetDetailSheet({ objective, dark, onClose, onRefresh, onOpenDecision 
   </View>;
 }
 
-// Environment choices are shown as what they actually look like. Each key maps
-// to the scene image the renderer will use (src/services/environmentTheme.ts);
-// the two minimal environments are flat tones and carry a swatch instead.
-const backgroundOptions: { key: WeatherSceneKey; label: string; preview?: ImageSourcePropType; swatch?: string }[] = [
-  { key: 'auto', label: 'Auto', swatch: 'spectral' },
-  { key: 'minimal-dark', label: 'Minimal Black', swatch: '#05070A' },
-  { key: 'minimal-light', label: 'Minimal Light', swatch: '#F7F8FA' },
-  { key: 'dusk-mountain', label: 'Dusk Mountain', preview: TIME_IMAGES.dusk },
-  { key: 'clear-night', label: 'Clear Night', preview: TIME_IMAGES.night },
-  { key: 'clear-day', label: 'Clear Day', preview: TIME_IMAGES.day },
-  { key: 'sunset', label: 'Sunset', preview: TIME_IMAGES.dusk },
-  { key: 'clouds', label: 'Clouds', preview: TIME_IMAGES.dawn },
-  { key: 'rain', label: 'Rain', preview: TIME_IMAGES.dusk },
-  { key: 'storm', label: 'Storm', preview: TIME_IMAGES.night },
-];
 const themeOptions: { key: ChatThemeMode; label: string }[] = [
   { key: 'system', label: 'System' }, { key: 'dark', label: 'Dark' }, { key: 'light', label: 'Light' },
 ];
 
-type SettingsSectionKey = 'execution' | 'voice-input' | 'usage' | 'appearance' | 'diagnostics' | 'account';
+type SettingsSectionKey = 'execution' | 'voice-input' | 'usage' | 'appearance' | 'account';
 
 const SETTINGS_ICONS: Record<SettingsSectionKey, React.ComponentType<{ color: string; size?: number }>> = {
-  execution: SlidersIcon, 'voice-input': BellIcon, usage: ActivityIcon, appearance: PaletteIcon, diagnostics: ShieldIcon, account: AccountIcon,
+  execution: SlidersIcon, 'voice-input': BellIcon, usage: ActivityIcon, appearance: PaletteIcon, account: AccountIcon,
 };
 
 /** One grouped settings row: large hit target, icon, title, optional value. */
@@ -724,27 +699,6 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
   const [expandedSection, setExpandedSection] = useState<SettingsSectionKey | null>(null);
   const [credentialKey, setCredentialKey] = useState('');
   const [credential, setCredential] = useState('');
-  const pickCustomBackground = async () => {
-    try {
-      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permission.granted) { Alert.alert('Permission required', 'Media library access is needed to choose a background.'); return; }
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, quality: 0.85 });
-      if (result.canceled || !result.assets?.length) return;
-      const asset = result.assets[0];
-      if (asset.fileSize && asset.fileSize > 10 * 1024 * 1024) { Alert.alert('Photo too large', 'Choose an image smaller than 10 MB.'); return; }
-      if (asset.mimeType && !asset.mimeType.startsWith('image/')) { Alert.alert('Unsupported file', 'Choose a supported image file.'); return; }
-      const next = { ...preferences, background: 'custom' as WeatherSceneKey, customBackgroundUri: asset.uri };
-      onPreferencesChange(next);
-      try { await saveCustomBackground(asset.uri); }
-      catch { setActiveBackground(preferences.background, preferences.customBackgroundUri); onPreferencesChange(preferences); Alert.alert('Background unavailable', 'The custom background could not be saved.'); }
-    } catch { Alert.alert('Background unavailable', 'The custom background could not be selected.'); }
-  };
-  const removeCustom = async () => {
-    const next = { ...preferences, background: 'auto' as WeatherSceneKey, customBackgroundUri: undefined };
-    onPreferencesChange(next);
-    try { await removeCustomBackground(); }
-    catch { setActiveBackground(preferences.background, preferences.customBackgroundUri); onPreferencesChange(preferences); Alert.alert('Background unavailable', 'The custom background could not be removed.'); }
-  };
   useEffect(() => { if (!open) setExpandedSection(null); }, [open]); // eslint-disable-line react-hooks/set-state-in-effect
   const toggleSection = (section: SettingsSectionKey) => setExpandedSection(current => current === section ? null : section);
   const providers = Array.from(new Map(executionProfiles.map(profile => [profile.provider.id, profile.provider.label])).entries());
@@ -814,41 +768,20 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
     </View> : null}
     </View>
     <View testID="settings-appearance-section" style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
-      <SettingsSectionControl first id="appearance" title="Appearance" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} color={text} muted={muted} summary="Theme, background, and chat display" />
-      {expandedSection === 'appearance' ? <View testID="settings-appearance-window" accessibilityViewIsModal style={[styles.appearanceWindow, { backgroundColor: dark ? '#171E2A' : '#F4F6F9' }]}>
-      <View style={styles.appearanceHeader}><Text accessibilityRole="header" style={[styles.appearanceTitle, { color: text }]}>Appearance</Text><TouchableOpacity testID="settings-appearance-close" accessibilityRole="button" accessibilityLabel="Close appearance settings" onPress={() => toggleSection('appearance')} style={styles.appearanceClose}><CloseIcon size={22} color={text} /></TouchableOpacity></View>
+      <SettingsSectionControl first id="appearance" title="Appearance" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} color={text} muted={muted} summary="System, dark, or light" />
+      {expandedSection === 'appearance' ? <View testID="settings-appearance-window" style={styles.settingsSectionContent}>
+      <Text style={[styles.settingsToggleDescription, { color: muted }]}>Magistrate uses a restrained system surface. Spectral color appears only when work is active or needs attention.</Text>
       <Text style={[styles.preferenceLabel, { color: muted }]}>THEME</Text>
       <View testID="settings-theme-options" style={styles.optionRow}>{themeOptions.map(option => <TouchableOpacity key={option.key} testID={`theme-option-${option.key}`} accessibilityRole="button" accessibilityLabel={`${option.label} theme`} accessibilityState={{ selected: preferences.themeMode === option.key }} onPress={() => { const next = { ...preferences, themeMode: option.key }; onPreferencesChange(next); void saveThemeMode(option.key); }} style={[styles.optionPill, preferences.themeMode === option.key ? styles.optionPillSelected : undefined]}><Text style={[styles.optionText, { color: preferences.themeMode === option.key ? brand.obsidian : text }]}>{option.label}</Text></TouchableOpacity>)}</View>
-      <Text style={[styles.preferenceLabel, { color: muted }]}>ENVIRONMENT</Text>
-      <View testID="settings-environment-grid" style={styles.environmentGrid}>{backgroundOptions.map(option => {
-        const selected = preferences.background === option.key;
-        return <TouchableOpacity key={option.key} testID={`background-option-${option.key}`} accessibilityRole="button" accessibilityLabel={`${option.label} environment`} accessibilityState={{ selected }} {...({ 'aria-selected': selected } as any)} onPress={() => { const next = { ...preferences, background: option.key, customBackgroundUri: undefined }; onPreferencesChange(next); void saveChatBackground(option.key); }} style={styles.environmentTile}>
-          <View style={[styles.environmentThumb, selected ? { borderColor: brand.cyan, borderWidth: 2 } : { borderColor: glassEdge(dark) }]}>
-            {option.preview ? <Image source={option.preview} style={styles.environmentThumbImage} resizeMode="cover" accessibilityIgnoresInvertColors />
-              : option.swatch === 'spectral' ? <LinearGradient colors={[brand.cyan, brand.violet]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.environmentThumbImage} />
-              : <View style={[styles.environmentThumbImage, { backgroundColor: option.swatch }]} />}
-          </View>
-          <Text numberOfLines={1} style={[styles.environmentLabel, { color: selected ? (dark ? brand.cyan : brand.violet) : muted }]}>{option.label}</Text>
-        </TouchableOpacity>;
-      })}</View>
-      <Text style={[styles.preferenceLabel, { color: muted }]}>CUSTOM BACKGROUND</Text>
-      {preferences.customBackgroundUri ? <View style={styles.customBackgroundRow}>
-        <Image source={{ uri: preferences.customBackgroundUri }} style={styles.customBackgroundPreview} resizeMode="cover" accessibilityLabel="Custom background preview" />
-        <View style={styles.customBackgroundCopy}><Text style={[styles.settingsToggleTitle, { color: text }]}>Your photo</Text><Text style={[styles.settingsToggleDescription, { color: muted }]}>Stored on this device and used only while selected.</Text></View>
-        <TouchableOpacity testID="settings-custom-background-remove" accessibilityRole="button" accessibilityLabel="Remove the custom background" onPress={() => void removeCustom()} style={styles.secondaryAction}><Text style={[styles.secondaryActionText, { color: brand.critical }]}>Remove</Text></TouchableOpacity>
-      </View> : null}
-      <TouchableOpacity testID="settings-custom-background-upload" accessibilityRole="button" accessibilityLabel={preferences.customBackgroundUri ? 'Replace the custom background photo' : 'Upload a custom background photo'} onPress={() => void pickCustomBackground()} style={[styles.uploadBackgroundButton, { borderColor: dark ? brand.cyan : brand.violet }]}><Text style={[styles.optionText, { color: dark ? brand.cyan : brand.violet }]}>{preferences.customBackgroundUri ? 'Replace photo' : 'Upload background'}</Text></TouchableOpacity>
     </View> : null}
     </View>
     <View style={[styles.settingsGroup, { backgroundColor: groupSurface }]}>
-    <SettingsSectionControl first id="diagnostics" title="Diagnostics" expanded={expandedSection === 'diagnostics'} onPress={() => toggleSection('diagnostics')} color={text} muted={muted} summary="Gateway, event ingress and execution" />
-    {expandedSection === 'diagnostics' ? <View testID="settings-diagnostics-content" style={styles.settingsSectionContent}><Text style={[styles.settingsToggleDescription, { color: muted }]}>Process-free Gateway, persisted runtime, and execution-interface details for troubleshooting.</Text><TouchableOpacity testID="settings-diagnostics-open" accessibilityRole="button" accessibilityLabel="Open diagnostics" onPress={() => { onClose(); router.push('/diagnostics' as any); }} style={styles.diagnosticsButton}><Text style={[styles.diagnosticsButtonText, { color: text }]}>Open diagnostics</Text><Text style={[styles.diagnosticsArrow, { color: muted }]}>↗</Text></TouchableOpacity></View> : null}
-    <SettingsSectionControl id="account" title="Account" expanded={expandedSection === 'account'} onPress={() => toggleSection('account')} color={text} muted={muted} summary="Profile, notifications and sign-in" />
+    <SettingsSectionControl first id="account" title="Account" expanded={expandedSection === 'account'} onPress={() => toggleSection('account')} color={text} muted={muted} summary="Profile, connections, notifications and privacy" />
     {expandedSection === 'account' ? <View testID="settings-account-content" style={styles.settingsSectionContent}><TouchableOpacity testID="settings-account-open" accessibilityRole="button" accessibilityLabel="Open account settings" onPress={() => { onClose(); router.push('/account' as any); }} style={styles.diagnosticsButton}><Text style={[styles.diagnosticsButtonText, { color: text }]}>Account & notifications</Text><Text style={[styles.diagnosticsArrow, { color: muted }]}>↗</Text></TouchableOpacity><TouchableOpacity testID="settings-logout" accessibilityRole="button" accessibilityLabel="Sign out of Magistrate" onPress={onLogout} style={styles.logoutButton}><Text style={styles.logoutButtonText}>SIGN OUT</Text></TouchableOpacity></View> : null}
     </View>
     <View style={styles.settingsStatusGrid}><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: error ? brand.critical : loading ? brand.attention : network ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Gateway</Text><Text testID="settings-network-status" style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : error ? 'Unavailable' : network ? 'Connected' : 'Degraded'}</Text></View></View><View style={styles.settingsStatus}><View style={[styles.statusDot, { backgroundColor: executionReady ? brand.success : brand.attention }]} /><View><Text style={[styles.settingsLabel, { color: muted }]}>Persisted runtime</Text><Text style={[styles.settingsValue, { color: text }]}>{loading ? 'Checking…' : `${runtimeStatus} · ${executionReady ? 'ready' : 'unavailable'}`}</Text></View></View></View>
     {error || executionError ? <Text style={styles.settingsError}>{error || executionError}</Text> : null}
-    <Text testID="settings-about" style={[styles.settingsAbout, { color: muted }]}>Magistrate · Magi is the interface. Fleet, Attention and the environment system are behind it.</Text>
+    <Text testID="settings-about" style={[styles.settingsAbout, { color: muted }]}>Magistrate · CALM AT REST. SPECTRAL WHEN ALIVE.</Text>
     </ScrollView>
     </Animated.View>
   </View>;
@@ -863,9 +796,9 @@ export default function ChatScreen() {
   const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({ profile_id: null, routing_profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
-  const [objectives, setObjectives] = useState<FleetObjective[]>([]); const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | null>(null); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [providers, setProviders] = useState<AuthProviderInfo[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [billing, setBilling] = useState<BillingAccount | null>(null); const [billingError, setBillingError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [objectives, setObjectives] = useState<FleetObjective[]>([]); const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | null>(null); const [projects, setProjects] = useState<CustomerProject[]>([]); const [attention, setAttention] = useState<UnifiedAttentionRecord[]>([]); const [activity, setActivity] = useState<RecentActivityItem[]>([]); const [usage, setUsage] = useState<UsageProvider[]>([]); const [usageLoading, setUsageLoading] = useState(false); const [usageError, setUsageError] = useState<string | null>(null); const [billing, setBilling] = useState<BillingAccount | null>(null); const [billingError, setBillingError] = useState<string | null>(null); const [health, setHealth] = useState<HealthInfo | null>(null);
   const [loading, setLoading] = useState(true); const [refreshing, setRefreshing] = useState(false); const [healthLoading, setHealthLoading] = useState(true); const [healthError, setHealthError] = useState<string | null>(null); const [reducedMotion, setReducedMotion] = useState(false);
-  const [errors, setErrors] = useState<{ fleet?: string | null; attention?: string | null; activity?: string | null; providers?: string | null }>({});
+  const [errors, setErrors] = useState<{ fleet?: string | null; projects?: string | null; attention?: string | null; activity?: string | null }>({});
   const chatRefreshRef = useRef<(() => Promise<void>) | null>(null); const refreshPromiseRef = useRef<Promise<void> | null>(null); const mountedRef = useRef(true);
   const selectedObjective = selectedObjectiveId ? objectives.find(objective => objective.objective_id === selectedObjectiveId) || null : null;
   const registerChatRefresh = useCallback((refresh: (() => Promise<void>) | null) => {
@@ -896,18 +829,18 @@ export default function ChatScreen() {
     if (refreshPromiseRef.current) return refreshPromiseRef.current;
     setRefreshing(true);
     const request = (async () => {
-      // One read-only owner refreshes canonical Chat, Fleet, Activity, and
-      // Attention. No timer, snapshot command, or execution reconciliation is
+      // One read-only owner refreshes canonical Chat, Projects, Fleet, Activity,
+      // and Attention. No timer, snapshot command, or execution reconciliation is
       // attached to this gesture.
       const results = await Promise.allSettled([
-        fetchFleet(), fetchUnifiedAttention(), fetchRecentActivity(),
+        fetchFleet(), fetchProjects(), fetchUnifiedAttention(), fetchRecentActivity(),
         fetchAuthProviders(), fetchHealth(),
         includeChat ? (chatRefreshRef.current?.() || Promise.resolve()) : Promise.resolve(),
       ]);
       if (!mountedRef.current) return;
-      const [fleetResult, attentionResult, activityResult, providerResult, healthResult] = results;
-      setErrors({ fleet: fleetResult.status === 'rejected' ? errorText(fleetResult.reason, 'Fleet could not be loaded.') : null, attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null, activity: activityResult.status === 'rejected' ? errorText(activityResult.reason, 'Recent activity could not be loaded.') : null, providers: providerResult.status === 'rejected' ? errorText(providerResult.reason, 'Connections data could not be loaded.') : null });
-      if (fleetResult.status === 'fulfilled') setObjectives(fleetResult.value.tasks); if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value); if (activityResult.status === 'fulfilled') setActivity(activityResult.value.items); if (providerResult.status === 'fulfilled') setProviders(providerResult.value);
+      const [fleetResult, projectResult, attentionResult, activityResult, , healthResult] = results;
+      setErrors({ fleet: fleetResult.status === 'rejected' ? errorText(fleetResult.reason, 'Fleet could not be loaded.') : null, projects: projectResult.status === 'rejected' ? errorText(projectResult.reason, 'Projects could not be loaded.') : null, attention: attentionResult.status === 'rejected' ? errorText(attentionResult.reason, 'Attention data could not be loaded.') : null, activity: activityResult.status === 'rejected' ? errorText(activityResult.reason, 'Recent activity could not be loaded.') : null });
+      if (fleetResult.status === 'fulfilled') setObjectives(fleetResult.value.tasks); if (projectResult.status === 'fulfilled') setProjects(projectResult.value); if (attentionResult.status === 'fulfilled') setAttention(attentionResult.value); if (activityResult.status === 'fulfilled') setActivity(activityResult.value.items);
       if (healthResult.status === 'fulfilled') { setHealth(healthResult.value); setHealthError(null); } else setHealthError(errorText(healthResult.reason, 'Network status could not be loaded.'));
       setLoading(false); setHealthLoading(false);
     })().finally(() => {
@@ -958,7 +891,7 @@ export default function ChatScreen() {
   }), [drawerOpen, isNarrow]);
   return <EnvironmentBackground hideBottomControls preserveCanvas><SafeAreaView style={styles.page}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
-      <DrawerPanel open={drawerOpen && !settingsOpen && !selectedObjective} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => setDrawerOpen(false)} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} objectives={objectives} onOpenObjective={objective => { setDrawerOpen(false); setSelectedObjectiveId(objective.objective_id); }} attention={attention} activity={activity} providers={providers} errors={errors} loading={loading} refreshing={refreshing} onRefresh={() => { void refreshAll(); }} />
+      <DrawerPanel open={drawerOpen && !settingsOpen && !selectedObjective} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => setDrawerOpen(false)} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} objectives={objectives} onOpenObjective={objective => { setDrawerOpen(false); setSelectedObjectiveId(objective.objective_id); }} projects={projects} onCreateProject={async (name, description) => { const project = await createProject({ name, description }); setProjects(current => [project, ...current.filter(item => item.id !== project.id)]); }} attention={attention} activity={activity} errors={errors} loading={loading} refreshing={refreshing} onRefresh={() => { void refreshAll(); }} />
       <Animated.View style={styles.chatStage}><ChatCanvas drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onRegisterRefresh={registerChatRefresh} onRefreshAll={refreshAll} globalRefreshing={refreshing} />
         <Animated.View testID="chat-dim" pointerEvents={drawerOpen ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
           <TouchableOpacity testID="drawer-dismiss" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={() => setDrawerOpen(false)} activeOpacity={1} style={styles.chatDimPress} />
@@ -1050,7 +983,7 @@ const styles = StyleSheet.create({
   drawerFixedHeader: { flexShrink: 0, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 10, borderRadius: 26, borderWidth: StyleSheet.hairlineWidth },
   drawerTitleRow: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 10 },
   drawerCloseButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
-  drawerWordmark: { flex: 1, fontFamily: Platform.select({ web: 'Bodoni Moda, Times New Roman, serif', default: undefined }), fontSize: 26, lineHeight: 34, fontWeight: '500' },
+  drawerWordmark: { flex: 1, fontSize: 24, lineHeight: 32, fontWeight: '600' },
   drawerSearchInput: { flex: 1, minWidth: 0, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 14, fontSize: 16, outlineStyle: 'none' as any },
   drawerHeaderButton: { width: 42, height: 42, borderRadius: 21, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   drawerRefreshText: { fontSize: 24, lineHeight: 27, fontWeight: '500' },
@@ -1065,11 +998,13 @@ const styles = StyleSheet.create({
   workDot: { width: 7, height: 7, borderRadius: 4 }, drawerWorkName: { flexShrink: 1, fontSize: 14, fontWeight: '500' }, drawerWorkStatus: { flexShrink: 1, fontSize: 12 },
   drawerBottom: { flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, ...Platform.select({ web: { paddingBottom: 'calc(12px + env(safe-area-inset-bottom, 0px))' as any }, default: { paddingBottom: 12 } }) },
   drawerSettingsButton: { flex: 1, minHeight: 48, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: 24, borderWidth: StyleSheet.hairlineWidth },
+  drawerSettingsContent: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
   drawerSettingsText: { fontSize: 15, fontWeight: '600' },
   accountRow: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24 },
   accountIcon: { width: ICON_SIZE, height: ICON_SIZE, alignItems: 'center', justifyContent: 'center' },
   gearIconContainer: { width: 20, alignItems: 'center', justifyContent: 'center' }, chevron: { width: 18, fontSize: 13, textAlign: 'center' },
   sectionPanel: { paddingLeft: 44, paddingRight: 4, paddingBottom: 12, gap: 8 }, panelText: { fontSize: 13, lineHeight: 19 }, panelItem: { minHeight: 40, justifyContent: 'center', paddingVertical: 6 }, panelItemTitle: { fontSize: 13, fontWeight: '700', marginBottom: 2 }, panelItemMeta: { fontSize: 12, lineHeight: 17 },
+  projectCreateForm: { gap: 8, paddingVertical: 8 }, projectInput: { minHeight: 42, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 11, fontSize: 13, outlineStyle: 'none' as any }, projectCreateButton: { minHeight: 42, borderRadius: 10, backgroundColor: brand.ink, alignItems: 'center', justifyContent: 'center' }, projectCreateButtonText: { color: brand.paper, fontSize: 13, fontWeight: '700' },
   fleetObjectiveRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, fleetObjectiveCopy: { flex: 1, minWidth: 0 }, fleetPanelName: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: '700' },
 
   // Product Fleet details are an independent sibling drawer. It never exposes

@@ -1,16 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Alert, ActivityIndicator, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Alert, ActivityIndicator, Platform, TextInput } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
+import Constants from 'expo-constants';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { AccountOnboardingState, AuthProviderInfo, createBillingPortal, fetchAccountOnboarding, fetchAuthProviders, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, ProviderAuthConfiguration, ProviderLoginMethod, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile, connectAuthProvider } from '../../src/api/client';
+import { AccountOnboardingState, AuthProviderInfo, BillingAccount, connectAuthProvider, createBillingPortal, deleteGatewayAccount, fetchAccountOnboarding, fetchAuthProviders, fetchBillingAccount, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, logoutGatewaySession, ProviderAuthConfiguration, ProviderLoginMethod, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile } from '../../src/api/client';
 import { linkProviderIdentity, providerSignInAvailable, SignInProvider } from '../../src/services/ProviderSignIn';
-import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
-import { loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveVoiceInputMode } from '../../src/services/ChatPreferences';
+import { loadChatPreferences, saveVoiceInputMode } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
+import { openExternalUrl } from '../../src/utils/externalLinks';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { loadOperatingPermissionMode, saveOperatingPermissionMode, OPERATING_PERMISSION_MODE_OPTIONS, OperatingPermissionMode } from '../../src/services/OperatingPermissionModes';
 import { notificationManager, NativePushStatus } from '../../src/services/NotificationManager';
@@ -41,6 +42,12 @@ export default function AccountScreen() {
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileName, setProfileName] = useState('');
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [billing, setBilling] = useState<BillingAccount | null>(null);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
   const [loginMethods, setLoginMethods] = useState<ProviderLoginMethod[]>([]);
@@ -52,8 +59,6 @@ export default function AccountScreen() {
   const [providersLoaded, setProvidersLoaded] = useState<boolean>(false);
   const [connectNotice, setConnectNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState<boolean>(false);
-  const [activeThemeKey, setActiveThemeKey] = useState<WeatherSceneKey>('dusk-mountain');
-  const [customBackgroundUri, setCustomBackgroundUri] = useState<string | undefined>();
 
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
   const [voiceInputMode, setVoiceInputMode] = useState<VoiceInputMode>('automatic');
@@ -71,9 +76,9 @@ export default function AccountScreen() {
     // Each source is settled independently and its failure is shown, not
     // swallowed: an unreachable provider list must read as unavailable rather
     // than as an account with no integrations.
-    const [profileResult, providerResult, methodsResult, configurationResult, onboardingResult] = await Promise.allSettled([
+    const [profileResult, providerResult, methodsResult, configurationResult, onboardingResult, billingResult] = await Promise.allSettled([
       fetchUserProfile(), fetchAuthProviders(), fetchProviderLoginMethods(),
-      fetchProviderAuthConfiguration(), fetchAccountOnboarding(),
+      fetchProviderAuthConfiguration(), fetchAccountOnboarding(), fetchBillingAccount(),
     ]);
     if (profileResult.status === 'fulfilled') {
       const prof = profileResult.value;
@@ -84,6 +89,7 @@ export default function AccountScreen() {
       // value is legacy metadata and must not overwrite an explicit device
       // choice during hydration.
       setProfile(prof);
+      setProfileName(prof.name || '');
       setProfileError(null);
     } else {
       setProfileError(errorText(profileResult.reason, 'Account profile could not be loaded.'));
@@ -100,6 +106,8 @@ export default function AccountScreen() {
     if (methodsResult.status === 'fulfilled') setLoginMethods(methodsResult.value);
     if (configurationResult.status === 'fulfilled') setProviderConfiguration(configurationResult.value);
     if (onboardingResult.status === 'fulfilled') setOnboarding(onboardingResult.value);
+    if (billingResult.status === 'fulfilled') { setBilling(billingResult.value); setBillingError(null); }
+    else { setBilling(null); setBillingError(errorText(billingResult.reason, 'Plan, credits, and billing could not be loaded.')); }
     setProvidersLoaded(true);
   };
 
@@ -107,8 +115,6 @@ export default function AccountScreen() {
     const unsubscribePushStatus = notificationManager.subscribePushStatus(setNativePushStatus);
     Promise.allSettled([loadChatPreferences(), fetchVoiceInputCapabilities(), fetchNotificationPreferences(), loadOperatingPermissionMode()]).then(([preferencesResult, capabilityResult, notificationResult, localModeResult]) => {
       if (preferencesResult.status === 'fulfilled') {
-        setActiveThemeKey(preferencesResult.value.background);
-        setCustomBackgroundUri(preferencesResult.value.customBackgroundUri);
         setVoiceInputMode(preferencesResult.value.voiceInputMode);
       }
       if (capabilityResult.status === 'fulfilled') {
@@ -162,40 +168,32 @@ export default function AccountScreen() {
     }
   };
 
-  const handlePickCustomBackground = async () => {
-    const permResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permResult.granted) {
-      Alert.alert('Permission Required', 'Media library access is needed to select a custom background photo.');
-      return;
-    }
-
-    const pickerResult = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      quality: 0.85
-    });
-
-    if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
-      const asset = pickerResult.assets[0];
-      if (asset.fileSize && asset.fileSize > 10 * 1024 * 1024) { Alert.alert('Photo Too Large', 'Choose an image smaller than 10 MB.'); return; }
-      if (asset.mimeType && !asset.mimeType.startsWith('image/')) { Alert.alert('Unsupported File', 'Choose a supported image file.'); return; }
-      const customUri = asset.uri;
-      setActiveThemeKey('custom');
-      setCustomBackgroundUri(customUri);
-      await saveCustomBackground(customUri);
-    }
+  const saveProfileName = async () => {
+    const name = profileName.trim();
+    if (!name) { Alert.alert('Name required', 'Enter the name Magi should use.'); return; }
+    setSavingProfile(true);
+    try { const updated = await updateUserProfile({ name }); setProfile(updated); setProfileName(updated.name); }
+    catch (error) { Alert.alert('Profile not saved', errorText(error, 'Your profile could not be updated.')); }
+    finally { setSavingProfile(false); }
   };
 
-  const handleSelectBackground = async (key: WeatherSceneKey) => {
-    setActiveThemeKey(key);
-    setCustomBackgroundUri(undefined);
-    setActiveBackground(key);
-    try {
-      await saveChatBackground(key);
-      await updateUserProfile({ active_theme: key });
-    } catch (e) {
-      Alert.alert('Appearance not saved', errorText(e, 'The background choice could not be saved to the gateway. It remains active on this device only.'));
+  const openAccountLink = async (url: string) => {
+    const result = await openExternalUrl(url);
+    if (!result.ok) Alert.alert('Unable to open link', result.message);
+  };
+
+  const requestAccountDeletion = () => {
+    if (!profile || deleteConfirmation !== `DELETE ${profile.user_id}`) {
+      Alert.alert('Confirmation required', `Type DELETE ${profile?.user_id || 'your account ID'} exactly before deleting this account.`);
+      return;
     }
+    Alert.alert('Permanently delete account?', 'Projects, messages, uploads, sessions, and account data will be erased. This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete account', style: 'destructive', onPress: () => {
+        setDeletingAccount(true);
+        void deleteGatewayAccount(deleteConfirmation).catch(error => Alert.alert('Account not deleted', errorText(error, 'Your data was preserved. Try again later.'))).finally(() => setDeletingAccount(false));
+      } },
+    ]);
   };
 
   // REAL OAUTH BROWSER AUTHENTICATION FLOW WITH AUTO DISMISSAL
@@ -322,6 +320,10 @@ export default function AccountScreen() {
               </TouchableOpacity>
             </View>
           </View>
+          <View style={styles.profileEditRow}>
+            <TextInput testID="account-profile-name-input" accessibilityLabel="Account display name" maxLength={80} value={profileName} onChangeText={setProfileName} placeholder="Display name" placeholderTextColor="rgba(255,255,255,0.5)" style={styles.profileNameInput} />
+            <TouchableOpacity testID="account-profile-save" accessibilityRole="button" accessibilityLabel="Save account display name" accessibilityState={{ disabled: savingProfile || !profileName.trim(), busy: savingProfile }} disabled={savingProfile || !profileName.trim()} onPress={() => void saveProfileName()} style={styles.profileSaveButton}><Text style={styles.profileSaveText}>{savingProfile ? 'SAVING…' : 'SAVE'}</Text></TouchableOpacity>
+          </View>
         </GlassSurface>
 
         <AccountSectionHeader id="sign-in" title="SIGN-IN & BILLING" expanded={expandedSection === 'sign-in'} onPress={() => toggleSection('sign-in')} />
@@ -331,7 +333,15 @@ export default function AccountScreen() {
           {loginMethods.map(method => <View key={method.provider} testID={`login-method-${method.provider}`} style={styles.socialRow}><View style={styles.providerLeft}><Text style={styles.socialName}>{method.provider.toUpperCase()}</Text><Text style={styles.socialHandle}>{method.label || 'Verified provider identity'}{method.current ? ' · current session' : ' · recovery ready'}</Text></View><TouchableOpacity testID={`unlink-login-${method.provider}`} disabled={identityBusy !== null || method.current || loginMethods.length <= 1} accessibilityState={{ disabled: identityBusy !== null || method.current || loginMethods.length <= 1 }} onPress={() => void unlinkLoginMethod(method.provider)} style={[styles.socialToggleBtn, (method.current || loginMethods.length <= 1) && { opacity: 0.45 }]}><Text style={styles.socialBtnText}>REMOVE</Text></TouchableOpacity></View>)}
           {(['apple', 'google'] as const).filter(provider => !loginMethods.some(method => method.provider === provider)).map(provider => <TouchableOpacity key={provider} testID={`link-login-${provider}`} disabled={identityBusy !== null || !providerEnabled(provider)} onPress={() => void linkLoginMethod(provider)} style={[styles.identityAction, (!providerEnabled(provider) || identityBusy !== null) && { opacity: 0.5 }]}><Text style={styles.socialBtnText}>{identityBusy === provider ? 'LINKING…' : `LINK ${provider.toUpperCase()}`}</Text></TouchableOpacity>)}
           {identityNotice ? <Text testID="identity-notice" accessibilityRole="alert" style={styles.providerError}>{identityNotice}</Text> : null}
-          <View style={styles.billingBlock}><Text style={styles.settingLabel}>SUBSCRIPTION</Text><Text testID="billing-status" style={styles.settingHint}>{onboarding?.steps.billing.complete ? `Active · ${onboarding.steps.billing.status}` : `Status · ${onboarding?.steps.billing.status || 'unknown'}`}</Text>{onboarding?.steps.billing.customer_portal_available ? <TouchableOpacity testID="open-billing-portal" disabled={identityBusy !== null} onPress={() => void openBillingPortal()} style={styles.identityAction}><Text style={styles.socialBtnText}>{identityBusy === 'billing' ? 'OPENING…' : 'MANAGE BILLING ↗'}</Text></TouchableOpacity> : null}</View>
+          <View style={styles.billingBlock}>
+            <Text style={styles.settingLabel}>PLAN, CREDITS & BILLING</Text>
+            {billingError ? <Text accessibilityRole="alert" style={styles.providerError}>{billingError}</Text> : billing ? <>
+              <Text testID="billing-status" style={styles.settingToggleLabel}>{billing.plan_name} · {(billing.balance_microcredits / 1_000_000).toLocaleString()} credits</Text>
+              <Text style={styles.settingHint}>{(billing.reserved_microcredits / 1_000_000).toLocaleString()} reserved · {(billing.period_spend_microcredits / 1_000_000).toLocaleString()} used this period · {billing.subscription_status}</Text>
+              <Text style={styles.settingHint}>{billing.low_credit_warning ? 'Credit balance is low. ' : ''}Concurrency limit: {billing.limits.concurrency}.</Text>
+            </> : <Text style={styles.settingHint}>Verified billing data is unavailable.</Text>}
+            {onboarding?.steps.billing.customer_portal_available ? <TouchableOpacity testID="open-billing-portal" disabled={identityBusy !== null} onPress={() => void openBillingPortal()} style={styles.identityAction}><Text style={styles.socialBtnText}>{identityBusy === 'billing' ? 'OPENING…' : 'MANAGE BILLING ↗'}</Text></TouchableOpacity> : <Text style={styles.settingHint}>Billing management is unavailable for this account.</Text>}
+          </View>
         </GlassSurface> : null}
 
         <AccountSectionHeader id="notifications" title="CAPTAIN ATTENTION NOTIFICATIONS" expanded={expandedSection === 'notifications'} onPress={() => toggleSection('notifications')} />
@@ -451,36 +461,31 @@ export default function AccountScreen() {
           ))}
         </GlassSurface> : null}
 
-        {/* BACKGROUNDS & APPEARANCE */}
-        <AccountSectionHeader id="appearance" title="BACKGROUNDS & APPEARANCE" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} />
-
+        <AccountSectionHeader id="appearance" title="APPEARANCE" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} />
         {expandedSection === 'appearance' ? <GlassSurface variant="card" style={styles.settingsCard}>
-          <Text style={styles.settingLabel}>SELECTABLE BACKGROUND THEME</Text>
-          <View style={styles.themeRow}>
-            {[
-              { key: 'auto', label: 'Automatic' },
-              { key: 'dusk-mountain', label: 'Dusk Mountain' },
-              { key: 'clear-day', label: 'Clear Day' },
-              { key: 'clear-night', label: 'Clear Night' },
-              { key: 'clouds', label: 'Cloudy Sky' },
-              { key: 'rain', label: 'Rain Storm' },
-              { key: 'sunset', label: 'Sunset Glow' },
-              { key: 'minimal-dark', label: 'Minimal Dark' }
-            ].map(t => (
-              <TouchableOpacity key={t.key} onPress={() => handleSelectBackground(t.key as WeatherSceneKey)}>
-                <GlassSurface variant="control" style={[styles.themePill, activeThemeKey === t.key ? styles.themePillActive : undefined]}>
-                  <Text style={[styles.themeText, activeThemeKey === t.key ? styles.themeTextActive : undefined]}>{t.label}</Text>
-                </GlassSurface>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {customBackgroundUri ? <Image source={{ uri: customBackgroundUri }} style={styles.customBackgroundPreview} resizeMode="cover" accessibilityLabel="Custom background preview" /> : null}
-          <TouchableOpacity testID="account-custom-background-upload" style={styles.customBgBtn} onPress={handlePickCustomBackground}>
-            <Text style={styles.customBgBtnText}>{customBackgroundUri ? 'REPLACE CUSTOM PHOTO 📷' : 'UPLOAD CUSTOM PHOTO 📷'}</Text>
-          </TouchableOpacity>
-          {customBackgroundUri ? <TouchableOpacity testID="account-custom-background-remove" style={styles.customBgRemoveBtn} onPress={async () => { setCustomBackgroundUri(undefined); setActiveThemeKey('auto'); await removeCustomBackground(); }}><Text style={styles.customBgBtnText}>REMOVE CUSTOM PHOTO</Text></TouchableOpacity> : null}
+          <Text style={styles.settingToggleLabel}>SYSTEM, DARK OR LIGHT</Text>
+          <Text style={styles.settingHint}>Appearance is managed in the main Settings sheet. Magistrate uses a flat productivity canvas without wallpaper or transparency effects.</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Return to Chat settings" onPress={() => router.replace('/chat' as any)} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>OPEN CHAT SETTINGS</Text></TouchableOpacity>
         </GlassSurface> : null}
+
+        <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>PRIVACY, SUPPORT & ABOUT</Text></View>
+        <GlassSurface variant="card" style={styles.settingsCard}>
+          <Text style={styles.settingToggleLabel}>MAGISTRATE</Text>
+          <Text testID="account-version" style={styles.settingHint}>Version {Constants.expoConfig?.version || 'unavailable'} · build {Constants.nativeBuildVersion || Constants.expoConfig?.ios?.buildNumber || 'unavailable'}</Text>
+          <Text style={styles.settingHint}>CALM AT REST. SPECTRAL WHEN ALIVE.</Text>
+          <View style={styles.accountLinks}>
+            <TouchableOpacity accessibilityRole="link" accessibilityLabel="Open privacy and security documentation" onPress={() => void openAccountLink('https://github.com/calvin-rutherford/Magistrate/blob/main/docs/friend-beta-security.md')} style={styles.accountLink}><Text style={styles.accountLinkText}>Privacy & security</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="link" accessibilityLabel="Open Magistrate license" onPress={() => void openAccountLink('https://github.com/calvin-rutherford/Magistrate/blob/main/LICENSE')} style={styles.accountLink}><Text style={styles.accountLinkText}>Legal & license</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="link" accessibilityLabel="Open support" onPress={() => void openAccountLink('https://github.com/calvin-rutherford/Magistrate/issues')} style={styles.accountLink}><Text style={styles.accountLinkText}>Support</Text></TouchableOpacity>
+          </View>
+          <TouchableOpacity testID="account-logout" accessibilityRole="button" accessibilityLabel="Sign out of Magistrate" onPress={() => void logoutGatewaySession()} style={styles.accountLogout}><Text style={styles.accountLogoutText}>SIGN OUT</Text></TouchableOpacity>
+          <View style={styles.deleteSection}>
+            <Text style={styles.settingToggleLabel}>DELETE ACCOUNT</Text>
+            <Text style={styles.settingHint}>Permanently erases account data. Type DELETE {profile?.user_id || 'your account ID'} to enable this irreversible action.</Text>
+            <TextInput testID="account-delete-confirmation" accessibilityLabel="Account deletion confirmation" autoCapitalize="characters" value={deleteConfirmation} onChangeText={setDeleteConfirmation} placeholder={profile ? `DELETE ${profile.user_id}` : 'Account unavailable'} placeholderTextColor="rgba(255,255,255,0.45)" style={styles.deleteInput} />
+            <TouchableOpacity testID="account-delete" accessibilityRole="button" accessibilityLabel="Permanently delete Magistrate account" accessibilityState={{ disabled: deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`, busy: deletingAccount }} disabled={deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`} onPress={requestAccountDeletion} style={[styles.accountDelete, (deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`) && styles.disabled]}><Text style={styles.accountDeleteText}>{deletingAccount ? 'DELETING…' : 'DELETE ACCOUNT'}</Text></TouchableOpacity>
+          </View>
+        </GlassSurface>
       </ScrollView>
     </EnvironmentBackground>
   );
@@ -496,7 +501,7 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     marginBottom: 8
   },
-  headerTitle: { fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1.5 },
+  headerTitle: { fontSize: 13, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1.5 },
   headerCircleBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
   backText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
   profileCard: { padding: 18, marginVertical: 8, borderRadius: 18 },
@@ -507,12 +512,16 @@ const styles = StyleSheet.create({
   avatarBadge: { position: 'absolute', bottom: -2, right: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: '#FFFFFF', justifyContent: 'center', alignItems: 'center' },
   avatarBadgeText: { fontSize: 11 },
   profileInfo: { flex: 1 },
+  profileEditRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 16 },
+  profileNameInput: { flex: 1, minHeight: 44, borderWidth: 1, borderColor: 'rgba(255,255,255,0.28)', borderRadius: 10, color: '#FFFFFF', paddingHorizontal: 12, fontSize: 14 },
+  profileSaveButton: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 10, backgroundColor: '#FFFFFF' },
+  profileSaveText: { color: '#11151B', fontSize: 11, fontWeight: '800' },
   profileName: { fontSize: 16, fontWeight: 'bold', color: '#FFFFFF' },
   profileEmail: { fontSize: 12, color: 'rgba(255, 255, 255, 0.65)', marginTop: 2 },
   uploadBtn: { marginTop: 6 },
-  uploadBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 0.8 },
+  uploadBtnText: { fontSize: 10, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 0.8 },
   sectionHeader: { marginTop: 14, marginBottom: 6, minHeight: 44, paddingVertical: 8, paddingHorizontal: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  sectionTitle: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', letterSpacing: 1.4, flex: 1 },
+  sectionTitle: { fontSize: 11, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', letterSpacing: 1.4, flex: 1 },
   sectionChevron: { color: '#FFFFFF', fontSize: 22, lineHeight: 24, width: 30, textAlign: 'center' },
   socialCard: { padding: 16, borderRadius: 18, gap: 12 },
   socialRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
@@ -520,27 +529,27 @@ const styles = StyleSheet.create({
   socialName: { fontSize: 13.5, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 0.5 },
   socialHandle: { fontSize: 11, color: 'rgba(255, 255, 255, 0.5)', marginTop: 2 },
   providerReason: { fontSize: 10, lineHeight: 14, color: 'rgba(255, 255, 255, 0.62)', marginTop: 4 },
-  providerError: { fontFamily: 'monospace', fontSize: 11, lineHeight: 16, color: '#FFB4B2', marginBottom: 8 },
-  providerPlaceholder: { fontFamily: 'monospace', color: 'rgba(255,255,255,0.5)', fontSize: 11, textAlign: 'center', marginVertical: 10 },
+  providerError: { fontSize: 11, lineHeight: 16, color: '#FFB4B2', marginBottom: 8 },
+  providerPlaceholder: { color: 'rgba(255,255,255,0.5)', fontSize: 11, textAlign: 'center', marginVertical: 10 },
   socialToggleBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   socialBtnConnected: { backgroundColor: 'rgba(255, 255, 255, 0.15)', borderColor: '#FFFFFF' },
-  socialBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
+  socialBtnText: { fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
   identityAction: { marginTop: 10, minHeight: 40, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.4)', justifyContent: 'center', alignItems: 'center' },
   billingBlock: { marginTop: 20, paddingTop: 16, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.3)' },
   // Settings cards have a little more breathing room for the mode controls.
   settingsCard: { padding: 21, borderRadius: 18 },
-  settingLabel: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', marginBottom: 8 },
+  settingLabel: { fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', marginBottom: 8 },
   settingToggleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 6 },
-  settingToggleLabel: { fontFamily: 'monospace', fontSize: 11, fontWeight: 'bold', color: '#FFFFFF' },
+  settingToggleLabel: { fontSize: 11, fontWeight: 'bold', color: '#FFFFFF' },
   settingCopy: { flex: 1, paddingRight: 12 },
   settingHint: { marginTop: 3, fontSize: 10, color: 'rgba(255, 255, 255, 0.55)' },
   toggleBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   toggleBtnActive: { backgroundColor: 'rgba(255, 255, 255, 0.2)', borderColor: '#FFFFFF' },
-  toggleBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
+  toggleBtnText: { fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
   permissionModeColumn: { gap: 7, marginTop: 10 },
   permissionModeOption: { padding: 10, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   permissionModeOptionActive: { backgroundColor: 'rgba(36, 216, 255, 0.22)', borderColor: '#24D8FF' },
-  permissionModeTitle: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255,255,255,0.75)' },
+  permissionModeTitle: { fontSize: 10, fontWeight: 'bold', color: 'rgba(255,255,255,0.75)' },
   permissionModeTitleActive: { color: '#FFFFFF' },
   pushStatusText: { marginTop: 12, fontSize: 10, lineHeight: 15, color: 'rgba(255,255,255,0.72)' },
   enablePushButton: { alignSelf: 'flex-start', marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderWidth: 1, borderColor: '#24D8FF', borderRadius: 999 },
@@ -548,13 +557,16 @@ const styles = StyleSheet.create({
   voiceModePill: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   voiceModePillActive: { backgroundColor: 'rgba(36, 216, 255, 0.28)', borderColor: '#24D8FF' },
   voiceModePillDisabled: { opacity: 0.45 },
-  voiceModeText: { fontFamily: 'monospace', fontSize: 10, color: 'rgba(255,255,255,0.7)' },
+  voiceModeText: { fontSize: 10, color: 'rgba(255,255,255,0.7)' },
   voiceModeTextActive: { color: '#FFFFFF', fontWeight: 'bold' },
-  themeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  themePill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },
-  themePillActive: { backgroundColor: 'rgba(255, 255, 255, 0.25)', borderColor: '#FFFFFF' },
-  themeText: { fontFamily: 'monospace', fontSize: 11, color: 'rgba(255, 255, 255, 0.7)' },
-  themeTextActive: { color: '#FFFFFF', fontWeight: 'bold' },
-  customBgBtn: { marginTop: 14, backgroundColor: 'rgba(255, 255, 255, 0.12)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: '#FFFFFF', alignItems: 'center' }, customBackgroundPreview: { width: '100%', height: 110, borderRadius: 12, marginTop: 14 }, customBgRemoveBtn: { marginTop: 8, backgroundColor: 'rgba(255, 98, 95, 0.18)', paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: '#FFB4B2', alignItems: 'center' },
-  customBgBtnText: { fontFamily: 'monospace', color: '#FFFFFF', fontWeight: 'bold', fontSize: 11 }
+  accountLinks: { marginTop: 12, gap: 2 },
+  accountLink: { minHeight: 44, justifyContent: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.15)' },
+  accountLinkText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600' },
+  accountLogout: { minHeight: 44, marginTop: 18, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center' },
+  accountLogoutText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800', letterSpacing: 0.7 },
+  deleteSection: { marginTop: 22, paddingTop: 18, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.2)' },
+  deleteInput: { minHeight: 44, marginTop: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.28)', borderRadius: 10, color: '#FFFFFF', paddingHorizontal: 12, fontSize: 13 },
+  accountDelete: { minHeight: 44, marginTop: 8, borderRadius: 10, borderWidth: 1, borderColor: '#FF625F', alignItems: 'center', justifyContent: 'center' },
+  accountDeleteText: { color: '#FF8E8B', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
+  disabled: { opacity: 0.45 },
 });

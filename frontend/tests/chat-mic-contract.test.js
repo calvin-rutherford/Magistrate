@@ -27,12 +27,12 @@ test('iOS composer follows keyboard frames without double-counting the home indi
   assert.match(chat, /behavior=\{Platform\.OS === 'android' \? 'height' : undefined\}/);
 });
 
-test('chat keeps one voice entry point and restores native/web material fallbacks', () => {
+test('chat keeps one voice entry point on restrained blur-free surfaces', () => {
   assert.doesNotMatch(chat, /testID="chat-primary-action"/);
   assert.match(chat, /testID="inline-mic-button"/);
-  assert.match(chat, /NativeGlassBlur dark=\{dark\} intensity=\{20\}/);
-  assert.match(chat, /NativeGlassBlur dark=\{dark\} intensity=\{24\}/);
-  assert.match(chat, /backdropFilter: `blur\(\$\{radius\}px\)`/);
+  assert.match(chat, /const blurStyle = \(_radius: number\) => null/);
+  assert.match(chat, /function NativeGlassBlur[\s\S]*?return null/);
+  assert.doesNotMatch(chat, /backdropFilter: `blur/);
 });
 
 test('voice preferences have durable keys, defaults, validation, and save functions', () => {
