@@ -25,8 +25,9 @@ from app.provider_auth import (
     unlink_login_method, validate_provider_auth_configuration,
 )
 from app.billing import (
-    MAX_WEBHOOK_BYTES, accept_webhook, billing_status, create_checkout,
-    create_portal, validate_billing_configuration,
+    MAX_WEBHOOK_BYTES as BILLING_MAX_WEBHOOK_BYTES, accept_webhook,
+    billing_status, create_checkout, create_portal,
+    validate_billing_configuration,
 )
 from app.onboarding import acknowledge_welcome, onboarding_state
 from app.herdr_client import HerdrClient
@@ -47,7 +48,9 @@ from app.account_lifecycle import AccountDeletionError, delete_account
 from app.projects import (ProjectError, bind_github_repository, create_project,
                           delete_project, get_project, list_projects,
                           unbind_repository, update_project)
-from app.github_service import github_service
+from app.github_app import (MAX_WEBHOOK_BYTES as GITHUB_MAX_WEBHOOK_BYTES,
+                            github_app_service, router as github_app_router,
+                            validate_github_app_configuration)
 from app.recent_activity import RecentActivityService
 from app.activity_store import SourceEventConflict, list_activity, snapshot_activity, source_diagnostics
 from app.structured_runtime import StructuredRuntimeProjection
@@ -121,6 +124,7 @@ UPLOADS_DIR = GATEWAY_DIR / 'uploads' / 'avatars'
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
 app.include_router(ar_router)
+app.include_router(github_app_router)
 app.include_router(magi_chat_router)
 app.include_router(firstmate_execution_router)
 app.include_router(firstmate_decision_router)
@@ -144,8 +148,23 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
     if request.url.path == '/api/v1/magi/messages' and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
-    if request.url.path == '/api/v1/billing/webhook' and length > MAX_WEBHOOK_BYTES:
+    if request.url.path == '/api/v1/billing/webhook' and length > BILLING_MAX_WEBHOOK_BYTES:
         return JSONResponse({'detail': 'Billing webhook is too large.'}, status_code=413)
+    github_webhook = request.method == 'POST' and request.url.path == '/api/v1/github/webhooks'
+    github_install = request.method == 'POST' and request.url.path == '/api/v1/github/app/install'
+    if github_webhook and length > GITHUB_MAX_WEBHOOK_BYTES:
+        return JSONResponse({'detail': 'Webhook payload is too large.'}, status_code=413)
+    if github_install and length > 4096:
+        return JSONResponse({'detail': 'The GitHub App request is too large.'}, status_code=413)
+    if github_webhook or github_install:
+        body_cap = GITHUB_MAX_WEBHOOK_BYTES if github_webhook else 4096
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > body_cap:
+                detail = 'Webhook payload is too large.' if github_webhook else 'The GitHub App request is too large.'
+                return JSONResponse({'detail': detail}, status_code=413)
+            body.extend(chunk)
+        request._body = bytes(body)
     firstmate_execution_contract = request.method == 'POST' and bool(re.fullmatch(
         r'/api/v1/firstmate/execution-events(?:/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/wake)?',
         request.url.path,
@@ -191,9 +210,7 @@ async def enforce_bounded_request_size(request: Request, call_next):
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
 structured_runtime = StructuredRuntimeProjection()
-recent_activity_service = RecentActivityService(
-    structured_runtime, github_service, shared_provider_owner_only=True,
-)
+recent_activity_service = RecentActivityService(structured_runtime, github_app_service)
 stt_adapter = VoiceInputAdapter()
 _notification_reconciler_task = None
 _firstmate_delivery_recovery_task = None
@@ -255,6 +272,7 @@ async def start_notification_reconciler():
     validate_provider_auth_configuration()
     validate_billing_configuration()
     validate_magi_chat_configuration()
+    validate_github_app_configuration()
     # A process cannot resume an in-flight provider socket. Preserve the
     # reserved pair and expose a truthful, explicitly retryable failure.
     await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
@@ -1046,23 +1064,6 @@ async def disconnect_oauth_provider(provider: str, principal: Principal = Depend
         raise HTTPException(status_code=404, detail='Provider not supported')
     disconnect_account(principal.user_id, provider)
     return {'status': 'disconnected', 'provider': provider}
-
-# LIVE GITHUB PR ENDPOINTS
-@app.get('/api/v1/github/pulls')
-async def list_github_pulls(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50), refresh: bool = Query(False), principal: Principal = Depends(require_scope('providers'))):
-    _require_owner(principal)
-    try:
-        return await github_service.get_pull_requests(page, per_page, refresh)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-@app.get('/api/v1/github/pulls/{number}')
-async def get_github_pull(number: int, refresh: bool = Query(False), principal: Principal = Depends(require_scope('providers'))):
-    _require_owner(principal)
-    try:
-        return await github_service.get_pull_request(number, refresh)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 @app.get('/api/v1/recent-activity')
 async def get_recent_activity(limit: int = Query(20, ge=1, le=50), refresh: bool = Query(False), principal: Principal = Depends(require_scope('read'))):

@@ -247,7 +247,7 @@ async def test_unified_attention_includes_owner_decision_without_legacy_action(
     )
     await ingest_legacy_snapshot(decision_service, firstmate)
     monkeypatch.setattr(
-        attention_module.github_service,
+        attention_module.github_app_service,
         "get_pull_requests",
         AsyncMock(return_value={"items": []}),
     )

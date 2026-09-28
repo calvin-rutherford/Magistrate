@@ -30,7 +30,7 @@ def test_teams_provider():
 
 def test_unified_attention_service_has_no_placeholder_items(monkeypatch):
     monkeypatch.setattr('app.attention_service.attention_service.decision_service.reconcile', AsyncMock(return_value=[]))
-    monkeypatch.setattr('app.attention_service.github_service.get_pull_requests', AsyncMock(return_value={'items': []}))
+    monkeypatch.setattr('app.attention_service.github_app_service.get_pull_requests', AsyncMock(return_value={'items': []}))
     res = client.get('/api/v1/attention/unified', headers=HEADERS)
     assert res.status_code == 200
     assert res.json() == []

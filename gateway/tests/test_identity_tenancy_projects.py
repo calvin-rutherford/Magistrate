@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app import db
 from app.account_lifecycle import delete_account, enforce_retention
 from app.auth import issue_session
+from app.github_app import github_app_store
 from app.magi_chat_store import MagiChatStore, MagiChatNotFound
 from app.main import app
 from app.oauth_transactions import OAuthTransactionStore
@@ -61,13 +62,16 @@ def test_projects_and_repositories_are_durable_and_tenant_opaque(monkeypatch):
         f"/api/v1/projects/{project['id']}/repositories/{bound.json()['id']}", headers=headers_b
     ).status_code == 404
     assert client.get("/api/v1/projects", headers=headers_b).json()["projects"] == []
-    # Deployment-level provider sessions are owner-only until a provider-native
-    # per-principal client replaces them; they cannot leak operator data.
-    assert client.get("/api/v1/github/pulls", headers=headers_b).status_code == 403
+    # GitHub App repository reads are principal-scoped and return no data when
+    # this tenant has not installed the App; deployment-level usage remains
+    # bootstrap-owner-only.
+    github_pulls = client.get("/api/v1/github/pulls", headers=headers_b)
+    assert github_pulls.status_code == 200
+    assert github_pulls.json()["items"] == []
     assert client.get("/api/v1/usage", headers=headers_b).status_code == 403
     recent = client.get("/api/v1/recent-activity", headers=headers_b)
     assert recent.status_code == 200
-    assert recent.json()["sources"]["github"] == "unavailable"
+    assert recent.json()["sources"]["github"] == "available"
 
     archived = client.patch(
         f"/api/v1/projects/{project['id']}", headers=headers_a, json={"status": "archived"}
@@ -101,6 +105,29 @@ def test_account_deletion_erases_only_authenticated_tenant_across_domains(monkey
     headers_b = _tenant(monkeypatch, owner_b)
     monkeypatch.setenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user")
     monkeypatch.setenv("MAGISTRATE_CHAT_UPLOAD_DIR", str(tmp_path / "uploads"))
+
+    for index, owner in enumerate((owner_a, owner_b), start=1):
+        installation_id = 8800 + index
+        github_app_store.upsert_installation(
+            {
+                "id": installation_id,
+                "account": {"id": 9800 + index, "login": owner, "type": "Organization"},
+                "repository_selection": "selected",
+                "permissions": {"contents": "read"},
+                "events": ["installation"],
+            },
+            user_id=owner,
+        )
+        github_app_store.upsert_repository(
+            installation_id,
+            {
+                "id": 10800 + index,
+                "name": "private-repository",
+                "full_name": f"{owner}/private-repository",
+                "owner": {"login": owner},
+                "private": True,
+            },
+        )
 
     projects = {}
     for owner, headers in ((owner_a, headers_a), (owner_b, headers_b)):
@@ -215,6 +242,8 @@ def test_account_deletion_erases_only_authenticated_tenant_across_domains(monkey
     assert client.get(f"/api/v1/projects/{projects[owner_b]}", headers=headers_b).status_code == 200
     assert get_upload(owner_a, uploads[owner_a]["upload_id"]) is None
     assert get_upload(owner_b, uploads[owner_b]["upload_id"]) is not None
+    assert github_app_store.repositories(owner_a) == []
+    assert len(github_app_store.repositories(owner_b)) == 1
     with pytest.raises(MagiChatNotFound):
         store.submission(owner_a, "client-message-0001")
     assert store.submission(owner_b, "client-message-0002")["user_message"]["content"] == f"private message for {owner_b}"
@@ -229,6 +258,7 @@ def test_account_deletion_erases_only_authenticated_tenant_across_domains(monkey
             ("execution_credentials", "user_id"),
             ("gateway_sessions", "user_id"), ("chat_uploads", "user_id"),
             ("oauth_transactions", "principal_id"),
+            ("github_app_installations", "user_id"),
         )
         for table, column in checks:
             assert connection.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (owner_a,)).fetchone()[0] == 0, table

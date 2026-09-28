@@ -24,21 +24,22 @@ class StubRuntime:
 
 
 class StubGitHub:
-    async def get_merged_pull_requests(self, limit, refresh):
+    async def get_merged_pull_requests(self, owner_user_id, limit, refresh):
+        assert owner_user_id == 'owner'
         return [{'number': 42, 'title': 'Merged work', 'merged_at': '2026-08-28T12:00:00Z', 'repository': 'acme/ship', 'url': 'https://github.com/acme/ship/pull/42'}]
 
 
 @pytest.mark.asyncio
 async def test_feed_is_newest_first_and_deduplicates_snapshot_pr():
     feed = await RecentActivityService(StubRuntime(), StubGitHub()).get_recent_activity("owner")
-    assert [item['id'] for item in feed['items']] == ['github:pull:42:merged', 'firstmate:request']
+    assert [item['id'] for item in feed['items']] == ['github:repository:acme/ship:pull:42:merged', 'firstmate:request']
     assert feed['sources'] == {'firstmate': 'available', 'github': 'available'}
 
 
 @pytest.mark.asyncio
 async def test_feed_keeps_real_partial_source_data():
     class FailedGitHub:
-        async def get_merged_pull_requests(self, limit, refresh):
+        async def get_merged_pull_requests(self, owner_user_id, limit, refresh):
             raise RuntimeError('offline')
     feed = await RecentActivityService(StubRuntime(), FailedGitHub()).get_recent_activity("owner", limit=1)
     assert feed['items'][0]['title'] == 'New request'

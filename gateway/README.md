@@ -83,6 +83,17 @@ This API is not general authority. GitHub reviews/merges, deploys, destructive
 or irreversible operations, external communications, credentials, and
 security-sensitive actions are outside the supported boundary.
 
+## Customer GitHub repositories
+
+Repository access uses tenant-bound GitHub App installations with read-only
+Contents, Pull requests, Checks, and Metadata permissions. App JWTs and
+short-lived installation tokens remain server-only; repository selection and
+lifecycle webhooks project into owner-qualified durable rows on the configured
+SQLite or PostgreSQL backend. The integration
+never writes source or owns execution lifecycle. Configuration and exact
+provider-console values are in
+[`../docs/github-app-activation.md`](../docs/github-app-activation.md).
+
 OAuth credentials are stored as `v<version>:<Fernet token>`. Current reads
 accept only the configured current version and raise on malformed, tampered,
 unversioned, or otherwise unauthenticated values. They never return the input
