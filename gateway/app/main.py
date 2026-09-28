@@ -842,13 +842,28 @@ async def delete_current_account(
 ):
     """Permanently erase the authenticated principal and revoke every session."""
     response.headers['Cache-Control'] = 'no-store'
-    _clear_provider_cookie(response)
+    if contract.confirmation != f"DELETE {principal.user_id}":
+        raise HTTPException(
+            status_code=409,
+            detail="Account deletion confirmation does not match the authenticated account.",
+        )
     try:
-        return await asyncio.to_thread(
+        hosted_controller = get_hosted_controller()
+        if hosted_controller is not None:
+            await hosted_controller.retire_owner(principal.user_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Hosted workloads could not be retired; account data was preserved.",
+        ) from exc
+    try:
+        result = await asyncio.to_thread(
             delete_account, principal.user_id, confirmation=contract.confirmation,
         )
     except AccountDeletionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _clear_provider_cookie(response)
+    return result
 
 
 # PROJECTS

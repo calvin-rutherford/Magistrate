@@ -42,8 +42,13 @@ digest, fixed worker command, opaque tenant/isolation/execution ids, callback
 bearer, and mandatory controls. It must return exactly
 `magistrate.isolation-receipt.v1` with the requested id and
 `accepted|existing`. `GET` returns exactly `magistrate.isolation-status.v1` and
-`queued|running|succeeded|failed|cancelled`; `404` means absent and causes an
-idempotent recreate. Cancellation uses a deterministic idempotency key and
+`queued|running|succeeded|failed|cancelled`; every terminal response also
+carries a strict `FirstmateMeasuredUsage` record. A terminal status without
+measured usage is retried and cannot manufacture a product failure or billing
+settlement. A cancellation that wins before launch uses the catalogued
+`magistrate/no-worker` zero-usage measurement because no worker or provider was
+allocated. `404` means absent and causes an idempotent recreate. Cancellation
+uses a deterministic idempotency key and
 must create a cancellation tombstone even if it races the initial `PUT`. A
 queued cancellation is terminally recorded without allocating capacity. No
 cloud-provider or orchestrator resource appears in the Gateway contract.
@@ -106,15 +111,17 @@ mTLS:
 POST /v1/github/credentials
 ```
 
-The request carries opaque execution/tenant identities, the bounded project
-alias, an explicit operator-configured permission set, and a lifetime no longer
-than the worker. The broker must map `(tenant_key, project alias)` to an
-operator-approved GitHub App installation; it must never treat the project
-alias as an arbitrary repository selector. It returns one repository-scoped
-installation token expiring within one hour and the exact requested
-permissions. Gateway validates that closed receipt and relays it without
-persisting it. The isolation backend's host policy limits where the worker can
-use the token.
+The Gateway first resolves exactly one repository by joining the objective's
+durable project id to a current repository in an active GitHub App installation
+owned by the same principal. The request carries opaque execution/tenant
+identities plus that exact installation id, provider repository id, canonical
+`owner/repository`, explicit operator-configured permissions, and a lifetime no
+longer than the worker. An arbitrary model-supplied project alias is never
+credential authority. The broker returns one repository-scoped installation
+token expiring within one hour and the exact requested repository and
+permissions. Gateway rejects a conflicting receipt and relays valid bytes
+without persisting them. The isolation backend's host policy limits where the
+worker can use the token.
 
 ## Required configuration
 
@@ -144,8 +151,10 @@ MAGISTRATE_WORKER_POLL_SECONDS=5
 
 Startup fails closed on a mutable image tag, non-HTTPS service, missing/private
 key material with unsafe metadata, short identity key, host list that omits the
-Gateway, unknown GitHub permission, or invalid resource/concurrency bound. It
-never downgrades to the shared operator runtime.
+Gateway, unknown GitHub permission, or invalid resource/concurrency bound. The
+Friend Beta issuer performs the same complete validation before treating hosted
+mode as authority to omit the shared-runtime warning. It never downgrades to
+the shared operator runtime.
 
 ## Activation gates
 
@@ -166,6 +175,12 @@ selected backend (not with a mocked receipt):
   duplicate execution; and
 - two real tenants cannot fetch claims, decisions, events, files, processes, or
   credentials across boundaries.
+
+PostgreSQL is the production multi-instance queue authority; all hosted store,
+decision, cancellation, lease, and cleanup writes use the shared persistence
+adapter. Account deletion first fences workload bearers and idempotently
+cancels/deletes external executions; if cleanup is unavailable, deletion fails
+closed and preserves account data for a safe retry.
 
 Runtime/health reads report the interface as configured with
 `activation: not-observed`; they never probe or start the backend. Until these

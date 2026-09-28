@@ -204,6 +204,17 @@ def create_friend_beta_access_grant(
     hosted_execution = os.getenv("MAGISTRATE_HOSTED_EXECUTION_ENABLED", "").strip().lower() in {
         "1", "true", "yes", "on",
     }
+    if elevated and hosted_execution:
+        # The operator CLI is independent of Gateway startup, so it must not
+        # treat a lone feature flag as proof that the isolation boundary is
+        # completely configured.
+        from app.hosted_execution import HostedExecutionConfig
+        try:
+            HostedExecutionConfig.from_env()
+        except RuntimeError as exc:
+            raise ValueError(
+                "Hosted isolation must be completely configured before issuing elevated access"
+            ) from exc
     if elevated and not hosted_execution and not allow_shared_runtime_access:
         raise ValueError("Command or voice scope requires explicit shared-runtime risk acknowledgement")
     if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool):

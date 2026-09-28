@@ -5,10 +5,15 @@ import pytest
 from fastapi import HTTPException
 
 from app import db
+from app.account_lifecycle import delete_account
 from app.auth import Principal
-from app.firstmate_execution import FirstmateProgressEvent
+from app.billing import CreditLedger
+from app.firstmate_execution import FirstmateMeasuredUsage, FirstmateProgressEvent
 from app.firstmate_execution_api import post_firstmate_execution_event
-from app.hosted_execution import HostedExecutionConfig, HostedExecutionController, HostedExecutionStore
+from app.hosted_execution import (
+    HostedExecutionConfig, HostedExecutionController, HostedExecutionStore,
+    IsolationStatus,
+)
 from app.magi_chat_api import magi_chat_store
 from app.magi_firstmate_tools import FirstmateSubmitObjectiveContract, ObjectiveSubmissionStore
 from app.magi_tool_protocol import MagiToolContext
@@ -52,6 +57,7 @@ class FakeIsolationBackend:
     def __init__(self):
         self.executions = {}
         self.ensure_calls = []
+        self.cancelled = []
         self.deleted = []
 
     async def ensure(self, execution_id, spec):
@@ -64,9 +70,20 @@ class FakeIsolationBackend:
 
     async def status(self, execution_id):
         row = self.executions.get(execution_id)
-        return row["status"] if row else "missing"
+        state = row["status"] if row else "missing"
+        usage = None
+        if state in {"succeeded", "failed", "cancelled"}:
+            usage = {
+                "provider": "magistrate", "model": "no-worker",
+                "input_tokens": 0, "output_tokens": 0, "compute_milliseconds": 0,
+            }
+        return IsolationStatus(
+            state,
+            usage=None if usage is None else FirstmateMeasuredUsage.model_validate(usage),
+        )
 
     async def cancel(self, execution_id):
+        self.cancelled.append(execution_id)
         if execution_id in self.executions:
             self.executions[execution_id]["status"] = "cancelled"
 
@@ -79,7 +96,7 @@ class FakeIsolationBackend:
                 "expires_at": 1, "repository": "example/repo", "permissions": request["permissions"]}
 
 
-def accepted_submission(owner: str, suffix: str):
+def accepted_submission(owner: str, suffix: str, *, reserve: bool = True):
     origin = magi_chat_store.prepare_submission(owner, f"hosted-client-{suffix}", "Implement the isolated objective.")
     magi_chat_store.complete_submission(owner, origin.assistant_message_id, origin.attempt, "Accepted.", latency_ms=1)
     contract = FirstmateSubmitObjectiveContract(
@@ -93,6 +110,16 @@ def accepted_submission(owner: str, suffix: str):
     )
     store = ObjectiveSubmissionStore()
     claim = store.claim(context=context, invocation_key=(suffix.encode().hex() * 64)[:64], contract=contract)
+    if reserve:
+        with sqlite3.connect(db.DB_PATH) as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO user_profiles
+                   (user_id,name,email,created_at,updated_at) VALUES (?,?,?,1,1)""",
+                (owner, owner, f"{owner}@example.invalid"),
+            )
+        CreditLedger().reserve_objective(
+            owner, claim.objective_id, idempotency_key=f"objective:{claim.objective_id}",
+        )
     store.accept(owner, claim)
     return claim
 
@@ -218,9 +245,9 @@ async def test_expired_launch_lease_recovers_without_duplicate_execution_or_even
 
 @pytest.mark.asyncio
 async def test_per_tenant_concurrency_queues_second_objective_but_other_tenant_can_run():
-    first = accepted_submission("hosted-owner-limit", "limit-one")
-    second = accepted_submission("hosted-owner-limit", "limit-two")
-    third = accepted_submission("hosted-owner-other", "limit-three")
+    first = accepted_submission("hosted-owner-limit", "limit-one", reserve=False)
+    second = accepted_submission("hosted-owner-limit", "limit-two", reserve=False)
+    third = accepted_submission("hosted-owner-other", "limit-three", reserve=False)
     controller = HostedExecutionController(config(max_global=2, max_per_tenant=1), FakeIsolationBackend())
     assert await controller.process_once() is True
     assert await controller.process_once() is True
@@ -254,8 +281,13 @@ async def test_failed_worker_is_terminally_projected_and_ephemeral_capacity_is_c
             "SELECT phase FROM firstmate_execution_events WHERE objective_id=? ORDER BY created_at",
             (claim.objective_id,),
         )]
+        reservation = connection.execute(
+            "SELECT status,actual_microcredits FROM credit_reservations WHERE objective_id=?",
+            (claim.objective_id,),
+        ).fetchone()
     assert stored[0] == "terminal" and stored[1] == "" and stored[2] is not None
     assert phases == ["objective.accepted", "worker.started", "objective.failed"]
+    assert reservation == ("settled", 0)
     assert backend.deleted == [run["backend_execution_id"]]
 
 
@@ -304,3 +336,132 @@ async def test_worker_bearer_cannot_cross_tenant_boundary():
         await controller.authenticate(second.objective_id, f"Bearer {token_a}")
     assert getattr(denied.value, "status_code", None) == 403
     assert run_a["isolation_key"] != run_b["isolation_key"]
+
+
+@pytest.mark.asyncio
+async def test_durable_running_cancellation_is_reasserted_and_observed():
+    claim = accepted_submission("hosted-owner-active-cancel", "active-cancel")
+    backend = FakeIsolationBackend()
+    controller = HostedExecutionController(config(), backend)
+    await controller.process_once()
+    run = HostedExecutionStore().workload(claim.objective_id)
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute(
+            """INSERT INTO objective_cancellation_requests
+               (request_id,owner_user_id,objective_id,task_id,actor_session_id,idempotency_key,
+                status,notification_status,notification_attempt_count,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,'requested','delivered',1,1,1)""",
+            ("ocr_" + "2" * 32, "hosted-owner-active-cancel", claim.objective_id,
+             claim.task_id, "session", "cancel-key-0002"),
+        )
+    await controller.reconcile_once()
+    assert backend.cancelled == [run["backend_execution_id"]]
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT status FROM objective_cancellation_requests WHERE objective_id=?",
+            (claim.objective_id,),
+        ).fetchone()[0] == "observed"
+        assert connection.execute(
+            "SELECT state,cleaned_at FROM hosted_execution_runs WHERE objective_id=?",
+            (claim.objective_id,),
+        ).fetchone()[0] == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_backend_terminal_without_measured_usage_cannot_fabricate_failure():
+    claim = accepted_submission("hosted-owner-no-usage", "no-usage")
+    backend = FakeIsolationBackend()
+    controller = HostedExecutionController(config(), backend)
+    await controller.process_once()
+    run = HostedExecutionStore().workload(claim.objective_id)
+    backend.executions[run["backend_execution_id"]]["status"] = "failed"
+
+    async def status_without_usage(execution_id):
+        assert execution_id == run["backend_execution_id"]
+        return IsolationStatus("failed")
+
+    backend.status = status_without_usage
+    with pytest.raises(RuntimeError, match="measured usage"):
+        await controller.reconcile_once()
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT state FROM hosted_execution_runs WHERE objective_id=?", (claim.objective_id,),
+        ).fetchone()[0] == "running"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM firstmate_execution_events WHERE objective_id=? AND phase='objective.failed'",
+            (claim.objective_id,),
+        ).fetchone()[0] == 0
+
+
+def test_github_target_is_derived_from_owner_bound_app_repository():
+    owner = "hosted-owner-github"
+    project_id = "project-hosted-github"
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute(
+            """INSERT INTO github_app_installations
+               (installation_id,user_id,account_login,account_type,repository_selection,status,
+                permissions_json,events_json,created_at,updated_at)
+               VALUES (101,?,'owner','User','selected','active','{}','[]',1,1)""",
+            (owner,),
+        )
+        connection.execute(
+            """INSERT INTO github_app_installations
+               (installation_id,user_id,account_login,account_type,repository_selection,status,
+                permissions_json,events_json,created_at,updated_at)
+               VALUES (202,'another-owner','other','User','selected','active','{}','[]',1,1)"""
+        )
+        for installation in (101, 202):
+            connection.execute(
+                """INSERT INTO github_app_repositories
+                   (installation_id,repository_id,owner_login,name,full_name,private,
+                    default_branch,html_url,active,updated_at)
+                   VALUES (?,303,'example','repo','example/repo',1,'main',
+                           'https://github.com/example/repo',1,1)""",
+                (installation,),
+            )
+        connection.execute(
+            """INSERT INTO project_repositories
+               (repository_id,owner_user_id,project_id,provider,provider_repository_id,
+                full_name,html_url,default_branch,created_at,updated_at)
+               VALUES ('repo-binding',?,?,'github','303','example/repo',
+                       'https://github.com/example/repo','main',1,1)""",
+            (owner, project_id),
+        )
+    target = HostedExecutionStore().github_target({
+        "owner_user_id": owner, "project_id": project_id,
+    })
+    assert target == {
+        "installation_id": 101,
+        "provider_repository_id": 303,
+        "repository": "example/repo",
+        "project_repository_id": "repo-binding",
+    }
+    assert HostedExecutionStore().github_target({
+        "owner_user_id": "another-owner", "project_id": project_id,
+    }) is None
+
+
+@pytest.mark.asyncio
+async def test_account_retirement_fences_bearer_and_cleans_external_worker():
+    claim = accepted_submission("hosted-owner-delete", "delete")
+    backend = FakeIsolationBackend()
+    controller = HostedExecutionController(config(), backend)
+    await controller.process_once()
+    run = HostedExecutionStore().workload(claim.objective_id)
+    await controller.retire_owner("hosted-owner-delete")
+    with sqlite3.connect(db.DB_PATH) as connection:
+        stored = connection.execute(
+            "SELECT state,worker_token_enc,cleaned_at FROM hosted_execution_runs WHERE objective_id=?",
+            (claim.objective_id,),
+        ).fetchone()
+    assert stored[0] == "terminal" and stored[1] == "" and stored[2] is not None
+    assert backend.cancelled == [run["backend_execution_id"]]
+    assert backend.deleted == [run["backend_execution_id"]]
+    assert delete_account(
+        "hosted-owner-delete", confirmation="DELETE hosted-owner-delete",
+    )["status"] == "deleted"
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM hosted_execution_runs WHERE owner_user_id=?",
+            ("hosted-owner-delete",),
+        ).fetchone()[0] == 0

@@ -25,8 +25,13 @@ from fastapi import APIRouter, Body, Header, HTTPException, Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import db
+from app.billing import BillingError
+from app.persistence import connect
 from app.firstmate_execution import (
+    FirstmateExecutionConflict,
     FirstmateExecutionEventContract,
+    FirstmateExecutionNotFound,
+    FirstmateMeasuredUsage,
     FirstmateNativeChatOrigin,
     FirstmateObjectiveAcceptedEvent,
     FirstmateObjectiveFacts,
@@ -38,6 +43,10 @@ _IMAGE = re.compile(r"^[A-Za-z0-9._/:@-]+@sha256:[0-9a-f]{64}$")
 _HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _PERMISSION = re.compile(r"^(?:contents|pull_requests|issues|workflows):(read|write)$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+_NO_WORKER_USAGE = FirstmateMeasuredUsage(
+    provider="magistrate", model="no-worker", input_tokens=0,
+    output_tokens=0, compute_milliseconds=0,
+)
 
 
 def _now_ms() -> int:
@@ -170,9 +179,15 @@ class HostedObjectiveDispatcher:
         return ObjectiveDispatchReceipt(already_present=False)
 
 
+@dataclass(frozen=True)
+class IsolationStatus:
+    state: str
+    usage: FirstmateMeasuredUsage | None = None
+
+
 class IsolationTransport(Protocol):
     async def ensure(self, execution_id: str, spec: dict[str, Any]) -> str: ...
-    async def status(self, execution_id: str) -> str: ...
+    async def status(self, execution_id: str) -> IsolationStatus: ...
     async def cancel(self, execution_id: str) -> None: ...
     async def delete(self, execution_id: str) -> None: ...
     async def github_credential(self, request: dict[str, Any]) -> dict[str, Any]: ...
@@ -228,19 +243,30 @@ class IsolationBackendClient:
             raise RuntimeError("Isolation backend returned a conflicting launch receipt")
         return execution_id
 
-    async def status(self, execution_id: str) -> str:
+    async def status(self, execution_id: str) -> IsolationStatus:
         response = await self._request(self.config.backend_url, "GET", f"/v1/executions/{execution_id}")
         if response.status_code == 404:
-            return "missing"
+            return IsolationStatus("missing")
         if response.status_code != 200:
             raise RuntimeError(f"Isolation backend status failed ({response.status_code})")
         payload = self._payload(response, "Isolation backend returned an invalid status")
-        if (set(payload) != {"schema_version", "execution_id", "status"}
+        state = payload.get("status")
+        terminal = state in {"succeeded", "failed", "cancelled"}
+        expected = {"schema_version", "execution_id", "status", "usage"} if terminal else {
+            "schema_version", "execution_id", "status",
+        }
+        if (set(payload) != expected
                 or payload.get("schema_version") != "magistrate.isolation-status.v1"
                 or payload.get("execution_id") != execution_id
-                or payload.get("status") not in {"queued", "running", "succeeded", "failed", "cancelled"}):
+                or state not in {"queued", "running", "succeeded", "failed", "cancelled"}):
             raise RuntimeError("Isolation backend returned an invalid status")
-        return str(payload["status"])
+        usage = None
+        if terminal:
+            try:
+                usage = FirstmateMeasuredUsage.model_validate(payload["usage"])
+            except ValueError as exc:
+                raise RuntimeError("Isolation backend returned invalid measured usage") from exc
+        return IsolationStatus(str(state), usage)
 
     async def cancel(self, execution_id: str) -> None:
         response = await self._request(
@@ -281,7 +307,7 @@ class IsolationBackendClient:
 class HostedExecutionStore:
     def _connect(self) -> sqlite3.Connection:
         db.init_db()
-        connection = sqlite3.connect(db.DB_PATH, timeout=10)
+        connection = connect(db.DB_PATH, timeout=10)
         connection.row_factory = sqlite3.Row
         return connection
 
@@ -396,7 +422,14 @@ class HostedExecutionStore:
     def active(self) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT run.*, objective.terminal_phase FROM hosted_execution_runs run
+                """SELECT run.*, objective.terminal_phase,
+                          EXISTS (
+                              SELECT 1 FROM objective_cancellation_requests cancellation
+                              WHERE cancellation.owner_user_id=run.owner_user_id
+                                AND cancellation.objective_id=run.objective_id
+                                AND cancellation.status='requested'
+                          ) AS cancellation_requested
+                   FROM hosted_execution_runs run
                    LEFT JOIN firstmate_execution_objectives objective
                      ON objective.owner_user_id=run.owner_user_id AND objective.objective_id=run.objective_id
                    WHERE run.state='running' ORDER BY run.created_at LIMIT 1000"""
@@ -433,6 +466,26 @@ class HostedExecutionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def retire_owner(self, owner: str) -> list[dict[str, Any]]:
+        """Fence every owner workload before account data can be erased."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT * FROM hosted_execution_runs
+                   WHERE owner_user_id=? AND cleaned_at IS NULL
+                   ORDER BY created_at, objective_id""",
+                (owner,),
+            ).fetchall()
+            now = _now_ms()
+            for row in rows:
+                connection.execute(
+                    """UPDATE hosted_execution_runs SET state='terminal', lease_id=NULL,
+                       lease_expires_at=NULL, worker_token_hash=?, worker_token_enc='', updated_at=?
+                       WHERE owner_user_id=? AND objective_id=?""",
+                    (f"retired:{row['objective_id']}", now, owner, row["objective_id"]),
+                )
+        return [dict(row) for row in rows]
+
     def cleaned(self, objective_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -444,12 +497,46 @@ class HostedExecutionStore:
         with self._connect() as connection:
             row = connection.execute(
                 """SELECT run.*, submission.contract_json, submission.contract_sha256,
-                          submission.conversation_id, submission.user_message_id
+                          submission.conversation_id, submission.user_message_id,
+                          submission.project_id
                    FROM hosted_execution_runs run JOIN magi_objective_submissions submission
                      ON submission.objective_id=run.objective_id WHERE run.objective_id=?""",
                 (objective_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def github_target(self, run: dict[str, Any]) -> dict[str, Any] | None:
+        """Resolve exactly one current owner-authorized repository for a run."""
+        project_id = run.get("project_id")
+        if not project_id:
+            return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT app_repo.installation_id, app_repo.repository_id,
+                          app_repo.full_name, project_repo.repository_id
+                   FROM project_repositories AS project_repo
+                   JOIN github_app_repositories AS app_repo
+                     ON lower(app_repo.full_name) = lower(project_repo.full_name)
+                    AND app_repo.active = 1
+                   JOIN github_app_installations AS installation
+                     ON installation.installation_id = app_repo.installation_id
+                    AND installation.user_id = project_repo.owner_user_id
+                    AND installation.status = 'active'
+                   WHERE project_repo.owner_user_id = ?
+                     AND project_repo.project_id = ?
+                     AND project_repo.provider = 'github'
+                   ORDER BY app_repo.installation_id, app_repo.repository_id
+                   LIMIT 2""",
+                (run["owner_user_id"], project_id),
+            ).fetchall()
+        if len(rows) != 1:
+            return None
+        return {
+            "installation_id": int(rows[0][0]),
+            "provider_repository_id": int(rows[0][1]),
+            "repository": str(rows[0][2]),
+            "project_repository_id": str(rows[0][3]),
+        }
 
 
 class HostedExecutionController:
@@ -541,6 +628,7 @@ class HostedExecutionController:
                 schema_version="firstmate.execution-event.v1", event_id=f"hev_{digest[:32]}",
                 objective_id=run["objective_id"], task_id=run["task_id"], run_id=run["run_id"],
                 occurred_at_ms=terminal_at, phase="objective.cancelled",
+                usage=_NO_WORKER_USAGE,
             )
             await firstmate_execution_service.ingest(run["owner_user_id"], event)
             await asyncio.to_thread(self.store.mark_terminal, run["owner_user_id"], run["objective_id"])
@@ -548,12 +636,19 @@ class HostedExecutionController:
             if run.get("terminal_phase"):
                 await asyncio.to_thread(self.store.mark_terminal, run["owner_user_id"], run["objective_id"])
                 continue
-            status = await self.transport.status(run["backend_execution_id"])
+            if run.get("cancellation_requested"):
+                # The cancellation row is durable authority. Reassert the
+                # idempotent backend tombstone until its status is observed.
+                await self.transport.cancel(run["backend_execution_id"])
+            observed = await self.transport.status(run["backend_execution_id"])
+            status = observed.state
             if status == "missing":
                 await self.transport.ensure(run["backend_execution_id"], self.launch_spec(run))
             elif status in {"running", "succeeded", "failed", "cancelled"}:
                 await self._worker_started_event(run)
             if status in {"succeeded", "failed", "cancelled"}:
+                if observed.usage is None:
+                    raise RuntimeError("Isolation backend omitted terminal measured usage")
                 terminal_phase = "objective.cancelled" if status == "cancelled" else "objective.failed"
                 digest = hashlib.sha256(
                     f"worker-exit\0{terminal_phase}\0{run['owner_user_id']}\0{run['objective_id']}".encode()
@@ -563,10 +658,20 @@ class HostedExecutionController:
                     schema_version="firstmate.execution-event.v1", event_id=f"hev_{digest[:32]}",
                     objective_id=run["objective_id"], task_id=run["task_id"], run_id=run["run_id"],
                     occurred_at_ms=terminal_at, phase=terminal_phase,
+                    usage=observed.usage,
                 )
                 await firstmate_execution_service.ingest(run["owner_user_id"], event)
                 await asyncio.to_thread(self.store.mark_terminal, run["owner_user_id"], run["objective_id"])
         for run in await asyncio.to_thread(self.store.pending_cleanup):
+            await self.transport.delete(run["backend_execution_id"])
+            await asyncio.to_thread(self.store.cleaned, run["objective_id"])
+
+    async def retire_owner(self, owner: str) -> None:
+        """Fence, cancel, and remove every workload before account erasure."""
+        runs = await asyncio.to_thread(self.store.retire_owner, owner)
+        for run in runs:
+            if run["state"] in {"launching", "running"}:
+                await self.transport.cancel(run["backend_execution_id"])
             await self.transport.delete(run["backend_execution_id"])
             await asyncio.to_thread(self.store.cleaned, run["objective_id"])
 
@@ -604,7 +709,7 @@ class HostedDecisionCommandAdapter:
 
     async def open_identity(self, task_id: str) -> str | None:
         db.init_db()
-        with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+        with connect(db.DB_PATH, timeout=10) as connection:
             row = connection.execute(
                 """SELECT lifecycle_identity FROM firstmate_decisions WHERE task_id=?
                    AND state IN ('pending','answering') ORDER BY updated_at DESC LIMIT 1""", (task_id,),
@@ -622,7 +727,7 @@ class HostedDecisionCommandAdapter:
         digest = hashlib.sha256(encoded).hexdigest()
         delivery = "hda_" + hashlib.sha256(f"hosted-answer-v1\0{task_id}\0{lifecycle_identity}\0{digest}".encode()).hexdigest()[:32]
         now = _now_ms()
-        with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+        with connect(db.DB_PATH, timeout=10) as connection:
             run = connection.execute(
                 "SELECT owner_user_id,objective_id FROM hosted_execution_runs WHERE task_id=? AND state='running'", (task_id,),
             ).fetchone()
@@ -637,7 +742,7 @@ class HostedDecisionCommandAdapter:
             )
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         while asyncio.get_running_loop().time() < deadline:
-            with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+            with connect(db.DB_PATH, timeout=10) as connection:
                 row = connection.execute("SELECT status FROM hosted_decision_deliveries WHERE delivery_id=?", (delivery,)).fetchone()
             if row and row[0] == "accepted":
                 return FirstmateCommandResult(True, "answered")
@@ -692,22 +797,36 @@ async def get_hosted_objective(objective_id: str = _OBJECTIVE_PATH, authorizatio
 async def get_hosted_github_credential(objective_id: str = _OBJECTIVE_PATH,
                                        authorization: str | None = Header(default=None)):
     controller, run = await _workload(objective_id, authorization)
+    target = await asyncio.to_thread(controller.store.github_target, run)
+    if target is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This project does not have exactly one currently authorized GitHub repository.",
+        )
+    request = {
+        "schema_version": "magistrate.github-credential-request.v1",
+        "execution_id": run["backend_execution_id"],
+        "tenant_key": run["tenant_key"],
+        "installation_id": target["installation_id"],
+        "repository_id": target["provider_repository_id"],
+        "repository": target["repository"],
+        "permissions": list(controller.config.github_permissions),
+        "expires_within_seconds": min(3600, controller.config.deadline_seconds),
+    }
     try:
-        return await controller.transport.github_credential({
-            "schema_version": "magistrate.github-credential-request.v1",
-            "execution_id": run["backend_execution_id"], "tenant_key": run["tenant_key"],
-            "project": run["project"], "permissions": list(controller.config.github_permissions),
-            "expires_within_seconds": min(3600, controller.config.deadline_seconds),
-        })
+        credential = await controller.transport.github_credential(request)
     except (RuntimeError, httpx.HTTPError) as exc:
         raise HTTPException(status_code=503, detail="A scoped GitHub credential is unavailable.") from exc
+    if credential.get("repository") != target["repository"]:
+        raise HTTPException(status_code=503, detail="The credential broker returned a conflicting repository.")
+    return credential
 
 
 @router.get("/objectives/{objective_id}/decision-answers")
 async def get_hosted_decision_answers(objective_id: str = _OBJECTIVE_PATH,
                                       authorization: str | None = Header(default=None)):
     _controller, run = await _workload(objective_id, authorization)
-    with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+    with connect(db.DB_PATH, timeout=10) as connection:
         rows = connection.execute(
             """SELECT delivery_id,lifecycle_identity,answer_enc,answer_sha256
                FROM hosted_decision_deliveries WHERE owner_user_id=? AND objective_id=?
@@ -723,7 +842,7 @@ async def get_hosted_decision_answers(objective_id: str = _OBJECTIVE_PATH,
 async def ack_hosted_decision_answer(ack: HostedDecisionAck, objective_id: str = _OBJECTIVE_PATH,
                                      authorization: str | None = Header(default=None)):
     _controller, run = await _workload(objective_id, authorization)
-    with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+    with connect(db.DB_PATH, timeout=10) as connection:
         changed = connection.execute(
             """UPDATE hosted_decision_deliveries SET status=?,updated_at=? WHERE delivery_id=?
                AND owner_user_id=? AND objective_id=? AND status='pending'""",
@@ -747,7 +866,9 @@ async def post_hosted_decision_events(objective_id: str = _OBJECTIVE_PATH,
                                       batch: dict[str, Any] = Body(...)):
     _controller, run = await _workload(objective_id, authorization)
     from app.firstmate_client import FirstmateClient
-    from app.firstmate_decisions import FirstmateDecisionEventBatch, FirstmateDecisionService
+    from app.firstmate_decisions import (
+        FirstmateDecisionError, FirstmateDecisionEventBatch, FirstmateDecisionService,
+    )
     try:
         contract = FirstmateDecisionEventBatch.model_validate(batch)
     except ValueError as exc:
@@ -759,7 +880,10 @@ async def post_hosted_decision_events(objective_id: str = _OBJECTIVE_PATH,
         raise HTTPException(status_code=409, detail="The decision source does not belong to this hosted execution.")
     service = FirstmateDecisionService(
         FirstmateClient(), command=HostedDecisionCommandAdapter(), source_instance_id=expected_source)
-    decisions = await service.ingest_events(run["owner_user_id"], contract)
+    try:
+        decisions = await service.ingest_events(run["owner_user_id"], contract)
+    except FirstmateDecisionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return {"schema_version": "firstmate.decision-events-result.v1", "status": "accepted",
             "pending_count": len(decisions), "observed_at": contract.observed_at}
 
@@ -773,7 +897,19 @@ async def post_hosted_event(envelope: HostedEventEnvelope, objective_id: str = _
             run["objective_id"], run["task_id"], run["run_id"]):
         raise HTTPException(status_code=409, detail="The event does not belong to this hosted execution.")
     from app.firstmate_execution_api import firstmate_execution_service
-    result = await firstmate_execution_service.ingest(run["owner_user_id"], event)
+    try:
+        result = await firstmate_execution_service.ingest(run["owner_user_id"], event)
+    except FirstmateExecutionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FirstmateExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except BillingError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if event.phase in {"objective.completed", "objective.failed", "objective.cancelled"}:
         await asyncio.to_thread(controller.store.mark_terminal, run["owner_user_id"], objective_id)
     return result

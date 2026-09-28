@@ -47,6 +47,16 @@ assert len(ProjectMemoryStore().search(
     purpose="postgres-isolation", actor_session_id="postgres-verify",
 )) == 1
 
+with connect(db.DB_PATH) as connection:
+    hosted = connection.execute(
+        """SELECT owner_user_id,tenant_key,isolation_key,backend_execution_id
+           FROM hosted_execution_runs ORDER BY owner_user_id"""
+    ).fetchall()
+assert [row[0] for row in hosted] == ["tenant-a", "tenant-b"]
+assert len({row[1] for row in hosted}) == 2
+assert len({row[2] for row in hosted}) == 2
+assert len({row[3] for row in hosted}) == 2
+
 # Exercise deletion ordering with live bearer authority and PostgreSQL FKs.
 with connect(db.DB_PATH) as connection:
     connection.execute(
@@ -57,6 +67,13 @@ with connect(db.DB_PATH) as connection:
     )
 
 delete_account("tenant-a", confirmation="DELETE tenant-a")
+with connect(db.DB_PATH) as connection:
+    assert connection.execute(
+        "SELECT COUNT(*) FROM hosted_execution_runs WHERE owner_user_id='tenant-a'"
+    ).fetchone()[0] == 0
+    assert connection.execute(
+        "SELECT COUNT(*) FROM hosted_execution_runs WHERE owner_user_id='tenant-b'"
+    ).fetchone()[0] == 1
 assert list_projects("tenant-a")["projects"] == []
 assert list_projects("tenant-b")["projects"][0]["id"] == projects_b[0]["id"]
 assert len(ProjectMemoryStore().search(

@@ -34,6 +34,7 @@ _DIRECT_OWNER_TABLES: tuple[tuple[str, str], ...] = (
     ("projects", "owner_user_id"),
     ("workspaces", "owner_user_id"),
     ("objective_cancellation_requests", "owner_user_id"),
+    ("hosted_execution_runs", "owner_user_id"),
     ("magi_objective_submissions", "owner_user_id"),
     ("firstmate_execution_events", "owner_user_id"),
     ("firstmate_execution_objectives", "owner_user_id"),
@@ -123,6 +124,7 @@ def _delete_indirect_rows(connection: sqlite3.Connection, user_id: str, tables: 
     # rows they reference. These deletes are repeated harmlessly by the direct
     # owner list so old SQLite deployments and PostgreSQL enforce one policy.
     for table, column in (
+        ("hosted_decision_deliveries", "owner_user_id"),
         ("firstmate_decision_answers", "owner_user_id"),
         ("firstmate_decision_answer_confirmations", "owner_user_id"),
         ("firstmate_decision_events", "owner_user_id"),

@@ -1,6 +1,7 @@
 """PostgreSQL multi-instance startup and tenant persistence smoke contract."""
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 
@@ -12,7 +13,11 @@ if len(sys.argv) != 2:
 owner = sys.argv[1]
 
 from app import db
+from app.hosted_execution import HostedExecutionConfig, HostedExecutionStore
 from app.magi_chat_store import MagiChatStore
+from app.magi_firstmate_tools import FirstmateSubmitObjectiveContract, ObjectiveSubmissionStore
+from app.magi_tool_protocol import MagiToolContext
+from app.persistence import connect
 from app.projects import bind_github_repository, create_project, get_project, list_projects
 from app.project_memory import MemoryScope, ProjectMemoryStore
 from app.uploads import get_upload, save_upload
@@ -43,6 +48,49 @@ memory = ProjectMemoryStore().put(
 message = MagiChatStore().prepare_submission(
     owner, f"postgres-smoke-{owner}", f"private message for {owner}"
 )
+objective_contract = FirstmateSubmitObjectiveContract(
+    objective=f"Verify hosted PostgreSQL isolation for {owner}",
+    project=project["id"],
+    constraints=["Keep tenant state isolated"],
+    acceptance_criteria=["The durable hosted claim remains owner scoped"],
+    context_refs=[],
+)
+objective_context = MagiToolContext(
+    owner_user_id=owner,
+    conversation_id=message.conversation_id,
+    turn_id=message.turn_id,
+    user_message_id=message.user_message_id,
+    assistant_message_id=message.assistant_message_id,
+    command_authorized=True,
+)
+objective_store = ObjectiveSubmissionStore()
+objective_claim = objective_store.claim(
+    context=objective_context,
+    invocation_key=hashlib.sha256(f"postgres-hosted-{owner}".encode()).hexdigest(),
+    contract=objective_contract,
+)
+objective_store.accept(owner, objective_claim)
+hosted_config = HostedExecutionConfig(
+    worker_image="registry.example/worker@sha256:" + "a" * 64,
+    gateway_url="https://gateway.internal",
+    backend_url="https://isolation.internal",
+    github_broker_url="https://broker.internal",
+    client_cert_path="/unused/cert",
+    client_key_path="/unused/key",
+    ca_path="/unused/ca",
+    identity_key=b"postgres-smoke-identity-key-value",
+    network_hosts=("gateway.internal",),
+    github_permissions=("contents:write",),
+    max_global=20,
+    max_per_tenant=2,
+    cpu_millis=1000,
+    memory_mib=512,
+    workspace_mib=1024,
+    deadline_seconds=600,
+    cleanup_seconds=60,
+    poll_seconds=1,
+)
+assert HostedExecutionStore().claim(hosted_config) is not None
 db.save_execution_credential(owner, "smoke", f"private-secret-{owner}")
 upload = save_upload(owner, f"{owner}.txt", "text/plain", f"artifact-{owner}".encode())
 
@@ -54,6 +102,11 @@ assert [item["id"] for item in ProjectMemoryStore().search(
     purpose="postgres-smoke", actor_session_id=f"session-{owner}",
 )] == [memory["id"]]
 assert get_upload(owner, upload["upload_id"])["filename"] == f"{owner}.txt"
+with connect(db.DB_PATH) as connection:
+    assert connection.execute(
+        "SELECT COUNT(*) FROM hosted_execution_runs WHERE owner_user_id=?",
+        (owner,),
+    ).fetchone()[0] == 1
 health = db.database_health()
 assert health["status"] == "healthy"
 assert health["backend"] == "postgresql"

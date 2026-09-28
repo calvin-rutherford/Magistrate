@@ -91,8 +91,11 @@ PYTHONPATH=. uv run python -m scripts.friend_beta_access issue \
 The output file must be absolute, new, outside the repository checkout, and
 mode `0600`. A principal can hold only one active grant; revoke it before
 reissue or use a new device principal. Default scopes are
-`read,account,notifications`; command/voice issuance requires the CLI's explicit
-shared-runtime acknowledgement and remains non-isolated. Use `list` for
+`read,account,notifications`; in restricted local mode command/voice issuance
+requires the CLI's explicit shared-runtime acknowledgement and remains
+non-isolated. Hosted mode omits that acknowledgement only when its complete
+fail-closed configuration validates; external activation evidence is still a
+release gate. Use `list` for
 content-free metadata and `revoke --grant-id ...` to retire the grant, every
 derived bearer, and that principal's push registration. A successful online
 app logout does the same; after an offline
