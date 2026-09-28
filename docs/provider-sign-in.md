@@ -67,18 +67,7 @@ The reversed Google client ID is added to Expo's app schemes at build time. Appl
 
 A provider principal is gated from protected product routes by durable `account-onboarding.v1` state. The additive migration backfills existing connected login principals so pre-deploy sessions and fresh sign-ins cannot observe different gates. Onboarding resumes, in order, through welcome acknowledgement, profile naming, a genuinely credential-backed GitHub OAuth connection, and an active/trialing Stripe subscription before entering Magi. GitHub and billing completion are derived from canonical credential/subscription rows, not browser-return parameters. A checkout redirect never grants access; only a timestamp-bound, HMAC-verified Stripe webhook can change subscription state.
 
-Stripe is optional only in the sense that an entirely absent integration leaves onboarding truthfully blocked. Partial or unsafe configuration refuses Gateway startup:
-
-```text
-MAGISTRATE_STRIPE_SECRET_KEY=sk_live_...
-MAGISTRATE_STRIPE_WEBHOOK_SECRET=whsec_...
-MAGISTRATE_STRIPE_PRICE_ID=price_...
-MAGISTRATE_BILLING_SUCCESS_URL=https://app.example.com/?billing=success
-MAGISTRATE_BILLING_CANCEL_URL=https://app.example.com/?billing=cancel
-MAGISTRATE_BILLING_PORTAL_RETURN_URL=https://app.example.com/account
-```
-
-Register `POST https://<gateway>/api/v1/billing/webhook` in Stripe for `checkout.session.completed` and `customer.subscription.created`, `.updated`, and `.deleted`. The checkout embeds the opaque Magistrate user ID in Checkout and Subscription metadata; do not edit that metadata in provider automation. Checkout and customer-portal URLs are always server-created.
+Stripe is optional only in the sense that an entirely absent integration leaves onboarding truthfully blocked. Partial or unsafe configuration refuses Gateway startup. The catalog-backed production configuration uses `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `MAGISTRATE_BILLING_CATALOG_PATH`, and `MAGISTRATE_BILLING_RETURN_ORIGINS`; register `/api/v1/billing/webhooks/stripe`. The earlier single-price `MAGISTRATE_STRIPE_*` variables and `/api/v1/billing/webhook` remain accepted during migration, but new activation must follow the exact multi-plan and credit-ledger runbook in [`billing-and-credits.md`](billing-and-credits.md). Checkout embeds the opaque Magistrate user ID in Checkout and Subscription metadata; do not edit that metadata in provider automation. Checkout and customer-portal URLs are always server-created.
 
 GitHub onboarding uses the existing authenticated OAuth transaction boundary. Add the exact app and native return locations to `MAGISTRATE_OAUTH_REDIRECT_URIS`, and register the Gateway's `/api/v1/auth/github/callback` in the GitHub OAuth App. The operator bootstrap endpoint remains a curl/automation recovery boundary; production customer UI accepts only `mgb_` Friend Beta invitations and never submits arbitrary text to bootstrap issuance.
 

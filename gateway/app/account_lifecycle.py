@@ -21,6 +21,10 @@ class AccountDeletionError(RuntimeError):
 _DIRECT_OWNER_TABLES: tuple[tuple[str, str], ...] = (
     ("account_onboarding", "user_id"),
     ("account_credit_ledger", "owner_user_id"),
+    ("execution_usage_ledger", "owner_user_id"),
+    ("credit_reservations", "owner_user_id"),
+    ("credit_ledger", "owner_user_id"),
+    ("billing_checkout_sessions", "owner_user_id"),
     ("billing_accounts", "owner_user_id"),
     ("project_memories", "owner_user_id"),
     ("project_repositories", "owner_user_id"),

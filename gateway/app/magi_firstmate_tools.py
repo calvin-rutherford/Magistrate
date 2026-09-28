@@ -25,6 +25,7 @@ from typing import Any, Protocol, Sequence
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app import db
+from app.billing import BillingError, CreditLedger, InsufficientCredits
 from app.projects import resolve_project_id
 from app.firstmate_client import FirstmateClient
 from app.firstmate_intake import FirstmateIntakeError, FirstmateSupervisorInbox
@@ -769,9 +770,11 @@ class FirstmateObjectiveTools:
         *,
         store: ObjectiveSubmissionStore | None = None,
         dispatcher: ObjectiveDispatcher | None = None,
+        credit_ledger: CreditLedger | None = None,
     ) -> None:
         self.store = store or ObjectiveSubmissionStore()
         self.dispatcher = dispatcher or TasksAxiObjectiveDispatcher()
+        self.credit_ledger = credit_ledger or CreditLedger()
 
     @property
     def definitions(self) -> Sequence[MagiToolDefinition]:
@@ -792,6 +795,21 @@ class FirstmateObjectiveTools:
             context=context, invocation_key=invocation_key, contract=contract,
         )
         if not claim.accepted:
+            # Reserve before the queue edge. This transaction is the hard stop:
+            # insufficient balance, spend cap, entitlement, or concurrency
+            # means Firstmate never receives a task and cannot start a worker.
+            try:
+                self.credit_ledger.reserve_objective(
+                    context.owner_user_id,
+                    claim.objective_id,
+                    idempotency_key=f"objective:{claim.objective_id}",
+                )
+            except InsufficientCredits as exc:
+                self.store.fail(context.owner_user_id, claim, "objective_insufficient_credits")
+                raise MagiToolError("objective_insufficient_credits", retryable=False) from exc
+            except BillingError as exc:
+                self.store.fail(context.owner_user_id, claim, f"billing_{exc.code}")
+                raise MagiToolError(f"objective_billing_{exc.code}", retryable=False) from exc
             title = _task_title(contract)
             body = _task_body(claim.objective_id, claim.contract_json)
             try:

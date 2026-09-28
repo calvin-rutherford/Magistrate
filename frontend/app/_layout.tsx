@@ -216,8 +216,12 @@ export default function RootLayout() {
   const startBilling = async () => {
     setOnboardingSubmitting(true); setOnboardingError('');
     try {
-      const checkout = await createBillingCheckout();
-      const result = await WebBrowser.openAuthSessionAsync(checkout.url, Linking.createURL('/'));
+      const returnUrl = Platform.OS === 'web' && typeof window !== 'undefined'
+        ? `${window.location.origin}/chat` : 'magistrate://chat';
+      const checkoutUrl = await createBillingCheckout(
+        'individual', returnUrl, `billing-onboarding-${Date.now()}`,
+      );
+      const result = await WebBrowser.openAuthSessionAsync(checkoutUrl, returnUrl);
       if (result.type === 'cancel' || result.type === 'dismiss') throw new Error('Billing setup was not completed.');
       const value = await refreshOnboarding();
       if (!value.steps.billing.complete) throw new Error('Payment is still awaiting verified subscription confirmation. Try again shortly.');

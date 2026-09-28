@@ -29,6 +29,13 @@ def _pending_claim(suffix: str):
         assistant_message_id=f"mgm_{suffix * 8}a",
         command_authorized=True,
     )
+    db.init_db()
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute(
+            """INSERT OR IGNORE INTO user_profiles
+               (user_id,name,email,created_at,updated_at) VALUES (?, '', '', 1, 1)""",
+            (context.owner_user_id,),
+        )
     claim = ObjectiveSubmissionStore().claim(
         context=context,
         invocation_key=(suffix.encode().hex() * 64)[:64],

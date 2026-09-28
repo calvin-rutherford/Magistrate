@@ -1,11 +1,13 @@
 import asyncio
 import json
 import os
+import sqlite3
 
 import httpx
 import pytest
 
 from app import db
+from app.billing import CreditLedger
 from app.magi_chat_service import MAGI_DIRECT_RESPONSE, MagiChatService
 from app.magi_chat_store import MagiChatStore
 from app.magi_firstmate_tools import (
@@ -22,6 +24,21 @@ from app.magi_firstmate_tools import (
 )
 from app.magi_model import MagiModelResult, MagiModelToolCall, OpenAIMagiModel
 from app.magi_tool_protocol import MagiToolContext, MagiToolError
+
+
+def _ensure_operator() -> None:
+    db.init_db()
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute(
+            """INSERT OR IGNORE INTO user_profiles
+               (user_id,name,email,created_at,updated_at)
+               VALUES('operator-a','','',1,1)"""
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO user_profiles
+               (user_id,name,email,created_at,updated_at)
+               VALUES('operator-b','','',1,1)"""
+        )
 
 
 def objective_arguments(**updates):
@@ -98,6 +115,7 @@ def test_submit_objective_contract_keeps_all_required_typed_fields():
 @pytest.mark.asyncio
 async def test_objective_executor_is_principal_scoped_and_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'objectives.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
     store = ObjectiveSubmissionStore()
     tools = FirstmateObjectiveTools(store=store, dispatcher=dispatcher)
@@ -138,8 +156,28 @@ async def test_objective_executor_is_principal_scoped_and_idempotent(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_insufficient_credits_publish_no_firstmate_task(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'objective-no-credit.sqlite3'))
+    _ensure_operator()
+    ledger = CreditLedger()
+    ledger.summary('operator-a')
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute("UPDATE billing_accounts SET available_microcredits = 0 WHERE owner_user_id = 'operator-a'")
+    dispatcher = FakeDispatcher()
+    tools = FirstmateObjectiveTools(
+        store=ObjectiveSubmissionStore(), dispatcher=dispatcher, credit_ledger=ledger,
+    )
+    call = MagiModelToolCall('call_no_credit', FIRSTMATE_SUBMIT_OBJECTIVE, objective_arguments())
+    with pytest.raises(MagiToolError) as denied:
+        await tools.execute(call, context=tool_context(), invocation_key='c' * 64)
+    assert denied.value.code == 'objective_insufficient_credits'
+    assert dispatcher.calls == []
+
+
+@pytest.mark.asyncio
 async def test_objective_executor_rejects_missing_command_authority_and_argument_drift(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'objective-auth.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
     tools = FirstmateObjectiveTools(
         store=ObjectiveSubmissionStore(), dispatcher=dispatcher,
@@ -358,6 +396,7 @@ class IntentRoutingModel:
 @pytest.mark.asyncio
 async def test_responses_provider_service_keeps_ordinary_chat_and_objective_delegation(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'responses-service.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
     objective_store = ObjectiveSubmissionStore()
     tools = FirstmateObjectiveTools(store=objective_store, dispatcher=dispatcher)
@@ -445,6 +484,7 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
 @pytest.mark.asyncio
 async def test_command_authorized_turn_cannot_mask_missing_tool_selection_as_prose(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'required-selection.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
 
     class ProseFallbackModel:
@@ -475,6 +515,7 @@ async def test_command_authorized_turn_cannot_mask_missing_tool_selection_as_pro
 @pytest.mark.asyncio
 async def test_native_chat_routes_actionable_intent_once_but_answers_questions_directly(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'native-objective.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
     objective_store = ObjectiveSubmissionStore()
     tools = FirstmateObjectiveTools(store=objective_store, dispatcher=dispatcher)
@@ -532,6 +573,7 @@ async def test_native_chat_routes_actionable_intent_once_but_answers_questions_d
 @pytest.mark.asyncio
 async def test_chat_never_offers_tool_without_command_authority_or_executes_unsolicited_call(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'native-objective-auth.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
     model = IntentRoutingModel(force_tool=True)
     service = MagiChatService(
@@ -557,6 +599,7 @@ async def test_chat_never_offers_tool_without_command_authority_or_executes_unso
 @pytest.mark.asyncio
 async def test_native_chat_preserves_the_models_immediate_user_language_acknowledgement(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'native-objective-language.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
     acknowledgement = 'He aceptado ese objetivo. Te mantendré al tanto aquí.'
     service = MagiChatService(
@@ -580,6 +623,7 @@ async def test_native_chat_preserves_the_models_immediate_user_language_acknowle
 @pytest.mark.asyncio
 async def test_accepted_objective_uses_truthful_ack_fallback_instead_of_internal_or_done_claim(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'native-objective-ack.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher()
     service = MagiChatService(
         IntentRoutingModel(unsafe_ack=True),
@@ -605,6 +649,7 @@ async def test_accepted_objective_uses_truthful_ack_fallback_instead_of_internal
 @pytest.mark.asyncio
 async def test_failed_queue_acceptance_retries_same_objective_and_task_identity(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'native-objective-retry.sqlite3'))
+    _ensure_operator()
     dispatcher = FakeDispatcher(fail_count=1)
     model = IntentRoutingModel()
     objective_store = ObjectiveSubmissionStore()
