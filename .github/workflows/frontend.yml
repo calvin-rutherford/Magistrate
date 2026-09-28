@@ -3,12 +3,16 @@ name: Frontend
 on:
   pull_request:
     paths:
+      - 'scripts/production_acceptance.py'
+      - 'docs/CLIENT_PROTOCOL.md'
       - 'frontend/**'
       - '.github/workflows/frontend.yml'
   push:
     branches:
       - main
     paths:
+      - 'scripts/production_acceptance.py'
+      - 'docs/CLIENT_PROTOCOL.md'
       - 'frontend/**'
       - '.github/workflows/frontend.yml'
 

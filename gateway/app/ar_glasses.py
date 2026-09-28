@@ -30,12 +30,20 @@ class ARGlassesConnectionManager:
             return None
 
     async def process_payload(self, data: Dict[str, Any], websocket: WebSocket, can_command: bool):
+        if not isinstance(data, dict):
+            await websocket.send_json({'error': 'Invalid input payload'})
+            return
         if data.get('type') == 'input' and can_command:
             modality, payload = data.get('modality'), data.get('payload')
             if not isinstance(modality, str) or not isinstance(payload, str) or len(payload) > 4000:
                 await websocket.send_json({'error': 'Invalid input payload'})
                 return
-            await websocket.send_json({'status': 'ack', 'received_modality': modality, 'action': 'dispatched_to_firstmate', 'summary': f'Processed {modality} input'})
+            # There is no AR execution adapter. An acknowledgement must not
+            # manufacture a dispatch receipt or create a second chat transport.
+            await websocket.send_json({
+                'status': 'unavailable',
+                'error': 'AR execution is unavailable. Submit work through Native Magi.',
+            })
         else:
             await websocket.send_json({'error': 'Command scope required'})
 

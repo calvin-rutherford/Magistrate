@@ -19,3 +19,5 @@ gateway/uploads/
 frontend/node_modules/
 frontend/dist/
 frontend/.expo/
+# Private release evidence, dependency caches and restore rehearsal artifacts.
+.release/

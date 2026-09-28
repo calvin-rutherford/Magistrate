@@ -3,6 +3,8 @@ name: Gateway
 on:
   pull_request:
     paths:
+      - 'scripts/production_acceptance.py'
+      - 'docs/CLIENT_PROTOCOL.md'
       - 'gateway/**'
       - 'runtime/firstmate-producer.lock.json'
       - 'scripts/install_firstmate_producer.sh'
@@ -11,6 +13,8 @@ on:
     branches:
       - main
     paths:
+      - 'scripts/production_acceptance.py'
+      - 'docs/CLIENT_PROTOCOL.md'
       - 'gateway/**'
       - 'runtime/firstmate-producer.lock.json'
       - 'scripts/install_firstmate_producer.sh'

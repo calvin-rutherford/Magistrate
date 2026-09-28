@@ -1,0 +1,37 @@
+name: Production foundation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Release contracts and evidence admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate release registry and authoritative documents
+        run: python3 scripts/production_acceptance.py check
+      - name: Exercise missing, stale, forged-class and incomplete evidence refusals
+        run: |
+          mkdir -p .release
+          python3 scripts/production_acceptance.py run --suite release-foundation --output .release/foundation.json
+      - name: Assert no generated repository drift
+        run: test -z "$(git status --porcelain --untracked-files=all)"
+      # This receipt contains only commit/registry identity and command results.
+      # It is never live-service or physical-device acceptance evidence.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-foundation-receipt
+          path: .release/foundation.json
+          if-no-files-found: error
+          retention-days: 14
