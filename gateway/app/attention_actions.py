@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import tempfile
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -143,7 +144,7 @@ def _decode_outcome(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
 
 def _outcome_row(action_key: str, user_id: str) -> Optional[Dict[str, Any]]:
     db.init_db()
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM attention_action_outcomes WHERE action_key=? AND user_id=?", (action_key, user_id)).fetchone()
     return _decode_outcome(row)
@@ -151,7 +152,7 @@ def _outcome_row(action_key: str, user_id: str) -> Optional[Dict[str, Any]]:
 
 def outcome_for_item(item_id: str, user_id: str) -> Optional[Dict[str, Any]]:
     db.init_db()
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM attention_action_outcomes WHERE item_id=? AND user_id=? ORDER BY updated_at DESC LIMIT 1", (item_id, user_id)).fetchone()
     return _decode_outcome(row)
@@ -180,7 +181,7 @@ def _store_confirmation(action: Dict[str, Any], user_id: str, session_id: str, s
     token = secrets.token_urlsafe(32)
     now = int(time.time())
     db.init_db()
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         conn.execute(
             "INSERT INTO attention_action_confirmations(confirmation_hash,action_key,user_id,actor_session_id,action,target_id,expires_at) VALUES(?,?,?,?,?,?,?)",
             (_confirmation_hash(token), action["action_key"], user_id, session_id, selected_action, target_id, now + CONFIRMATION_TTL_SECONDS),
@@ -223,7 +224,7 @@ def _claim_pending(action: Dict[str, Any], user_id: str, session_id: str, select
     }
     db.init_db()
     try:
-        with sqlite3.connect(db.DB_PATH) as conn:
+        with connect(db.DB_PATH) as conn:
             conn.execute(
                 "INSERT INTO attention_action_outcomes(action_key,user_id,actor_session_id,item_id,decision_key,action,provider,target_id,source_revision,status,evidence_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (action["action_key"], user_id, session_id, action.get("item_id", ""), action["decision_key"], selected_action, "firstmate", target_id, _safe_text(action.get("source_revision")), "pending", json.dumps(evidence, sort_keys=True), now, now),
@@ -288,7 +289,7 @@ async def execute_confirmation(
         raise AttentionActionError("confirmation_invalid", "Confirmation is missing, expired, already used, or does not match this target.", 409) from None
     db.init_db()
     now = int(time.time())
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         row = conn.execute(
             "SELECT action_key,user_id,actor_session_id,action,target_id,expires_at,used_at FROM attention_action_confirmations WHERE confirmation_hash=?",
             (confirmation_hash,),
@@ -308,7 +309,7 @@ async def execute_confirmation(
         "source_revision": _safe_text(item.get("revision")), "operation": "captain-hold-answer",
         "recorded": status == "succeeded",
     }
-    with sqlite3.connect(db.DB_PATH) as conn:
+    with connect(db.DB_PATH) as conn:
         conn.execute("UPDATE attention_action_outcomes SET status=?, evidence_json=?, updated_at=? WHERE action_key=? AND user_id=?", (status, json.dumps(evidence, sort_keys=True), int(time.time()), action_key, user_id))
     outcome = _outcome_row(action_key, user_id)
     return _public_outcome(outcome) if outcome else {"status": status, "action_key": action_key, "evidence": evidence}

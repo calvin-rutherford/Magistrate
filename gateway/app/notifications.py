@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from app.persistence import connect
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -34,7 +35,7 @@ KNOWN_PLATFORMS = frozenset({"ios", "android", "native"})
 
 
 def init_notification_db() -> None:
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         cursor = conn.cursor()
         cursor.execute("""
@@ -109,7 +110,7 @@ def register_push_token(user_id: str, push_token: str, platform: str = "ios", ti
         raise ValueError("timezone_offset_minutes must be between -840 and 840.")
     init_notification_db()
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.execute("""
             INSERT INTO push_tokens (user_id, push_token, platform, updated_at, revoked_at, timezone_offset_minutes)
             VALUES (?, ?, ?, ?, NULL, ?)
@@ -123,7 +124,7 @@ def register_push_token(user_id: str, push_token: str, platform: str = "ios", ti
 
 def revoke_push_token(user_id: str, push_token: Optional[str] = None) -> Dict[str, Any]:
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         if push_token:
             conn.execute("UPDATE push_tokens SET revoked_at=? WHERE user_id=? AND push_token=?", (int(time.time()), user_id, push_token.strip()))
         else:
@@ -136,7 +137,7 @@ def get_registered_push_token(user_id: str) -> Optional[Dict[str, Any]]:
     enabled_value = os.getenv("MAGISTRATE_FRIEND_BETA_ENABLED", "false").strip().lower()
     friend_enabled = enabled_value in {"1", "true", "yes", "on"}
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT push_token, platform, timezone_offset_minutes FROM push_tokens WHERE user_id=? AND revoked_at IS NULL",
             (user_id,),
@@ -162,7 +163,7 @@ def list_registered_push_users() -> List[str]:
     enabled_value = os.getenv("MAGISTRATE_FRIEND_BETA_ENABLED", "false").strip().lower()
     friend_enabled = enabled_value in {"1", "true", "yes", "on"}
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         has_grants = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='friend_beta_access_grants'",
         ).fetchone()
@@ -279,7 +280,7 @@ def _quiet(local_hour: Optional[int], quiet_start: Optional[int], quiet_end: Opt
 
 def get_notification_preferences(user_id: str) -> Dict[str, Any]:
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT enabled, quiet_start, quiet_end, mode FROM notification_preferences WHERE user_id=?", (user_id,)).fetchone()
     if not row:
@@ -309,7 +310,7 @@ def reconcile_notification_events(
         if item.get("requires_action") is True and _mode_for_kind(mode, item.get("notification_kind"), bool(item.get("consequential")))
     }
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         existing = {row["item_id"]: row for row in conn.execute("SELECT * FROM notification_state WHERE user_id=?", (user_id,)).fetchall()}
         for item_id, row in existing.items():
@@ -354,7 +355,7 @@ def _unread_events(user_id: str, attention_items: List[Dict[str, Any]], preferen
         return []
     items_by_id = {str(item["id"]): item for item in attention_items}
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT item_id FROM notification_state WHERE user_id=? AND active=1 AND viewed=0",
             (user_id,),
@@ -365,7 +366,7 @@ def _unread_events(user_id: str, attention_items: List[Dict[str, Any]], preferen
 def mark_notification_events_delivered(user_id: str, item_ids: List[str]) -> None:
     """Record provider/browser delivery without clearing the unread indicator."""
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.executemany(
             "UPDATE notification_state SET delivered=1 WHERE user_id=? AND item_id=? AND active=1",
             [(user_id, item_id) for item_id in item_ids],
@@ -438,7 +439,7 @@ async def dispatch_notification_events(
 def acknowledge_notification_events(user_id: str, item_ids: List[str]) -> None:
     """Acknowledge items as viewed; this is the unread-dot clear operation."""
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.executemany("UPDATE notification_state SET delivered=1, viewed=1 WHERE user_id=? AND item_id=? AND active=1", [(user_id, item_id) for item_id in item_ids])
 
 
@@ -457,7 +458,7 @@ def update_notification_preferences(
         raise ValueError("quiet hours must be between 0 and 23")
     init_notification_db()
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.execute("""
             INSERT INTO notification_preferences(user_id,enabled,quiet_start,quiet_end,mode,updated_at) VALUES(?,?,?,?,?,?)
             ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled, quiet_start=excluded.quiet_start,

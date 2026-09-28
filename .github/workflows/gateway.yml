@@ -24,6 +24,19 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: magistrate_test
+          POSTGRES_DB: magistrate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -52,3 +65,18 @@ jobs:
           echo "MAGISTRATE_TEST_PINNED_FIRSTMATE_ROOT=${XDG_DATA_HOME}/magistrate/firstmate-producer/2af0d17014cb2e244aa441bfe6df16c4f630475b" >> "$GITHUB_ENV"
       - name: Run complete hermetic gateway suite
         run: PYTHONPATH=. uv run pytest -v
+      - name: Prove concurrent PostgreSQL startup and tenant persistence
+        env:
+          MAGISTRATE_ENV: test
+          MAGISTRATE_SECRET_KEY: PzjyXlt95cBlNsdqacmjgHZjMqTiRBJ2_wF5iWkYBss=
+          MAGISTRATE_DATABASE_URL: postgresql://postgres:magistrate_test@127.0.0.1:5432/magistrate_test
+          MAGISTRATE_STATE_DIR: ${{ runner.temp }}/magistrate-postgres-state
+        run: |
+          mkdir -p "$MAGISTRATE_STATE_DIR"
+          uv run python -m scripts.postgres_smoke tenant-a &
+          first=$!
+          uv run python -m scripts.postgres_smoke tenant-b &
+          second=$!
+          wait "$first"
+          wait "$second"
+          uv run python -m scripts.postgres_verify_isolation

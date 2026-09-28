@@ -19,8 +19,14 @@ class AttentionService:
     read-does-not-mutate runtime boundary.
     """
 
-    def __init__(self, decision_service: FirstmateDecisionService = firstmate_decisions):
+    def __init__(
+        self,
+        decision_service: FirstmateDecisionService = firstmate_decisions,
+        *,
+        shared_provider_owner_only: bool = False,
+    ):
         self.decision_service = decision_service
+        self.shared_provider_owner_only = shared_provider_owner_only
 
     async def get_unified_attention_items(self, owner_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         owner_user_id = owner_user_id or os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
@@ -47,6 +53,14 @@ class AttentionService:
             # Persistence failures can carry local paths; expose no exception
             # detail and continue with independent providers.
             print('Persisted Firstmate decisions unavailable')
+
+        # gh-axi/Jira/Teams adapters use deployment-level provider authority.
+        # Never project that operator data into another authenticated tenant.
+        if (
+            self.shared_provider_owner_only
+            and owner_user_id != os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
+        ):
+            return items
 
         # GitHub pull requests are provider data, not execution-runtime state.
         try:
@@ -118,4 +132,4 @@ class AttentionService:
         return items
 
 
-attention_service = AttentionService()
+attention_service = AttentionService(shared_provider_owner_only=True)

@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import stat as stat_module
 import tempfile
 import time
@@ -557,7 +558,7 @@ class FirstmateDecisionStore:
     @staticmethod
     def _connect() -> sqlite3.Connection:
         db.init_db()
-        connection = sqlite3.connect(db.DB_PATH, timeout=5.0)
+        connection = connect(db.DB_PATH, timeout=5.0)
         connection.execute("PRAGMA foreign_keys = ON")
         connection.row_factory = sqlite3.Row
         return connection

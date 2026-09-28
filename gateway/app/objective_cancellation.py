@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from app.persistence import connect
 import time
 from typing import Any
 
@@ -45,7 +46,7 @@ class ObjectiveCancellationService:
 
     async def _notify(self, row: sqlite3.Row, *, duplicate: bool) -> dict[str, Any]:
         now = int(time.time() * 1000)
-        with sqlite3.connect(db.DB_PATH, timeout=10) as delivery_connection:
+        with connect(db.DB_PATH, timeout=10) as delivery_connection:
             delivery_connection.row_factory = sqlite3.Row
             delivery_connection.execute(
                 """UPDATE objective_cancellation_requests
@@ -72,7 +73,7 @@ class ObjectiveCancellationService:
                 "policy and publish objective.cancelled only after cancellation is observed."
             )
         except FirstmateIntakeError as exc:
-            with sqlite3.connect(db.DB_PATH) as failed_connection:
+            with connect(db.DB_PATH) as failed_connection:
                 failed_connection.execute(
                     """UPDATE objective_cancellation_requests
                        SET error_code = 'intake_unavailable',
@@ -86,7 +87,7 @@ class ObjectiveCancellationService:
                 503,
             ) from exc
         delivered_at = int(time.time() * 1000)
-        with sqlite3.connect(db.DB_PATH, timeout=10) as delivered_connection:
+        with connect(db.DB_PATH, timeout=10) as delivered_connection:
             delivered_connection.row_factory = sqlite3.Row
             delivered_connection.execute(
                 """UPDATE objective_cancellation_requests
@@ -110,7 +111,7 @@ class ObjectiveCancellationService:
         if not isinstance(cutoff, int) or isinstance(cutoff, bool) or cutoff < 0:
             raise ValueError("updated_before_ms must be a non-negative integer")
         db.init_db()
-        with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+        with connect(db.DB_PATH, timeout=10) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """SELECT request.*,
@@ -130,7 +131,7 @@ class ObjectiveCancellationService:
             if row["terminal_phase"] is not None:
                 now = int(time.time() * 1000)
                 observed = row["terminal_phase"] == "objective.cancelled"
-                with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+                with connect(db.DB_PATH, timeout=10) as connection:
                     connection.execute(
                         """UPDATE objective_cancellation_requests
                            SET status = ?, error_code = ?, notification_status = 'delivered',
@@ -143,7 +144,7 @@ class ObjectiveCancellationService:
                     )
                 counts["terminal"] += 1
                 continue
-            with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+            with connect(db.DB_PATH, timeout=10) as connection:
                 connection.row_factory = sqlite3.Row
                 connection.execute(
                     """UPDATE objective_cancellation_requests
@@ -179,7 +180,7 @@ class ObjectiveCancellationService:
             )
         db.init_db()
         now = int(time.time() * 1000)
-        connection = sqlite3.connect(db.DB_PATH, timeout=10)
+        connection = connect(db.DB_PATH, timeout=10)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("BEGIN IMMEDIATE")

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+from app.persistence import connect
 import stat as stat_module
 import tempfile
 import threading
@@ -24,6 +25,7 @@ from typing import Any, Protocol, Sequence
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app import db
+from app.projects import resolve_project_id
 from app.firstmate_client import FirstmateClient
 from app.firstmate_intake import FirstmateIntakeError, FirstmateSupervisorInbox
 from app.magi_model import (
@@ -263,7 +265,7 @@ def _connect_objectives() -> sqlite3.Connection:
         with _SCHEMA_LOCK:
             if path not in _INITIALIZED_DB_PATHS:
                 db.init_db()
-                connection = sqlite3.connect(db.DB_PATH, timeout=10)
+                connection = connect(db.DB_PATH, timeout=10)
                 try:
                     connection.execute("PRAGMA foreign_keys = ON")
                     connection.execute(
@@ -297,6 +299,10 @@ def _connect_objectives() -> sqlite3.Connection:
                         connection.execute(
                             "ALTER TABLE magi_objective_submissions ADD COLUMN display_title TEXT"
                         )
+                    if "project_id" not in columns:
+                        connection.execute(
+                            "ALTER TABLE magi_objective_submissions ADD COLUMN project_id TEXT"
+                        )
                     connection.execute(
                         """CREATE INDEX IF NOT EXISTS idx_magi_objectives_owner_task
                            ON magi_objective_submissions(owner_user_id, task_id)"""
@@ -309,7 +315,7 @@ def _connect_objectives() -> sqlite3.Connection:
                 finally:
                     connection.close()
                 _INITIALIZED_DB_PATHS.add(path)
-    connection = sqlite3.connect(db.DB_PATH, timeout=10)
+    connection = connect(db.DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -402,17 +408,20 @@ class ObjectiveSubmissionStore:
                     objective_id, task_id, contract_json, contract_sha256,
                     accepted=False, duplicate=True, attempt=attempt,
                 )
+            project_id = resolve_project_id(
+                context.owner_user_id, contract.project, connection=connection,
+            )
             connection.execute(
                 """INSERT INTO magi_objective_submissions
                    (objective_id, task_id, owner_user_id, invocation_key, conversation_id,
                     turn_id, user_message_id, assistant_message_id, contract_json,
-                    contract_sha256, display_title, status, attempt_count, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitting', 1, ?, ?)""",
+                    contract_sha256, display_title, project_id, status, attempt_count, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitting', 1, ?, ?)""",
                 (
                     objective_id, task_id, context.owner_user_id, invocation_key,
                     context.conversation_id, context.turn_id, context.user_message_id,
                     context.assistant_message_id, contract_json, contract_sha256,
-                    concise_objective_title(contract.objective), now, now,
+                    concise_objective_title(contract.objective), project_id, now, now,
                 ),
             )
             connection.commit()
