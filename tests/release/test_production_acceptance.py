@@ -25,8 +25,8 @@ class ReleaseGateTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.registry = gate.load_registry()
-        # This is ONLY a receipt-validator fixture. The real billing gap stays
-        # unimplemented and cannot be admitted by a hand-written pass receipt.
+        # ONLY receipt-validator fixtures; never actual live-service evidence.
+        # Preserve explicit gap refusal tests even though all merged suites exist.
         self.fixture_registry = copy.deepcopy(self.registry)
         for suite in self.fixture_registry["suites"]:
             if not suite["commands"]:
@@ -83,6 +83,28 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertGreater(len(rows), 20)
         for line in rows:
             self.assertIn(line.split("|")[-2].strip(), gate.STATES)
+
+    def test_merged_registry_has_no_unimplemented_suite_or_retired_entrypoint(self):
+        for suite in self.registry["suites"]:
+            self.assertTrue(suite["commands"], suite["id"])
+            self.assertIsNone(suite["gap"], suite["id"])
+        github = gate.indexed(self.registry["suites"])["github"]
+        self.assertIn("tests/test_github_app_integration.py", github["commands"][0]["argv"])
+        self.assertNotIn("tests/test_github_service.py", github["commands"][0]["argv"])
+        self.assertIn("dependency-security", gate.indexed(gate.indexed(self.registry["acceptances"])["activation"]["checks"]))
+
+    def test_postgres_fixture_never_inherits_deployment_authority(self):
+        spec = importlib.util.spec_from_file_location("postgres_release", ROOT / "scripts/test_postgres_release.py")
+        postgres = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(postgres)
+        with patch.dict(postgres.os.environ, {"MAGISTRATE_DATABASE_URL": "production", "MAGISTRATE_HOSTED_EXECUTION_ENABLED": "true", "OPENAI_API_KEY": "private", "FM_HOME": "/never-use", "STRIPE_SECRET_KEY": "private"}):
+            environment = postgres.test_environment(self.root, 54321)
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertNotIn("FM_HOME", environment)
+        self.assertNotIn("STRIPE_SECRET_KEY", environment)
+        self.assertNotIn("MAGISTRATE_HOSTED_EXECUTION_ENABLED", environment)
+        self.assertEqual(environment["MAGISTRATE_ENV"], "test")
+        self.assertIn("@127.0.0.1:54321/", environment["MAGISTRATE_DATABASE_URL"])
 
     def test_spencer_and_seven_moat_checkpoints_cannot_disappear(self):
         required = {

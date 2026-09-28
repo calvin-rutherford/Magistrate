@@ -1,90 +1,107 @@
 # Security model — release authority boundaries
 
-Authority: [production matrix](PRODUCTION_STATUS.md). **Production multi-tenant
-security convergence: FAILED.** Principal scoping and provider verification are
-implemented; shared operator resources are not a SaaS isolation boundary.
+Authority: [production matrix](PRODUCTION_STATUS.md). Repository controls and
+advisory remediation: **COMPLETE**. Deployed isolation, legal/security review
+and physical-device evidence: **BLOCKED_EXTERNAL**. No compliance certification,
+penetration test or production threat-model approval is inferred from unit tests.
 
 ## Trust boundaries
 
-| Boundary | Existing enforcement | Required production evidence / owner |
+| Boundary | Executable enforcement | External proof still required |
 |---|---|---|
-| Client → Gateway | Opaque scoped bearer; provider signature/issuer/audience/time/nonce verification; one-time challenge and refresh rotation | A1/A2/A11: per-route tenant/project membership and revoked/disabled identity tests |
-| Native/web session storage | Native SecureStore; web HttpOnly refresh cookie; principal-qualified chat caches | A2/A8: physical logout, refresh reuse, offline expiry, cross-device and cross-account clearing |
-| Gateway → provider | Server-only credentials; encrypted stored OAuth/execution secrets; bounded request/result adapters | A7/A11: least-egress/provider policy, secret rotation and redacted failure telemetry |
-| Model → host tools | Closed named tools; host-owned identity; strict bounded JSON; confirmation outside model authority | A5/A7/A11: untrusted context cannot choose tenant, command, key or arbitrary tool |
-| Gateway → Firstmate | Deterministic intake and pinned producer; authenticated structured events; immutable correlation/evidence | A5/A11: isolated runtime credentials/files/network and producer ownership |
-| Worker → product | Durable typed events, not terminal text; no inferred completion | A5/A12: replay/conflict/foreign-owner/out-of-order and crash recovery |
-| Files → consumers | Bounded/type-validated chat files and owner-qualified access | A10/A11: durable private avatar/blob policy, malicious content handling, quotas, retention and backups |
-| Payments → entitlement | Absent in baseline | A4/A11: raw-body signature verification, replay-safe ledger and tenant customer mapping |
-| Notifications → authority | Permission/mode affects alert volume only; pending-intent routing; acknowledgement separate from decision | A9/A11: real receipts, authenticated deep links, exact confirmed decision answer |
+| Client → Gateway | Scoped bearer, verified provider issuer/audience/nonce/time, rotating channel-bound refresh, owner-qualified opaque IDs | Console audiences/redirects, actual login/logout/reuse and device storage |
+| Model → host | Closed tools, host identity/idempotency, bound confirmation, bounded inert context; attachment turns have no execution tools | Provider egress/data terms and hostile-input review |
+| Payments → entitlement | Exact raw-body signature/time checks, immutable webhook identity, integer reservations/settlement | Merchant/price approval, real test-mode reconciliation, legal/mobile purchase rules |
+| GitHub → repository | Owner-bound App installation, current selected-repository projection, scoped server-only tokens, signed webhooks | Console permissions/installations/revocation and broker scope |
+| Gateway → worker | Exclusive hosted intake, per-objective bearer, mTLS receipt validation, durable leases/events/decisions | Enforced process/filesystem/network/resource isolation and cleanup under hostile workloads |
+| Files → consumer | Actual-byte caps, MIME/digest/owner checks, private paths/quotas, optional fail-closed scanner, authenticated signed access | Provisioned volumes, scanner operation, disk quotas, backup/encryption/retention |
+| Push → device | Durable ticket/receipt ledger; owner/fingerprint/token-hash binding, delayed bounded polling, exact invalid-token retirement | APNs/FCM credentials, receipt and physical arrival/tap evidence |
+| Operations | Content-free correlation/telemetry, independent metrics token, fail-closed production preflight and HTTP-200 readiness | Private monitoring/alerts, public TLS/WSS, isolated restore, incident ownership |
+
+The authenticated principal owns one personal workspace. This is not an
+enterprise organization/team membership product. Hosted infrastructure cannot
+be certified by Gateway receipt validation: a shared UID/HOME or Docker socket
+is not a sandbox. The read-only GitHub App and privileged worker token broker
+have distinct permission authorities; never mount App keys into a repo worker.
 
 ## Fail-closed invariants
 
-- No client/model-provided principal field grants access; opaque IDs do not
-  substitute for owner checks. Unknown tenant membership, repository selection,
-  capability, entitlement or policy must deny, not fall back to operator state.
-- Never merge provider subjects by email. Login accounts and integration OAuth
-  accounts have different `account_kind` and cannot grant each other's authority.
-- Scope `response` is producer authority, not a human provider/Friend Beta grant.
-  Generic `command` exposes shared runtime controls today; a scoped bearer alone
-  is not a safe multi-tenant command grant. Friend Beta elevation remains explicit
-  restricted-cohort risk, not production tenancy.
-- Reads cannot schedule, reconcile execution lifecycle, signal workers or scrape
-  Herdr. Health configuration flags are not proof a provider/runtime is reachable.
-- Persist causality/evidence before generating completion prose. Reject changed
-  facts under an accepted event/key. Pending cancellation, push acceptance and
-  model timeout each remain distinct from observed external success.
-- Never carry prompts, keys, terminal transcripts, raw decision answers or full
-  provider failures into public Activity, push, diagnostics or release receipts.
-- No executable context, retrieved text, repository file, upload or model answer
-  may register tools or change routing/confirmation policy.
+- Unknown/foreign owner, repository selection, entitlement or capability denies;
+  no fallback to operator identity. Email never auto-links login accounts.
+- Human grants never receive producer `response` scope. Hosted mode rejects
+  legacy user-scoped producer ingress. Restricted local Friend Beta remains an
+  explicitly acknowledged shared-runtime cohort, not public-SaaS isolation.
+- Reads do not drive workers/Herdr. Configured readiness is not a live upstream
+  probe. Only explicit write-side controllers own execution reconciliation.
+- Accepted work, requested cancellation, accepted push ticket, provider receipt,
+  device arrival and viewing are different facts. No prose or HTTP 200 fabricates
+  completion. Exact decision answers remain outside model-selectable arguments.
+- Prompts, raw provider errors, keys, private answer bytes and terminal text do
+  not belong in logs, public diagnostics, push copy or release artifacts.
+- Received-byte/time/in-flight limits are per-process; shared upload quotas use
+  DB serialization. Edge rate limits and filesystem quotas remain defense in depth.
+- Provider HTTPS/host allowlists and redirect/proxy refusal are not an egress
+  firewall; infrastructure must deny metadata/private/link-local destinations.
 
-## Known repository security gaps, not external excuses
+## Dependency reachability and compatible remediation — 2026-09-28
 
-A1/A11 must finish tenant/project authorization; A3 must replace shared GitHub
-service access for tenant repository authority; A5 must prove worker isolation;
-A4 must implement payment/ledger boundaries; A10/A11 must converge public
-checkout-local avatar storage and complete file lifecycle; A9 must converge push
-receipt semantics. Missing deletion/retention and provider-context egress policy
-must not be described as GDPR compliance or complete account deletion. No
-penetration test, SOC report, regulatory certification, physical attestation or
-App Store approval is claimed.
+The older four-finding report in the component security runbook is historical.
+This reconciliation resolves it without an Expo downgrade or an unreviewed
+parser fork:
 
-The root Docker compose mounts the host Docker socket in the retained worker.
-That configuration is not an approved SaaS sandbox. Neither a separate principal,
-worktree, provider key label nor bearer scope proves process/filesystem/network
-isolation. Operator worker activation is outside this foundation.
+- **image-size**, GHSA-5p2g-fcmc-qvqq / GHSA-w3rx-r6r6-pgpr: reachable at build
+  time through Metro asset parsing, including hostile headers disguised as PNG.
+  Metro 0.84.4's synchronous string-path call is incompatible with patched 2.x's
+  byte-only default; no patched 1.x exists. The scoped override selects **2.0.4**;
+  `patches/metro+0.84.4.patch` uses its documented async `imageSizeFromFile` for
+  paths and retains the byte API for buffers/ZIP assets. No parser code is copied.
+- **decode-uri-component**, GHSA-vcc3-ghjq-m6fr: reachable at runtime through
+  Expo Router → query-string on malformed incoming query/deep-link text.
+  Patched **0.5.0** is ESM, unlike the old callable CommonJS export.
+  `patches/query-string+7.1.3.patch` selects its default export under the supported
+  Node 22 / Metro toolchain. No decoding algorithm is forked.
+- The already merged `xcode → uuid@11.1.1` scoped override remains; its v4-only
+  CommonJS compatibility regression remains mandatory.
 
-## Secret handling and recovery
+`npm ci` applies versioned `patch-package --error-on-fail` patches. The release
+suite asserts the exact reviewed versions, exercises real Metro file/buffer assets
+for web/iOS/Android, Unicode/duplicate/malformed query semantics and timeout-bound
+malicious ICNS/HEIF/JXL/query fixtures. Full browser tests and export are still
+mandatory; a lockfile-only audit is insufficient. Re-review/remove the bridges
+when supported upstream consumers adopt these APIs; never blindly bump a patch.
 
-Production bootstrap/Fernet/provider secrets stay in the approved server secret
-store and private environment, never `EXPO_PUBLIC_*`, Git, browser storage, URLs,
-logs or Actions artifacts. Generate independent high-entropy keys; preserve
-versioned Fernet keys needed for retained backups. Restrict state directories and
-backup files; reject symlink/ownership/checkout-local deployment state per the
-guarded deploy contract. Restored sessions and external grants need an explicit
-revocation review: restoring an old DB must not accidentally restore retired
-access. Backups contain sensitive user data even when provider secrets inside
-are encrypted. File and DB backups require coordinated retention/deletion policy.
+Current local `npm audit` reports **zero** advisories for frontend and Pi adapter;
+`pip-audit 2.10.1` reports **zero known vulnerabilities** in the installed locked
+Gateway and installed retained backend environments. Editable project source is
+not an advisory package. These are point-in-time database lookups, not proof of
+absence of vulnerabilities. CI's `Locked dependency advisory checks` reruns all
+four scans; reports are separate from hermetic receipts. No risk waiver or
+unresolved upstream exception is being claimed. Isolate CI/build credentials
+from untrusted repo code even with a clean scan.
 
-Operator account/console configuration is in
-[PRODUCTION_ACTIVATION.md](PRODUCTION_ACTIVATION.md). A12 cannot choose legal
-identity, pricing, data-retention promises or destructive migration without owner
-approval. Record external ownership and verification, not fabricated values.
+## Lifecycle, secrets and recovery
 
-## Required adversarial acceptance
+Production keys live in a private secret manager/environment, never Git,
+`EXPO_PUBLIC_*`, URLs, browser storage or CI logs. Rotate formerly exposed
+historical authority: deletion of committed DB/log files did not purge Git history.
+Keep independent bootstrap, Fernet, metrics, upload-signing and worker-identity
+keys and the key versions needed for approved restores.
 
-Run the complete `tenant-authorization`, `provider-auth`, `uploads`,
-`execution-recovery-isolation`, `billing-ledger` and `integration` suites. Each
-new domain adds explicit unauthenticated/wrong-scope/wrong-tenant/expired/revoked
-read and write cases, guessed IDs, replay/conflict and malformed/bounded-body
-cases. Cover websocket reconnect and replay, OAuth redirect and audience
-confusion, refresh family reuse, webhook duplicate/out-of-order facts, foreign
-blob/context/repository access and cross-runtime credential leakage.
+Account erasure covers owned current/historical content, scoped context, credits,
+sessions, GitHub bindings and receipt rows; file quarantine rolls back with the
+DB failure. Hosted erasure first fences/cancels external work and fails closed if
+cleanup cannot be confirmed. External provider retention and backup expiry need
+operator/legal approval. Restoring an old snapshot may resurrect revoked access:
+keep traffic closed and review/reissue authority before reopening.
 
-Release admission rejects missing suites, ambiguous JSON, dirty/stale commits,
-wrong evidence classes, missing checkpoints and artifact hash mismatches.
-Receipts are not cryptographic proof that a human external attestation is true:
-a named independent release reviewer must inspect evidence and approve the final
-RC. Require the CI checks and environment approvals in forge settings as an
-external activation item. No bypass/waiver field exists in the evidence packet.
+Django/Compose are lab-quarantined, legacy launch/rsync paths refuse production,
+and unauthenticated AR is removed. Pi is retained regression code, never a
+human Chat or rollback path. See [PRODUCTION_ACTIVATION.md](PRODUCTION_ACTIVATION.md)
+and [SAAS_ARCHITECTURE.md](SAAS_ARCHITECTURE.md).
+
+Mandatory adversarial gates include `tenant-authorization`, `security-boundaries`,
+`provider-auth`, `github`, `billing-ledger`, `uploads`, `push-deep-links`,
+`execution-recovery-isolation` and full `integration`. Release admission rejects
+dirty/stale/failed/missing/wrong-class evidence; it validates hashes and structure,
+not the truth of a human attestation. An independent release authority must review
+the real artifacts. No waiver field can bypass a mandatory checkpoint.

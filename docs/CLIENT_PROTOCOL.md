@@ -1,116 +1,123 @@
 # Client protocol — canonical API/data contracts
 
-Authority: [production matrix](PRODUCTION_STATUS.md). **Baseline contract:
-COMPLETE.** This is not a claim that future tenant/project/billing APIs exist.
-Actual request validators are exported without app startup or deployment DB access:
+Authority: [production matrix](PRODUCTION_STATUS.md). Merged repository contract:
+**COMPLETE**. External service/device acceptance remains separate.
 
 ```sh
-cd gateway
-uv run python -m scripts.export_client_protocol > ../.release/client-protocol.json
+mkdir -p .release
+(cd gateway && uv run python -m scripts.export_client_protocol) > .release/client-protocol.json
 ```
 
-The output is `magistrate.client-protocol.v1`: native request, Activity catch-up,
-objective tool, discriminated execution events, verified completion evidence,
-decision batches and decision-answer JSON Schemas from their Pydantic validators,
-plus channel/path metadata. The CLI uses a disposable test database because the
-legacy DB module initializes on import; it clears deployment configuration before
-loading validators. It is not a hand-maintained copy or a full response OpenAPI schema. `test_client_protocol_export.py` guards determinism, closed
-identity fields and executable routes. Keep output with the candidate hash; do
-not commit production data. Full HTTP discovery remains Gateway's OpenAPI.
+`magistrate.client-protocol.v1` exports the **actual** Pydantic validators for
+native messages, Activity catch-up, objective tools, discriminated execution
+facts, completion evidence, measured usage, decision batches/answers, billing
+Checkout/Portal, memory writes, perception/confirmation and execution requirements.
+It also exports executable domain/channel paths. The CLI clears deployment
+configuration before imports and uses disposable state; it never starts the app,
+opens a deployment DB, requests a provider or invokes a worker. The deterministic
+export tests include poisoned PostgreSQL/state configuration and route parity.
+This is a schema bundle, not a full response OpenAPI specification.
 
-## Authentication and ownership
+## Identity and onboarding
 
-Use the short-lived bearer in `Authorization`, never a query string. Ownership
-comes from the verified principal, not user/tenant IDs in request JSON. Native
-provider refresh authority is a rotating SecureStore token; web refresh
-continuity is the Secure HttpOnly SameSite cookie. Web JavaScript does not retain
-refresh credentials. `401`, expiry, logout or principal change clears memory and
-prior-principal caches before protected remount. Cosmetic components must not
-make authorized requests: an incidental 401 invalidates the real session.
+Use short-lived `Authorization: Bearer` credentials, never query tokens. Owner
+and personal-workspace/tenant qualifiers come from the server principal, never
+client JSON. Missing/foreign opaque project/repository/message IDs return the
+same not-found response. Principal-scoped caches clear on logout/expiry/401/change.
+Cosmetic surfaces must not issue authorized requests just to decorate the shell.
 
-Apple/Google login challenge, exchange and refresh are `/api/v1/auth/provider/*`.
-Provider availability is configuration, not a live sign-in. Integration OAuth
-`/api/v1/auth/{provider}/connect` is separate from login identities. Permission
-presentation/notification modes never grant execution authority.
+Apple/Google `/api/v1/auth/provider/*` handles challenge/exchange/refresh.
+Native refresh authority is rotating SecureStore data; web refresh is only a
+Secure HttpOnly SameSite cookie. Login identities and integration OAuth have
+separate account kinds; matching email never auto-links subjects.
+`/api/v1/account/onboarding` resumes welcome, name, GitHub OAuth identity and
+signed subscription state. The Free credit projection or creating Checkout does
+**not** complete paid onboarding. Account erasure requires exact authenticated
+confirmation at `DELETE /api/v1/account` and retires owned credentials/content.
 
-## Native human conversation
+## Human conversation
 
 | Operation | Contract |
 |---|---|
-| Submit | `POST /api/v1/magi/messages`; `client_message_id`, exact `content`, optional `conversation_id`, `source` text/voice, bounded stored attachments, explicit `retry_failed` |
-| Current | `GET /api/v1/magi/conversations/current`; authoritative current thread for the principal |
-| Identified read | `GET /api/v1/magi/conversations/{conversation_id}`; another owner's ID returns not found |
-| Replay | `GET /api/v1/magi/conversations/{conversation_id}/replay?after=...`; canonical change sequence |
-| Cancel | `POST /api/v1/magi/messages/{client_message_id}/cancel`; durable native cancellation, not a worker kill |
-| Diagnostics | `GET /api/v1/magi/diagnostics`; bounded content-free counters |
+| Submit | `POST /api/v1/magi/messages`: owner-qualified `client_message_id`, exact content, optional conversation, text/voice source, stored attachments, explicit retry and request-bound `explicit_confirmation` |
+| Current | `GET /api/v1/magi/conversations/current` |
+| Identified read | `GET /api/v1/magi/conversations/{conversation_id}` |
+| Replay | `GET /api/v1/magi/conversations/{conversation_id}/replay?after=...` |
+| Cancel | `POST /api/v1/magi/messages/{client_message_id}/cancel`; not a worker kill |
+| Diagnostics / route costs | `GET /api/v1/magi/diagnostics`, `/api/v1/magi/model-routes`; content-free |
 
-Responses identify `magi.native-chat.v1`. Preserve canonical IDs, timestamps,
-ordering and monotonic message revisions. Native statuses are pending, completed,
-failed or cancelled. A duplicate `client_message_id` is owner-scoped; changed
-facts under an already bound key conflict. An explicit retry revises the same
-failed canonical pair. A response with failed status is not success merely
-because HTTP returned 200. Assistant text is exact final provider bytes after
-validation; partial/reasoning/tool envelopes are not fabricated prose.
+Responses are `magi.native-chat.v1`. Canonical IDs/timestamps/order and monotonic
+revisions remain authoritative. Pending/completed/failed/cancelled are distinct;
+a failed row with HTTP 200 is not success. Reusing a bound key with changed facts
+conflicts; retry revises the same failed canonical pair. Final provider bytes,
+not reasoning/tool envelopes or inferred stdout, become assistant conversation.
 
-`MagiConversation.ts` normalizes wire/revision data;
-`MagiConversationSession.ts` is the one shared Chat/Voice reactive record. Persist
-only principal-qualified canonical data and genuine pending sends. Successful
-history is authoritative and prunes stale cache. Do not infer completion from
-text, optimistic counts, worker output, prompt boundaries or a notification.
+`MagiConversationSession.ts` is the shared reactive Chat/Voice record. Persist
+only principal-qualified canonical rows and genuine pending sends; authoritative
+history prunes stale cache. There are no worker targets or transport flags.
 
 ## Socket and replay
 
-Connect WSS `/api/v1/events`; first frame is exactly:
+WSS `/api/v1/events` authenticates with a bounded first frame:
 
 ```json
 {"type":"auth","token":"SHORT_BEARER_FROM_AUTH","activity_after":0}
 ```
 
-The token above is a notation, never a real credential. Do not put it in the
-socket URL. Server acknowledgement is `connected`, schema
-`magistrate.events.v2`. Conversation events have type `magi_messages` and payload
-schema `magi.native-chat.v1`; structured Activity uses `activity_records`.
-Monotonic revisions and durable HTTP/replay remain authority after reconnect;
-duplicate frames do not append duplicate chat rows. No terminal/worker/pane or
-legacy captain output is delivered as human conversation. Bounded first-frame
-validation and scope checks remain mandatory.
+This is notation, not a credential. Acknowledgement is `connected`, schema
+`magistrate.events.v2`. Native frames are `magi_messages`, Activity frames
+`activity_records`. HTTP replay and revisions survive reconnect; duplicates never
+append duplicate canonical rows. No worker/terminal/Pi stream is conversation.
 
-## Execution, Attention and files
+## Merged domains
 
-- `/api/v1/firstmate/execution-events` accepts strict
-  `firstmate.execution-event.v1` with immutable event ID and objective/task/run
-  causality. Completed events require `firstmate.completion-evidence.v1` with
-  verified passed typed checks and allowlisted artifact references. Source
-  authentication and durable evidence, not model prose, authorize a completion
-  report. A completion report is a new assistant-only row in the original thread.
-- `/api/v1/firstmate/decision-events` accepts a complete authenticated
-  `firstmate.decision-events.v1` projection. Reads do not refresh Firstmate.
-  Answering binds opaque ID/revision, owner/session, exact native user row and
-  confirmation. Dismissing, viewing or acknowledging a notification is not an
-  answer. Never add raw answer text to model-selectable arguments.
-- `/api/v1/fleet` is the product projection; it omits task/run/pane/PID/terminal
-  controls. Objective cancellation persists `requested`; only the authenticated
-  structured cancellation event makes it observed. A request receipt is not a
-  cancellation success claim.
-- `/api/v1/activity`, `/snapshot`, `/replay`, `/catch-up` project durable events;
-  Attention and notifications project the corresponding unresolved decisions.
-- `/api/v1/uploads` issues opaque IDs and explicit `stored` state. A message
-  attachment must match server metadata and owner. Download requires auth. A
-  bare 200, filename, URL or local picker selection does not prove storage,
-  extraction, model ingestion or attachment.
-- Voice STT is `/api/v1/voice/transcribe`; its final text goes through the same
-  native submit. Notification intents must pass `PendingIntentRouter` allowlists,
-  wait for authenticated routing and match the intended principal/item.
+- `/api/v1/projects` and owner-qualified project/repository routes persist the
+  personal-workspace hierarchy. Repository metadata is not GitHub authorization.
+- `/api/v1/github/app/*`, `/installations/{id}/reconcile`, and
+  `/api/v1/github/repositories/{id}/...` use active owner-bound GitHub App access.
+  OAuth account identity alone cannot authorize repository content. Tokens stay
+  server-only; callbacks and signed webhooks are distinct ingress seams.
+- `/api/v1/billing/catalog`, `/account`, `/checkout`, `/portal` accept catalog IDs,
+  not caller-selected customer/balance authority. Only raw-byte signed
+  `/api/v1/billing/webhooks/stripe` events change paid state. The legacy single-price
+  webhook/config remains migration compatibility, not new activation guidance.
+- `/api/v1/magi/memory/*` takes an owner-resolved project plus optional repository.
+  Writes/tombstones require command; search/context/audit require read. Context
+  carries bounded facts/provenance, never permission or executable instructions.
+- `/api/v1/perception/events` and its confirmation route normalize consented
+  device observations. Even confirmed results have `executes_action: false`.
+  Low-confidence/high-impact/neural/subvocal drafts require exact confirmation;
+  another existing product API must independently authorize any action.
+- `/api/v1/uploads` returns explicit server `stored`/attached state and opaque IDs.
+  Authenticated signed access, deletion, digest/owner checks and private storage
+  are in `uploads.py`. No path or local-picker selection proves processing.
+  Attachment-bearing Magi turns have no execution tools.
+- `/api/v1/voice/transcribe` returns STT text for the **same** Native Magi thread.
+  Notifications use typed allowlisted intents and authenticated routing, not
+  command authority. Status exposes owner-only receipt counts; ticket acceptance,
+  provider receipt, physical arrival and viewing are separate facts.
 
-## Compatibility and merge handoff
+## Execution and Attention
 
-A1/A3/A4/A6/A10 must provide real tenant/project/GitHub/billing/context/storage
-routes and schemas; do not invent client calls ahead of their merge. Preserve
-closed server-derived ownership and add every new route to tenant-negative tests.
-Additive optional fields must remain truthful; required semantic changes need a
-new version and compatible rollout. A12's schema export derives validators but
-cannot replace cross-language response tests or browser behavior.
+Local authenticated `/api/v1/firstmate/execution-events` and decision projections
+are disabled as producer ingress in hosted mode. Hosted callbacks under
+`/api/v1/hosted-execution/objectives/{objective_id}/...` instead require the exact
+objective-bound worker bearer. Both feed the same closed structured ledgers.
 
-Run `client-contract`, `integration`, `tenant-authorization`, `frontend` and
-`spencer-hermetic`; then the real Spencer second-device/offline/deep-link tests.
-See [SECURITY_MODEL.md](SECURITY_MODEL.md) for the trust boundary.
+`firstmate.execution-event.v1` preserves immutable event/objective/task/run
+causality. Production terminal facts need measured usage; completed facts also
+need verified `firstmate.completion-evidence.v1`. Model prose or a process exit
+cannot manufacture completion. Fleet omits pane/PID/raw runtime controls;
+cancellation stays requested until observed. Activity snapshot/replay/catch-up
+reads persisted facts, never starts a worker.
+
+Decision batches are complete `firstmate.decision-events.v1` projections.
+`firstmate.answer_decision` arguments contain only opaque ID/revision; the host
+loads exact answer bytes from the owner's canonical user row with bound
+confirmation. Viewing/dismissing/acknowledging a notification never answers it.
+
+Preserve additive compatibility, closed ownership and canonical identities.
+Required semantic changes need versioning and Gateway-before-client rollout.
+Run `client-contract`, `tenant-authorization`, `integration`, `frontend` and
+`spencer-hermetic`; physical/offline/second-device checkpoints remain external.
+See [SECURITY_MODEL.md](SECURITY_MODEL.md).

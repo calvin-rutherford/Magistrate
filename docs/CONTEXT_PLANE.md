@@ -1,68 +1,79 @@
-# Context plane — continuity without authority leakage
+# Context plane — durable continuity without authority leakage
 
-Authority: [production matrix](PRODUCTION_STATUS.md). **Production context plane:
-FAILED.** Native conversation continuity is implemented; portable project memory
-is a separate workstream, not a synonym for transcript history.
+Authority: [production matrix](PRODUCTION_STATUS.md). Repository context plane:
+**COMPLETE**. Real provider/harness/device continuity: **BLOCKED_EXTERNAL**.
 
-## Existing context
+## Canonical authority
 
-`MagiChatStore.context_before` selects bounded owner-scoped history (maximum 40
-eligible messages) before the current turn. `MagiChatService` adds the observed
-profile, bounded optional deployment context and authenticated pending-decision
-projection. Native Chat is persisted independently of model/provider sessions;
-new service/model instances can reuse canonical IDs and history. The release
-replacement fixture proves this synthetic boundary and cross-owner refusal.
+`project_memory.py`, migration 6 and its owner-qualified store own context, not
+provider threads, harness sessions, embeddings or terminal transcripts. Each
+entry, mutation and retrieval has authenticated owner, derived tenant/personal
+organization, persisted workspace/project and optional repository qualification.
+This is personal-workspace tenancy, not arbitrary enterprise memberships.
+Repository retrieval may inherit project-wide entries in that exact scope;
+it never inherits a sibling repository or any other owner's data.
 
-Objectives accept only bounded opaque `context_refs`, not arbitrary raw context
-or model-selected credentials. Decision answers load exact bytes from the
-owner's canonical user row with bound confirmation. Verified execution outcome
-messages are deliberately generated from accepted objective/evidence JSON with
-**no prior chat history or worker transcript**. Preserve that narrow outcome path.
+Current `project_memory_entries`, revisions, terms, audit and retrieval tables
+are authority. The older encrypted `project_memories` key/value table remains
+migration-compatible history. Supported typed memories include goals, decisions,
+conversation facts, repositories, objectives, outcomes/artifacts, failed
+approaches, questions/preferences and Fleet facts. Model `magi.remember` is
+available only for an explicit user request and cannot claim authoritative
+outcomes, artifacts or Fleet state; those originate in structured ledgers.
 
-No baseline vector database, project-memory provenance/version/deletion plane,
-portable cross-harness checkpoint or automatic complete long-term recall is
-proved. A provider's prompt window or an opaque reference is not a durable
-retrieval implementation. Files with `stored` status are not automatically
-extracted, embedded, indexed or submitted to a model.
+Stable owner/scope/memory keys produce deterministic identities. Revisions are
+append-only, deletion creates a tombstone and deleted identities cannot be
+reused. A bounded lexical index ranks term/title overlap, importance, repository
+specificity and recency. Mutation audits form a digest chain; retrieval records
+query digests and selected entry IDs, not raw queries in operational logs.
 
-## Required A6 contract
+## Selective assembly and frozen handoff
 
-- Bind every context object/reference to authenticated principal/tenant/project
-  membership. Resolve references only on the server; reject unknown, revoked,
-  expired or foreign objects without revealing another tenant's existence.
-- Store provenance/source identity, immutable version/hash, freshness and
-  retention/deletion state. Separate user facts, file-derived material, verified
-  execution evidence, provider output and untrusted repository text.
-- Bound retrieval by count/bytes/tokens and explicit model-policy purpose. Record
-  selected IDs/versions and policy for a replayable audit without copying private
-  content into logs. Mark missing/truncated/stale context truthfully.
-- Treat retrieved content as data, never system policy, shell instructions, tool
-  definitions, authority, a decision confirmation or a billing entitlement.
-- Keep provider/model/harness neutral canonical context, with approved adapters
-  for transport. Replacement cannot silently widen egress or discard provenance.
-  Provider-specific session IDs are not the portable source of truth.
-- Honor revocation and deletion in retrieval, caches, derived indexes, uploads
-  and backups under the approved retention policy; do not promise immediate
-  destruction of independently retained financial/audit records.
-- Allow background execution to use only a frozen authorized context binding or
-  an explicitly governed refresh. Reads of context do not wake or supervise work.
+`MagiContextAssembler` emits bounded `magi.context-plane.v1` inert JSON facts:
+up to eight relevant memory entries, three recent project intents, five Fleet
+outcomes, five pending decisions, modality and ten authenticated attachment
+metadata records. The document is capped at 16,000 characters with 1,200-character
+memory excerpts. Native conversation continuity separately admits up to 40
+completed whole rows and 100,000 characters. No transcript dumping or hidden
+reasoning enters the memory plane.
 
-A1 supplies membership, A10 durable files, A7 bounded model selection/usage, A5
-execution handoff and A4 charging rules. A12 needs exact schema/route/config and
-migration dependencies, not proposed environment variables. Any external storage/
-index/provider console activation must follow the merged adapter's actual names.
+Before objective publication, at most ten relevant memories and their exact
+canonical context/digest freeze on `magi_objective_submissions`. Retry, restart
+and hosted/local handoff reuse the saved bytes; a later memory edit cannot change
+an accepted task. `context_refs` alone grant no dereference authority. Context is
+not a system instruction, tool definition, credential, entitlement or confirmation.
+Verified completion prose remains a separate narrow path generated from accepted
+objective/evidence JSON, not prior chat or worker transcripts.
+
+## Files, privacy and lifecycle
+
+Private uploaded bytes are owner/digest validated before provider encoding.
+Stored status does not mean extraction, indexing or understanding. OpenAI's
+implemented file parts are distinct from other providers' capability/refusal
+behavior; metadata-only consumption must not be described as file understanding.
+A device/perception adapter normalizes consented drafts, never execution intent
+by itself. See [CLIENT_PROTOCOL.md](CLIENT_PROTOCOL.md).
+
+Memory writes/search are bounded and fail closed on capacity, controls,
+credential-like content or unsupported kinds. They never silently evict history.
+The component [context contract](magi-context-plane-v1.md) owns exact limits and
+API details. Account erasure removes entries, revisions, terms, audits and
+retrievals in the same owner-scoped lifecycle transaction. Backup expiration,
+provider-side erasure and legal retention remain explicit operator obligations;
+logical deletion cannot prove all external copies disappeared.
 
 ## Acceptance
 
-Repository: extend `magi-context-routing`, `tenant-authorization`, `migrations`,
-`backup-restore` and `moat-hermetic` with seeded project facts, provenance/version
-checks, wrong-tenant/project guesses, revoked references, bounded retrieval,
-deletion and restart/replacement tests. Verify exact conversation IDs/revisions
-and no duplicate objective across provider/harness boundary failures.
+`magi-context-routing`, `tenant-authorization`, `moat-hermetic`, `migrations`,
+`backup-restore` and `postgres-persistence` include the actual merged memory,
+routing and isolated-handoff tests. The composed restore fixture compares memory
+revisions/index/audit/retrieval rows and frozen context with the full DB and
+restored object bytes. PostgreSQL exercises two concurrent tenants and selective
+erasure. Synthetic replacement tests prove Gateway-owned continuity, not a
+real vendor switch or running harness migration.
 
-Live: moat context-continuity and provider/harness replacement must recall a
-known authorized project fact across real process/provider/device changes while
-denying another tenant. Include the source artifact and redacted selection/
-version evidence; “the model sounded like it remembered” is insufficient. The
-synthetic provider seam cannot pass this gate. See
-[MAGISTRATE_ROUTING.md](MAGISTRATE_ROUTING.md) and [CLIENT_PROTOCOL.md](CLIENT_PROTOCOL.md).
+External moat acceptance must recall an authorized project fact across real
+provider, process, harness and device changes, preserve provenance/digests,
+reject another tenant and demonstrate deletion. A convincing model answer
+without source/selection evidence cannot pass. Follow
+[PRODUCTION_ACTIVATION.md](PRODUCTION_ACTIVATION.md).

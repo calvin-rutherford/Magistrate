@@ -21,9 +21,15 @@ from app.persistence import connect
 from app.projects import bind_github_repository, create_project, get_project, list_projects
 from app.project_memory import MemoryScope, ProjectMemoryStore
 from app.uploads import get_upload, save_upload
+from app.push_receipts import PushDeliveryStore
 
 
 db.update_profile(owner, name=f"Postgres {owner}", email=f"{owner}@example.test")
+push = PushDeliveryStore(db.DB_PATH)
+push_claim = push.claim_send(owner, "smoke-decision", "smoke-fingerprint", f"fixture-{owner}")
+assert push_claim is not None
+push.accepted(push_claim, f"smoke-ticket-{owner}")
+assert push.summary(owner) == {"pending": 1}
 project = create_project(owner, name=f"Project {owner}", slug=f"project-{owner}")
 repository = bind_github_repository(
     owner,

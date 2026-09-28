@@ -1,123 +1,107 @@
 # SaaS architecture and migration composition
 
-Authority: [production matrix](PRODUCTION_STATUS.md). **SaaS convergence: FAILED.**
-This distinguishes the executable baseline from required production contracts.
+Authority: [production matrix](PRODUCTION_STATUS.md). Repository domain contracts
+are **COMPLETE** within the boundaries below; infrastructure activation is
+**BLOCKED_EXTERNAL**. This is a principal-owned personal-workspace product, not
+an implemented enterprise organization/membership system.
 
-## Executable baseline
+## Executable topology
 
 ```text
-Expo Chat / Voice ── authenticated Native Magi API ── SQLite canonical messages
-                                   │
-                            provider-native model
-                                   │ closed, scope-bound tools only
-                            durable objective intake
-                                   │ deterministic task + one bounded wake
-                              Firstmate scheduler
-                                   │ authenticated structured pushes
-                         events / decisions / evidence
-                                   │ persisted projections
-                         Fleet / Activity / Attention
+Expo Chat / Voice / Projects
+       │ server-verified principal, scoped bearer
+       ▼
+Gateway ── canonical Native Magi messages ── bounded context + routed providers
+       │ closed tools; host-derived identity and confirmation
+       ▼
+Objective + frozen context + customer-credit reservation
+       ├─ restricted local intake: deterministic tasks-axi add / Firstmate wake
+       └─ hosted intake: durable controller / mTLS isolated worker backend
+       │ authenticated structured events / decisions / measured usage / evidence
+       ▼
+Persisted Fleet / Activity / Attention / canonical outcome messages
 ```
 
-Gateway is the identity, API and persistence boundary, not a scheduler. Normal
-startup/health/product reads project durable facts and never scrape terminals,
-snapshot Herdr, signal a process or install a reconciliation timer. One-shot
-write-side recovery of interrupted queue/wake commits is distinct from reads.
-Notification reconciliation may deliver persisted Attention changes, not execute
-work. A model's completion prose is not evidence that a worker completed work.
+Human conversation is only `/api/v1/magi/*` plus `magi_messages` events. No worker
+transcript, terminal, Pi transport switch or selectable worker target is Chat.
+Reads project durable facts; they do not probe/supervise workers. Hosted execution
+has an explicit **write-side** controller, leases and reconciliation; this does
+not authorize execution timers in health/Fleet/Activity/Attention reads. Local
+mode's bounded startup recovery is likewise a write-side admission operation.
 
-The current durable human identity is a Gateway principal; native messages,
-objectives, events and decisions carry owner qualification. Current Firstmate,
-GitHub CLI access and some controls remain deployment-owner resources. This is
-not tenant runtime isolation. Friend Beta shared-runtime acknowledgement does
-not make it so. Legacy Django/Channels/Celery models and Postgres migrations are
-independent; they are not the Native Magi data authority. Retained Pi tables are
-historical state, never an alternative human conversation route.
+## Merged domain authority
 
-## Required production domain boundaries
-
-| Domain | Required authority | Integration owner |
+| Domain | Executable authority | Boundary |
 |---|---|---|
-| Principal / membership | Verified provider subject → internal principal; organization/project membership resolved server-side on every access | A1 / A2 |
-| Project / repository | Tenant-authorized project plus installation/repository binding; no global service-identity fallback | A1 / A3 |
-| Billing / entitlement | Durable customer mapping, verified payment events, ledger and reserved budget; no client-computed balance | A4 |
-| Context | Tenant/project ACL, provenance, immutable versions, deletion/retention and bounded model selection | A6 |
-| Routing | Host policy chooses permitted provider/model/harness with budget and capability evidence; request/model JSON cannot select authority | A7 |
-| Execution | Durable owner/project objective and causality, isolated runtime mapping, Firstmate queue/scheduler | A5 / A11 |
-| Files | Private owner/tenant metadata and durable blob identity; independently verified storage/processing states | A10 |
-| Product | Chat / Projects / Fleet / Activity / Attention; client never reconstructs lifecycle from prose | A8 / A9 |
-| Release | Composition tests, schema export, migration/restore rehearsal and candidate evidence | A12 |
+| Identity | `provider_auth.py`, `auth.py`, `onboarding.py` | Verified provider subject, no email auto-linking; welcome/name/GitHub OAuth/signed subscription onboarding |
+| Projects | `projects.py` | One personal workspace per principal, opaque owner-qualified projects and repository bindings; metadata binding alone grants no GitHub authority |
+| GitHub | `github_app.py` | Principal-bound installations and current authorized repositories; old global forge subprocess service deleted |
+| Credits | `billing.py`, `billing_api.py` | Signed webhooks, integer ledger, pre-intake reservation and measured settlement |
+| Context | `project_memory.py` | Owner/tenant/org/workspace/project/repository qualification, revisions, tombstones and frozen objective context |
+| Routing | `magi_routing.py`, `magi_providers.py`, `execution_routing.py` | Native vendor adapters and operator USD budgets separate from customer execution credits and harness lifecycle |
+| Execution | `magi_firstmate_tools.py`, `firstmate_intake.py`, `hosted_execution.py` | Exclusive local/hosted intake; hosted objective-bound bearers and provider-neutral isolation API |
+| Files | `uploads.py`, `perception.py` | Private POSIX objects, quotas, digests, consented non-executing perception; no object-store cloud SDK |
+| Recovery | `account_lifecycle.py`, `scripts/storage_ops.py` | Owner erasure and file quarantine; new-target SQLite backup/restore; external PostgreSQL snapshot/PITR |
+| Observation / notification | `structured_runtime.py`, `telemetry.py`, `push_receipts.py` | Durable product projections, content-free logs/operator metrics and separately reconciled provider receipts |
 
-These are integration constraints, not invented endpoints or already-existing
-organization tables. Each workstream must supply actual routes/schemas before
-its row changes from FAILED. No caller-supplied owner/tenant field becomes an
-authorization source. No new tenant feature may default an unknown membership to
-`default_user`, an operator repository, or a shared worker HOME.
+Component details: [identity](identity-tenancy-data-lifecycle.md),
+[hosted execution](hosted-execution.md), [security operations](production-security-operations.md).
+When older component prose describes a subsequently merged domain as future or
+absent, the current code and this production matrix take precedence.
 
-## Data compatibility contract
+## Persistence and ordered composition
 
-1. Preserve existing canonical message IDs, client idempotency keys, revisions,
-   timestamps, reply edges, objective/task/run causality, source-event identities,
-   confirmation revisions and evidence hashes. Replays cannot re-charge, re-wake
-   or silently change an accepted event's facts.
-2. Add fields/tables/indexes without dropping or rewriting historical
-   `conversation_*` / `pi_*` data. A destructive backfill or principal merge
-   requires a separately approved migration and restore plan.
-3. Introduce schema versions at external boundaries. Unknown required variants
-   fail closed. Extra model-selected authority is rejected, not ignored.
-4. Upgrade Gateway before clients that require new fields. Readers tolerate
-   explicitly optional additive fields; they do not fabricate unobserved values.
-   If semantics break compatibility, version the protocol and test both readers.
-5. Model-provider errors remain durable truthful failures; billing settlement,
-   queue acceptance and task completion each have distinct transaction ledgers.
+All Gateway stores use `persistence.py`. SQLite is **single-instance only**, not
+a network-filesystem multi-writer topology. PostgreSQL is the multi-instance
+path selected by `MAGISTRATE_DATABASE_URL`. It translates the legacy parameterized
+SQL seam, uses transaction-scoped advisory locks for serialized writes and a
+separate migration lock. Concurrent startup and selective two-tenant erasure are
+exercised by `postgres-persistence` against a disposable PostgreSQL 16 container.
+This is not a managed-cloud restore drill.
 
-## Migration ownership and order
+`db.py:_SCHEMA_MIGRATIONS` and `schema_migrations` own forward-only versions:
 
-`gateway/app/db.py:init_db()` is the current additive schema authority. Uploads,
-notifications and OAuth transactions also initialize additive tables in their
-own modules. There is no numbered, globally composed migration runner yet.
-Every schema owner must list its tables, indexes, foreign keys, backfills,
-transaction boundaries and old-schema fixture in the integration handoff.
+1. legacy baseline;
+2. projects and tenant lifecycle;
+3. provider onboarding and billing;
+4. GitHub App installations/repositories;
+5. customer credit billing ledgers;
+6. scoped project context;
+7. hosted execution;
+8. files and perception;
+9. durable push ticket/receipt delivery accounting.
 
-A12 composition order:
+Each migration records its version only after its savepoint succeeds. Retained
+conversation/Pi rows are not dropped by upgrade. An explicit account erasure is
+a separate authenticated destructive action that also removes that owner's
+historical rows. Preserve message IDs/revisions, objective/task/run causality,
+immutable event identities, context digests, reservation keys and evidence.
 
-1. Take and verify a pre-upgrade online backup plus storage/secret-version
-   manifest; record the exact deployed Git revision.
-2. Compose A1 identity/membership parents before GitHub installations, ledger,
-   context and storage children; execution/routing references follow their
-   identity/entitlement contracts. Unique/index changes require collision tests.
-3. Run upgrade against a populated pre-feature DB, then run initialization twice.
-   Test concurrent startup if the merged migrator permits it; otherwise enforce
-   a single migration owner before application startup. Never assume concurrent
-   `ALTER TABLE` is safe merely because `CREATE TABLE IF NOT EXISTS` is used.
-4. Assert exact retained rows/bytes, ownership, evidence hashes, foreign keys,
-   native replay and encrypted credential readability. Add seeded billing,
-   tenant/context/file rows as those implementations merge.
-5. Simulate interrupted chat, queue publication, event generation and decisions.
-   Recovery cannot create duplicate work or falsely finish a pending response.
-6. Restore to a new isolated target and smoke with the intended code revision.
-   Rollback means the matching code + whole consistent state snapshot + required
-   keys/storage, not deleting inconvenient events or remapping an owned turn.
+`test_release_restore.py` upgrades a populated version-3 fixture, seeds all
+merged domains, runs the actual SQLite backup/restore entrypoints, compares
+**every table/row**, repeats initialization, verifies integrity/FKs and encryption,
+restores private object bytes separately, and exercises pending-chat recovery.
+The older v1 database fixture and migration rollback tests remain mandatory.
+The PostgreSQL contract covers concurrent domain persistence/erasure; an actual
+PostgreSQL backup/restore with secret escrow and a shared-volume snapshot is still
+an external activation checkpoint.
 
-`gateway/tests/test_release_restore.py` seeds native/legacy messages, pending
-chat, objective submissions, accepted/completed events, verified evidence,
-Activity, pending decisions, OAuth ciphertext and file metadata. It discovers
-all current tables and compares all rows through backup → restore → repeated
-init, integrity/FK checks and orphan recovery. It is a foundation, not evidence
-for unmerged schema additions or cloud recovery. DB backup alone does not contain
-upload bytes, a Fernet key, or external provider state.
+## Deployment and rollback
 
-## Deployment shape and non-goals
+Deploy only FastAPI Gateway plus exported Expo assets. PostgreSQL instances must
+share the same private POSIX state volume at the same absolute path: upload and
+erasure logic uses same-volume atomic rename. No S3/bucket variable substitutes
+for that implementation. Provision DB/state outside the release checkout.
 
-The current supported product deploy is FastAPI plus exported Expo web and
-persistent SQLite/file state, with Firstmate behind its explicit producer/control
-seam. Do not replace it with root Docker compose: that launches the retained
-Django broker/workers and mounts the host Docker socket. No high-availability
-multi-writer Gateway/SQLite topology is proved here. Scaling/database migration
-requires an explicit owner design and locking/recovery evidence, not a new
-`DATABASE_URL` value in the existing process.
+Back up **before migration**, include files and required secret versions, canary
+against `/readyz` HTTP 200 and authenticated schema health, then promote. Restore
+only into a new isolated DB/state target; an older snapshot may resurrect revoked
+sessions, so close traffic and review/reissue authority before reopening. There
+is no automatic data-loss rollback or schema downgrade. The guarded update
+script is not an atomic blue/green deployment manager.
 
-Activation, backups, DNS, keys and account setup are in
-[PRODUCTION_ACTIVATION.md](PRODUCTION_ACTIVATION.md). Protocol ownership is in
-[CLIENT_PROTOCOL.md](CLIENT_PROTOCOL.md); security and money boundaries are in
-[SECURITY_MODEL.md](SECURITY_MODEL.md) and [BILLING_MODEL.md](BILLING_MODEL.md).
+Django/Celery and root Compose are lab-quarantined, old launch/rsync scripts refuse
+production, and unauthenticated AR is removed. These are not rollback targets.
+The retained Pi adapter is regression-tested, never human-conversation authority.
+See [activation](PRODUCTION_ACTIVATION.md), [protocol](CLIENT_PROTOCOL.md) and
+[billing](BILLING_MODEL.md) for exact release boundaries.

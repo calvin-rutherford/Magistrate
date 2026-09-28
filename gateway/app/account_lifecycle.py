@@ -243,7 +243,7 @@ def _delete_indirect_rows(connection: sqlite3.Connection, user_id: str, tables: 
     execute("connected_accounts", "DELETE FROM connected_accounts WHERE user_id = ?", (user_id,))
 
     # Notification tables are installed lazily and have stable user_id columns.
-    for table in ("notification_events", "notification_state", "notification_preferences", "push_tokens"):
+    for table in ("notification_push_deliveries", "notification_events", "notification_state", "notification_preferences", "push_tokens"):
         execute(table, f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
     return deleted
 

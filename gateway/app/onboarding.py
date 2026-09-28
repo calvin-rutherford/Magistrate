@@ -58,7 +58,7 @@ def _state(connection: sqlite3.Connection, user_id: str) -> dict[str, Any]:
         (user_id,),
     ).fetchone()
     billing = connection.execute(
-        "SELECT status, current_period_end, external_customer_ref FROM billing_accounts WHERE owner_user_id = ?",
+        "SELECT status, current_period_end, external_customer_ref, subscription_id, provider_event_created FROM billing_accounts WHERE owner_user_id = ?",
         (user_id,),
     ).fetchone()
     now = int(time.time())
@@ -72,7 +72,14 @@ def _state(connection: sqlite3.Connection, user_id: str) -> dict[str, Any]:
         and (github["expires_at"] is None or int(github["expires_at"]) > now)
     )
     billing_status = str(billing["status"]) if billing else "none"
-    billing_complete = billing_status in {"active", "trialing"}
+    # The credit ledger initializes Free accounts as active, including during
+    # Checkout creation. That is not an observed paid subscription. Only a
+    # signed subscription event binds these fields; redirects/read-side credit
+    # initialization and cancellation back to Free must not complete onboarding.
+    billing_complete = bool(
+        billing and billing_status in {"active", "trialing"}
+        and billing["subscription_id"] and billing["provider_event_created"] is not None
+    )
     required = (
         not profile_complete if not provider_account else
         not (welcome_complete and profile_complete and github_complete and billing_complete)

@@ -35,3 +35,39 @@ jobs:
           path: .release/foundation.json
           if-no-files-found: error
           retention-days: 14
+
+  dependency-audits:
+    name: Locked dependency advisory checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v5
+      - run: mkdir -p .release
+      - name: Audit installed frontend and retained adapter
+        run: |
+          (cd frontend && npm ci && npm audit --audit-level=low --json > ../.release/frontend-audit.json)
+          (cd pi-extension && npm ci && npm audit --audit-level=low --json > ../.release/pi-audit.json)
+      - name: Audit Gateway and retained lab backend
+        run: |
+          (cd gateway && uv sync --frozen && uvx --from pip-audit==2.10.1 pip-audit --path .venv/lib/python3.12/site-packages --skip-editable --format json --output ../.release/gateway-audit.json)
+          uv venv .release/backend-env
+          uv pip install --python .release/backend-env/bin/python -r backend/requirements.txt
+          uvx --from pip-audit==2.10.1 pip-audit --path .release/backend-env/lib/python3.12/site-packages --format json --output .release/backend-audit.json
+      - name: Assert no generated repository drift
+        run: test -z "$(git status --porcelain --untracked-files=all)"
+      # Advisory services are online evidence, separate from hermetic receipts
+      # and never proof that a production service/device has been activated.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-advisory-reports
+          path: .release/*-audit.json
+          if-no-files-found: error
+          retention-days: 14

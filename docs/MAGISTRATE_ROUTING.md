@@ -1,75 +1,87 @@
 # Magistrate routing authority
 
-Authority: [production matrix](PRODUCTION_STATUS.md). **Closed native routing:
-COMPLETE. Production cost/provider/harness routing: FAILED.**
+Authority: [production matrix](PRODUCTION_STATUS.md). Repository routing contracts:
+**COMPLETE**. Real provider/harness replacement and cost evidence:
+**BLOCKED_EXTERNAL**.
 
-## Three distinct decisions
+## Distinct authorities
 
-1. **Human conversation transport** is fixed: Chat and transcribed Voice call
-   `/api/v1/magi/messages`, read `/api/v1/magi/conversations/*`, and reconcile
-   `magi_messages` events. There are no runtime transport flags or selectable
-   worker targets. Old deployment documents mentioning a native/legacy toggle
-   do not authorize reintroducing one.
-2. **Magi inference** uses the `MagiModel.complete` boundary. Baseline has one
-   concrete adapter, `OpenAIMagiModel`, using non-streamed Responses. Provider,
-   model, endpoint, reasoning effort, timeout and maximum output are server
-   configuration. An unknown configured provider fails instead of falling back
-   to a terminal or another credential.
-3. **Execution routing** is a validated harness/provider/model/variant inventory
-   and saved preference, separate from inference and speech input mode. It is
-   not proof that a worker migrated or that a provider key is available. Firstmate
-   owns scheduling and lifecycle; Gateway only accepts and projects contracts.
+1. **Conversation transport** is fixed: Chat and transcribed Voice use
+   `/api/v1/magi/messages`, canonical reads/replay and `magi_messages` events.
+   No terminal/Pi fallback, transport flag or worker target selector exists.
+2. **Magi inference** uses `MagiModel.complete`, `RoutedMagiModel` and native
+   OpenAI Responses, Anthropic Messages and Google generateContent adapters.
+   Credentials are server-only. A provider-compatible URL is not an adapter.
+3. **Execution harness selection** uses a separate verified inventory and
+   `HarnessRoutingStrategy`. `POST /api/v1/execution/route-recommendation`
+   explicitly returns `execution_started: false`; recommendations do not migrate,
+   start or inspect workers. Firstmate/hosted execution own the admitted lifecycle.
+4. **Speech input/output** uses foreground capture, STT and local TTS. Speech
+   modes are neither model-routing policy nor a new conversation architecture.
 
-## Closed model tool contract
+`magi_routing.py` typed defaults or the full closed
+`MAGISTRATE_MODEL_ROUTING_CONFIG` document are policy authority. The retired
+single-provider selectors are not routing controls; only the transitional value
+`MAGISTRATE_MAGI_MODEL_PROVIDER=routed` is accepted. See the detailed
+[selection/failover contract](model-routing-cost-failover.md).
 
-`magi_chat_service.py` and `magi_firstmate_tools.py` own the tool turn. A
-command-authorized routing call must choose an offered closed tool. Ordinary
-conversation selects `magi.respond`; actionable work uses
-`firstmate.submit_objective`. Pending authenticated decision context may offer
-`firstmate.answer_decision`. Unknown names, extra authority, malformed/oversized
-arguments and ambiguous calls fail closed. Natural-language keyword classifiers
-are not routing authority. Provider-private reasoning and tool protocol bytes
-never become user-visible chat prose.
+## Policy, cost and failover
 
-The host, not model arguments, binds principal, conversation, user row, assistant
-row and invocation identity. Objective arguments are bounded objective/project/
-constraints/acceptance criteria/opaque context references. The queue publishes a
-deterministic task and wakes once; `accepted` means intake accepted, not work
-completed. Decision arguments contain only opaque `decision_id` and
-`decision_revision`. Exact answer bytes come from the owner's canonical user
-message with bound confirmation, never a model rewrite or terminal transcript.
+Host policy closes each human turn into direct conversation, read-only
+investigation, execution, a **bound** decision response, or high-impact action.
+The high-impact classifier is a conservative confirmation gate, not permission
+to execute; the objective executor repeats the check on validated tool arguments.
+A new request with `explicit_confirmation: true` authorizes only that invocation.
+Prose never binds a decision or creates standing authority.
 
-A voice-only principal may chat but is not offered execution tools. Generic
-`command` remains broader than isolated chat in the baseline. Tenant/entitlement
-policy must be added before ordinary SaaS users receive shared runtime access.
+Selection requires configured credentials, enabled/available candidates,
+sufficient reasoning/context/tool/multimodal/reliability/safety capability, and
+per-request, monthly and provider-allocation budget. It chooses lowest estimated
+marginal cost with explicit preference/reliability/latency/stable-ID tie breaks.
+Unknown capability, price or usage never means free or unlimited.
 
-## Production routing requirements (A7 with A4/A5/A6)
+Before each paid attempt, `magi_model_routes` reserves integer micro-USD. Actual
+cost requires observed token usage; uncertain billing retains the conservative
+estimate. Content-free records expose provider/model, policy category, attempt,
+fallback, estimated/actual/charged amounts and safe errors, not prompts or keys.
+`magi_turn_closures` records one closure per canonical turn even without a call.
 
-- Resolve authenticated principal/project and verified provider capabilities;
-  apply explicit policy, tenant entitlement and budget before dispatch.
-- Keep provider, model, execution harness and variant distinct. Never treat a
-  display label or saved preference as actual activation.
-- Record a durable policy/version/selection and reservation identity sufficient
-  for deterministic retry and cost reconciliation, without logging prompts or
-  keys. Provider usage may arrive late; unknown usage is not zero cost.
-- Permit replacement only through reviewed adapters and safe execution handoff.
-  Preserve canonical conversation/context/objective identities. A fallback cannot
-  widen authority, data egress, budget or change an already accepted invocation.
-- Bound retries and tool rounds. Do not replay non-idempotent execution because a
-  model socket timed out. Preserve an explicit failure when delivery is uncertain.
-- Test cheap/default/escalated routes, unavailable capability, budget denial,
-  ambiguous usage, wrong-tenant credentials, replacement continuity and explicit
-  operator migration confirmation. Do not fabricate savings from token estimates.
+Retry/failover is bounded and allowed only for retryable failures **before any
+tool call**. Expensive fallback requires explicit confirmation; hard budgets are
+not overridable from chat. Do not silently lower capabilities or choose another
+objective after a tool was observed. Operator route budgets and customer
+Magistrate Credits are separate ledgers: the latter reserves/settles one execution
+objective from terminal measured use. See [BILLING_MODEL.md](BILLING_MODEL.md).
 
-No cost policy, second concrete Native Magi provider, automatic live worker
-migration, or cross-harness context portability is proved by baseline preferences.
-The new synthetic replacement test proves only the injectable provider seam.
+## Closed tools and durable execution
+
+`magi_chat_service.py`, `magi_firstmate_tools.py` and `firstmate_decisions.py`
+own the offered closed tool set: direct response, explicit memory, objective
+submission and authenticated decision answer. Unknown/ambiguous tool calls,
+extra authority and oversized arguments fail closed. The host supplies owner,
+conversation, canonical rows and idempotency identity. Command-less principals
+cannot submit work; attachment-bearing turns deliberately receive no execution
+tools. Model/private reasoning/tool envelopes never become chat prose.
+
+`firstmate.submit_objective` persists the exact validated contract and frozen
+scoped context, reserves credits, then admits deterministic local intake or the
+hosted durable queue. Acceptance is not completion. Decisions accept opaque
+ID/revision only; exact answer bytes come from the owner's canonical user row
+with out-of-band confirmation. Hosted workers use objective-bound credentials;
+local producer routes are rejected in hosted mode.
+
+Normal reads never query an isolation backend, snapshot Herdr or reconcile
+execution. Hosted write-side reconciliation is explicit lifecycle authority,
+not a read side effect. Live harness replacement still needs a safe durable
+handoff and verified context/evidence continuity; a recommendation or saved
+preference is not proof that any running harness changed.
 
 ## Acceptance
 
-Run registry suites `magi-context-routing`, `unit`, `execution-recovery-isolation`,
-`moat-hermetic`, then the **live** moat provider-replacement, harness-replacement,
-cost-routing and context-continuity checkpoints. These are distinct evidence
-classes. The current provider's successful response cannot pass another
-provider's replacement test. See [CONTEXT_PLANE.md](CONTEXT_PLANE.md) and
-[BILLING_MODEL.md](BILLING_MODEL.md).
+Run `unit`, `magi-context-routing`, `execution-recovery-isolation`, `moat-hermetic`
+and `client-contract`. These include the merged routing, memory, hosted and
+closed-tool suites, not only the original injectable model fixture. External moat
+checkpoints independently require actual provider replacement, harness
+replacement, cost routing, context continuity and background autonomy. No
+hermetic adapter test can satisfy them. See [CONTEXT_PLANE.md](CONTEXT_PLANE.md)
+and [PRODUCTION_ACTIVATION.md](PRODUCTION_ACTIVATION.md).

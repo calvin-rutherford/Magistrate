@@ -38,7 +38,7 @@ def test_remote_delivery_does_not_clear_unread_until_viewed(monkeypatch, tmp_pat
     notifications.register_push_token('captain', 'ExponentPushToken[real-device]', 'ios')
 
     async def fake_send(*args, **kwargs):
-        return {'status': 'sent'}
+        return {'status': 'accepted', 'ticket_id': 'ticket-unread'}
 
     monkeypatch.setattr(notifications, 'send_push_notification', fake_send)
     result = __import__('asyncio').run(notifications.dispatch_notification_events('captain', [item()]))
@@ -136,14 +136,14 @@ async def test_remote_push_retries_and_deduplicates_by_fingerprint(monkeypatch, 
         async def __aexit__(self, *args): return False
         async def post(self, *args, **kwargs):
             calls.append(kwargs['json'])
-            return Response(503, {}) if len(calls) == 1 else Response(200, {'data': {'status': 'ok'}})
+            return Response(503, {}) if len(calls) == 1 else Response(200, {'data': {'status': 'ok', 'id': 'ticket-retry'}})
 
     monkeypatch.setattr(notifications.httpx, 'AsyncClient', Client)
     result = await notifications.dispatch_notification_events('captain', [item()])
-    assert result['delivery'] == 'sent'
+    assert result['delivery'] == 'accepted'
     assert len(calls) == 2
     assert calls[0]['data']['url'] == '/attention?item=question-1'
-    assert (await notifications.dispatch_notification_events('captain', [item()]))['events'] == []
+    assert (await notifications.dispatch_notification_events('captain', [item()]))['delivery'] == 'pending'
     assert len(calls) == 2
 
 
@@ -155,13 +155,13 @@ async def test_quiet_hours_defer_and_revocation_stops_remote_delivery(monkeypatc
 
     async def fake_send(*args, **kwargs):
         sent.append(args)
-        return {'status': 'sent'}
+        return {'status': 'accepted', 'ticket_id': 'ticket-quiet'}
 
     monkeypatch.setattr(notifications, 'send_push_notification', fake_send)
     notifications.update_notification_preferences('captain', True, 22, 7, 'moderate')
     quiet = await notifications.dispatch_notification_events('captain', [item()], local_hour=23)
     assert quiet['events'] == [] and sent == []
     awake = await notifications.dispatch_notification_events('captain', [item()], local_hour=8)
-    assert awake['delivery'] == 'sent' and len(sent) == 1
+    assert awake['delivery'] == 'accepted' and len(sent) == 1
     notifications.revoke_push_token('captain')
     assert notifications.get_registered_push_token('captain') is None

@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -806,6 +806,11 @@ def _install_hosted_execution_schema(connection: sqlite3.Connection) -> None:
                            ON hosted_decision_deliveries(objective_id, status, created_at)""")
 
 
+def _migration_push_receipts(connection: sqlite3.Connection) -> None:
+    from app.push_receipts import install_schema
+    install_schema(connection)
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
     (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
@@ -814,6 +819,7 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
     (6, "project-context-plane", _migration_project_context_plane),
     (7, "hosted-execution", _install_hosted_execution_schema),
     (8, "files-and-perception", _migration_files_and_perception),
+    (9, "durable-push-receipts", _migration_push_receipts),
 )
 
 

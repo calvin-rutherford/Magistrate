@@ -1,157 +1,138 @@
-# Production status — integration authority
+# Production status — integration and release authority
 
-**Production verdict: FAILED.** This is the early A12 release-foundation baseline
-on main `8249f49`, not a declaration that the concurrent production workstreams
-have merged. Repository gaps below must be fixed; they are not external blockers.
-No live provider, payment, deployment, EAS build, TestFlight, or physical device
-was exercised by this foundation change.
+**Production verdict: BLOCKED_EXTERNAL.** Repository-controlled convergence is
+**COMPLETE** on the release branch reconciled with main
+`9abe699dce512be1c8995a3ca5b4c02788a9703e` (all preceding production workstreams).
+There are no waived, skipped or unimplemented mandatory repository suites.
+This is **not** activated production, an accepted live RC, a signed EAS/TestFlight
+build or App Store approval. Real service/device/legal/account evidence remains
+mandatory and unobserved by this work.
 
-This document is the single production matrix. The eight companion uppercase
-production documents define requirements and activation. Older phase/beta/live
-runbooks remain useful historical evidence, but cannot override the current
-executable Native Magi boundary or count as evidence for a new candidate.
+This is the single production matrix. The eight companion uppercase documents
+own architecture/activation requirements; component runbooks explain subsystem
+contracts. Earlier baseline audits and historical rollout claims cannot override
+current code or certify a new candidate.
 
-Status vocabulary:
-
-- **COMPLETE**: the specifically bounded repository contract exists and has
-  executable acceptance coverage; this does not imply external activation.
-- **BLOCKED_EXTERNAL**: the separately identified owner/service/device action
-  cannot be completed by repository changes.
-- **FAILED**: missing implementation, failed acceptance, or incomplete merged
-  integration. Never relabel this as an external dependency or skip its suite.
+- **COMPLETE**: the specifically bounded repository contract exists and its
+  executable acceptance passes; external activation is a separate row.
+- **BLOCKED_EXTERNAL**: a specifically named account/service/device/legal-owner
+  action cannot be completed by repository edits.
+- **FAILED**: missing repository implementation, failed tests or unresolved
+  integration. Never relabel this as an external dependency or waive its suite.
 
 ## Production matrix
 
-Test IDs below are executable through `scripts/production_acceptance.py`.
-“Evidence” states the acceptance boundary, not an unobserved service result.
-A source/test citation alone is not an RC receipt.
+Test IDs are executable in `scripts/production_acceptance.py`. Source/test
+citations are boundaries, not substitutes for a hash-bound candidate receipt.
 
 | Capability | Current implementation | Production requirement | Owner | Dependencies | Tests / entrypoint | Acceptance evidence | Status |
 |---|---|---|---|---|---|---|---|
-| Release contracts | Versioned schema export, suite registry, hashed candidate receipts and external-check admission | Reject missing, dirty/stale, failed, duplicate or wrong-class evidence | A12 | All owners reconcile registry | `release-foundation`, `client-contract` | Validator negative tests; generated schemas derive from real validators | COMPLETE |
-| Human Chat / Voice transport | `magi_chat_{api,service,store}.py`; one principal-owned canonical thread | Only `/api/v1/magi/*` and `magi_messages`; closed model tool routing | A7 / A12 | Auth, persistent DB | `unit`, `magi-context-routing`, `client-contract` | Route-retirement, exact-byte/idempotency/context isolation tests | COMPLETE |
-| SaaS identity / tenancy / Projects | Principal-scoped rows; shared operator runtime; no complete organization/project membership plane | Tenant membership, project/repository authorization and tenant runtime ownership everywhere | A1 / A11 | Schema and auth composition | `tenant-authorization`, `integration` | Two-tenant matrix across every new route; current tests prove only existing principal scopes | FAILED |
-| Apple / Google protocol | Verified assertions, nonce/audience/replay, native rotation, web HttpOnly cookie | Preserve fail-closed platform channel and revocation | A2 | Identity | `provider-auth` | Signed synthetic assertions and refresh-family tests | COMPLETE |
-| Apple / Google activation | No candidate console/device evidence | Real account IDs, registered callbacks, real native/web login | Account owners / A2 | [Activation](PRODUCTION_ACTIVATION.md) | `activation/provider-consoles`, Spencer | Redacted console IDs and real login records | BLOCKED_EXTERNAL |
-| GitHub SaaS integration | OAuth adapter; PR reads use deployment `gh-axi` repository/service identity | Tenant repository access/installation ownership, scoped credentials, revoked installation refusal | A3 / A1 | Tenant membership and GitHub account | `github`, `tenant-authorization` | Per-installation private-repository negative tests and live scope test | FAILED |
-| GitHub activation | OAuth configuration names exist; no new-candidate installation evidence | Approved organization/app/repositories and callback/permission evidence | GitHub owner / A3 | Merged A3 contract | `activation/provider-consoles` | Generated app/installation IDs, allowed-repository access, revocation | BLOCKED_EXTERNAL |
-| Stripe / ledger / entitlement | No implementation in baseline; `usage.py` is quota display only | Durable idempotent signed webhooks, money/credit ledger, budget/reservation/settlement and reconciliation | A4 | A1 identity, A7 usage | `billing-ledger` fails explicitly until registered | Duplicate/out-of-order webhook, insufficient funds, refund and reconciliation suite | FAILED |
-| Stripe activation | No account/product/price/webhook IDs observed | Approved legal merchant, test/live separation and secrets | Merchant owner / A4 | Merged billing routes/config | `activation/stripe-reconciliation` | Owner-reviewed console IDs and Stripe test-mode reconciliation | BLOCKED_EXTERNAL |
-| Durable execution bridge | Deterministic objective queue/wake, persisted events/evidence/decisions/cancellation | Firstmate remains scheduler; reads never drive lifecycle | A5 | Pinned producer, DB | `execution-recovery-isolation`, `moat-hermetic` | Concurrent/replay/crash tests and runtime-read tripwires | COMPLETE |
-| Multi-tenant execution isolation | Shared operator Firstmate and command authority | Per-tenant credentials, filesystem/network/resource boundaries and crash-safe admission | A5 / A11 | A1, A4, A7 | `tenant-authorization`, `execution-recovery-isolation` | Cross-tenant runtime denials and isolated worker recovery | FAILED |
-| Live autonomous workers | Pinned producer contract; no candidate live run | Progress with all clients closed, recovery and verified completion | Runtime owner / A5 | Isolated runtime activation | `moat/background-autonomy`, `activation/isolated-workers` | Structured causality and evidence from authorized real run | BLOCKED_EXTERNAL |
-| Context plane | Last 40 eligible messages, profile, bounded deployment/decision context; opaque objective references | Durable authorized project facts, provenance, retrieval, deletion and replacement continuity | A6 | A1, A10, A7 | `magi-context-routing`, `moat-hermetic` | Retrieval/ACL/deletion tests plus live continuity | FAILED |
-| Cost/model/harness routing | One concrete OpenAI adapter; execution inventory/preferences separate | Policy-bound provider replacement, cost/quality routing, budget admission, observed usage | A7 / A4 | Context, ledger, execution | `magi-context-routing`, `unit` | Route policy/budget tests; real provider/harness replacement | FAILED |
-| Product hierarchy | Chat and drawer Fleet/Activity/Attention; existing map/PR/account routes | Coherent Chat / Projects / Fleet / Activity / Attention, new-user empty/error states | A8 | A1/A3/A4/A5/A6/A7/A10 contracts | `frontend`, Spencer onboarding | Full browser suite and new physical journey | FAILED |
-| Scoped file storage | Bounded chat uploads and owner-qualified downloads, explicit stored/attached state | Preserve these contracts through storage changes | A10 | Auth, DB | `uploads` | Size/type/ownership/idempotency tests | COMPLETE |
-| Production file lifecycle | Local files; avatars in checkout-mounted public storage; no complete retention/scan/quota/backup plane | Durable private storage, bounded avatar handling, safe content access and deletion | A10 / A11 | Context, storage operator | `uploads`, `backup-restore` | Restart/restore/download/tenant/refusal tests and live storage proof | FAILED |
-| Foreground voice adapter | Capture → server STT → same Magi thread; local TTS; background stop | Permission, interruption and truthful no-audio/no-provider handling | A9 | Model key, native build | `voice`, `frontend` | Synthetic STT and browser/state-machine tests | COMPLETE |
-| Native voice / push / links | Native packages and notification registration/dedupe; no candidate device evidence | Mic/audio-route tests, real push receipt, authenticated cold/warm deep link | Apple/Expo owner / A9 | APNs/FCM, signed build | `spencer-new-user/upload-voice`, `push-deep-link` | Exact device/build/network records; ticket alone insufficient | BLOCKED_EXTERNAL |
-| Push receipt reconciliation | Expo send response tracked; production receipt lifecycle still needs convergence | Reconcile provider receipts, expire invalid tokens, preserve Attention fallback | A9 | Push provider | `push-deep-links`, `integration` | Receipt failure/retry/token retirement tests | FAILED |
-| Migration/restore foundation | Additive SQLite init; online deploy backup; new whole-table restore fixture | Preserve native/legacy rows, objectives/events/decisions/evidence, encrypted secrets | A12 / schema owners | All final migrations | `migrations`, `backup-restore` | Integrity/FK checks, exact rows, unchanged backup hash, orphan recovery | COMPLETE |
-| Composed production migration | Other workstreams not in this baseline | Seed each new domain; old DB → merged schema → restart → isolated restore | A12 + A1/A4/A6/A10 | Merged schema owners | `migrations`, `integration` | Final merged-candidate rehearsal, not a fresh DB only | FAILED |
-| Deployment safeguards / CI | Manual-only demo deploy, guarded fast-forward/backup/smoke; release CI added | No automatic deployment; full domain checks and clean receipts | A12 | Existing workflows | `deployment-smoke`, `release-foundation` | Hermetic refusal/restore/smoke contracts; no host restart performed | COMPLETE |
-| Production host / DB / DNS / monitoring | Operator configuration required; legacy Docker/Django is not the SaaS Gateway deployment | Persistent state, TLS/WSS, redaction/limits/alerts, isolated recovery | Infrastructure owner / A11 / A12 | [Activation](PRODUCTION_ACTIVATION.md) | `activation/persistent-restore`, `edge-monitoring` | Public authenticated smoke and operator recovery record | BLOCKED_EXTERNAL |
-| EAS / store / legal | Linked committed Expo owner/project and bundle; production `ascAppId` absent | Exact signed candidate, TestFlight/device proof, approved legal identity/URLs/store answers | Expo/Apple/legal owners / A12 | Production endpoint and permissions | `distribution`, production preflight | EAS/build/TestFlight IDs, archive and DEAT-001 evidence | BLOCKED_EXTERNAL |
-| Spencer synthetic path | New identity mapping/name onboarding, canonical chat, second-session continuity and logout | Mandatory reproducible synthetic integration floor | A12 | Auth and Magi contracts | `spencer-hermetic` | Fake identity-verifier/model edges explicitly labeled; real stores/routes | COMPLETE |
-| Spencer production path / moat | Required checkpoints registered; repository gaps above prevent complete journey | Every Spencer and all seven moat checkpoints; no waivers/skips | A12 + all domain owners | All FAILED implementations, then external evidence | `spencer-new-user`, `moat` | Human-reviewed, hash-bound per-checkpoint artifacts for exact candidate | FAILED |
-| Non-core integrations / AR | Google integration OAuth, Twitter/Discord unavailable; Jira/Teams deferred; AR now refuses unimplemented dispatch instead of fabricating success | Keep unavailable integrations truthful; Google login remains separate; AR is not a second execution/chat route | A8 / A11 / A12 | Native Magi boundary | `integration`, provider truthfulness and AR refusal tests | No fake records, provider connection or AR dispatch receipt | COMPLETE |
-| Retained executable surfaces | Django/Celery, CLI, Pi adapter, old deploy/bootstrap scripts retained | Regression coverage and explicit exclusion from production Chat; no unreviewed activation | A12 / A11 | Scope review | `backend`, `pi-extension`, `integration` | Existing tests; CLI/scripts inventoried, not declared SaaS-safe | COMPLETE |
+| Release contracts | 24 required suites, hashed clean-candidate receipts and separate external checkpoints | Refuse missing/dirty/stale/failed/duplicate/wrong-class evidence | A12 release | Domain gates and independent review | `release-foundation`, `client-contract` | Admission negatives; actual-validator schema export | COMPLETE |
+| Native human Chat / Voice | Canonical owner thread, `/api/v1/magi/*`, `magi_messages` | Preserve IDs/revisions/exact bytes; no Pi/terminal/worker fallback | A7 / A12 | Auth, persistence | `unit`, `magi-context-routing`, `client-contract` | Complete-message, route-retirement, idempotency and owner tests | COMPLETE |
+| Identity / personal tenancy / Projects | One personal workspace, durable owner-qualified projects/repository metadata | No foreign principal data; no invented enterprise membership | A1 / A11 | Provider identity, persistence | `tenant-authorization`, `postgres-persistence` | Two-tenant CRUD, guessed IDs, selective deletion and DB rollback | COMPLETE |
+| Provider auth / recovery / onboarding | Verified Apple/Google, platform channel, refresh rotation/linking; welcome/name/GitHub/signed subscription | Free-account initialization or Checkout return must not bypass subscription gate | A2 / A4 / A12 | Login identity, OAuth and signed billing facts | `provider-auth`, `spencer-hermetic` | Signed synthetic assertions and composed checkout/cancellation regression | COMPLETE |
+| Apple / Google activation | Console/native/web evidence not supplied | Actual audiences/redirects/team/clients, real login/recovery | Provider account owners | Activation sections 2–3 | `activation/provider-consoles`, Spencer | Real login and device records, not fixture signatures | BLOCKED_EXTERNAL |
+| GitHub repository plane | Owner-bound App installations, scoped read tokens, signed idempotent webhooks; global CLI service removed | Current selected repositories only; replay/revoke/foreign owner refusal | A3 / A1 | OAuth identity distinct from repository App | `github`, `tenant-authorization` | Private-repository, callback, token and lifecycle negative tests | COMPLETE |
+| GitHub / broker activation | Real App/installations/broker permissions not observed | Exact callbacks, selected repos, approved read/write scope and short-lived broker token | GitHub/security owners | Activation section 4, hosted backend | `activation/provider-consoles`, `isolated-workers`, Spencer | Console IDs, actual revocation/scope proof and forge artifact | BLOCKED_EXTERNAL |
+| Billing / credits / entitlement | Catalog, signed webhooks, integer ledger/reservation/measured settlement | Atomic budget/concurrency denial before intake; idempotent paid state | A4 / A5 / A12 | Principal, measured execution use | `billing-ledger`, `execution-recovery-isolation`, `migrations` | Replay/order/conflict, limits, settlement/refund and restore tests | COMPLETE |
+| Stripe activation | Catalog intentionally has no live price IDs | Approved merchant/pricing/mode, webhook/portal and real reconciliation | Merchant/legal owners | Activation section 5 | `activation/stripe-reconciliation`, Spencer | Test-mode event IDs and ledger review; no live charge inferred | BLOCKED_EXTERNAL |
+| Durable local execution bridge | Deterministic task/intake/wake, structured events/decisions/evidence | Firstmate owns lifecycle; reads never probe/control workers | A5 | Pinned producer and DB | `execution-recovery-isolation` | Replay/crash/read tripwires and pinned producer fixture | COMPLETE |
+| Hosted execution contract | Durable controller/leases, mTLS backend, objective-bound bearer, scoped broker, measured terminal facts | Closed recovery/cancellation/cleanup; no shared local fallback | A5 / A11 | PostgreSQL, backend/image/mTLS/broker | `execution-recovery-isolation`, `postgres-persistence` | Synthetic backend, lease/recovery, cross-tenant and cleanup refusal tests | COMPLETE |
+| Enforced live worker isolation/autonomy | Interface implemented; backend/image/control enforcement unobserved | Hostile tenant filesystem/process/credential/egress/resource isolation; client-independent recovery | Infrastructure/security owners | Activation section 7 | `activation/isolated-workers`, `moat/background-autonomy` | Actual controlled failure and isolation evidence, not mocked receipts | BLOCKED_EXTERNAL |
+| Persistent context | Scoped revisions/index/audit/tombstones and frozen objective context | Bounded authorized provider/harness-independent retrieval | A6 | Projects, files, structured ledgers | `magi-context-routing`, `moat-hermetic`, `backup-restore` | Scope/replacement/deletion/frozen-byte and restore tests | COMPLETE |
+| Model/cost/harness routing | Native OpenAI/Anthropic/Google, capability/price/budget/failover policy; separate harness strategy | No unknown-as-zero, no fallback after tool call, request-bound high-impact confirmation | A7 / A4 | Operator catalog/credentials; execution ledger distinct | `magi-context-routing`, `unit`, `moat-hermetic` | Native wire adapters, policy/budget/usage and replacement seams | COMPLETE |
+| Live provider/harness/context/cost moat | Required checks registered, no real replacements performed | Actual replacement, context provenance, budget/usage reconciliation | Model/runtime/release owners | Configured providers and isolated workers | `moat` | Seven independently reviewed live/device artifacts | BLOCKED_EXTERNAL |
+| Product hierarchy | Restrained Chat / Projects / Fleet / Activity / Attention, overlays and truthful states | Canonical UI, no synthetic runtime completion or target selector | A8 / A9 | Merged domain contracts | Full `frontend` | Browser/state/type/lint/export and UI contract tests | COMPLETE |
+| Private files / perception | Private POSIX objects, sniffed MIME/digest/quota/retention/signed access; non-executing consent drafts | Owner-qualified safe bytes and no device-originated execution authority | A10 / A11 | Persistent shared volume, scoped context | `uploads`, `tenant-authorization`, `backup-restore` | Spoof/traversal/quota/expiry/scanner/protocol/restore tests | COMPLETE |
+| Storage activation / recovery | POSIX adapter and SQLite drill; managed state unobserved | Provision encrypted private/shared volume, scanner if enabled, coordinated backup/key restore | Storage/DB/security owners | Activation section 6 | `activation/persistent-restore` | Actual bytes/rows/secret versions/ownership and measured recovery | BLOCKED_EXTERNAL |
+| Foreground voice / iOS entry code | Capture → STT → same thread, safe background stop, foreground-only App Intents | Permission/interruption-safe foreground UX; no continuous listening claim | A9 | Native build, STT key | `voice`, `frontend` | State machines, mocked STT and browser mic/shortcut tests | COMPLETE |
+| Push receipt reconciliation / links | Durable owner/fingerprint/token-hash tickets, delayed leased polling/backoff/expiry, exact token retirement | Receipt is provider handoff only; preserve unread/fallback and no duplicate authority | A9 / A12 | Expo send/receipt endpoints; migration 9 | `push-deep-links`, `migrations`, `postgres-persistence` | Restart/dedupe/outage/expiry/late-token/foreign-owner and erasure tests | COMPLETE |
+| Physical voice / push / links / device independence | Repository seams implemented; no exact candidate device run | Real APNs/FCM ticket+receipt, cold/warm tap, audio route/interruption and second device | Apple/Expo/device owner | Signed candidate and configured services | Spencer, `distribution/testflight-candidate` | iPhone/iOS/network/build records and DEAT-001 | BLOCKED_EXTERNAL |
+| Composed migrations / SQLite restore | Ordered versions 1–9; populated pre-domain upgrade and full-table backup/restore plus object snapshot | Preserve legacy/native rows, credits/context/evidence/secrets/push; repeatable init | A12 / schema owners | Final schema and matching key | `migrations`, `backup-restore` | Real operator SQLite backup/restore code, exact rows/FKs/digests, orphan recovery | COMPLETE |
+| PostgreSQL multi-instance persistence | Shared adapter and transaction/migration locks | Concurrent startup, owner isolation/erasure and durable hosted/receipt state | A1 / A12 | Disposable Docker PostgreSQL 16 for test | `postgres-persistence` | Two real concurrent fixture processes; never a production DSN | COMPLETE |
+| Production DB / DNS / monitoring | Preflight, service/edge/alert templates, content-free telemetry and private metrics | Actual provisioning/TLS/WSS/private scrape, alert delivery and isolated PostgreSQL restore | Infrastructure/on-call owners | Activation sections 6–8 | `activation/persistent-restore`, `edge-monitoring` | Public authenticated smoke, actual restore and alert record | BLOCKED_EXTERNAL |
+| Security / dependency remediation | Byte/time/in-flight caps, secret/URL controls, lab quarantine; compatible patched dependency call sites | No remaining known advisory finding or unreviewed parser substitution | A11 / A12 | Frozen deps and isolated CI/build credentials | `security-boundaries`, `release-configuration`, CI advisory checks | Zero current npm/Python findings; hostile parser and real Metro/query regressions | COMPLETE |
+| Deployment / CI / EAS repository config | Manual-only guarded deploy, strict readiness, fail-closed EAS production preflight | No auto deploy/rollback; exact reviewed candidate and required checks | A12 | Reviewed service environment and forge rulesets | `deployment-smoke`, `release-configuration`, full CI | Hermetic refusal/backup/smoke/build-config tests; no host lifecycle action | COMPLETE |
+| EAS / store / legal activation | Committed bundle/Expo linkage; actual `ascAppId` and approvals absent | Owner accounts/legal URLs/team, exact signed archive/TestFlight and submission approval | Expo/Apple/legal owners | Activation section 9 | `distribution`, `activation/legal-security` | Actual console/build/submission IDs, device records and reviewer | BLOCKED_EXTERNAL |
+| Spencer synthetic composition | Fresh verified-identity fixture, OAuth/Checkout/signed subscription, project/memory/file/chat, second session and erasure | No preseeded name or fabricated paid state; explicit fake external edges | A12 | Real stores/routes and mocked HTTP/model/identity | `spencer-hermetic` | Cross-domain checkout bypass/cancellation regression and owner/continuity checks | COMPLETE |
+| Spencer real new-user path | All ten checkpoints mandatory; no actual new-user service/device evidence | No bootstrap/SSH/runner config; real onboarding through retirement | Release operator + Spencer | All activated domains and exact candidate | `spencer-new-user` | Per-checkpoint hashed live/device artifacts; synthetic journey cannot substitute | BLOCKED_EXTERNAL |
+| Retired/non-core surfaces | AR route/client removed; root scripts refuse production; Django/Compose lab-only; Pi regression adapter retained | No legacy execution/conversation/rollback loophole; unavailable integrations truthful | A11 / A12 | Scope controls | `integration`, `backend`, `pi-extension`, `deployment-smoke` | Regression and retirement negatives; no external non-core activation claim | COMPLETE |
 
-## Executable inventory and ownership
+## Executable inventory and composition authority
 
-- `gateway/app`: auth/provider integrations; native chat/model/tools; objective
-  intake, decisions, events, cancellation; structured Fleet/Activity/Attention;
-  files/STT/notifications; execution inventory; explicit non-chat controls.
-  `gateway/scripts`: access provisioning, secret rotation, reliability probes,
-  and the deployment-isolated shared schema export.
-- `frontend/app`, `src`, `scripts`, `tests`: Expo web/native UI, auth/cache/socket,
-  voice, notifications, capability preferences, release preflight and browser
-  suites. `frontend/app.json`, `app.config.ts`, `eas.json` own native build config.
-- `backend`: independent Django/Channels/Celery models, migrations, services and
-  tests. Its Postgres is **not** the Gateway SQLite database. `cli`, root launch
-  scripts, `Dockerfile`, `docker-compose.yml`, setup/push/pull scripts and
-  `tests/e2e_live_test.py` are retained executable/legacy or opt-in live surfaces,
-  not production entrypoints. The compose Docker socket mount is not isolation.
-- `pi-extension`: retained native lifecycle adapter, not human Chat.
-  `runtime/firstmate-producer.lock.json` and `scripts/install_firstmate_producer.sh`
-  pin the external producer. Installation verification is not a live worker test.
-- `.github/workflows`: actual regression/deploy gates. A12's release registry
-  composes, not replaces, these commands. No test runner invokes live smoke,
-  model-reliability probes, deployment or worker lifecycle commands.
+- `gateway/app` is product identity/API/state/routing/execution/observation;
+  `gateway/scripts` owns provisioning/preflight/storage/schema export and
+  PostgreSQL test entrypoints. `db.py` migration order is authoritative; all stores
+  use `persistence.py`. New migration **9** adds `notification_push_deliveries`.
+- `frontend/app`, `src`, `native`, `plugins`, `scripts`, `tests` are Expo web/iPhone
+  product, shared auth/cache/voice/intents, release config and browser gates.
+  `frontend/patches` contains narrow Metro/query-string compatibility bridges,
+  applied by `npm ci`, not parser forks or an Expo downgrade.
+- `runtime` contains the pinned external Firstmate contract and reviewed service,
+  edge and alert **templates**, not proof of provisioned services. The release
+  runner never invokes live deploy/smoke, paid providers or worker lifecycle.
+- `backend` Django/Channels/Celery, `cli`, root launch/setup/rsync/Compose and
+  opt-in live scripts are retained/lab/retired surfaces, not the Native Magi SaaS
+  authority. Backend PostgreSQL is distinct from the Gateway PostgreSQL adapter.
+  `pi-extension` is regression-tested, never a human-conversation transport.
 
-## Merge order and conflict ownership
+All preceding workstreams are merged; the early foundation merge order is no
+longer an open dependency. Final composition preserves the complete product,
+keeps AR retirement, binds auth onboarding to signed subscription identity,
+adds durable receipt migration/recovery/erasure and repairs dependency consumer
+compatibility. Future schema/API changes must update owner-negative tests,
+exported validators, ordered migrations, restore fixtures and this registry.
+Only merge authority merges; this integration branch does not deploy or merge.
 
-Land the A12 foundation first. Merge authority alone merges; A12 does not.
-Then: A11 guardrails alongside A1 identity/schema; A2 auth and A3 GitHub against
-that identity; A4 ledger before A7 charged routing; A10 files and A6 context;
-A5 isolated execution plus A7 model policy; A8 UI and A9 voice/push consume those
-contracts. Finish with A11 cross-boundary negatives and A12 reconciliation.
-Independent changes may merge earlier only with compatible additive contracts.
+## Reproduce the exact gates
 
-Every owner must report changed routes, tables/indexes, principal semantics,
-configuration names, tests and migration order. A12 arbitrates `db.py`, common
-request/event names, startup ordering and shared CI, not pricing/legal choices.
-Do not copy another lane's unmerged files, invent its API, or silently weaken a
-gate to make this baseline green. Missing schema/contract functionality remains
-FAILED until its implementation and tests merge.
-
-## Acceptance entrypoints
+Use Python 3.12, Node 22 (SDK 57 requires >=22.13), Chrome, Docker for the isolated
+PostgreSQL fixture, `uv sync --frozen` in Gateway and `npm ci` in frontend/Pi.
+The retained backend requires `backend/requirements.txt` in the Python environment
+used by the runner. Build Expo web before Gateway SPA tests. Install/verify the
+pinned producer **inside a disposable fixture root**, never a supervising home,
+and set `MAGISTRATE_TEST_PINNED_FIRSTMATE_ROOT` to it; no activation is performed.
 
 ```sh
+mkdir -p .release
 python3 scripts/production_acceptance.py check
 python3 scripts/production_acceptance.py list
-mkdir -p .release
-python3 scripts/production_acceptance.py run --suite release-foundation --output .release/foundation.json
-# All suites, including intentionally failing unimplemented domains:
 python3 scripts/production_acceptance.py run --output .release/all-suites.json
+(cd gateway && uv run python -m scripts.export_client_protocol) > .release/client-protocol.json
 python3 scripts/production_acceptance.py template --revision "$(git rev-parse HEAD)" --output .release/rc.json
 python3 scripts/production_acceptance.py verify .release/rc.json --revision "$(git rev-parse HEAD)"
 ```
 
-Install dependencies first: `cd gateway && uv sync`; `npm ci` separately in
-`frontend` and `pi-extension`; a Python 3.12 environment with
-`pip install -r backend/requirements.txt` for the backend suite. Gateway full
-integration additionally needs the web export and the pinned producer fixture
-as configured in `.github/workflows/gateway.yml`. Use Node 22 and Chrome for the
-full frontend suite; `npm test`, not selected browser substitutes, is its gate.
+The last command **must fail** for an unfilled external template. Record real
+artifacts/attestations before admission. Output files never overwrite earlier
+receipts; use unique names for reruns. `--suite ID` supports focused diagnosis but
+never replaces the mandatory **full** frontend `npm test` or all-suite admission.
+POSIX tests use short `/tmp` fixture paths for AF_UNIX/Chrome and grant-output
+contracts. Missing dependencies/timeouts fail rather than skip. PostgreSQL tests
+create only a new loopback-bound container, ignore deployment environment/DSNs,
+and clean up only that owned container.
 
-Receipts record commands' exits, timestamps, candidate SHA, registry digest and
-cleanliness, never test output or environment values. The POSIX runner uses short
-`/tmp` test fixtures: deep worktree paths break AF_UNIX/Chrome sockets, and grant
-CLI tests correctly refuse output inside a release checkout. An uncommitted local pass
-cannot be RC evidence. Missing dependencies/timeouts fail rather than skip.
-`billing-ledger` deliberately fails without spawning anything until A4's actual
-suite replaces the gap. Existing tenant/context suites are a baseline, not proof
-of unimplemented SaaS requirements. Register the merged owners' tests as well.
+Receipts contain revision, registry digest, timestamps, exit codes and cleanliness,
+not test output/environment/content. An uncommitted pass is diagnosis, not clean
+RC evidence. CI workflows remain release gates and assert generated-file hygiene.
+Online advisory scans in Production foundation are separate from hermetic receipts:
+`npm audit` for frontend/Pi and pinned `pip-audit 2.10.1` for Gateway/backend.
 
-For external checkpoints, put redacted artifacts beside the packet and record
-relative path plus SHA-256. All statuses must become COMPLETE, with named human
-attestation and the correct live-service/physical-device/operator-review class.
-The validator checks structure, hashes and completeness, **not whether an
-operator's assertion is true**. Release authority must inspect the artifacts.
-Never put bearer tokens, private keys, customer content or raw prompts in Git or
-public Actions artifacts. Keep the actual packet in restricted release storage.
+## Current evidence and remaining acceptance
 
-## Foundation validation evidence
+Local reconciliation exercised all **24 suites**; updated Gateway full regression
+is **473 passed**, release admission **17 passed**, backend **16 passed**, Pi
+adapter **8 passed** plus typecheck. Patched frontend typegen/typecheck/lint,
+**full `npm test` including browser suites**, and web export pass (15 existing
+lint warnings, no errors). Disposable concurrent PostgreSQL/isolation/erasure
+and deployment workflow/deploy/restricted-beta smoke contract scripts pass.
+Framework deprecation warnings remain non-failing. Current frontend/Pi npm audits
+and Gateway/backend Python scans report **zero known vulnerabilities**.
 
-Local commands on this foundation change completed: Gateway full suite **359
-passed** (including the pinned producer fixture, new journeys/restore/export and
-AR truthful refusal); release admission **15 passed**; backend **16 passed**;
-retained Pi adapter **8 passed** plus typecheck; frontend typegen/typecheck/lint,
-**full `npm test` including browser suites**, and web export; all three deployment
-contract scripts. Frontend lint has 18 existing warnings and no errors. Gateway
-reports existing framework deprecation warnings. Temporary-path failures in the
-first local run were resolved by the approved short `/tmp` test fixtures.
-
-These are local hermetic results, not clean-candidate RC receipts or live/device
-acceptance. CI must rerun the candidate on the forge. No Stripe implementation,
-external-service acceptance, EAS build or physical test is claimed by this record.
-
-## Follow-up reconciliation gate
-
-After merged workstreams: replace the missing billing entrypoint, expand tenant,
-context/routing, file, push and migration fixtures; rerun all CI commands on the
-merged SHA; regenerate shared schemas; update every matrix row from evidence;
-then activate external accounts and execute Spencer/moat/DEAT-001. Only that
-follow-up may call a production RC accepted. This early PR is not that RC.
+Candidate receipts and forge CI must be rerun from the clean committed candidate;
+local diagnostic output is not a live-service or physical-device receipt. No
+external acceptance is fabricated. Exact owners/console fields/callbacks/env
+names/verification are in [PRODUCTION_ACTIVATION.md](PRODUCTION_ACTIVATION.md).
+Spencer's ten checkpoints, all seven moat checkpoints, activation and distribution
+remain BLOCKED_EXTERNAL until their actual per-checkpoint evidence is reviewed.
+A green repository is not permission to call production activated.
