@@ -4,7 +4,6 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.db import get_profile, update_profile, get_connected_accounts, upsert_connected_account, disconnect_account
 from app.providers.github import GitHubProviderAdapter
-from app.github_service import github_service
 from conftest import TEST_HEADERS
 
 client = TestClient(app)

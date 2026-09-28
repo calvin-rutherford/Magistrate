@@ -14,8 +14,9 @@ function timestamp(value: string | null) {
 
 export default function PullRequestDetailScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ number?: string }>();
+  const params = useLocalSearchParams<{ number?: string; repositoryId?: string }>();
   const number = Number(params.number);
+  const repositoryId = params.repositoryId ? Number(params.repositoryId) : undefined;
   const [pr, setPr] = useState<GitHubPR | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -28,10 +29,15 @@ export default function PullRequestDetailScreen() {
     }
     setLoading(true);
     setError(null);
-    try { setPr(await fetchGitHubPR(number, refresh)); }
+    if (repositoryId !== undefined && (!Number.isInteger(repositoryId) || repositoryId < 1)) {
+      setError('This repository identifier is invalid.');
+      setLoading(false);
+      return;
+    }
+    try { setPr(await fetchGitHubPR(number, refresh, repositoryId)); }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Pull request details could not be loaded.'); }
     finally { setLoading(false); }
-  }, [number]);
+  }, [number, repositoryId]);
 
   useEffect(() => { load(); }, [load]);
 

@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -480,9 +480,70 @@ def _migration_provider_onboarding_and_billing(connection: sqlite3.Connection) -
     )""")
 
 
+def _migration_github_app(connection: sqlite3.Connection) -> None:
+    # Customer repository authority comes only from a GitHub App installation.
+    # Installation tokens are short-lived and memory-only; no token column is
+    # deliberately present in this schema.
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_app_installations (
+        installation_id INTEGER PRIMARY KEY,
+        user_id TEXT,
+        account_id INTEGER,
+        account_login TEXT NOT NULL DEFAULT '',
+        account_type TEXT NOT NULL DEFAULT '',
+        repository_selection TEXT NOT NULL DEFAULT 'selected',
+        status TEXT NOT NULL DEFAULT 'active',
+        permissions_json TEXT NOT NULL DEFAULT '{}',
+        events_json TEXT NOT NULL DEFAULT '[]',
+        suspended_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_reconciled_at INTEGER,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_github_installations_user
+                           ON github_app_installations(user_id, status)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_app_repositories (
+        installation_id INTEGER NOT NULL,
+        repository_id INTEGER NOT NULL,
+        owner_login TEXT NOT NULL,
+        name TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        private INTEGER NOT NULL DEFAULT 0,
+        default_branch TEXT NOT NULL DEFAULT '',
+        html_url TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1,
+        deleted_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(installation_id, repository_id),
+        FOREIGN KEY(installation_id) REFERENCES github_app_installations(installation_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_github_repositories_name
+                           ON github_app_repositories(installation_id, full_name, active)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_app_transactions (
+        state_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        consumed_at INTEGER,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        event_name TEXT NOT NULL,
+        action TEXT,
+        payload_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        processed_at INTEGER,
+        error_code TEXT
+    )""")
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
     (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
+    (4, "tenant-github-app", _migration_github_app),
 )
 
 

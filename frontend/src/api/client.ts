@@ -1109,11 +1109,46 @@ export function normalizeAuthProvider(raw: unknown): AuthProviderInfo | null {
   };
 }
 
+export interface GitHubAppInstallation {
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  repository_selection: 'all' | 'selected';
+  status: 'active' | 'suspended' | 'removed';
+  last_reconciled_at: number | null;
+}
+
+export interface GitHubAppStatus {
+  schema_version: 'github-app-readiness.v1';
+  status: 'configured' | 'BLOCKED_EXTERNAL';
+  configured: boolean;
+  app_slug: string | null;
+  required_permissions: Record<string, 'read'>;
+  required_events: string[];
+  repository_selection: 'selected_repositories_recommended';
+  installation_tokens: 'server-only';
+  installations: GitHubAppInstallation[];
+  repository_count: number;
+}
+
+export interface GitHubRepository {
+  installation_id: number;
+  id: number;
+  owner: string;
+  name: string;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  html_url: string;
+  active: boolean;
+}
+
 export interface GitHubPR {
   id: number;
   number: number;
   title: string;
   repository: string;
+  repository_id?: number;
   author: string;
   branch: string | null;
   state: string;
@@ -1149,6 +1184,7 @@ export interface RecentActivityItem {
   project: string;
   url: string | null;
   pull_request_number: number | null;
+  repository_id?: number | null;
 }
 
 export interface RecentActivityFeed {
@@ -1703,6 +1739,34 @@ async function checkedJson<T>(res: Response): Promise<T> {
   return data as T;
 }
 
+export async function fetchGitHubAppStatus(): Promise<GitHubAppStatus> {
+  const res = await authorizedFetch(GATEWAY_URL + '/github/app/status');
+  const data = await checkedJson<GitHubAppStatus>(res);
+  if (!Array.isArray(data.installations) || typeof data.configured !== 'boolean') {
+    throw new Error('Gateway returned invalid GitHub App status.');
+  }
+  return data;
+}
+
+export async function beginGitHubAppInstall(redirectUri: string): Promise<{ auth_url: string; expires_in: number }> {
+  const res = await authorizedFetch(GATEWAY_URL + '/github/app/install', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uri: redirectUri }),
+  });
+  return checkedJson(res);
+}
+
+export async function reconcileGitHubInstallation(installationId: number): Promise<{ status: 'reconciled'; repositories: GitHubRepository[] }> {
+  const res = await authorizedFetch(GATEWAY_URL + `/github/installations/${installationId}/reconcile`, { method: 'POST' });
+  return checkedJson(res);
+}
+
+export async function fetchGitHubRepositories(): Promise<GitHubRepository[]> {
+  const res = await authorizedFetch(GATEWAY_URL + '/github/repositories');
+  const data = await checkedJson<{ items: GitHubRepository[] }>(res);
+  if (!Array.isArray(data.items)) throw new Error('Gateway returned invalid repository data.');
+  return data.items;
+}
+
 export async function fetchGitHubPRs(page = 1, refresh = false): Promise<GitHubPRPage> {
   const res = await authorizedFetch(GATEWAY_URL + `/github/pulls?page=${page}&per_page=20&refresh=${refresh}`, {
   });
@@ -1711,8 +1775,10 @@ export async function fetchGitHubPRs(page = 1, refresh = false): Promise<GitHubP
   return data as GitHubPRPage;
 }
 
-export async function fetchGitHubPR(number: number, refresh = false): Promise<GitHubPR> {
-  const res = await authorizedFetch(GATEWAY_URL + `/github/pulls/${number}?refresh=${refresh}`, {
+export async function fetchGitHubPR(number: number, refresh = false, repositoryId?: number): Promise<GitHubPR> {
+  const params = new URLSearchParams({ refresh: String(refresh) });
+  if (repositoryId !== undefined) params.set('repository_id', String(repositoryId));
+  const res = await authorizedFetch(GATEWAY_URL + `/github/pulls/${number}?${params.toString()}`, {
   });
   return checkedJson<GitHubPR>(res);
 }

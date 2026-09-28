@@ -49,6 +49,8 @@ _DIRECT_OWNER_TABLES: tuple[tuple[str, str], ...] = (
     ("execution_credentials", "user_id"),
     ("provider_auth_challenges", "owner_user_id"),
     ("oauth_transactions", "principal_id"),
+    ("github_app_transactions", "user_id"),
+    ("github_app_installations", "user_id"),
     ("gateway_sessions", "user_id"),
     ("friend_beta_access_grants", "user_id"),
     ("user_profiles", "user_id"),
@@ -170,6 +172,15 @@ def _delete_indirect_rows(connection: sqlite3.Connection, user_id: str, tables: 
     execute("conversation_messages", "DELETE FROM conversation_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)", (user_id,))
     execute("conversation_turns", "DELETE FROM conversation_turns WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)", (user_id,))
     execute("conversations", "DELETE FROM conversations WHERE user_id = ?", (user_id,))
+
+    # GitHub repository selections are children of owner-bound installations.
+    # Remove them before installation authority and principal state.
+    execute(
+        "github_app_repositories",
+        """DELETE FROM github_app_repositories WHERE installation_id IN
+           (SELECT installation_id FROM github_app_installations WHERE user_id = ?)""",
+        (user_id,),
+    )
 
     # Provider credentials and refresh authority are indirect children. Bearer
     # sessions reference both provider families/accounts and beta grants, so

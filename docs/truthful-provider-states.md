@@ -35,6 +35,12 @@ Every non-connected row carries a safe `unavailable_reason`. Configuration
 Disconnecting deletes the credential row (`db.disconnect_account`), so a later
 listing cannot reconstruct a connected-looking state from a stale row.
 
+GitHub OAuth is now optional account identity only (`read:user`,
+`user:email`). A connected OAuth row does **not** authorize repositories.
+Repository connection truth comes separately from the principal-bound GitHub
+App status and installation tables documented in
+[`github-app-activation.md`](github-app-activation.md).
+
 The client repeats the same rule in `normalizeAuthProvider`
 (`frontend/src/api/client.ts`): an unknown status string, or a `connected`
 status on a provider the gateway marked unavailable, fails closed. A stale or
@@ -54,8 +60,8 @@ its OAuth application, redirect URI, tenant consent, and scopes, then remove the
 hardcoded `is_configured`/`is_deferred` overrides in
 `gateway/app/providers/jira.py` / `teams.py`. Until then, **do not create a demo
 `connected` state** for either provider — that is the exact failure this
-contract exists to prevent. GitHub is the required provider bridge for owner
-alpha.
+contract exists to prevent. The GitHub App, not this optional identity OAuth
+row, is the repository provider bridge.
 
 ## Telemetry: no invented metrics
 

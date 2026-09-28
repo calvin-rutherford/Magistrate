@@ -555,7 +555,7 @@ function DrawerPanel({ open, dark, isNarrow, animatedStyle, panHandlers, activeS
     else { const result = await openExternalUrl(item.external_url || item.url); if (!result.ok) Alert.alert('Unable to open attention item', result.message); }
   };
   const openActivityItem = async (item: RecentActivityItem) => {
-    if (item.pull_request_number) router.push(`/pr-detail?number=${item.pull_request_number}` as any);
+    if (item.pull_request_number) router.push(`/pr-detail?number=${item.pull_request_number}${item.repository_id ? `&repositoryId=${item.repository_id}` : ''}` as any);
     else if (item.url) { const result = await openExternalUrl(item.url); if (!result.ok) Alert.alert('Unable to open activity', result.message); }
   };
   // Projects are the real project names the fleet and activity feed already

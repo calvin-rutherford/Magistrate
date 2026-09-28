@@ -1,24 +1,16 @@
 import asyncio
-import os
 from typing import Any, Dict, List
 
-from app.github_service import GitHubService
+from app.github_app import GitHubAppService
 from app.structured_runtime import StructuredRuntimeProjection
 
 
 class RecentActivityService:
     """Merge persisted structured execution facts with forge merge events."""
 
-    def __init__(
-        self,
-        runtime: StructuredRuntimeProjection,
-        github: GitHubService,
-        *,
-        shared_provider_owner_only: bool = False,
-    ):
+    def __init__(self, runtime: StructuredRuntimeProjection, github: GitHubAppService):
         self.runtime = runtime
         self.github = github
-        self.shared_provider_owner_only = shared_provider_owner_only
 
     async def get_recent_activity(
         self,
@@ -26,15 +18,11 @@ class RecentActivityService:
         limit: int = 20,
         refresh: bool = False,
     ) -> Dict[str, Any]:
-        github_read = (
-            self.github.get_merged_pull_requests(limit=limit, refresh=refresh)
-            if not self.shared_provider_owner_only
-            or owner_user_id == os.getenv('MAGISTRATE_BOOTSTRAP_USER_ID', 'default_user').strip()
-            else asyncio.sleep(0, result=PermissionError('shared provider data is owner-only'))
-        )
         fleet_result, github_result = await asyncio.gather(
             asyncio.to_thread(self.runtime.recent_activity, owner_user_id, limit=limit),
-            github_read,
+            self.github.get_merged_pull_requests(
+                owner_user_id, limit=limit, refresh=refresh,
+            ),
             return_exceptions=True,
         )
         source_status = {
@@ -48,7 +36,7 @@ class RecentActivityService:
         if not isinstance(github_result, Exception):
             for pull in github_result:
                 items.append({
-                    'id': f'github:pull:{pull["number"]}:merged',
+                    'id': f'github:repository:{pull.get("repository_id", pull["repository"])}:pull:{pull["number"]}:merged',
                     'type': 'pull_request_merged',
                     'title': pull['title'],
                     'description': f'PR #{pull["number"]} merged',
@@ -57,6 +45,7 @@ class RecentActivityService:
                     'project': pull['repository'],
                     'url': pull['url'],
                     'pull_request_number': pull['number'],
+                    'repository_id': pull.get('repository_id'),
                 })
 
         # Prefer GitHub's precise merge event if a future structured completion
