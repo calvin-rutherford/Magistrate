@@ -11,7 +11,9 @@ import {
 
 WebBrowser.maybeCompleteAuthSession();
 
-type Provider = 'apple' | 'google';
+export type SignInProvider = 'apple' | 'google';
+type Provider = SignInProvider;
+type ProviderAction = 'sign_in' | 'link';
 
 const GOOGLE_DISCOVERY: AuthSession.DiscoveryDocument = {
   authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
@@ -78,7 +80,8 @@ export function prepareProviderSignIn(provider: Provider): void {
   prepared.set(provider, challenge);
 }
 
-async function takeChallenge(provider: Provider): Promise<ProviderAuthChallenge> {
+async function takeChallenge(provider: Provider, action: ProviderAction): Promise<ProviderAuthChallenge> {
+  if (action === 'link') return createProviderAuthChallenge(provider, redirectUri(provider), 'link');
   let pending = prepared.get(provider);
   if (!pending) {
     prepareProviderSignIn(provider);
@@ -102,7 +105,7 @@ function appleDisplayName(fullName: AppleAuthentication.AppleAuthenticationFullN
   return value || undefined;
 }
 
-async function signInWithNativeApple(challenge: ProviderAuthChallenge): Promise<void> {
+async function signInWithNativeApple(challenge: ProviderAuthChallenge, action: ProviderAction): Promise<void> {
   if (!(await AppleAuthentication.isAvailableAsync())) {
     throw new Error('Sign in with Apple is unavailable on this device.');
   }
@@ -120,11 +123,11 @@ async function signInWithNativeApple(challenge: ProviderAuthChallenge): Promise<
   await exchangeProviderAuthChallenge({
     provider: 'apple', challengeId: challenge.challenge_id, nonce: challenge.nonce,
     identityToken: credential.identityToken,
-    displayName: appleDisplayName(credential.fullName),
+    displayName: appleDisplayName(credential.fullName), action,
   });
 }
 
-async function signInWithWebApple(challenge: ProviderAuthChallenge): Promise<void> {
+async function signInWithWebApple(challenge: ProviderAuthChallenge, action: ProviderAction): Promise<void> {
   const clientId = providerClientId('apple');
   const redirect = challenge.redirect_uri || redirectUri('apple');
   if (!clientId || !redirect) throw new Error('Apple web sign-in is not configured.');
@@ -143,11 +146,11 @@ async function signInWithWebApple(challenge: ProviderAuthChallenge): Promise<voi
   }
   await exchangeProviderAuthChallenge({
     provider: 'apple', challengeId: challenge.challenge_id, nonce: challenge.nonce,
-    authorizationCode: result.params.code, redirectUri: redirect,
+    authorizationCode: result.params.code, redirectUri: redirect, action,
   });
 }
 
-async function signInWithGoogle(challenge: ProviderAuthChallenge): Promise<void> {
+async function signInWithGoogle(challenge: ProviderAuthChallenge, action: ProviderAction): Promise<void> {
   const clientId = providerClientId('google');
   const redirect = challenge.redirect_uri || redirectUri('google');
   if (!clientId || !redirect) throw new Error('Google sign-in is not configured for this client.');
@@ -176,28 +179,36 @@ async function signInWithGoogle(challenge: ProviderAuthChallenge): Promise<void>
   if (!identityToken) throw new Error('Google did not return an identity assertion.');
   await exchangeProviderAuthChallenge({
     provider: 'google', challengeId: challenge.challenge_id, nonce: challenge.nonce,
-    identityToken, redirectUri: redirect,
+    identityToken, redirectUri: redirect, action,
   });
 }
 
-export function signInWithProvider(provider: Provider): Promise<void> {
+function performProviderAction(provider: Provider, action: ProviderAction): Promise<void> {
   if (activeSignIn) return activeSignIn;
   activeSignIn = (async () => {
     if (!providerSignInAvailable(provider)) {
       throw new Error(`${provider === 'apple' ? 'Apple' : 'Google'} sign-in is not configured for this client.`);
     }
-    const challenge = await takeChallenge(provider);
+    const challenge = await takeChallenge(provider, action);
     try {
       if (provider === 'apple') {
-        if (Platform.OS === 'ios') await signInWithNativeApple(challenge);
-        else await signInWithWebApple(challenge);
+        if (Platform.OS === 'ios') await signInWithNativeApple(challenge, action);
+        else await signInWithWebApple(challenge, action);
       } else {
-        await signInWithGoogle(challenge);
+        await signInWithGoogle(challenge, action);
       }
-      await validateGatewaySession();
+      if (action === 'sign_in') await validateGatewaySession();
     } finally {
-      prepareProviderSignIn(provider);
+      if (action === 'sign_in') prepareProviderSignIn(provider);
     }
   })().finally(() => { activeSignIn = null; });
   return activeSignIn;
+}
+
+export function signInWithProvider(provider: Provider): Promise<void> {
+  return performProviderAction(provider, 'sign_in');
+}
+
+export function linkProviderIdentity(provider: Provider): Promise<void> {
+  return performProviderAction(provider, 'link');
 }

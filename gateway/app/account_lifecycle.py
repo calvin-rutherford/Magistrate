@@ -19,6 +19,7 @@ class AccountDeletionError(RuntimeError):
 # Directly tenant-qualified tables. Child tables without owner columns are
 # removed first through owner-qualified parent subqueries below.
 _DIRECT_OWNER_TABLES: tuple[tuple[str, str], ...] = (
+    ("account_onboarding", "user_id"),
     ("account_credit_ledger", "owner_user_id"),
     ("billing_accounts", "owner_user_id"),
     ("project_memories", "owner_user_id"),

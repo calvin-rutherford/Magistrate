@@ -58,6 +58,8 @@ test('production remains fail-closed until a real App Store Connect record is li
 
   fixture.eas = clone(fixture.eas);
   fixture.eas.submit.production.ios = { ascAppId: '1234567890' };
+  fixture.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID = 'repository-test.apps.googleusercontent.com';
+  fixture.env.EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID = 'com.googleusercontent.apps.repository-test';
   const ready = evaluateFriendBetaRelease(fixture);
   assert.equal(ready.result, 'PASS', ready.failures.join('\n'));
   assert.ok(ready.checks.includes('testflight-production-profile'));

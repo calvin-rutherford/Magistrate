@@ -378,11 +378,15 @@ def issue_friend_beta_session(access_code: str) -> dict[str, object]:
 
 
 def account_onboarding_required(principal: Principal) -> bool:
-    """Tell the client whether this account principal still needs a name."""
-    if (
-        (principal.access_grant_id is None and principal.provider_session_id is None)
-        or not principal.has("account")
-    ):
+    """Return durable first-run state without trusting a client completion flag."""
+    if not principal.has("account"):
+        return False
+    if principal.provider_session_id is not None:
+        # Imported lazily to keep the low-level session module independent from
+        # billing/provider HTTP adapters.
+        from app.onboarding import onboarding_required
+        return onboarding_required(principal.user_id)
+    if principal.access_grant_id is None:
         return False
     _session_db()
     with connect(database.DB_PATH) as connection:

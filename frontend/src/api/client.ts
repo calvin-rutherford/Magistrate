@@ -296,15 +296,18 @@ export interface ProviderAuthChallenge {
 }
 
 export async function createProviderAuthChallenge(
-  provider: 'apple' | 'google', redirectUri?: string,
+  provider: 'apple' | 'google', redirectUri?: string, action: 'sign_in' | 'link' = 'sign_in',
 ): Promise<ProviderAuthChallenge> {
-  const response = await fetchRaw(`${GATEWAY_URL}/auth/provider/challenge`, {
+  const init: RequestInit = {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      provider, action: 'sign_in', client_platform: Platform.OS === 'web' ? 'web' : 'native',
+      provider, action, client_platform: Platform.OS === 'web' ? 'web' : 'native',
       ...(redirectUri ? { redirect_uri: redirectUri } : {}),
     }),
-  });
+  };
+  const response = action === 'link'
+    ? await authorizedFetch(`${GATEWAY_URL}/auth/provider/challenge`, init)
+    : await fetchRaw(`${GATEWAY_URL}/auth/provider/challenge`, init);
   const payload = await readResponsePayload(response);
   if (!response.ok) throw responseError(response, payload);
   if (!payload || typeof payload !== 'object') throw new Error('Gateway returned an invalid sign-in challenge.');
@@ -317,13 +320,21 @@ export async function createProviderAuthChallenge(
   return value as unknown as ProviderAuthChallenge;
 }
 
+export interface ProviderAccountLink {
+  schema_version: 'provider-account-link.v1';
+  status: 'linked' | 'unlinked';
+  provider: 'apple' | 'google';
+  user_id?: string;
+}
+
 export async function exchangeProviderAuthChallenge(input: {
   provider: 'apple' | 'google'; challengeId: string; nonce: string;
   identityToken?: string; authorizationCode?: string; redirectUri?: string;
-  displayName?: string;
-}): Promise<GatewaySession> {
-  const revision = ++sessionRevision;
-  const response = await fetchRaw(`${GATEWAY_URL}/auth/provider/exchange`, {
+  displayName?: string; action?: 'sign_in' | 'link';
+}): Promise<GatewaySession | ProviderAccountLink> {
+  const action = input.action || 'sign_in';
+  const revision = action === 'sign_in' ? ++sessionRevision : sessionRevision;
+  const init: RequestInit = {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       provider: input.provider, challenge_id: input.challengeId, nonce: input.nonce,
@@ -332,9 +343,20 @@ export async function exchangeProviderAuthChallenge(input: {
       ...(input.redirectUri ? { redirect_uri: input.redirectUri } : {}),
       ...(input.displayName ? { display_name: input.displayName } : {}),
     }),
-  });
+  };
+  const response = action === 'link'
+    ? await authorizedFetch(`${GATEWAY_URL}/auth/provider/exchange`, init)
+    : await fetchRaw(`${GATEWAY_URL}/auth/provider/exchange`, init);
   const payload = await readResponsePayload(response);
   if (!response.ok) throw responseError(response, payload);
+  if (action === 'link') {
+    const link = payload as Partial<ProviderAccountLink> | null;
+    if (!link || link.schema_version !== 'provider-account-link.v1'
+      || link.status !== 'linked' || link.provider !== input.provider) {
+      throw new Error('Gateway returned an invalid provider link result.');
+    }
+    return link as ProviderAccountLink;
+  }
   const session = sessionFromPayload(payload);
   if (!session || session.authMethod !== input.provider || !session.refreshExpiresAt) {
     throw new Error('Gateway returned an invalid provider session.');
@@ -1452,6 +1474,63 @@ export async function fetchUserProfile(): Promise<UserProfile> {
   // such a request would invalidate the whole session for a decoration.
   try { await AsyncStorage.setItem(ACCOUNT_DISPLAY_NAME_KEY, profile.name || ''); } catch { /* personalization is optional */ }
   return profile;
+}
+
+export interface AccountOnboardingState {
+  schema_version: 'account-onboarding.v1';
+  required: boolean;
+  next_step: 'welcome' | 'profile' | 'github' | 'billing' | null;
+  steps: {
+    welcome: { complete: boolean };
+    profile: { complete: boolean };
+    github: { complete: boolean; available: boolean; unavailable_reason: string | null };
+    billing: {
+      complete: boolean; available: boolean; status: string;
+      current_period_end: number | null; customer_portal_available: boolean;
+    };
+  };
+}
+
+export async function fetchAccountOnboarding(): Promise<AccountOnboardingState> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/onboarding`);
+  const value = await checkedJson<AccountOnboardingState>(res);
+  if (value?.schema_version !== 'account-onboarding.v1' || typeof value.required !== 'boolean'
+    || !value.steps || !['welcome', 'profile', 'github', 'billing', null].includes(value.next_step)) {
+    throw new Error('Gateway returned invalid onboarding state.');
+  }
+  return value;
+}
+
+export async function acknowledgeAccountWelcome(): Promise<AccountOnboardingState> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/onboarding/welcome`, { method: 'POST' });
+  return checkedJson<AccountOnboardingState>(res);
+}
+
+export interface BillingSession { schema_version: 'billing-checkout.v1' | 'billing-portal.v1'; url: string; checkout_session_id?: string }
+export async function createBillingCheckout(): Promise<BillingSession> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/billing/checkout`, { method: 'POST' });
+  return checkedJson<BillingSession>(res);
+}
+export async function createBillingPortal(): Promise<BillingSession> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/billing/portal`, { method: 'POST' });
+  return checkedJson<BillingSession>(res);
+}
+
+export interface ProviderLoginMethod {
+  provider: 'apple' | 'google'; label: string; current: boolean;
+  linked_at: number; last_authenticated_at: number | null;
+}
+export async function fetchProviderLoginMethods(): Promise<ProviderLoginMethod[]> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/login-methods`);
+  const value = await checkedJson<{ schema_version: string; methods: ProviderLoginMethod[] }>(res);
+  if (value.schema_version !== 'provider-login-methods.v1' || !Array.isArray(value.methods)) {
+    throw new Error('Gateway returned invalid sign-in methods.');
+  }
+  return value.methods;
+}
+export async function unlinkProviderLoginMethod(provider: 'apple' | 'google'): Promise<ProviderAccountLink> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/login-methods/${provider}`, { method: 'DELETE' });
+  return checkedJson<ProviderAccountLink>(res);
 }
 
 export async function updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {

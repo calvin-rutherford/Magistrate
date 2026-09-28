@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Alert, ActivityIndicator, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { fetchUserProfile, uploadUserAvatar, fetchAuthProviders, connectAuthProvider, updateUserProfile, updateNotificationPreferences, fetchNotificationPreferences, fetchVoiceInputCapabilities, GATEWAY_URL, UserProfile, AuthProviderInfo } from '../../src/api/client';
+import { AccountOnboardingState, AuthProviderInfo, createBillingPortal, fetchAccountOnboarding, fetchAuthProviders, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, ProviderAuthConfiguration, ProviderLoginMethod, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile, connectAuthProvider } from '../../src/api/client';
+import { linkProviderIdentity, providerSignInAvailable, SignInProvider } from '../../src/services/ProviderSignIn';
 import { setActiveBackground, WeatherSceneKey } from '../../src/services/environmentTheme';
 import { loadChatPreferences, removeCustomBackground, saveChatBackground, saveCustomBackground, saveVoiceInputMode } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
@@ -28,7 +29,7 @@ function providerActionLabel(provider: AuthProviderInfo): string {
   return 'CONNECT +';
 }
 
-type AccountSectionKey = 'notifications' | 'voice' | 'connections' | 'appearance';
+type AccountSectionKey = 'sign-in' | 'notifications' | 'voice' | 'connections' | 'appearance';
 function AccountSectionHeader({ id, title, expanded, onPress }: { id: AccountSectionKey; title: string; expanded: boolean; onPress: () => void }) {
   return <TouchableOpacity testID={`account-section-${id}`} accessibilityRole="button" accessibilityLabel={`${title} settings`} accessibilityState={{ expanded }} {...({ 'aria-expanded': expanded } as any)} onPress={onPress} style={styles.sectionHeader} activeOpacity={0.75}>
     <Text style={styles.sectionTitle}>{title}</Text><Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.sectionChevron}>{expanded ? '⌄' : '›'}</Text>
@@ -42,6 +43,11 @@ export default function AccountScreen() {
   const [profileError, setProfileError] = useState<string | null>(null);
 
   const [providers, setProviders] = useState<AuthProviderInfo[]>([]);
+  const [loginMethods, setLoginMethods] = useState<ProviderLoginMethod[]>([]);
+  const [providerConfiguration, setProviderConfiguration] = useState<ProviderAuthConfiguration | null>(null);
+  const [onboarding, setOnboarding] = useState<AccountOnboardingState | null>(null);
+  const [identityBusy, setIdentityBusy] = useState<SignInProvider | 'billing' | null>(null);
+  const [identityNotice, setIdentityNotice] = useState<string | null>(null);
   const [providersError, setProvidersError] = useState<string | null>(null);
   const [providersLoaded, setProvidersLoaded] = useState<boolean>(false);
   const [connectNotice, setConnectNotice] = useState<string | null>(null);
@@ -65,7 +71,10 @@ export default function AccountScreen() {
     // Each source is settled independently and its failure is shown, not
     // swallowed: an unreachable provider list must read as unavailable rather
     // than as an account with no integrations.
-    const [profileResult, providerResult] = await Promise.allSettled([fetchUserProfile(), fetchAuthProviders()]);
+    const [profileResult, providerResult, methodsResult, configurationResult, onboardingResult] = await Promise.allSettled([
+      fetchUserProfile(), fetchAuthProviders(), fetchProviderLoginMethods(),
+      fetchProviderAuthConfiguration(), fetchAccountOnboarding(),
+    ]);
     if (profileResult.status === 'fulfilled') {
       const prof = profileResult.value;
       if (prof.avatar_url && prof.avatar_url.startsWith('/uploads')) {
@@ -88,6 +97,9 @@ export default function AccountScreen() {
       setProviders([]);
       setProvidersError(errorText(providerResult.reason, 'Connected accounts could not be loaded.'));
     }
+    if (methodsResult.status === 'fulfilled') setLoginMethods(methodsResult.value);
+    if (configurationResult.status === 'fulfilled') setProviderConfiguration(configurationResult.value);
+    if (onboardingResult.status === 'fulfilled') setOnboarding(onboardingResult.value);
     setProvidersLoaded(true);
   };
 
@@ -215,6 +227,43 @@ export default function AccountScreen() {
     }
   };
 
+  const providerEnabled = (provider: SignInProvider) => Boolean(
+    providerConfiguration?.[provider]
+    && (providerSignInAvailable(provider))
+    && (provider === 'apple'
+      ? (Platform.OS === 'web' ? providerConfiguration.apple_web : providerConfiguration.apple_native)
+      : (Platform.OS === 'web' ? providerConfiguration.google_web : providerConfiguration.google_native)),
+  );
+
+  const linkLoginMethod = async (provider: SignInProvider) => {
+    setIdentityBusy(provider); setIdentityNotice(null);
+    try {
+      await linkProviderIdentity(provider);
+      await loadAccountData();
+      setIdentityNotice(`${provider === 'apple' ? 'Apple' : 'Google'} is now a recovery sign-in method.`);
+    } catch (error) { setIdentityNotice(errorText(error, 'The sign-in method could not be linked.')); }
+    finally { setIdentityBusy(null); }
+  };
+
+  const unlinkLoginMethod = async (provider: SignInProvider) => {
+    setIdentityBusy(provider); setIdentityNotice(null);
+    try {
+      await unlinkProviderLoginMethod(provider);
+      await loadAccountData();
+      setIdentityNotice(`${provider === 'apple' ? 'Apple' : 'Google'} was removed as a sign-in method.`);
+    } catch (error) { setIdentityNotice(errorText(error, 'The sign-in method could not be removed.')); }
+    finally { setIdentityBusy(null); }
+  };
+
+  const openBillingPortal = async () => {
+    setIdentityBusy('billing'); setIdentityNotice(null);
+    try {
+      const portal = await createBillingPortal();
+      await WebBrowser.openBrowserAsync(portal.url);
+    } catch (error) { setIdentityNotice(errorText(error, 'Billing management is unavailable.')); }
+    finally { setIdentityBusy(null); }
+  };
+
   const handleToggleVoiceOutput = (enabled: boolean) => {
     setVoiceEnabled(enabled);
     ttsService.setSettings({ enabled });
@@ -272,6 +321,16 @@ export default function AccountScreen() {
             </View>
           </View>
         </GlassSurface>
+
+        <AccountSectionHeader id="sign-in" title="SIGN-IN & BILLING" expanded={expandedSection === 'sign-in'} onPress={() => toggleSection('sign-in')} />
+        {expandedSection === 'sign-in' ? <GlassSurface variant="card" style={styles.settingsCard}>
+          <Text style={styles.settingLabel}>RECOVERY SIGN-IN METHODS</Text>
+          <Text style={styles.settingHint}>Link a second verified identity so you can recover this same account. Email addresses are never used to merge accounts.</Text>
+          {loginMethods.map(method => <View key={method.provider} testID={`login-method-${method.provider}`} style={styles.socialRow}><View style={styles.providerLeft}><Text style={styles.socialName}>{method.provider.toUpperCase()}</Text><Text style={styles.socialHandle}>{method.label || 'Verified provider identity'}{method.current ? ' · current session' : ' · recovery ready'}</Text></View><TouchableOpacity testID={`unlink-login-${method.provider}`} disabled={identityBusy !== null || method.current || loginMethods.length <= 1} accessibilityState={{ disabled: identityBusy !== null || method.current || loginMethods.length <= 1 }} onPress={() => void unlinkLoginMethod(method.provider)} style={[styles.socialToggleBtn, (method.current || loginMethods.length <= 1) && { opacity: 0.45 }]}><Text style={styles.socialBtnText}>REMOVE</Text></TouchableOpacity></View>)}
+          {(['apple', 'google'] as const).filter(provider => !loginMethods.some(method => method.provider === provider)).map(provider => <TouchableOpacity key={provider} testID={`link-login-${provider}`} disabled={identityBusy !== null || !providerEnabled(provider)} onPress={() => void linkLoginMethod(provider)} style={[styles.identityAction, (!providerEnabled(provider) || identityBusy !== null) && { opacity: 0.5 }]}><Text style={styles.socialBtnText}>{identityBusy === provider ? 'LINKING…' : `LINK ${provider.toUpperCase()}`}</Text></TouchableOpacity>)}
+          {identityNotice ? <Text testID="identity-notice" accessibilityRole="alert" style={styles.providerError}>{identityNotice}</Text> : null}
+          <View style={styles.billingBlock}><Text style={styles.settingLabel}>SUBSCRIPTION</Text><Text testID="billing-status" style={styles.settingHint}>{onboarding?.steps.billing.complete ? `Active · ${onboarding.steps.billing.status}` : `Status · ${onboarding?.steps.billing.status || 'unknown'}`}</Text>{onboarding?.steps.billing.customer_portal_available ? <TouchableOpacity testID="open-billing-portal" disabled={identityBusy !== null} onPress={() => void openBillingPortal()} style={styles.identityAction}><Text style={styles.socialBtnText}>{identityBusy === 'billing' ? 'OPENING…' : 'MANAGE BILLING ↗'}</Text></TouchableOpacity> : null}</View>
+        </GlassSurface> : null}
 
         <AccountSectionHeader id="notifications" title="CAPTAIN ATTENTION NOTIFICATIONS" expanded={expandedSection === 'notifications'} onPress={() => toggleSection('notifications')} />
 
@@ -464,6 +523,8 @@ const styles = StyleSheet.create({
   socialToggleBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   socialBtnConnected: { backgroundColor: 'rgba(255, 255, 255, 0.15)', borderColor: '#FFFFFF' },
   socialBtnText: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: '#FFFFFF' },
+  identityAction: { marginTop: 10, minHeight: 40, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.4)', justifyContent: 'center', alignItems: 'center' },
+  billingBlock: { marginTop: 20, paddingTop: 16, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.3)' },
   // Settings cards have a little more breathing room for the mode controls.
   settingsCard: { padding: 21, borderRadius: 18 },
   settingLabel: { fontFamily: 'monospace', fontSize: 10, fontWeight: 'bold', color: 'rgba(255, 255, 255, 0.6)', marginBottom: 8 },
