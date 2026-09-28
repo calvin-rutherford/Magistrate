@@ -1,0 +1,83 @@
+{
+  "schema_version": "magistrate.billing-catalog.v1",
+  "currency": "usd",
+  "credit_unit": {
+    "name": "Magistrate Credit",
+    "microcredits_per_credit": 1000000,
+    "usd_micros_per_credit": 10000,
+    "description": "One credit purchases one US cent of normalized provider/model/compute cost after the configured margin. Ledger arithmetic uses one-millionth of a credit."
+  },
+  "default_plan": "free",
+  "plans": [
+    {
+      "id": "free",
+      "name": "Free",
+      "kind": "free",
+      "stripe_price_id": null,
+      "monthly_included_credits": 500,
+      "objective_reserve_credits": 100,
+      "monthly_spend_limit_credits": 500,
+      "concurrency_limit": 1,
+      "low_credit_warning_credits": 125,
+      "grace_days": 0,
+      "entitlements": ["chat", "usage", "execution", "topups"]
+    },
+    {
+      "id": "demo",
+      "name": "Demo",
+      "kind": "demo",
+      "stripe_price_id": null,
+      "monthly_included_credits": 2000,
+      "objective_reserve_credits": 150,
+      "monthly_spend_limit_credits": 2000,
+      "concurrency_limit": 1,
+      "low_credit_warning_credits": 300,
+      "grace_days": 0,
+      "entitlements": ["chat", "usage", "execution", "topups", "demo"]
+    },
+    {
+      "id": "individual",
+      "name": "Individual",
+      "kind": "subscription",
+      "stripe_price_id": null,
+      "monthly_included_credits": 10000,
+      "objective_reserve_credits": 200,
+      "monthly_spend_limit_credits": 15000,
+      "concurrency_limit": 2,
+      "low_credit_warning_credits": 1000,
+      "grace_days": 3,
+      "entitlements": ["chat", "usage", "execution", "topups", "billing_portal"]
+    },
+    {
+      "id": "pro",
+      "name": "Pro",
+      "kind": "subscription",
+      "stripe_price_id": null,
+      "monthly_included_credits": 50000,
+      "objective_reserve_credits": 300,
+      "monthly_spend_limit_credits": 100000,
+      "concurrency_limit": 8,
+      "low_credit_warning_credits": 5000,
+      "grace_days": 7,
+      "entitlements": ["chat", "usage", "execution", "topups", "billing_portal", "priority"]
+    }
+  ],
+  "credit_packs": [
+    {
+      "id": "credits-10k",
+      "name": "10,000 Credit Pack",
+      "stripe_price_id": null,
+      "credits": 10000
+    }
+  ],
+  "rates": [
+    {
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "input_usd_micros_per_million": 150000,
+      "output_usd_micros_per_million": 600000,
+      "compute_usd_micros_per_hour": 0,
+      "margin_bps": 2500
+    }
+  ]
+}

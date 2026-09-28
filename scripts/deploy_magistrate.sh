@@ -95,7 +95,7 @@ fi
 # Authentication and encrypted credentials depend on production-only settings.
 # Fail before the build/restart rather than allowing systemd to start a process
 # that silently falls back to a checkout-local database or development mode.
-required_env=(MAGISTRATE_ENV MAGISTRATE_DB_PATH MAGISTRATE_BOOTSTRAP_SECRET MAGISTRATE_SECRET_KEY MAGISTRATE_CORS_ORIGINS)
+required_env=(MAGISTRATE_ENV MAGISTRATE_BOOTSTRAP_SECRET MAGISTRATE_SECRET_KEY MAGISTRATE_CORS_ORIGINS)
 for key in "${required_env[@]}"; do
   if ! grep -Eq "^${key}=[^#[:space:]]" "$ENV_FILE"; then
     echo "refusing deploy: $key is missing or empty in $ENV_FILE" >&2
@@ -117,9 +117,61 @@ env_value() {
 }
 
 DB_PATH="$(env_value MAGISTRATE_DB_PATH)"
-if [[ "$DB_PATH" != /* || "$DB_PATH" == "$DEPLOY_DIR"/* ]]; then
-  echo "refusing deploy: MAGISTRATE_DB_PATH must be an absolute path outside the deployment checkout" >&2
+DATABASE_URL="$(env_value MAGISTRATE_DATABASE_URL)"
+STATE_DIR="$(env_value MAGISTRATE_STATE_DIR)"
+if [[ -n "$DB_PATH" && -n "$DATABASE_URL" ]] || [[ -z "$DB_PATH" && -z "$DATABASE_URL" ]]; then
+  echo "refusing deploy: configure exactly one of MAGISTRATE_DB_PATH or MAGISTRATE_DATABASE_URL" >&2
   exit 1
+fi
+if [[ -n "$DATABASE_URL" ]]; then
+  DB_BACKEND=postgresql
+  if [[ ! "$DATABASE_URL" =~ ^postgres(ql)?://[^[:space:]]+$ ]]; then
+    echo "refusing deploy: MAGISTRATE_DATABASE_URL must be a PostgreSQL URL" >&2
+    exit 1
+  fi
+  if [[ "$STATE_DIR" != /* || "$STATE_DIR" == "$DEPLOY_DIR"/* || -L "$STATE_DIR" ]]; then
+    echo "refusing deploy: PostgreSQL requires an absolute non-symlink MAGISTRATE_STATE_DIR outside the checkout" >&2
+    exit 1
+  fi
+  install -d -m 700 "$STATE_DIR"
+  STATE_REAL_PATH="$(realpath -e -- "$STATE_DIR" 2>/dev/null || true)"
+  DEPLOY_REAL_PATH="$(realpath -e -- "$DEPLOY_DIR" 2>/dev/null || true)"
+  if [[ -z "$STATE_REAL_PATH" || "$STATE_REAL_PATH" != "$STATE_DIR" || "$STATE_REAL_PATH" == "$DEPLOY_REAL_PATH"/* ]]; then
+    echo "refusing deploy: MAGISTRATE_STATE_DIR must be normalized, symlink-free, and outside the checkout" >&2
+    exit 1
+  fi
+  if [[ "$(stat -c '%u' "$STATE_DIR")" != "$(id -u)" || "$(stat -c '%a' "$STATE_DIR")" != 700 ]]; then
+    echo "refusing deploy: MAGISTRATE_STATE_DIR must be service-owned mode 0700" >&2
+    exit 1
+  fi
+else
+  DB_BACKEND=sqlite
+  if [[ "$DB_PATH" != /* || "$DB_PATH" == "$DEPLOY_DIR"/* ]]; then
+    echo "refusing deploy: MAGISTRATE_DB_PATH must be an absolute path outside the deployment checkout" >&2
+    exit 1
+  fi
+fi
+STRIPE_SECRET="$(env_value STRIPE_SECRET_KEY)"
+STRIPE_WEBHOOK_SECRET_VALUE="$(env_value STRIPE_WEBHOOK_SECRET)"
+if [[ -n "$STRIPE_SECRET" || -n "$STRIPE_WEBHOOK_SECRET_VALUE" ]]; then
+  if [[ ! "$STRIPE_SECRET" =~ ^sk_live_ || ! "$STRIPE_WEBHOOK_SECRET_VALUE" =~ ^whsec_ ]]; then
+    echo "refusing deploy: production Stripe API and webhook secrets must be configured together with live/valid prefixes" >&2
+    exit 1
+  fi
+  BILLING_CATALOG_PATH="$(env_value MAGISTRATE_BILLING_CATALOG_PATH)"
+  BILLING_RETURN_ORIGINS="$(env_value MAGISTRATE_BILLING_RETURN_ORIGINS)"
+  if [[ "$BILLING_CATALOG_PATH" != /* || "$BILLING_CATALOG_PATH" == "$DEPLOY_DIR"/* || ! -f "$BILLING_CATALOG_PATH" || -L "$BILLING_CATALOG_PATH" ]]; then
+    echo "refusing deploy: activated Stripe billing requires an absolute external regular catalog file" >&2
+    exit 1
+  fi
+  if [[ "$(stat -c '%u' "$BILLING_CATALOG_PATH")" != "$(id -u)" || "$(stat -c '%a' "$BILLING_CATALOG_PATH")" != 600 ]]; then
+    echo "refusing deploy: the external billing catalog must be service-owned mode 0600" >&2
+    exit 1
+  fi
+  if [[ -z "$BILLING_RETURN_ORIGINS" ]]; then
+    echo "refusing deploy: activated Stripe billing requires MAGISTRATE_BILLING_RETURN_ORIGINS" >&2
+    exit 1
+  fi
 fi
 CORS_ORIGINS="$(awk -F= '$1 == "MAGISTRATE_CORS_ORIGINS" { sub(/^[[:space:]]+/, "", $2); print $2; exit }' "$ENV_FILE")"
 CORS_ORIGINS="${CORS_ORIGINS%\"}"; CORS_ORIGINS="${CORS_ORIGINS#\"}"
@@ -155,6 +207,10 @@ LEGACY_CHAT_ENABLED="$(env_boolean MAGISTRATE_LEGACY_CHAT_ENABLED false)"
 FRIEND_BETA_ENABLED="$(env_boolean MAGISTRATE_FRIEND_BETA_ENABLED false)"
 if [[ "$NATIVE_CHAT_ENABLED" == "$LEGACY_CHAT_ENABLED" ]]; then
   echo "refusing deploy: exactly one of native chat and legacy chat must be enabled" >&2
+  exit 1
+fi
+if [[ "$DB_BACKEND" == postgresql && "$LEGACY_CHAT_ENABLED" == true ]]; then
+  echo "refusing deploy: PostgreSQL supports provider-native Magi only; legacy Pi rollback requires SQLite" >&2
   exit 1
 fi
 if [[ "$NATIVE_CHAT_ENABLED" == true ]]; then
@@ -323,9 +379,19 @@ PY
 
 fi
 
-# Any schema-affecting native rollout requires an integrity-checked online
-# SQLite backup first. The same guard continues to protect Pi-only rollouts.
-if [[ "$NATIVE_CHAT_ENABLED" == true || "$PI_ENABLED" == true ]]; then
+# PostgreSQL backup authority belongs to the managed database platform. Require
+# an explicit snapshot acknowledgement before any schema-affecting rollout.
+if [[ "$DB_BACKEND" == postgresql && ( "$NATIVE_CHAT_ENABLED" == true || "$PI_ENABLED" == true ) ]]; then
+  if [[ "$(env_value MAGISTRATE_POSTGRES_BACKUP_CONFIRMED)" != true ]]; then
+    echo "refusing deploy: set MAGISTRATE_POSTGRES_BACKUP_CONFIRMED=true only after a restorable snapshot" >&2
+    exit 1
+  fi
+  echo "PostgreSQL pre-deploy snapshot acknowledged"
+fi
+
+# Any schema-affecting SQLite rollout requires an integrity-checked online
+# backup first. The same guard continues to protect Pi-only rollouts.
+if [[ "$DB_BACKEND" == sqlite && ( "$NATIVE_CHAT_ENABLED" == true || "$PI_ENABLED" == true ) ]]; then
   if [[ ! -f "$DB_PATH" || -L "$DB_PATH" ]]; then
     echo "refusing deploy: native/Pi rollout requires an existing regular persistent SQLite database" >&2
     exit 1

@@ -20,10 +20,11 @@ from app.auth import (Principal, account_onboarding_required, authenticate_reque
                       validate_friend_beta_configuration, verify_token)
 from app.provider_auth import (
     PROVIDER_COOKIE_NAME, PROVIDER_COOKIE_PATH, create_challenge,
-    exchange_challenge, provider_availability, public_session_payload,
-    refresh_session as refresh_provider_session,
-    validate_provider_auth_configuration,
+    exchange_challenge, list_login_methods, provider_availability,
+    public_session_payload, refresh_session as refresh_provider_session,
+    unlink_login_method, validate_provider_auth_configuration,
 )
+from app.onboarding import acknowledge_welcome, onboarding_state
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
@@ -36,11 +37,17 @@ from app.contracts import (ExecutionSettingsContract, ExecutionCredentialContrac
                            ActivityCatchUpContract, MAGI_MAX_RESPONSE_BYTES,
                            RenameAgentContract)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
-from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
+from app.db import (database_health, init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
                     disconnect_account, get_execution_preferences, get_execution_credential_status,
                     save_execution_preferences, save_execution_credential, delete_execution_credential,
                     create_agent_migration, get_agent_migration, get_agent_migration_by_idempotency, transition_agent_migration)
-from app.github_service import github_service
+from app.account_lifecycle import AccountDeletionError, delete_account
+from app.projects import (ProjectError, bind_github_repository, create_project,
+                          delete_project, get_project, list_projects,
+                          unbind_repository, update_project)
+from app.github_app import (MAX_WEBHOOK_BYTES as GITHUB_MAX_WEBHOOK_BYTES,
+                            github_app_service, router as github_app_router,
+                            validate_github_app_configuration)
 from app.recent_activity import RecentActivityService
 from app.activity_store import SourceEventConflict, list_activity, snapshot_activity, source_diagnostics
 from app.structured_runtime import StructuredRuntimeProjection
@@ -62,7 +69,7 @@ from app.providers.teams import TeamsProviderAdapter
 from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
 from app.usage import get_usage
 from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BYTES,
-                         associate_uploads, save_upload, get_upload)
+                         associate_uploads, save_upload, get_upload, validate_content)
 from app.magi_chat_api import (magi_chat_readiness, magi_chat_service,
                                router as magi_chat_router,
                                validate_magi_chat_configuration)
@@ -73,6 +80,9 @@ from app.firstmate_execution_api import (
     firstmate_execution_service, router as firstmate_execution_router,
 )
 from app.firstmate_decision_api import router as firstmate_decision_router
+from app.billing import MAX_WEBHOOK_BYTES, validate_billing_configuration
+from app.billing_api import router as billing_router
+from app.project_memory_api import router as project_memory_router
 from app.objective_cancellation import (
     ObjectiveCancellationError, objective_cancellation_service,
 )
@@ -105,7 +115,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allow_headers=['Authorization', 'Content-Type'],
 )
 
@@ -114,9 +124,12 @@ UPLOADS_DIR = GATEWAY_DIR / 'uploads' / 'avatars'
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
 app.include_router(ar_router)
+app.include_router(github_app_router)
 app.include_router(magi_chat_router)
 app.include_router(firstmate_execution_router)
 app.include_router(firstmate_decision_router)
+app.include_router(billing_router)
+app.include_router(project_memory_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -135,8 +148,33 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
     if request.url.path == '/api/v1/uploads' and length > MAX_UPLOAD_REQUEST_BYTES:
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
-    if request.url.path == '/api/v1/magi/messages' and length > MAX_PROMPT_REQUEST_BYTES:
-        return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
+    if (
+        request.url.path == '/api/v1/magi/messages'
+        or request.url.path.startswith('/api/v1/magi/memory/entries/')
+    ) and length > MAX_PROMPT_REQUEST_BYTES:
+        return JSONResponse({'detail': 'The Magi request is too large.'}, status_code=413)
+    github_webhook = request.method == 'POST' and request.url.path == '/api/v1/github/webhooks'
+    github_install = request.method == 'POST' and request.url.path == '/api/v1/github/app/install'
+    stripe_webhook = request.method == 'POST' and request.url.path in {
+        '/api/v1/billing/webhook', '/api/v1/billing/webhooks/stripe',
+    }
+    if github_webhook:
+        body_cap, too_large = GITHUB_MAX_WEBHOOK_BYTES, 'Webhook payload is too large.'
+    elif github_install:
+        body_cap, too_large = 4096, 'The GitHub App request is too large.'
+    elif stripe_webhook:
+        body_cap, too_large = MAX_WEBHOOK_BYTES, 'The Stripe webhook is too large.'
+    else:
+        body_cap, too_large = 0, ''
+    if body_cap and length > body_cap:
+        return JSONResponse({'detail': too_large}, status_code=413)
+    if body_cap:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > body_cap:
+                return JSONResponse({'detail': too_large}, status_code=413)
+            body.extend(chunk)
+        request._body = bytes(body)
     firstmate_execution_contract = request.method == 'POST' and bool(re.fullmatch(
         r'/api/v1/firstmate/execution-events(?:/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/wake)?',
         request.url.path,
@@ -182,7 +220,7 @@ async def enforce_bounded_request_size(request: Request, call_next):
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
 structured_runtime = StructuredRuntimeProjection()
-recent_activity_service = RecentActivityService(structured_runtime, github_service)
+recent_activity_service = RecentActivityService(structured_runtime, github_app_service)
 stt_adapter = VoiceInputAdapter()
 _notification_reconciler_task = None
 _firstmate_delivery_recovery_task = None
@@ -242,7 +280,9 @@ async def start_notification_reconciler():
     global _notification_reconciler_task, _firstmate_delivery_recovery_task
     validate_friend_beta_configuration()
     validate_provider_auth_configuration()
+    validate_billing_configuration()
     validate_magi_chat_configuration()
+    validate_github_app_configuration()
     # A process cannot resume an in-flight provider socket. Preserve the
     # reserved pair and expose a truthful, explicitly retryable failure.
     await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
@@ -403,6 +443,33 @@ class ProviderRefreshRequest(BaseModel):
 class ObjectiveCancellationRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class AccountDeletionRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    confirmation: str = Field(min_length=8, max_length=256)
+
+
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=120)
+    slug: Optional[str] = Field(None, min_length=1, max_length=64)
+    description: str = Field('', max_length=2000)
+
+
+class ProjectUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    description: Optional[str] = Field(None, max_length=2000)
+    status: Optional[Literal['active', 'archived']] = None
+
+
+class RepositoryBindingRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    full_name: str = Field(min_length=3, max_length=201)
+    html_url: str = Field(min_length=19, max_length=500)
+    provider_repository_id: Optional[str] = Field(None, max_length=128)
+    default_branch: Optional[str] = Field(None, max_length=255)
 
 
 def _optional_principal(request: Request, authorization: Optional[str]) -> Optional[Principal]:
@@ -610,6 +677,7 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
     }
     provider = magi_chat_readiness()
     producer = fm_client.get_producer_readiness()
+    database = await asyncio.to_thread(database_health)
     degraded: List[str] = []
     if provider['enabled'] and provider['status'] != 'configured':
         degraded.append('magi-provider')
@@ -617,12 +685,15 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         degraded.append('firstmate-execution-interface')
     if producer['required'] and producer['status'] != 'ready':
         degraded.append('firstmate-producer')
+    if database['status'] != 'healthy':
+        degraded.append('database')
     return {
         'status': 'degraded' if degraded else 'healthy',
         'degraded_sources': degraded,
         'service': 'magistrate-gateway',
         'version': '1.1.0',
         'gateway_ready': True,
+        'database': database,
         'magi_provider': provider,
         'execution_interface': execution_interface,
         'event_ingress': event_ingress,
@@ -673,21 +744,169 @@ async def post_account_profile(
             raise HTTPException(status_code=422, detail='Display name is invalid.')
     return update_profile(user_id=principal.user_id, name=name, email=email, bio=bio, active_theme=active_theme)
 
+@app.get('/api/v1/account/onboarding')
+async def get_account_onboarding(principal: Principal = Depends(require_scope('account'))):
+    return onboarding_state(principal.user_id)
+
+
+@app.post('/api/v1/account/onboarding/welcome')
+async def complete_account_welcome(principal: Principal = Depends(require_scope('account'))):
+    acknowledge_welcome(principal.user_id)
+    return onboarding_state(principal.user_id)
+
+
+@app.get('/api/v1/account/login-methods')
+async def get_account_login_methods(principal: Principal = Depends(require_scope('account'))):
+    return list_login_methods(principal)
+
+
+@app.delete('/api/v1/account/login-methods/{provider}')
+async def delete_account_login_method(
+    provider: Literal['apple', 'google'],
+    principal: Principal = Depends(require_scope('account')),
+):
+    return unlink_login_method(principal, provider)
+
+
 @app.post('/api/v1/account/avatar')
 async def upload_account_avatar(
     file: UploadFile = File(...),
     principal: Principal = Depends(require_scope('account'))
 ):
-    safe_name = Path(file.filename or 'avatar').name
-    safe_name = re.sub(r'[^A-Za-z0-9._-]', '_', safe_name)[:128] or 'avatar'
-    filename = f'{principal.user_id}_{int(time.time())}_{safe_name}'
-    filepath = os.path.join(UPLOADS_DIR, filename)
-    content = await file.read()
-    with open(filepath, 'wb') as f:
-        f.write(content)
-    public_url = f'/uploads/avatars/{filename}'
-    updated = update_profile(user_id=principal.user_id, avatar_url=public_url)
-    return {'status': 'success', 'avatar_url': public_url, 'profile': updated}
+    content = await file.read(5 * 1024 * 1024 + 1)
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail='Avatar images must be 5 MB or smaller.')
+    try:
+        media_type = validate_content(file.content_type, file.filename or 'avatar', content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    extensions = {
+        'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+        'image/webp': '.webp', 'image/bmp': '.bmp',
+    }
+    if media_type not in extensions:
+        raise HTTPException(status_code=422, detail='An image avatar is required.')
+    filename = f'avatar_{secrets.token_urlsafe(24)}{extensions[media_type]}'
+    filepath = UPLOADS_DIR / filename
+    previous = get_profile(principal.user_id).get('avatar_url')
+    try:
+        with filepath.open('xb') as handle:
+            handle.write(content)
+        os.chmod(filepath, 0o600)
+        public_url = f'/uploads/avatars/{filename}'
+        updated = update_profile(user_id=principal.user_id, avatar_url=public_url)
+    except Exception:
+        filepath.unlink(missing_ok=True)
+        raise
+    if isinstance(previous, str) and previous.startswith('/uploads/avatars/avatar_'):
+        old_path = (GATEWAY_DIR / previous.lstrip('/')).resolve()
+        if old_path.parent == UPLOADS_DIR.resolve() and old_path != filepath:
+            old_path.unlink(missing_ok=True)
+    return {'status': 'stored', 'avatar_url': public_url, 'profile': updated}
+
+
+@app.delete('/api/v1/account')
+async def delete_current_account(
+    contract: AccountDeletionRequest,
+    response: Response,
+    principal: Principal = Depends(require_scope('account')),
+):
+    """Permanently erase the authenticated principal and revoke every session."""
+    response.headers['Cache-Control'] = 'no-store'
+    _clear_provider_cookie(response)
+    try:
+        return await asyncio.to_thread(
+            delete_account, principal.user_id, confirmation=contract.confirmation,
+        )
+    except AccountDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# PROJECTS
+
+def _project_call(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except ProjectError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.get('/api/v1/projects')
+async def get_projects(
+    include_archived: bool = Query(False),
+    limit: int = Query(100, ge=1, le=200),
+    principal: Principal = Depends(require_scope('read')),
+):
+    return await asyncio.to_thread(
+        list_projects, principal.user_id, include_archived=include_archived, limit=limit,
+    )
+
+
+@app.post('/api/v1/projects', status_code=201)
+async def post_project(
+    contract: ProjectCreateRequest,
+    principal: Principal = Depends(require_scope('account')),
+):
+    return await asyncio.to_thread(
+        _project_call, create_project, principal.user_id,
+        name=contract.name, slug=contract.slug, description=contract.description,
+    )
+
+
+@app.get('/api/v1/projects/{project_id}')
+async def get_project_detail(
+    project_id: str,
+    principal: Principal = Depends(require_scope('read')),
+):
+    return await asyncio.to_thread(_project_call, get_project, principal.user_id, project_id)
+
+
+@app.patch('/api/v1/projects/{project_id}')
+async def patch_project(
+    project_id: str,
+    contract: ProjectUpdateRequest,
+    principal: Principal = Depends(require_scope('account')),
+):
+    return await asyncio.to_thread(
+        _project_call, update_project, principal.user_id, project_id,
+        name=contract.name, description=contract.description, status=contract.status,
+    )
+
+
+@app.delete('/api/v1/projects/{project_id}', status_code=204)
+async def remove_project(
+    project_id: str,
+    principal: Principal = Depends(require_scope('account')),
+):
+    await asyncio.to_thread(_project_call, delete_project, principal.user_id, project_id)
+    return Response(status_code=204)
+
+
+@app.post('/api/v1/projects/{project_id}/repositories', status_code=201)
+async def post_project_repository(
+    project_id: str,
+    contract: RepositoryBindingRequest,
+    principal: Principal = Depends(require_scope('providers')),
+):
+    return await asyncio.to_thread(
+        _project_call, bind_github_repository, principal.user_id, project_id,
+        full_name=contract.full_name, html_url=contract.html_url,
+        provider_repository_id=contract.provider_repository_id,
+        default_branch=contract.default_branch,
+    )
+
+
+@app.delete('/api/v1/projects/{project_id}/repositories/{repository_id}', status_code=204)
+async def remove_project_repository(
+    project_id: str,
+    repository_id: str,
+    principal: Principal = Depends(require_scope('providers')),
+):
+    await asyncio.to_thread(
+        _project_call, unbind_repository, principal.user_id, project_id, repository_id,
+    )
+    return Response(status_code=204)
+
 
 # OAUTH & CONNECTED ACCOUNTS ENDPOINTS
 def _provider_connection_state(adapter, account: dict) -> Dict[str, Any]:
@@ -831,21 +1050,6 @@ async def disconnect_oauth_provider(provider: str, principal: Principal = Depend
     disconnect_account(principal.user_id, provider)
     return {'status': 'disconnected', 'provider': provider}
 
-# LIVE GITHUB PR ENDPOINTS
-@app.get('/api/v1/github/pulls')
-async def list_github_pulls(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50), refresh: bool = Query(False), principal: Principal = Depends(require_scope('providers'))):
-    try:
-        return await github_service.get_pull_requests(page, per_page, refresh)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-@app.get('/api/v1/github/pulls/{number}')
-async def get_github_pull(number: int, refresh: bool = Query(False), principal: Principal = Depends(require_scope('providers'))):
-    try:
-        return await github_service.get_pull_request(number, refresh)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
 @app.get('/api/v1/recent-activity')
 async def get_recent_activity(limit: int = Query(20, ge=1, le=50), refresh: bool = Query(False), principal: Principal = Depends(require_scope('read'))):
     try:
@@ -944,10 +1148,12 @@ async def post_canonical_activity_catch_up(
 # JIRA & TEAMS ENDPOINTS
 @app.get('/api/v1/jira/issues')
 async def get_jira_issues(principal: Principal = Depends(require_scope('providers'))):
+    _require_owner(principal)
     return await jira_adapter.get_assigned_issues()
 
 @app.get('/api/v1/teams/mentions')
 async def get_teams_mentions(principal: Principal = Depends(require_scope('providers'))):
+    _require_owner(principal)
     return await teams_adapter.get_mentions()
 
 # UNIFIED ATTENTION ENDPOINT
@@ -1028,6 +1234,7 @@ async def get_attention_action(action_key: str, principal: Principal = Depends(r
 
 @app.get('/api/v1/usage')
 async def get_usage_summary(provider: Optional[str] = None, principal: Principal = Depends(require_scope('read'))):
+    _require_owner(principal)
     try:
         return await get_usage(provider)
     except RuntimeError as exc:

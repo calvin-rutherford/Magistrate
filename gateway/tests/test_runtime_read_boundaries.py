@@ -90,10 +90,10 @@ def native_runtime(monkeypatch, tmp_path):
         AsyncMock(side_effect=AssertionError("a read attempted to start a process")),
     )
     monkeypatch.setattr(
-        gateway.github_service, "get_pull_requests", AsyncMock(return_value={"items": []}),
+        gateway.github_app_service, "get_pull_requests", AsyncMock(return_value={"items": []}),
     )
     monkeypatch.setattr(
-        gateway.github_service, "get_merged_pull_requests", AsyncMock(return_value=[]),
+        gateway.github_app_service, "get_merged_pull_requests", AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
         gateway.jira_adapter, "get_assigned_issues", AsyncMock(return_value=[]),

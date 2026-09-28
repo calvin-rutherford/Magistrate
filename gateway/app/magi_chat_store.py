@@ -11,6 +11,7 @@ import json
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import threading
 import time
 from typing import Any, Sequence
@@ -29,7 +30,7 @@ _VALID_ROUTE_CATEGORIES = frozenset({
     "DECISION_RESPONSE", "HIGH_IMPACT_ACTION",
 })
 _VALID_ROUTE_OUTCOMES = frozenset({
-    "routing", "direct-response", "objective-accepted",
+    "routing", "direct-response", "objective-accepted", "memory-saved",
     "confirmation-required", "failed", "cancelled",
 })
 _SCHEMA_LOCK = threading.Lock()
@@ -82,7 +83,7 @@ def _connect() -> sqlite3.Connection:
             if path not in _INITIALIZED_DB_PATHS:
                 db.init_db()
                 _INITIALIZED_DB_PATHS.add(path)
-    connection = sqlite3.connect(db.DB_PATH, timeout=_BUSY_TIMEOUT_SECONDS)
+    connection = connect(db.DB_PATH, timeout=_BUSY_TIMEOUT_SECONDS)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection

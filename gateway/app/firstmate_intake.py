@@ -11,10 +11,12 @@ import os
 from pathlib import Path
 import stat as stat_module
 import sqlite3
+from app.persistence import connect
 import time
 from typing import Any
 
 from app import db
+from app.billing import BillingError, CreditLedger
 from app.firstmate_client import FirstmateClient
 from app.firstmate_producer import ProducerContractError
 
@@ -177,7 +179,7 @@ async def reconcile_pending_objective_intake(
     if not isinstance(cutoff, int) or isinstance(cutoff, bool) or cutoff < 0:
         raise ValueError("updated_before_ms must be a non-negative integer")
     db.init_db()
-    with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+    with connect(db.DB_PATH, timeout=10) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """SELECT * FROM magi_objective_submissions
@@ -196,7 +198,7 @@ async def reconcile_pending_objective_intake(
         try:
             contract = FirstmateSubmitObjectiveContract.model_validate_json(row["contract_json"])
         except (ValueError, TypeError):
-            with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+            with connect(db.DB_PATH, timeout=10) as connection:
                 connection.execute(
                     """UPDATE magi_objective_submissions
                        SET status = 'failed', attempt_count = ?,
@@ -212,7 +214,7 @@ async def reconcile_pending_objective_intake(
             continue
 
         attempt = int(row["attempt_count"]) + 1
-        with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+        with connect(db.DB_PATH, timeout=10) as connection:
             changed = connection.execute(
                 """UPDATE magi_objective_submissions
                    SET status = 'submitting', attempt_count = ?, last_error_code = NULL,
@@ -234,20 +236,34 @@ async def reconcile_pending_objective_intake(
             accepted=False,
             duplicate=True,
             attempt=attempt,
+            context_json=str(row["context_json"]),
+            context_sha256=str(row["context_sha256"]),
         )
         try:
+            # A crash may have landed after the objective row but before its
+            # reservation. Recovery must restore the same pre-start hard gate.
+            CreditLedger().reserve_objective(
+                str(row["owner_user_id"]),
+                claim.objective_id,
+                idempotency_key=f"objective:{claim.objective_id}",
+            )
             await objective_dispatcher.submit(
                 task_id=claim.task_id,
                 title=_task_title(contract),
                 project=contract.project,
-                body=_task_body(claim.objective_id, claim.contract_json),
+                body=_task_body(
+                    claim.objective_id, claim.contract_json,
+                    claim.context_json if claim.context_sha256 else None,
+                ),
             )
             store.accept(str(row["owner_user_id"]), claim)
-        except ObjectiveDispatchError as exc:
+        except (ObjectiveDispatchError, BillingError) as exc:
             reason = str(exc)
+            prefix = "objective_dispatch" if isinstance(exc, ObjectiveDispatchError) else "objective_billing"
+            safe_reason = getattr(exc, "code", reason)
             store.fail(
                 str(row["owner_user_id"]), claim,
-                f"objective_dispatch_{reason}" if reason else "objective_dispatch_failed",
+                f"{prefix}_{safe_reason}" if safe_reason else f"{prefix}_failed",
             )
             counts["failed"] += 1
         else:

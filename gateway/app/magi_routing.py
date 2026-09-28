@@ -30,6 +30,7 @@ from app.magi_model import (
     OpenAIMagiModel,
 )
 from app.magi_providers import AnthropicMagiModel, GoogleMagiModel
+from app.persistence import connect
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _ROUTE_SCHEMA = "magi.model-routing.v1"
@@ -352,7 +353,7 @@ class ModelRouteStore:
 
     def _connect(self) -> sqlite3.Connection:
         db.init_db()
-        connection = sqlite3.connect(db.DB_PATH, timeout=10)
+        connection = connect(db.DB_PATH, timeout=10)
         connection.row_factory = sqlite3.Row
         return connection
 

@@ -8,6 +8,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_ROOT = path.resolve(HERE, '..');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ASC_APP_ID = /^[1-9][0-9]{5,14}$/;
+const GOOGLE_IOS_CLIENT_ID = /^([A-Za-z0-9._-]+)\.apps\.googleusercontent\.com$/;
 const SECRET_PUBLIC_NAME = /(secret|token|password|credential|api[_-]?key|private[_-]?key)/i;
 
 function readJson(name) {
@@ -61,6 +62,12 @@ export function evaluateFriendBetaRelease({ profile, env, app, eas, packageJson 
       'testflight-production-profile', 'production must be a store build with autoIncrement');
     check(ASC_APP_ID.test(eas?.submit?.production?.ios?.ascAppId || ''),
       'app-store-connect-link', 'set the public numeric ascAppId after the App Store Connect record exists');
+    const googleIosClientId = String(env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID || '').trim();
+    const googleMatch = GOOGLE_IOS_CLIENT_ID.exec(googleIosClientId);
+    const reversedGoogleClientId = String(env.EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID || '').trim();
+    check(Boolean(googleMatch), 'google-ios-client-id', 'set the real Google iOS OAuth client ID in the EAS production environment');
+    check(Boolean(googleMatch) && reversedGoogleClientId === `com.googleusercontent.apps.${googleMatch?.[1]}`,
+      'google-ios-callback-scheme', 'the reversed Google iOS client ID must exactly match the OAuth client');
   }
 
   const configuredOwner = String(env.EXPO_OWNER || '').trim();

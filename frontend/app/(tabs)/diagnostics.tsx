@@ -158,7 +158,7 @@ export default function HomeScreen() {
         {prError && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.errorText}>{prs.length ? `Showing last known pull requests. ${prError}` : prError}</Text></GlassSurface>}
         {!prError && !loading && prs.length === 0 && <GlassSurface variant="card" style={styles.emptyCard}><Text style={styles.emptyText}>No open pull requests need your attention.</Text></GlassSurface>}
         {prs.map(pr => (
-          <TouchableOpacity key={pr.number} onPress={() => router.push(`/pr-detail?number=${pr.number}` as any)} activeOpacity={0.85}>
+          <TouchableOpacity key={`${pr.repository_id || pr.repository}:${pr.number}`} onPress={() => router.push(`/pr-detail?number=${pr.number}${pr.repository_id ? `&repositoryId=${pr.repository_id}` : ''}` as any)} activeOpacity={0.85}>
             <GlassSurface variant="card" style={styles.card}>
               <View style={styles.cardHeader}>
                 <Text style={styles.prNumber}>PR #{pr.number}</Text>

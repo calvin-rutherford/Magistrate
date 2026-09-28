@@ -10,6 +10,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 import json
 import sqlite3
+from app.persistence import connect
 from typing import Any, Optional
 
 from app import db
@@ -42,7 +43,7 @@ _PHASE_LABELS = {
 
 def _connect() -> sqlite3.Connection:
     db.init_db()
-    connection = sqlite3.connect(db.DB_PATH, timeout=5.0)
+    connection = connect(db.DB_PATH, timeout=5.0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection

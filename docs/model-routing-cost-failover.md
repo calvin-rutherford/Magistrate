@@ -85,9 +85,10 @@ most two. Retry/fallback is allowed only for retryable provider failures and
 never after a tool call. Candidates in the selected capability class precede
 other classes; alternate providers use their native adapter.
 
-Before every attempt, SQLite `BEGIN IMMEDIATE` reserves integer micro-USD in
-`magi_model_routes`. A monthly or per-request limit blocks the call before any
-provider traffic. A fallback above `max_automatic_fallback_cost_usd` pauses with
+Before every attempt, the shared persistence transaction (`BEGIN IMMEDIATE` on
+SQLite, translated to a transaction-scoped lock on PostgreSQL) reserves integer
+micro-USD in `magi_model_routes`. A monthly or per-request limit blocks the call
+before any provider traffic. A fallback above `max_automatic_fallback_cost_usd` pauses with
 `route_fallback_confirmation_required`; retrying the saved message with
 explicit confirmation authorizes that material fallback. Hard budget exhaustion
 is never overridable from chat. There is no silent downgrade of reasoning,
@@ -101,6 +102,15 @@ section records exactly one policy category/outcome per canonical human turn,
 including confirmation-required, failed, and cancelled turns that made no paid
 call. Neither ledger stores prompts, responses, tool arguments, credentials, or
 chain-of-thought.
+
+This operational model-cost ledger and the customer credit ledger have distinct,
+non-overlapping authority. `magi_model_routes` meters each Native Chat provider
+call and enforces the operator's model-routing USD budgets. `gateway/app/billing.py`
+reserves and settles customer Magistrate Credits once for the resulting execution
+objective, using terminal execution usage and the billing catalog. A catalog
+model's `credits_remaining_usd` is an operator provider allocation, not a customer
+credit balance; routing never mints, debits, or reports customer credits. See
+`docs/billing-and-credits.md` for that accounting contract.
 
 ## Execution harness strategy
 

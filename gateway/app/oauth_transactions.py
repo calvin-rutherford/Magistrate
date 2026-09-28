@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -120,7 +121,7 @@ def _state_ttl_seconds() -> int:
 
 
 def _connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(database.DB_PATH, timeout=5)
+    connection = connect(database.DB_PATH, timeout=5)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 

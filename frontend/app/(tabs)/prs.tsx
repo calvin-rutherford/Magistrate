@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Alert, Platform } from 'react-native';
+import * as Linking from 'expo-linking';
+import * as WebBrowser from 'expo-web-browser';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
-import { fetchGitHubPRs, fetchUnifiedAttention, GitHubPR } from '../../src/api/client';
+import { beginGitHubAppInstall, fetchGitHubAppStatus, fetchGitHubPRs, fetchUnifiedAttention, GitHubAppStatus, GitHubPR } from '../../src/api/client';
 import { useRouter } from 'expo-router';
 
 export default function PRsScreen() {
@@ -15,11 +17,19 @@ export default function PRsScreen() {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
+  const [appStatus, setAppStatus] = useState<GitHubAppStatus | null>(null);
 
   const loadPRs = async (nextPage = 1, refresh = false) => {
     setLoading(true);
     setError(null);
     try {
+      const status = await fetchGitHubAppStatus();
+      setAppStatus(status);
+      if (!status.configured || !status.installations.some(item => item.status === 'active')) {
+        setPrs([]);
+        setHasMore(false);
+        return;
+      }
       const data = await fetchGitHubPRs(nextPage, refresh);
       setPrs(current => nextPage === 1 ? data.items : [...current, ...data.items]);
       setPage(nextPage);
@@ -28,6 +38,28 @@ export default function PRsScreen() {
       setError(e instanceof Error ? e.message : 'GitHub pull requests could not be loaded.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const installGitHubApp = async () => {
+    try {
+      const redirectUri = Platform.OS === 'web' && typeof window !== 'undefined'
+        ? new URL('/prs', window.location.origin).toString()
+        : Linking.createURL('/prs');
+      const result = await beginGitHubAppInstall(redirectUri);
+      const browserResult = await WebBrowser.openAuthSessionAsync(result.auth_url, redirectUri);
+      if (browserResult.type === 'success') {
+        const callback = new URL(browserResult.url);
+        if (callback.searchParams.get('github_error')) {
+          Alert.alert('GitHub App not installed', 'GitHub did not complete the repository installation.');
+        }
+        await loadPRs(1, true);
+      } else {
+        WebBrowser.dismissBrowser();
+      }
+    } catch (reason) {
+      WebBrowser.dismissBrowser();
+      Alert.alert('GitHub App unavailable', reason instanceof Error ? reason.message : 'The installation could not be started.');
     }
   };
 
@@ -71,9 +103,22 @@ export default function PRsScreen() {
         </View>
 
         {error && <GlassSurface variant="card" style={styles.prCard}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={() => loadPRs(1, true)}><Text style={styles.linkText}>TRY AGAIN</Text></TouchableOpacity></GlassSurface>}
-        {!error && !loading && prs.length === 0 && <GlassSurface variant="card" style={styles.prCard}><Text style={styles.prSummary}>No open pull requests.</Text></GlassSurface>}
+        {!error && !loading && appStatus && !appStatus.configured && <GlassSurface variant="card" style={styles.prCard}>
+          <Text style={styles.prTitle}>GitHub App activation required</Text>
+          <Text style={styles.prSummary}>Repository access is blocked until an operator configures the GitHub App. No App ID or credential has been assumed.</Text>
+        </GlassSurface>}
+        {!error && !loading && appStatus?.configured && appStatus.installations.some(item => item.status === 'suspended') && <GlassSurface variant="card" style={styles.prCard}>
+          <Text style={styles.prTitle}>GitHub App suspended</Text>
+          <Text style={styles.prSummary}>Repository data is unavailable until an organization owner resumes this installation in GitHub.</Text>
+        </GlassSurface>}
+        {!error && !loading && appStatus?.configured && !appStatus.installations.some(item => item.status === 'active' || item.status === 'suspended') && <GlassSurface variant="card" style={styles.prCard}>
+          <Text style={styles.prTitle}>Connect selected repositories</Text>
+          <Text style={styles.prSummary}>Install the Magistrate GitHub App and grant only the repositories you want this account to read.</Text>
+          <TouchableOpacity onPress={installGitHubApp}><Text style={styles.linkText}>INSTALL GITHUB APP ↗</Text></TouchableOpacity>
+        </GlassSurface>}
+        {!error && !loading && appStatus?.configured && appStatus.installations.some(item => item.status === 'active') && prs.length === 0 && <GlassSurface variant="card" style={styles.prCard}><Text style={styles.prSummary}>{appStatus.repository_count === 0 ? 'No repositories are authorized. Select repositories in the GitHub App installation.' : 'No open pull requests.'}</Text></GlassSurface>}
         {prs.map(pr => (
-          <TouchableOpacity key={pr.id} onPress={() => router.push(`/pr-detail?number=${pr.number}` as any)} activeOpacity={0.85}>
+          <TouchableOpacity key={`${pr.repository_id || pr.repository}:${pr.id}`} onPress={() => router.push(`/pr-detail?number=${pr.number}${pr.repository_id ? `&repositoryId=${pr.repository_id}` : ''}` as any)} activeOpacity={0.85}>
             <GlassSurface variant="card" style={styles.prCard}>
               <View style={styles.prHeaderRow}>
                 <View style={styles.prTagGroup}>

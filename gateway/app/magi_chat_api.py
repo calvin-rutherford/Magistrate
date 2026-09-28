@@ -181,6 +181,7 @@ async def post_magi_message(
             # authority. Tool JSON can never grant that scope to itself.
             allow_tools=principal.has("command"),
             explicit_confirmation=contract.explicit_confirmation,
+            actor_session_id=principal.session_id,
         )
     except MagiChatNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
