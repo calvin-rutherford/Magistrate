@@ -37,6 +37,7 @@ from app.magi_tool_protocol import (
     MagiToolError,
     MagiToolExecutionResult,
 )
+from app.magi_routing import requires_high_impact_confirmation
 
 FIRSTMATE_SUBMIT_OBJECTIVE = "firstmate.submit_objective"
 FIRSTMATE_OBJECTIVE_SCHEMA = "firstmate.objective.v1"
@@ -779,6 +780,15 @@ class FirstmateObjectiveTools:
         if not isinstance(call, MagiModelToolCall) or call.name != FIRSTMATE_SUBMIT_OBJECTIVE:
             raise MagiToolError("tool_not_supported", retryable=False)
         contract = parse_submit_objective_arguments(call.arguments_json)
+        policy_text = "\n".join((
+            contract.objective, contract.project,
+            *contract.constraints, *contract.acceptance_criteria,
+        ))
+        if requires_high_impact_confirmation(policy_text) and not context.explicit_confirmation:
+            # Re-check the validated model-authored objective. This prevents a
+            # benign-looking prompt or provider hallucination from bypassing
+            # the host's request-bound high-impact confirmation policy.
+            raise MagiToolError("objective_confirmation_required", retryable=False)
         claim = self.store.claim(
             context=context, invocation_key=invocation_key, contract=contract,
         )

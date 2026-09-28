@@ -157,9 +157,40 @@ if [[ "$NATIVE_CHAT_ENABLED" == "$LEGACY_CHAT_ENABLED" ]]; then
   echo "refusing deploy: exactly one of native chat and legacy chat must be enabled" >&2
   exit 1
 fi
-if [[ "$NATIVE_CHAT_ENABLED" == true && -z "$(env_value OPENAI_API_KEY)" ]]; then
-  echo "refusing deploy: enabled native chat requires OPENAI_API_KEY" >&2
-  exit 1
+if [[ "$NATIVE_CHAT_ENABLED" == true ]]; then
+  PROVIDER_CONFIGURED=false
+  for credential_key in OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY; do
+    if [[ -n "$(env_value "$credential_key")" ]]; then
+      PROVIDER_CONFIGURED=true
+    fi
+  done
+  ROUTING_CONFIG="$(env_value MAGISTRATE_MODEL_ROUTING_CONFIG)"
+  if [[ -n "$ROUTING_CONFIG" ]]; then
+    if ! ROUTING_CREDENTIAL_KEYS="$(printf '%s' "$ROUTING_CONFIG" | python3 -c '
+import json, re, sys
+try:
+    value = json.load(sys.stdin)
+    models = value["models"]
+    if not isinstance(models, list): raise ValueError
+    keys = {item["credential_env"] for item in models if isinstance(item, dict)}
+    if not keys or any(not isinstance(key, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,127}", key) for key in keys): raise ValueError
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+print("\n".join(sorted(keys)))
+')"; then
+      echo "refusing deploy: MAGISTRATE_MODEL_ROUTING_CONFIG is invalid" >&2
+      exit 1
+    fi
+    while IFS= read -r credential_key; do
+      if [[ -n "$credential_key" && -n "$(env_value "$credential_key")" ]]; then
+        PROVIDER_CONFIGURED=true
+      fi
+    done <<< "$ROUTING_CREDENTIAL_KEYS"
+  fi
+  if [[ "$PROVIDER_CONFIGURED" != true ]]; then
+    echo "refusing deploy: enabled native chat requires at least one configured model provider credential" >&2
+    exit 1
+  fi
 fi
 if [[ "$FRIEND_BETA_ENABLED" == true && "$NATIVE_CHAT_ENABLED" != true ]]; then
   echo "refusing deploy: Friend Beta access requires provider-native Magi chat" >&2

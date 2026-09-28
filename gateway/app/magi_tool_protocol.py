@@ -24,6 +24,7 @@ class MagiToolContext:
     user_message_id: str
     assistant_message_id: str
     command_authorized: bool
+    explicit_confirmation: bool = False
 
 
 @dataclass(frozen=True)

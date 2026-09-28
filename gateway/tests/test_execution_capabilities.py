@@ -79,6 +79,32 @@ def test_unified_profiles_keep_harness_provider_model_variant_and_auth(monkeypat
     assert response.json()['routing']['migration_supported'] is False
 
 
+def test_process_free_execution_recommendation_uses_closed_routing_metadata(monkeypatch):
+    configured = inventory()
+    configured['harnesses'][0]['models'][0]['routing'] = {
+        'reasoning': 4, 'context_tokens': 100000, 'tools': True,
+        'multimodal': False, 'reliability': '0.99', 'latency_ms': 250,
+        'estimated_cost_usd': '0.020000',
+    }
+    monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(configured))
+
+    response = client.post('/api/v1/execution/route-recommendation', headers=HEADERS, json={
+        'reasoning': 3, 'context_tokens': 20000, 'tools': True,
+    })
+    assert response.status_code == 200
+    assert response.json() == {
+        'schema_version': 'execution.route-recommendation.v1',
+        'selection': {
+            'profile_id': 'codex:gpt-5', 'harness': 'codex',
+            'provider': 'unknown', 'model': 'gpt-5', 'variant': 'gpt-5',
+            'estimated_cost_usd': '0.020000',
+            'reason': 'cheapest-reliably-capable',
+        },
+        'execution_started': False,
+        'consumer': 'firstmate',
+    }
+
+
 def test_execution_settings_persist_defaults_and_clear_selection(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_EXECUTION_INVENTORY', json.dumps(inventory()))
     response = client.get('/api/v1/execution/settings?user_id=settings-test', headers=HEADERS)

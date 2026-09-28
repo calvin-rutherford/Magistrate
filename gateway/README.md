@@ -14,21 +14,27 @@ Set `MAGISTRATE_SECRET_KEY_VERSION` when introducing a new key; it defaults to
 ## Provider-native Magi Chat
 
 Normal captain chat is now `POST /api/v1/magi/messages`: authenticated FastAPI
-calls one non-streamed OpenAI-compatible provider adapter and atomically retains
-the user/assistant pair in additive `magi_conversations` / `magi_messages`
-tables. `client_message_id` is unique per authenticated principal, including
-under concurrent retries. Reads, replay, retry, cancel, diagnostics, and the
-native WebSocket feed are owner-scoped and fail closed; clients cannot submit an
-owner identity. Provider keys remain server-only. See
+routes one complete turn through native OpenAI, Anthropic, Google, or registered
+future-provider adapters and atomically retains the user/assistant pair in
+additive `magi_conversations` / `magi_messages` tables. `client_message_id` is
+unique per authenticated principal, including under concurrent retries. Reads,
+replay, retry, cancel, diagnostics, and the native WebSocket feed are
+owner-scoped and fail closed; clients cannot submit an owner identity. Provider
+keys remain server-only. See
 [`../docs/native-chat-architecture.md`](../docs/native-chat-architecture.md) for
 the API and architecture contract.
 
-Native Magi Chat is unconditional and requires `OPENAI_API_KEY` in production.
+Native Magi Chat is unconditional and production requires at least one
+credentialed, available route in the validated model catalog. Selection,
+capability policy, cost metering, budget reservations, failover, and
+content-free route records are documented in
+[`../docs/model-routing-cost-failover.md`](../docs/model-routing-cost-failover.md).
 Existing deployment compatibility settings do not register an alternate human
 conversation API. Chat and replay never call Herdr, terminal parsers, or Pi
 ownership. The only execution edge is the closed
 `firstmate.submit_objective` tool: it is offered only to a command-authorized
-turn and dispatches only when explicitly selected.
+turn and dispatches only when explicitly selected. No retry or provider
+fallback occurs after a tool call has been observed.
 
 ## Process-free runtime reads
 
