@@ -1029,7 +1029,7 @@ export interface AttentionItem {
 }
 
 export interface NotificationEvent extends AttentionItem {
-  notification_kind: 'captain_question' | 'pr_ready' | 'blocker' | 'stall' | 'failure' | 'milestone' | 'completion' | 'consequential_decision';
+  notification_kind: 'captain_question' | 'pr_ready' | 'blocker' | 'stall' | 'failure' | 'milestone' | 'completion' | 'consequential_decision' | 'budget' | 'credit' | 'repository_disconnected' | 'payment_issue';
   url: string;
   deep_link?: string | null;
   revision?: string;

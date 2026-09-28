@@ -42,4 +42,6 @@ test('voice preferences have durable keys, defaults, validation, and save functi
   assert.match(preferences, /voiceTranscriptBehavior: 'insert'/);
   assert.match(preferences, /saveVoiceCaptureBehavior/);
   assert.match(preferences, /saveVoiceTranscriptBehavior/);
+  for (const key of ['output-enabled', 'auto-speak', 'auto-listen']) assert.match(preferences, new RegExp(`magistrate\\.voice\\.${key}`));
+  assert.match(preferences, /saveVoicePlaybackPreferences/);
 });

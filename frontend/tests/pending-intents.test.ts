@@ -14,6 +14,8 @@ test('parses the versioned owner routes and preserves exact targets', () => {
   assert.equal(pendingIntentPath(parsePendingIntent('/chat?agentId=crew-7')!), '/chat?agentId=crew-7');
   assert.equal(pendingIntentPath(parsePendingIntent('/attention?item=decision%3A7')!), '/attention?item=decision%3A7');
   assert.equal(pendingIntentPath(parsePendingIntent('/pr-detail?number=42')!), '/pr-detail?number=42');
+  assert.equal(pendingIntentPath(parsePendingIntent('/chat?shortcut=running')!), '/chat?shortcut=running');
+  assert.equal(pendingIntentPath(parsePendingIntent('/attention?overview=true')!), '/attention?overview=true');
 });
 
 test('rejects malformed, external, unsupported, and unsafe targets', () => {

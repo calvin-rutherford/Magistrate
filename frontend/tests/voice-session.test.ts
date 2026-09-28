@@ -34,3 +34,16 @@ test('cancel and permission errors recover without entering chat', () => {
   assert.doesNotMatch(source, /submitVoiceMove/);
   assert.match(capture, /Microphone permission was denied/);
 });
+
+test('voice lifecycle stops foreground capture and exposes explicit recovery controls', () => {
+  const source = readFileSync(new URL('../app/voice.tsx', import.meta.url), 'utf8');
+  const capture = readFileSync(new URL('../src/input/VoiceInputAdapter.ts', import.meta.url), 'utf8');
+  assert.match(source, /AppState\.addEventListener\('change'/);
+  assert.match(source, /Network\.useNetworkState\(\)/);
+  assert.match(source, /cancelMagiChatTurn\(messageId\)/);
+  assert.match(source, /testID="voice-mute"/);
+  assert.match(source, /testID="voice-cancel"/);
+  assert.match(source, /Linking\.openSettings\(\)/);
+  assert.match(capture, /getCurrentInput\(\)/);
+  assert.match(capture, /mediaServicesDidReset/);
+});

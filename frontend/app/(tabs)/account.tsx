@@ -8,7 +8,7 @@ import { EnvironmentBackground } from '../../src/components/EnvironmentBackgroun
 import { GlassSurface } from '../../src/components/GlassSurface';
 import { AccountOnboardingState, AuthProviderInfo, BillingAccount, connectAuthProvider, createBillingPortal, deleteGatewayAccount, fetchAccountOnboarding, fetchAuthProviders, fetchBillingAccount, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, logoutGatewaySession, ProviderAuthConfiguration, ProviderLoginMethod, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile } from '../../src/api/client';
 import { linkProviderIdentity, providerSignInAvailable, SignInProvider } from '../../src/services/ProviderSignIn';
-import { loadChatPreferences, saveVoiceInputMode } from '../../src/services/ChatPreferences';
+import { loadChatPreferences, saveVoiceInputMode, saveVoicePlaybackPreferences } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
 import { openExternalUrl } from '../../src/utils/externalLinks';
@@ -116,6 +116,10 @@ export default function AccountScreen() {
     Promise.allSettled([loadChatPreferences(), fetchVoiceInputCapabilities(), fetchNotificationPreferences(), loadOperatingPermissionMode()]).then(([preferencesResult, capabilityResult, notificationResult, localModeResult]) => {
       if (preferencesResult.status === 'fulfilled') {
         setVoiceInputMode(preferencesResult.value.voiceInputMode);
+        setVoiceEnabled(preferencesResult.value.voiceOutputEnabled);
+        setAutoSpeak(preferencesResult.value.voiceAutoSpeak);
+        setAutoListen(preferencesResult.value.voiceAutoListen);
+        ttsService.setSettings({ enabled: preferencesResult.value.voiceOutputEnabled, autoSpeak: preferencesResult.value.voiceAutoSpeak });
       }
       if (capabilityResult.status === 'fulfilled') {
         const local = getLocalVoiceCapabilities(capabilityResult.value.serverConfigured);
@@ -267,6 +271,7 @@ export default function AccountScreen() {
   const handleToggleVoiceOutput = (enabled: boolean) => {
     setVoiceEnabled(enabled);
     ttsService.setSettings({ enabled });
+    void saveVoicePlaybackPreferences({ outputEnabled: enabled });
   };
 
   const saveNotificationSettings = async (enabled: boolean, quiet: boolean, mode: OperatingPermissionMode = operatingPermissionMode) => {
@@ -406,7 +411,7 @@ export default function AccountScreen() {
             <Text style={styles.settingToggleLabel}>AUTO-SPEAK MAGISTRATE</Text>
             <TouchableOpacity
               style={[styles.toggleBtn, autoSpeak ? styles.toggleBtnActive : undefined]}
-              onPress={() => setAutoSpeak(!autoSpeak)}
+              onPress={() => { const next = !autoSpeak; setAutoSpeak(next); ttsService.setSettings({ autoSpeak: next }); void saveVoicePlaybackPreferences({ autoSpeak: next }); }}
             >
               <Text style={styles.toggleBtnText}>{autoSpeak ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>
@@ -416,7 +421,7 @@ export default function AccountScreen() {
             <Text style={styles.settingToggleLabel}>CONTINUOUS LISTEN AFTER RESPONSE</Text>
             <TouchableOpacity
               style={[styles.toggleBtn, autoListen ? styles.toggleBtnActive : undefined]}
-              onPress={() => setAutoListen(!autoListen)}
+              onPress={() => { const next = !autoListen; setAutoListen(next); void saveVoicePlaybackPreferences({ autoListen: next }); }}
             >
               <Text style={styles.toggleBtnText}>{autoListen ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>

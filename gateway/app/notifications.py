@@ -10,12 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from app.persistence import connect
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -28,9 +29,13 @@ MAX_PUSH_ATTEMPTS = 3
 
 # These are deliberately policy categories, not execution permissions.  A
 # mode can change alert volume only; it never authorizes a command.
-RESTRICTED_KINDS = frozenset({"captain_question", "blocker"})
-MODERATE_KINDS = RESTRICTED_KINDS | frozenset({"pr_ready", "milestone", "stall", "failure"})
-FULL_KINDS = frozenset({"captain_question", "blocker", "stall", "failure", "completion", "consequential_decision"})
+ACCOUNT_ATTENTION_KINDS = frozenset({"budget", "credit", "repository_disconnected", "payment_issue"})
+RESTRICTED_KINDS = frozenset({"captain_question", "blocker", "consequential_decision"}) | ACCOUNT_ATTENTION_KINDS
+MODERATE_KINDS = RESTRICTED_KINDS | frozenset({"pr_ready", "milestone", "stall", "failure", "completion"})
+FULL_KINDS = frozenset({"captain_question", "blocker", "stall", "failure", "completion", "consequential_decision"}) | ACCOUNT_ATTENTION_KINDS
+# A terminal outcome can be useful without demanding a captain action. It may
+# be pushed once, but the client will not turn it into an unread Attention dot.
+INFORMATIONAL_KINDS = frozenset({"completion", "failure"})
 KNOWN_PLATFORMS = frozenset({"ios", "android", "native"})
 
 
@@ -307,7 +312,8 @@ def reconcile_notification_events(
     mode = preferences["mode"]
     actionable = {
         str(item["id"]): item for item in attention_items
-        if item.get("requires_action") is True and _mode_for_kind(mode, item.get("notification_kind"), bool(item.get("consequential")))
+        if (item.get("requires_action") is True or item.get("notification_kind") in INFORMATIONAL_KINDS)
+        and _mode_for_kind(mode, item.get("notification_kind"), bool(item.get("consequential")))
     }
     now = int(time.time())
     with connect(DB_PATH) as conn:
@@ -373,9 +379,51 @@ def mark_notification_events_delivered(user_id: str, item_ids: List[str]) -> Non
         )
 
 
+def _safe_deep_link(event: Dict[str, Any]) -> str:
+    """Keep notification navigation inside the public app route vocabulary."""
+    route = str(event.get("deep_link") or event.get("url") or "")
+    parsed = urlparse(route)
+    query = parse_qs(parsed.query)
+    if parsed.scheme or parsed.netloc:
+        return "/attention?overview=true"
+    item = query.get("item", [""])[0]
+    if parsed.path == "/attention" and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", item):
+        return "/attention?" + urlencode({"item": item})
+    if parsed.path == "/attention" and query.get("overview") == ["true"]:
+        return "/attention?overview=true"
+    agent_id = query.get("agentId", [""])[0]
+    if parsed.path == "/chat" and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", agent_id):
+        return "/chat?" + urlencode({"agentId": agent_id})
+    if parsed.path == "/chat" and query.get("shortcut") == ["running"]:
+        return "/chat?shortcut=running"
+    number = query.get("number", [""])[0]
+    if parsed.path == "/pr-detail" and re.fullmatch(r"[1-9][0-9]{0,8}", number):
+        return "/pr-detail?" + urlencode({"number": number})
+    return "/attention?overview=true"
+
+
+def _safe_push_copy(kind: Optional[str]) -> tuple[str, str]:
+    """Visible push copy never exposes repository, task, provider, or billing identifiers."""
+    if kind in {"captain_question", "consequential_decision", "blocker"}:
+        return "Your answer is needed", "Open Magistrate to review an item that needs your attention."
+    if kind == "completion":
+        return "Work completed", "Open Magistrate to review the result."
+    if kind in {"failure", "stall"}:
+        return "Work needs attention", "Open Magistrate to review what happened."
+    if kind in {"budget", "credit"}:
+        return "Usage needs attention", "Open Magistrate to review account usage."
+    if kind == "repository_disconnected":
+        return "A repository needs reconnecting", "Open Magistrate to review the connection."
+    if kind == "payment_issue":
+        return "Billing needs attention", "Open Magistrate to review billing."
+    if kind == "pr_ready":
+        return "A pull request is ready", "Open Magistrate to review it."
+    return "Magistrate attention", "Open Magistrate to review the update."
+
+
 def _push_intent_data(event: Dict[str, Any]) -> Dict[str, Any]:
     """Return a versioned, app-owned target alongside the legacy URL field."""
-    route = str(event.get("deep_link") or event.get("url") or "/attention")
+    route = _safe_deep_link(event)
     parsed = urlparse(route)
     query = parse_qs(parsed.query)
     target_type = "attention"
@@ -416,12 +464,13 @@ async def dispatch_notification_events(
     failures: List[Dict[str, Any]] = []
     for event in events:
         kind = event.get("notification_kind")
-        title = "Your answer is needed" if kind in {"captain_question", "consequential_decision", "blocker"} else event.get("title", "Magistrate attention")
+        title, body = _safe_push_copy(kind)
+        safe_route = _safe_deep_link(event)
         outcome = await send_push_notification(
             user_id,
             title,
-            event.get("subtitle") or "An item needs your attention.",
-            {**_push_intent_data(event), "url": event.get("deep_link") or event.get("url", "/attention"), "item_id": event.get("id"), "notification_kind": kind},
+            body,
+            {**_push_intent_data(event), "url": safe_route, "item_id": event.get("id"), "notification_kind": kind},
         )
         if outcome.get("status") == "sent":
             delivered.append(str(event["id"]))

@@ -4,9 +4,11 @@ export const PENDING_INTENT_VERSION = 1 as const;
 
 type VoiceIntent = { version: 1; targetType: 'voice'; route: '/voice'; params: { autostart: 'true' } };
 type AttentionIntent = { version: 1; targetType: 'attention'; route: '/attention'; params: { item: string } };
+type AttentionOverviewIntent = { version: 1; targetType: 'attention-overview'; route: '/attention'; params: { overview: 'true' } };
 type AgentIntent = { version: 1; targetType: 'agent'; route: '/chat'; params: { agentId: string } };
+type MagiQueryIntent = { version: 1; targetType: 'magi-query'; route: '/chat'; params: { shortcut: 'running' } };
 type PullRequestIntent = { version: 1; targetType: 'pull-request'; route: '/pr-detail'; params: { number: string } };
-export type PendingIntent = VoiceIntent | AttentionIntent | AgentIntent | PullRequestIntent;
+export type PendingIntent = VoiceIntent | AttentionIntent | AttentionOverviewIntent | AgentIntent | MagiQueryIntent | PullRequestIntent;
 export interface PendingIntentPayload {
   intent_version: number;
   target_type?: string;
@@ -51,11 +53,17 @@ export function parsePendingIntent(rawUrl: string | null | undefined): PendingIn
   }
   if (path === '/attention') {
     const item = safeParameter(parsed.searchParams.get('item'), /^[A-Za-z0-9._:-]+$/);
-    return item ? { version: PENDING_INTENT_VERSION, targetType: 'attention', route: '/attention', params: { item } } : null;
+    if (item) return { version: PENDING_INTENT_VERSION, targetType: 'attention', route: '/attention', params: { item } };
+    return parsed.searchParams.get('overview') === 'true'
+      ? { version: PENDING_INTENT_VERSION, targetType: 'attention-overview', route: '/attention', params: { overview: 'true' } }
+      : null;
   }
   if (path === '/chat') {
     const agentId = safeParameter(parsed.searchParams.get('agentId'), /^[A-Za-z0-9._:-]+$/);
-    return agentId ? { version: PENDING_INTENT_VERSION, targetType: 'agent', route: '/chat', params: { agentId } } : null;
+    if (agentId) return { version: PENDING_INTENT_VERSION, targetType: 'agent', route: '/chat', params: { agentId } };
+    return parsed.searchParams.get('shortcut') === 'running'
+      ? { version: PENDING_INTENT_VERSION, targetType: 'magi-query', route: '/chat', params: { shortcut: 'running' } }
+      : null;
   }
   if (path === '/pr-detail') {
     const number = parsed.searchParams.get('number');

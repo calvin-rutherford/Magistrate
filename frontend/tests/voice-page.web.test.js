@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { launchBrowser, startWebServer } = require('./helpers/web-server');
+const { clickRendered, launchBrowser, startWebServer } = require('./helpers/web-server');
 
 let server;
 let browser;
@@ -10,7 +10,7 @@ let VOICE_URL;
 
 test.before(async () => {
   server = await startWebServer({ readyPath: '/voice' });
-  VOICE_URL = `${server.base}/voice`;
+  VOICE_URL = `${server.base}/voice?autostart=true`;
   browser = await launchBrowser({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 });
 
@@ -50,8 +50,8 @@ test('voice control keeps the compact stage and enlarged branded mark proportion
   await page.waitForSelector('[data-testid="voice-control"]');
   // The stage is now an invisible hit target (no ghost-triangle SVG behind
   // the mark), so its size comes from the touchable's own box.
-  const stageWidth = await page.$eval('[data-testid="voice-control"]', element => Math.round(element.getBoundingClientRect().width));
-  const markWidth = await page.$eval('[data-testid="voice-active-mark"]', element => Math.round(element.getBoundingClientRect().width));
+  const stageWidth = await page.$$eval('[data-testid="voice-control"]', elements => Math.round(elements.find(element => element.getBoundingClientRect().width > 0)?.getBoundingClientRect().width || 0));
+  const markWidth = await page.$$eval('[data-testid="voice-active-mark"]', elements => Math.round(elements.find(element => element.getBoundingClientRect().width > 0)?.getBoundingClientRect().width || 0));
   const viewportWidth = await page.evaluate(() => innerWidth);
   const expectedStage = (viewportWidth < 680 ? Math.min(Math.max(viewportWidth - 34, 200), 360) : Math.min(viewportWidth * 0.46, 520)) * 0.95;
   const expectedMark = (viewportWidth < 680 ? Math.min(Math.max(viewportWidth * 0.54, 140), 220) : Math.min(viewportWidth * 0.28, 270)) * 1.2;
@@ -122,7 +122,7 @@ test('voice mode listens continuously: transcribes a turn, answers in the thread
   await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForFunction(() => document.body.innerText.includes('Listening'), { timeout: 20_000 });
   await new Promise(resolve => setTimeout(resolve, 1_000));
-  await page.click('[data-testid="voice-control"]');
+  await clickRendered(page, '[data-testid="voice-control"]');
   await page.waitForSelector('[data-testid="voice-conversation"]', { timeout: 20_000 });
   const thread = await page.$eval('[data-testid="voice-conversation"]', element => element.innerText);
   assert.match(thread, /What is the fleet doing right now\?/);
@@ -133,7 +133,7 @@ test('voice mode listens continuously: transcribes a turn, answers in the thread
   await page.close();
 });
 
-test('voice ripple field reacts to injected amplitude while the canonical mark stays geometrically stable', async () => {
+test('3D tetrahedron reacts to injected amplitude while its accessible stage stays stable', async () => {
   const page = await browser.newPage();
   await page.setViewport({ width: 390, height: 844 });
   await page.evaluateOnNewDocument(() => {
@@ -153,13 +153,13 @@ test('voice ripple field reacts to injected amplitude while the canonical mark s
   await page.goto(VOICE_URL, { waitUntil: 'networkidle0' });
   await page.waitForFunction(() => typeof window.__voiceSetTestAmplitude === 'function' && document.body.innerText.includes('Listening'), { timeout: 20_000 });
   const before = await page.$eval('[data-testid="voice-active-mark"]', element => element.getBoundingClientRect().toJSON());
-  const quietRipple = await page.$eval('[data-testid="voice-ripple-layer-4"]', element => ({ opacity: getComputedStyle(element).opacity, rect: element.getBoundingClientRect().toJSON() }));
+  const quietPoints = await page.$$eval('[data-testid^="voice-tetrahedron-face-"]', elements => elements.map(element => element.getAttribute('points')));
   await page.evaluate(() => window.__voiceSetTestAmplitude?.(1));
   await new Promise(resolve => setTimeout(resolve, 650));
   const after = await page.$eval('[data-testid="voice-active-mark"]', element => element.getBoundingClientRect().toJSON());
-  const loudRipple = await page.$eval('[data-testid="voice-ripple-layer-4"]', element => ({ opacity: getComputedStyle(element).opacity, rect: element.getBoundingClientRect().toJSON() }));
+  const loudPoints = await page.$$eval('[data-testid^="voice-tetrahedron-face-"]', elements => elements.map(element => element.getAttribute('points')));
   assert.ok(Math.abs(before.width - after.width) < 0.5 && Math.abs(before.height - after.height) < 0.5, JSON.stringify({ before, after }));
-  assert.ok(Math.abs(quietRipple.rect.width - loudRipple.rect.width) > 1 || quietRipple.opacity !== loudRipple.opacity, JSON.stringify({ quietRipple, loudRipple }));
+  assert.notDeepEqual(quietPoints, loudPoints);
   await page.close();
 });
 
@@ -182,7 +182,7 @@ test('ending a deep-linked voice session still lands back in chat', async () => 
   await page.goto(VOICE_URL, { waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForSelector('[data-testid="end-voice-conversation"]');
-  await page.click('[data-testid="end-voice-conversation"]');
+  await clickRendered(page, '[data-testid="end-voice-conversation"]');
   await page.waitForFunction(() => window.location.pathname === '/chat', { timeout: 20_000 });
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   await page.close();

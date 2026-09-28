@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder, useAudioRecorderState } from 'expo-audio';
 import { Platform } from 'react-native';
 import { browserSpeechRecognitionAvailable, DEFAULT_VOICE_INPUT_MODE, VoiceInputMode } from '../services/VoiceInputModes';
@@ -25,6 +25,9 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void, mo
   const recorder = useAudioRecorder(options);
   const recorderState = useAudioRecorderState(recorder, 100);
   const [error, setError] = useState<VoiceCaptureError | null>(null);
+  const [audioInput, setAudioInput] = useState<{ uid: string; name: string; type: string } | null>(null);
+  const [routeRevision, setRouteRevision] = useState(0);
+  const audioInputUidRef = useRef<string | null>(null);
   const recognitionRef = useRef<any>(null);
   const browserTranscriptRef = useRef('');
   const stopBrowserRecognition = useCallback(() => {
@@ -82,6 +85,11 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void, mo
     try {
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await recorder.prepareToRecordAsync();
+      try {
+        const input = await recorder.getCurrentInput();
+        audioInputUidRef.current = input.uid;
+        setAudioInput(input);
+      } catch { /* Web and some simulators do not enumerate audio routes. */ }
       recorder.record();
       startBrowserRecognition();
     } catch (cause) {
@@ -114,9 +122,26 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void, mo
     if (recorderState.isRecording) await recorder.stop().catch(() => undefined);
     await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => undefined);
   }, [recorder, recorderState.isRecording, stopBrowserRecognition]);
+  useEffect(() => {
+    if (!recorderState.isRecording || Platform.OS === 'web') return;
+    let live = true;
+    const inspectRoute = async () => {
+      try {
+        const input = await recorder.getCurrentInput();
+        if (!live) return;
+        if (audioInputUidRef.current && audioInputUidRef.current !== input.uid) setRouteRevision(value => value + 1);
+        audioInputUidRef.current = input.uid;
+        setAudioInput(current => current?.uid === input.uid && current.name === input.name ? current : input);
+      } catch { /* A route can disappear while iOS is applying the change. Retry. */ }
+    };
+    void inspectRoute();
+    const timer = setInterval(() => void inspectRoute(), 750);
+    return () => { live = false; clearInterval(timer); };
+  }, [recorder, recorderState.isRecording]);
   const db = recorderState.metering;
   const amplitude = recorderState.isRecording && typeof db === 'number'
     ? Math.max(0, Math.min(1, Math.pow(10, db / 20))) : 0;
   return { start, stop, cancel, isRecording: recorderState.isRecording,
-    durationMillis: recorderState.durationMillis, amplitude, error };
+    durationMillis: recorderState.durationMillis, amplitude, error, audioInput, routeRevision,
+    mediaServicesDidReset: Boolean(recorderState.mediaServicesDidReset) };
 }
