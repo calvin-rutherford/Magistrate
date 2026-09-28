@@ -1588,6 +1588,56 @@ def _initialize_db() -> None:
         updated_at INTEGER NOT NULL
     )
     ''')
+    # Content-free paid-inference ledger. Costs use integer micro-USD and an
+    # explicit conservative budget charge; NULL actual cost means the provider
+    # did not report usage, never that the call was free.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_model_routes (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        route_category TEXT NOT NULL CHECK(route_category IN (
+            'DIRECT_CONVERSATION','READ_ONLY_INVESTIGATION','EXECUTION',
+            'DECISION_RESPONSE','HIGH_IMPACT_ACTION')),
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        capability_class TEXT NOT NULL,
+        attempt_ordinal INTEGER NOT NULL,
+        fallback_from TEXT,
+        state TEXT NOT NULL CHECK(state IN ('reserved','succeeded','failed')),
+        estimated_cost_micro_usd INTEGER NOT NULL CHECK(estimated_cost_micro_usd >= 0),
+        actual_cost_micro_usd INTEGER CHECK(actual_cost_micro_usd >= 0),
+        budget_charge_micro_usd INTEGER NOT NULL CHECK(budget_charge_micro_usd >= 0),
+        input_tokens INTEGER CHECK(input_tokens >= 0),
+        output_tokens INTEGER CHECK(output_tokens >= 0),
+        error_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, request_id, attempt_ordinal)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_model_routes_budget ON magi_model_routes(owner_user_id, created_at, state)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_model_routes_model ON magi_model_routes(provider_id, model_id, state)')
+    # One content-free policy closure per native human turn, including turns
+    # intentionally stopped before a paid provider call.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_turn_routes (
+        assistant_message_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        route_category TEXT NOT NULL CHECK(route_category IN (
+            'DIRECT_CONVERSATION','READ_ONLY_INVESTIGATION','EXECUTION',
+            'DECISION_RESPONSE','HIGH_IMPACT_ACTION')),
+        permission_granted INTEGER NOT NULL CHECK(permission_granted IN (0,1)),
+        explicit_confirmation INTEGER NOT NULL CHECK(explicit_confirmation IN (0,1)),
+        outcome TEXT NOT NULL CHECK(outcome IN (
+            'routing','direct-response','objective-accepted','memory-saved',
+            'confirmation-required','failed','cancelled')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(assistant_message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_turn_routes_owner ON magi_turn_routes(owner_user_id, updated_at)')
 
     # The Firstmate adapter has its own non-destructive consumer position. It
     # never reads or mutates Firstmate/Pi cursor sidecars. Source rows are

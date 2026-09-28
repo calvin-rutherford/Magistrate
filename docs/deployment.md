@@ -29,15 +29,21 @@ MAGISTRATE_BOOTSTRAP_SECRET=<operator-generated-secret>
 MAGISTRATE_SECRET_KEY=<generated-fernet-key>
 MAGISTRATE_CORS_ORIGINS=https://magistrate.example
 MAGISTRATE_FRIEND_BETA_ENABLED=false
+# Configure one or more candidates from the validated routing catalog:
 OPENAI_API_KEY=<server-side-provider-secret>
-MAGISTRATE_MAGI_MODEL=gpt-4o-mini
+# ANTHROPIC_API_KEY=<server-side-provider-secret>
+# GOOGLE_API_KEY=<server-side-provider-secret>
 MAGISTRATE_NATIVE_CHAT_ENABLED=true
 MAGISTRATE_LEGACY_CHAT_ENABLED=false
 MAGISTRATE_PI_OWNERSHIP_ENABLED=false
 ```
 
-`OPENAI_API_KEY` must exist only in the mode-`0600` Gateway environment; there
-is no `EXPO_PUBLIC_` provider key. The guarded exporter derives the two public
+Every configured model-provider key must exist only in the mode-`0600` Gateway
+environment; there is no `EXPO_PUBLIC_` provider key. Typed repository defaults
+for capabilities, prices, budgets, and failover live in
+`gateway/app/magi_routing.py`; production may replace the complete validated
+catalog with `MAGISTRATE_MODEL_ROUTING_CONFIG`. See
+[`model-routing-cost-failover.md`](./model-routing-cost-failover.md). The guarded exporter derives the two public
 transport booleans from the server flags, preventing a native frontend/legacy
 server split. Native defaults to on and legacy defaults to off, but production
 deployment still validates that exactly one is enabled. See

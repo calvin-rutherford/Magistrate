@@ -57,7 +57,7 @@ def objective_arguments(**updates):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
-def tool_context(owner='operator-a', *, authorized=True):
+def tool_context(owner='operator-a', *, authorized=True, confirmed=False):
     return MagiToolContext(
         owner_user_id=owner,
         conversation_id='mgc_conversation_1234',
@@ -65,6 +65,7 @@ def tool_context(owner='operator-a', *, authorized=True):
         user_message_id='mgm_user_1234',
         assistant_message_id='mgm_assistant_1234',
         command_authorized=authorized,
+        explicit_confirmation=confirmed,
     )
 
 
@@ -197,6 +198,30 @@ async def test_objective_executor_rejects_missing_command_authority_and_argument
     with pytest.raises(MagiToolError) as conflict:
         await tools.execute(changed, context=tool_context(), invocation_key='b' * 64)
     assert conflict.value.code == 'objective_idempotency_conflict'
+    assert len(dispatcher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_objective_executor_rechecks_model_authored_high_impact_action(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'objective-confirmation.sqlite3'))
+    _ensure_operator()
+    dispatcher = FakeDispatcher()
+    tools = FirstmateObjectiveTools(
+        store=ObjectiveSubmissionStore(), dispatcher=dispatcher,
+    )
+    call = MagiModelToolCall(
+        'call_high_impact', FIRSTMATE_SUBMIT_OBJECTIVE,
+        objective_arguments(objective='Deploy Magistrate to production.'),
+    )
+    with pytest.raises(MagiToolError) as unconfirmed:
+        await tools.execute(call, context=tool_context(), invocation_key='c' * 64)
+    assert unconfirmed.value.code == 'objective_confirmation_required'
+    assert dispatcher.calls == []
+
+    accepted = await tools.execute(
+        call, context=tool_context(confirmed=True), invocation_key='c' * 64,
+    )
+    assert accepted.payload['status'] == 'accepted'
     assert len(dispatcher.calls) == 1
 
 

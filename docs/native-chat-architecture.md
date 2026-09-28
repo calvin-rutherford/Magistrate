@@ -9,7 +9,7 @@ not selected by a rollout or rollback flag.
 Chat or Voice
   -> POST /api/v1/magi/messages
   -> MagiChatService reserves one owner-scoped user/assistant pair
-  -> configured provider completion (with the closed Firstmate objective tool)
+  -> capability/cost/budget-routed provider completion (with the closed Firstmate objective tool)
   -> exact final assistant content in magi_messages
   -> HTTP history/replay and magi_messages realtime events
 ```
@@ -35,6 +35,12 @@ Human conversation uses only:
 The same socket may deliver structured `activity_records`. It does not deliver
 terminal output, worker/pane history, selectable conversation targets, or
 legacy captain events.
+
+OpenAI, Anthropic, Google, and future adapters share the closed model boundary;
+selection, metering, budgets, and failover are defined in
+[`model-routing-cost-failover.md`](model-routing-cost-failover.md). Routing does
+not create another conversation path, and it stops before any retry/fallback
+once a tool call has been observed.
 
 The retired captain prompt/output, terminal history, generic conversation,
 Voice move, Pi ownership, and terminal-parser paths are not registered as human

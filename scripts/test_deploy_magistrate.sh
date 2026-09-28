@@ -147,7 +147,7 @@ if NATIVE_MISSING_PROVIDER="$(TEST_BACKUP_DIR="$ROOT/state/native-missing" run_u
   echo 'native rollout without provider credentials was not rejected' >&2
   exit 1
 fi
-grep -Fq 'enabled native chat requires OPENAI_API_KEY' <<<"$NATIVE_MISSING_PROVIDER"
+grep -Fq 'enabled native chat requires at least one configured model provider credential' <<<"$NATIVE_MISSING_PROVIDER"
 printf 'OPENAI_API_KEY=test-provider-secret\n' >> "$DEPLOY/gateway/.env"
 git -C "$DEPLOY" add gateway/.env
 git -C "$DEPLOY" commit -m configure-native-provider >/dev/null

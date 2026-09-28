@@ -30,6 +30,10 @@ async def test_openai_model_returns_exact_complete_text_without_logging_or_norma
             'status': 'completed',
             'output': [{'type': 'message', 'role': 'assistant',
                         'content': [{'type': 'output_text', 'text': expected}]}],
+            'usage': {
+                'input_tokens': 20, 'output_tokens': 10,
+                'input_tokens_details': {'cached_tokens': 5},
+            },
         })
 
     model = OpenAIMagiModel(
@@ -40,6 +44,9 @@ async def test_openai_model_returns_exact_complete_text_without_logging_or_norma
         [MagiModelMessage('user', 'hello')], system_context='system', request_id='safe-request-id',
     )
     assert result.text.encode('utf-8') == expected.encode('utf-8')
+    assert result.usage.input_tokens == 20
+    assert result.usage.output_tokens == 10
+    assert result.usage.cached_input_tokens == 5
 
 
 @pytest.mark.asyncio
@@ -127,9 +134,10 @@ async def test_openai_model_round_trips_one_closed_tool_call_and_result_message(
     assert [item[0] for item in requests] == ['tool-request-1', 'tool-request-2']
 
 
-def test_enabled_production_native_chat_requires_a_server_provider_key(monkeypatch):
+def test_enabled_production_native_chat_requires_a_configured_routed_provider(monkeypatch):
     monkeypatch.setenv('MAGISTRATE_ENV', 'production')
-    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    for key in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY'):
+        monkeypatch.delenv(key, raising=False)
     with pytest.raises(RuntimeError):
         validate_magi_chat_configuration()
 

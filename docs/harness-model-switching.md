@@ -1,6 +1,10 @@
 # Harness and model switching
 
 Magistrate treats execution identity as persisted structured data, not a guess.
+Provider-model selection for Native Chat and process-free recommendations for
+new execution profiles are specified in
+[`model-routing-cost-failover.md`](model-routing-cost-failover.md); neither is
+evidence that a runtime was launched or migrated.
 Fleet rows show objective/task/run lifecycle accepted through versioned events;
 they never inspect Herdr panes. The current event contract does not carry a
 harness/model identity, so those fields remain **unknown**. A configured
@@ -28,6 +32,10 @@ when that consumer is present; it does not rewrite existing agents.
 
 The composer selector is separate: it passes an explicitly selected profile as
 prompt context for a new prompt and does not claim to change a live process.
+Verified profiles with complete capability, reliability, latency, and estimated
+cost metadata may also be evaluated by the replaceable
+`POST /api/v1/execution/route-recommendation` strategy. Its response explicitly
+reports `execution_started: false`; Firstmate remains the launch consumer.
 
 ## Moving a running agent
 

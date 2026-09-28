@@ -25,6 +25,14 @@ MAX_ATTACHMENTS_PER_MESSAGE = 10
 _BUSY_TIMEOUT_SECONDS = 10
 _VALID_STATUSES = frozenset({"pending", "completed", "failed", "cancelled"})
 _VALID_SOURCES = frozenset({"text", "voice"})
+_VALID_ROUTE_CATEGORIES = frozenset({
+    "DIRECT_CONVERSATION", "READ_ONLY_INVESTIGATION", "EXECUTION",
+    "DECISION_RESPONSE", "HIGH_IMPACT_ACTION",
+})
+_VALID_ROUTE_OUTCOMES = frozenset({
+    "routing", "direct-response", "objective-accepted", "memory-saved",
+    "confirmation-required", "failed", "cancelled",
+})
 _SCHEMA_LOCK = threading.Lock()
 _INITIALIZED_DB_PATHS: set[str] = set()
 
@@ -592,6 +600,7 @@ class MagiChatStore:
             "conversation_id": conversation["id"],
             "assistant_message": _public_message(assistant),
             "messages": [_public_message(assistant)],
+            "error_code": assistant["error_code"] if assistant["status"] == "failed" else None,
         }
 
     def context_before(
@@ -743,6 +752,11 @@ class MagiChatStore:
                     (now, row["conversation_id"]),
                 )
                 _append_change(connection, row["conversation_id"], row["id"], revision, now)
+                connection.execute(
+                    """UPDATE magi_turn_routes SET outcome = 'failed', updated_at = ?
+                       WHERE assistant_message_id = ? AND owner_user_id = ?""",
+                    (now, row["id"], row["owner_user_id"]),
+                )
                 failures[row["owner_user_id"]] = failures.get(row["owner_user_id"], 0) + 1
             for owner_user_id, count in failures.items():
                 _increment_diagnostics(connection, owner_user_id, magi_messages_failed=count)
@@ -775,6 +789,11 @@ class MagiChatStore:
                     "UPDATE magi_conversations SET updated_at = ? WHERE id = ?",
                     (now, user["conversation_id"]),
                 )
+                connection.execute(
+                    """UPDATE magi_turn_routes SET outcome = 'cancelled', updated_at = ?
+                       WHERE assistant_message_id = ? AND owner_user_id = ?""",
+                    (now, assistant["id"], owner_user_id),
+                )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -797,6 +816,7 @@ class MagiChatStore:
             "user_message": _public_message(user),
             "assistant_message": _public_message(assistant),
             "messages": [_public_message(user), _public_message(assistant)],
+            "error_code": assistant["error_code"] if assistant["status"] == "failed" else None,
         }
 
     def list_conversation(
@@ -894,6 +914,73 @@ class MagiChatStore:
             "latest_change": int(latest),
             "has_more": len(changes) > limit,
         }
+
+    def record_turn_route(
+        self,
+        owner_user_id: str,
+        assistant_message_id: str,
+        *,
+        category: str,
+        permission_granted: bool,
+        explicit_confirmation: bool,
+        outcome: str,
+    ) -> None:
+        """Upsert one content-free policy closure for a canonical turn."""
+        if (
+            category not in _VALID_ROUTE_CATEGORIES
+            or outcome not in _VALID_ROUTE_OUTCOMES
+            or type(permission_granted) is not bool
+            or type(explicit_confirmation) is not bool
+        ):
+            raise ValueError("Native Magi route closure is invalid.")
+        now = _now_ms()
+        with _connect() as connection:
+            assistant = connection.execute(
+                """SELECT 1 FROM magi_messages
+                   WHERE id = ? AND owner_user_id = ? AND role = 'assistant'""",
+                (assistant_message_id, owner_user_id),
+            ).fetchone()
+            if assistant is None:
+                raise MagiChatNotFound("Native Magi assistant message not found.")
+            connection.execute(
+                """INSERT INTO magi_turn_routes
+                   (assistant_message_id, owner_user_id, route_category,
+                    permission_granted, explicit_confirmation, outcome,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(assistant_message_id) DO UPDATE SET
+                     route_category = excluded.route_category,
+                     permission_granted = excluded.permission_granted,
+                     explicit_confirmation = excluded.explicit_confirmation,
+                     outcome = excluded.outcome,
+                     updated_at = excluded.updated_at
+                   WHERE magi_turn_routes.owner_user_id = excluded.owner_user_id""",
+                (
+                    assistant_message_id, owner_user_id, category,
+                    int(permission_granted), int(explicit_confirmation), outcome,
+                    now, now,
+                ),
+            )
+
+    def route_closures(self, owner_user_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("Native Magi route closure limit is invalid.")
+        with _connect() as connection:
+            rows = connection.execute(
+                """SELECT assistant_message_id, route_category, permission_granted,
+                          explicit_confirmation, outcome, created_at, updated_at
+                   FROM magi_turn_routes WHERE owner_user_id = ?
+                   ORDER BY updated_at DESC LIMIT ?""",
+                (owner_user_id, limit),
+            ).fetchall()
+        return [{
+            "assistant_message_id": row["assistant_message_id"],
+            "route_category": row["route_category"],
+            "permission_granted": bool(row["permission_granted"]),
+            "explicit_confirmation": bool(row["explicit_confirmation"]),
+            "outcome": row["outcome"],
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+        } for row in rows]
 
     def diagnostics(self, owner_user_id: str) -> dict[str, Any]:
         with _connect() as connection:

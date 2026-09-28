@@ -64,22 +64,43 @@ class MagiModelMessage:
 
 
 @dataclass(frozen=True)
+class MagiModelUsage:
+    """Provider-reported billable token counts (never inferred as actual usage)."""
+
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class MagiModelResult:
     """A complete provider turn; final text is preserved exactly as received."""
 
     text: str | None
     finish_reason: str = "stop"
     tool_calls: tuple[MagiModelToolCall, ...] = ()
+    usage: MagiModelUsage | None = None
 
 
 class MagiModelError(RuntimeError):
     """Safe, content-free provider failure suitable for service classification."""
 
-    def __init__(self, code: str, *, retryable: bool = True, tool_calls: int = 0):
+    def __init__(
+        self,
+        code: str,
+        *,
+        retryable: bool = True,
+        tool_calls: int = 0,
+        billing_uncertain: bool = False,
+    ):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
         self.tool_calls = max(0, int(tool_calls))
+        # A timeout or interrupted response may have consumed paid inference.
+        # Routers must reserve it conservatively and must not silently multiply
+        # that possible cost unless policy explicitly permits doing so.
+        self.billing_uncertain = bool(billing_uncertain)
 
 
 @runtime_checkable
@@ -295,6 +316,19 @@ def _parse_response_tool_calls(
     return tuple(parsed)
 
 
+def _openai_usage(payload: Mapping[str, Any]) -> MagiModelUsage | None:
+    raw = payload.get("usage")
+    if not isinstance(raw, Mapping):
+        return None
+    input_tokens = raw.get("input_tokens")
+    output_tokens = raw.get("output_tokens")
+    details = raw.get("input_tokens_details")
+    cached = details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
+    if not all(type(value) is int and value >= 0 for value in (input_tokens, output_tokens, cached)):
+        return None
+    return MagiModelUsage(input_tokens, output_tokens, cached)
+
+
 def _response_text(output: list[Any]) -> tuple[str | None, list[Any]]:
     """Extract only assistant output text and function calls from Responses."""
     text_parts: list[str] = []
@@ -459,9 +493,15 @@ class OpenAIMagiModel:
                     json=request_payload,
                 )
         except httpx.TimeoutException as exc:
-            raise MagiModelError("provider_timeout", retryable=True) from exc
-        except httpx.HTTPError as exc:
+            raise MagiModelError(
+                "provider_timeout", retryable=True, billing_uncertain=True,
+            ) from exc
+        except httpx.ConnectError as exc:
             raise MagiModelError("provider_unavailable", retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise MagiModelError(
+                "provider_unavailable", retryable=True, billing_uncertain=True,
+            ) from exc
         if response.status_code >= 400:
             # Provider bodies can echo request material. Deliberately classify
             # only the status and never propagate or log the body.
@@ -493,7 +533,10 @@ class OpenAIMagiModel:
                     "provider_tool_call_unsupported", retryable=False, tool_calls=len(raw_calls),
                 )
             calls = _parse_response_tool_calls(raw_calls, provider_tool_names)
-            return MagiModelResult(text=text, finish_reason="tool_calls", tool_calls=calls)
+            return MagiModelResult(
+                text=text, finish_reason="tool_calls", tool_calls=calls,
+                usage=_openai_usage(payload),
+            )
         if not isinstance(text, str) or not text.strip():
             raise MagiModelError("provider_empty_response", retryable=True)
         if magi_text_has_unsafe_controls(text):
@@ -504,4 +547,6 @@ class OpenAIMagiModel:
             raise MagiModelError("provider_invalid_unicode", retryable=True) from exc
         if len(text) > MAGI_MAX_RESPONSE_CHARACTERS or len(encoded) > MAGI_MAX_RESPONSE_BYTES:
             raise MagiModelError("response_too_large", retryable=True)
-        return MagiModelResult(text=text, finish_reason="stop")
+        return MagiModelResult(
+            text=text, finish_reason="stop", usage=_openai_usage(payload),
+        )

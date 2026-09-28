@@ -33,6 +33,11 @@ from app.magi_tool_protocol import (
     MagiToolError,
     MagiToolExecutor,
 )
+from app.magi_routing import (
+    ModelRouteContext,
+    RouteCategory,
+    classify_turn,
+)
 from app.project_memory import MagiContextAssembler, MemoryNotFound, MemoryScope
 
 MAX_NATIVE_CONTEXT_CHARACTERS = 100_000
@@ -42,6 +47,10 @@ MAX_VERIFIED_OUTCOME_CHECKS = 32
 MAX_VERIFIED_OUTCOME_ARTIFACTS = 16
 _TOOL_ACKNOWLEDGEMENT_FALLBACK = (
     "I've accepted that objective. I'll keep you updated here as the work progresses."
+)
+_HIGH_IMPACT_CONFIRMATION_REQUIRED = (
+    "This request may materially affect production, data, credentials, spending, or release state. "
+    "Review the exact action and submit it again with explicit confirmation before I delegate it."
 )
 _MEMORY_ACKNOWLEDGEMENT_FALLBACK = "I've saved that to this project's memory."
 _TOOL_ACK_COMPLETION_CLAIM = re.compile(
@@ -343,7 +352,17 @@ class MagiChatService:
         system_context: str,
         request_id: str,
         tools: Sequence[MagiToolDefinition] = (),
+        route_context: ModelRouteContext | None = None,
     ) -> MagiModelResult:
+        # Routing is additive to the provider-independent protocol. Test and
+        # future adapters need implement only complete(); the production router
+        # opts into authenticated, content-free route metadata explicitly.
+        complete_routed = getattr(self.model, "complete_routed", None)
+        if route_context is not None and callable(complete_routed):
+            return await complete_routed(
+                messages, system_context=system_context, request_id=request_id,
+                tools=tools, route_context=route_context,
+            )
         # Keep legacy/fake adapters source-compatible when no tool is offered;
         # only a configured tool-capable path receives the additive keyword.
         if tools:
@@ -474,11 +493,48 @@ class MagiChatService:
         *,
         source: str,
         allow_tools: bool,
+        explicit_confirmation: bool,
         actor_session_id: str,
     ) -> None:
         started = time.perf_counter_ns()
         observed_tool_calls = 0
+        category = classify_turn(content, command_authorized=allow_tools)
+        route_context = ModelRouteContext(
+            owner_user_id=owner_user_id,
+            category=category,
+            permission_granted=(allow_tools or category == RouteCategory.DIRECT_CONVERSATION),
+            explicit_confirmation=explicit_confirmation,
+            requires_tools=allow_tools,
+            # Native attachments currently expose authenticated metadata only;
+            # claiming a multimodal requirement would imply bytes were sent.
+            requires_multimodal=False,
+        )
+        route_outcome = "failed"
         try:
+            # High-impact text never reaches a provider or an objective tool
+            # until the authenticated caller supplies the explicit request bit.
+            # The second request needs a fresh client id, preserving exactly-once
+            # semantics for both the warning and any later accepted objective.
+            if category == RouteCategory.HIGH_IMPACT_ACTION and not explicit_confirmation:
+                latency_ms = max(0, (time.perf_counter_ns() - started) // 1_000_000)
+                await asyncio.to_thread(
+                    self.store.complete_submission,
+                    owner_user_id,
+                    prepared.assistant_message_id,
+                    prepared.attempt,
+                    _HIGH_IMPACT_CONFIRMATION_REQUIRED,
+                    latency_ms=latency_ms,
+                )
+                await asyncio.to_thread(
+                    self.store.record_turn_route,
+                    owner_user_id,
+                    prepared.assistant_message_id,
+                    category=category.value,
+                    permission_granted=route_context.permission_granted,
+                    explicit_confirmation=explicit_confirmation,
+                    outcome="confirmation-required",
+                )
+                return
             history = await asyncio.to_thread(
                 self.store.context_before,
                 owner_user_id,
@@ -527,6 +583,7 @@ class MagiChatService:
                     owner_user_id, client_message_id, prepared.attempt, phase="initial",
                 ),
                 tools=definitions,
+                route_context=route_context,
             )
             calls = self._tool_calls(result)
             observed_tool_calls = len(calls)
@@ -567,8 +624,14 @@ class MagiChatService:
                         owner_user_id, client_message_id, prepared.attempt,
                         phase="direct-response",
                     ),
+                    route_context=ModelRouteContext(
+                        owner_user_id=owner_user_id,
+                        category=RouteCategory.DIRECT_CONVERSATION,
+                        permission_granted=True,
+                    ),
                 )
                 response = self._validated_result(direct)
+                route_outcome = "direct-response"
             elif call is not None:
                 if call.name not in {definition.name for definition in execution_definitions}:
                     raise MagiModelError(
@@ -584,6 +647,7 @@ class MagiChatService:
                             user_message_id=prepared.user_message_id,
                             assistant_message_id=prepared.assistant_message_id,
                             command_authorized=allow_tools,
+                            explicit_confirmation=explicit_confirmation,
                             actor_session_id=actor_session_id,
                         ),
                         invocation_key=self._tool_invocation_key(
@@ -624,6 +688,12 @@ class MagiChatService:
                             owner_user_id, client_message_id, prepared.attempt,
                             phase="tool-acknowledgement",
                         ),
+                        route_context=ModelRouteContext(
+                            owner_user_id=owner_user_id,
+                            category=category,
+                            permission_granted=allow_tools,
+                            explicit_confirmation=explicit_confirmation,
+                        ),
                     )
                     response = self._validated_result(acknowledgement)
                     if not self._safe_tool_acknowledgement(response, dict(execution.payload)):
@@ -632,8 +702,14 @@ class MagiChatService:
                     raise
                 except Exception:
                     response = acknowledgement_fallback
+                route_outcome = (
+                    "memory-saved"
+                    if execution.payload.get("status") == "remembered"
+                    else "objective-accepted"
+                )
             else:
                 response = self._validated_result(result)
+                route_outcome = "direct-response"
             latency_ms = max(0, (time.perf_counter_ns() - started) // 1_000_000)
             await asyncio.to_thread(
                 self.store.complete_submission,
@@ -643,6 +719,15 @@ class MagiChatService:
                 response,
                 latency_ms=latency_ms,
                 tool_calls=observed_tool_calls,
+            )
+            await asyncio.to_thread(
+                self.store.record_turn_route,
+                owner_user_id,
+                prepared.assistant_message_id,
+                category=category.value,
+                permission_granted=route_context.permission_granted,
+                explicit_confirmation=explicit_confirmation,
+                outcome=route_outcome,
             )
         except asyncio.CancelledError:
             # Explicit cancellation transitions the reserved row separately.
@@ -656,6 +741,15 @@ class MagiChatService:
                 exc.code,
                 tool_calls=max(exc.tool_calls, observed_tool_calls),
             )
+            await asyncio.to_thread(
+                self.store.record_turn_route,
+                owner_user_id,
+                prepared.assistant_message_id,
+                category=category.value,
+                permission_granted=route_context.permission_granted,
+                explicit_confirmation=explicit_confirmation,
+                outcome="failed",
+            )
         except Exception:
             # Exception strings can contain provider payloads or local details.
             # Persist only a fixed classification and never log the exception.
@@ -666,6 +760,15 @@ class MagiChatService:
                 prepared.attempt,
                 "provider_failure",
                 tool_calls=observed_tool_calls,
+            )
+            await asyncio.to_thread(
+                self.store.record_turn_route,
+                owner_user_id,
+                prepared.assistant_message_id,
+                category=category.value,
+                permission_granted=route_context.permission_granted,
+                explicit_confirmation=explicit_confirmation,
+                outcome="failed",
             )
         finally:
             current = asyncio.current_task()
@@ -686,11 +789,16 @@ class MagiChatService:
             # Unlike an ordinary reply, an asynchronous outcome report receives
             # no conversation history. Its only user-role model input is the
             # canonical JSON built from MagiVerifiedOutcome above.
-            result = await self.model.complete(
+            result = await self._model_completion(
                 [MagiModelMessage(role="user", content=prompt)],
                 system_context=self._verified_outcome_system_context(),
                 request_id=self._provider_request_id(
                     owner_user_id, f"generated:{generation_key}", prepared.attempt,
+                ),
+                route_context=ModelRouteContext(
+                    owner_user_id=owner_user_id,
+                    category=RouteCategory.DIRECT_CONVERSATION,
+                    permission_granted=True,
                 ),
             )
             response = self._validated_result(result)
@@ -787,6 +895,7 @@ class MagiChatService:
         attachments: Sequence[dict[str, Any]] | None = None,
         retry_failed: bool = False,
         allow_tools: bool = False,
+        explicit_confirmation: bool = False,
         actor_session_id: str = "system",
     ) -> dict[str, Any]:
         """Submit once, or return the already-bound canonical pair.
@@ -807,10 +916,21 @@ class MagiChatService:
             retry_failed=retry_failed,
         )
         if prepared.claimed:
+            category = classify_turn(content, command_authorized=allow_tools)
+            await asyncio.to_thread(
+                self.store.record_turn_route,
+                owner_user_id,
+                prepared.assistant_message_id,
+                category=category.value,
+                permission_granted=(allow_tools or category == RouteCategory.DIRECT_CONVERSATION),
+                explicit_confirmation=explicit_confirmation,
+                outcome="routing",
+            )
             key = (owner_user_id, client_message_id)
             task = asyncio.create_task(self._complete_submission(
                 owner_user_id, client_message_id, prepared, content, attachments,
                 source=source, allow_tools=allow_tools,
+                explicit_confirmation=explicit_confirmation,
                 actor_session_id=actor_session_id,
             ))
             self._completion_tasks[key] = task

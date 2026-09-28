@@ -28,9 +28,11 @@ from app.onboarding import acknowledge_welcome, onboarding_state
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
+from app.execution_routing import ExecutionRequirements, select_execution_profile
 from app.contracts import (ExecutionSettingsContract, ExecutionCredentialContract,
                            NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
                            AttentionActionExecuteContract, RoutingPreferenceContract,
+                           ExecutionRouteRequirementsContract,
                            AgentMigrationRequestContract, AgentMigrationTransitionContract,
                            ActivityCatchUpContract, MAGI_MAX_RESPONSE_BYTES,
                            RenameAgentContract)
@@ -1396,6 +1398,30 @@ async def get_execution_capability_inventory(principal: Principal = Depends(requ
         return get_execution_capabilities(principal.user_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+
+
+@app.post('/api/v1/execution/route-recommendation')
+async def recommend_execution_route(
+    contract: ExecutionRouteRequirementsContract,
+    principal: Principal = Depends(require_scope('command')),
+):
+    """Select a truthful launch profile without driving any harness lifecycle."""
+    try:
+        capabilities = get_execution_capabilities(principal.user_id)
+        route = select_execution_profile(
+            capabilities['profiles'],
+            ExecutionRequirements(**contract.model_dump()),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        'schema_version': 'execution.route-recommendation.v1',
+        'selection': route.__dict__,
+        'execution_started': False,
+        'consumer': 'firstmate',
+    }
 
 
 def _routing_delivery(preference: Dict[str, Any], user_id: str) -> Dict[str, Any]:
