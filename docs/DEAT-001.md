@@ -58,9 +58,10 @@ Record pass/fail and evidence for each case:
 6. Native notification permission, Expo token registration, Gateway delivery,
    denied permission, offline/provider failure, and in-app fallback are
    observed separately. A foreground poll is not recorded as server push.
-7. Voice permission denial, foreground start/stop, final transcription, TTS,
-   cancellation, tap interruption, and background/lock behavior are recorded
-   without claiming ambient listening, VAD, Siri, or Action Button support.
+7. Voice permission denial, foreground start/stop, amplitude response, final
+   transcription, TTS, mute/cancellation/barge-in, audio-route changes,
+   background/lock behavior, all App Intents, and Action Button assignment are
+   recorded. Background/ambient listening remains intentionally unsupported.
 
 ## Repository-side preparation (not device evidence)
 

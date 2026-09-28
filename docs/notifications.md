@@ -2,7 +2,12 @@
 
 The Gateway is the source of truth for Captain Attention transitions. It
 reconciles an item fingerprint (`kind`, revision, copy, status, and deep link)
-and sends at most one Expo push for each active fingerprint. Provider errors
+and sends at most one Expo push for each active fingerprint. Sparse supported
+kinds cover decisions, completion/failure, budget/credit, repository disconnect,
+and payment issues (plus existing review/stall milestones). Visible push copy is
+fixed product language: task, repository, provider, host, path, and billing
+identifiers never appear on the lock screen. App-owned payload targets retain
+only the opaque key needed to open the authenticated Attention/Magi destination. Provider errors
 retry with bounded backoff; invalid device tokens are revoked. Quiet hours
 defer a transition rather than acknowledging it, so it is eligible after the
 quiet window. A successful remote send marks delivery, but not viewing: the
@@ -32,10 +37,11 @@ credentials; Expo Go and simulators cannot validate production delivery.
 ## Operating-permission modes
 
 Settings persist `restricted` (restricted / ask-first), `moderate`, or `full`.
-They select notification policy only: restricted surfaces decisions/blockers,
-moderate also includes review-ready PRs and meaningful milestones, and full
-suppresses routine progress while retaining stalls, failures needing Captain
-action, completions, and consequential decisions. These modes do **not** grant
+They select notification policy only: restricted surfaces decisions/blockers
+and account/repository issues, moderate also includes review-ready PRs,
+meaningful milestones, and sparse outcomes, and full suppresses routine review
+progress while retaining stalls, failures, completions, consequential
+decisions, and account/repository issues. These modes do **not** grant
 merge, destructive, irreversible, security-sensitive, or external-public
 authority. Existing Firstmate policy, command scopes, and Captain confirmation
 rules remain the authority for every operation.

@@ -59,6 +59,23 @@ def test_batches_actionable_items_and_ignores_infrastructure_block(monkeypatch, 
     assert events[1]['url'] == '/attention?item=pr-8'
 
 
+def test_sparse_outcomes_and_account_issues_are_supported_with_product_safe_copy(monkeypatch, tmp_path):
+    setup_db(monkeypatch, tmp_path)
+    completion = item('internal-run-44', kind='completion')
+    completion['requires_action'] = False
+    completion['title'] = 'runner-7 finished secret/repo'
+    completion['subtitle'] = 'host /private/path used 83 credits'
+    completion['url'] = 'https://infrastructure.invalid/private'
+    events = notifications.reconcile_notification_events('captain', [completion])['events']
+    assert [event['id'] for event in events] == ['internal-run-44']
+    assert notifications._safe_push_copy('completion') == ('Work completed', 'Open Magistrate to review the result.')
+    assert notifications._safe_deep_link(completion) == '/attention?overview=true'
+    for kind in ('budget', 'credit', 'repository_disconnected', 'payment_issue'):
+        assert notifications._mode_for_kind('restricted', kind)
+        title, body = notifications._safe_push_copy(kind)
+        assert 'runner-7' not in title + body and '/private' not in title + body
+
+
 def test_foreground_suppression_dedupes_later_background_poll(monkeypatch, tmp_path):
     setup_db(monkeypatch, tmp_path)
     foreground = notifications.reconcile_notification_events('captain', [item()], foreground=True)

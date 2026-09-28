@@ -125,7 +125,7 @@ function AssistantMessage({ message, dark, text, muted, onActions }: { message: 
 }
 
 // `target` remains an accepted shell prop for compatibility but is intentionally not read.
-export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voiceInputMode = 'automatic', voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {}, onRegisterRefresh, onRefreshAll, globalRefreshing = false }: { target?: string; onDrawerToggle?: () => void; drawerOpen?: boolean; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void; onRegisterRefresh?: (refresh: (() => Promise<void>) | null) => void; onRefreshAll?: () => Promise<void>; globalRefreshing?: boolean }) {
+export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voiceInputMode = 'automatic', voiceCaptureBehavior = 'tap-to-toggle', voiceTranscriptBehavior = 'insert', autoStartRecording = false, shortcut, activityOpen = false, onActivityOpen = () => {}, onActivityClose = () => {}, onRegisterRefresh, onRefreshAll, globalRefreshing = false }: { target?: string; onDrawerToggle?: () => void; drawerOpen?: boolean; voiceInputMode?: VoiceInputMode; voiceCapabilities?: VoiceInputCapabilities; voiceCaptureBehavior?: VoiceCaptureBehavior; voiceTranscriptBehavior?: VoiceTranscriptBehavior; autoStartRecording?: boolean; shortcut?: 'running'; activityOpen?: boolean; onActivityOpen?: () => void; onActivityClose?: () => void; onRegisterRefresh?: (refresh: (() => Promise<void>) | null) => void; onRefreshAll?: () => Promise<void>; globalRefreshing?: boolean }) {
   const router = useRouter(); const dark = isDarkTheme(useChatColorScheme());
   const { bottom: safeAreaBottom } = useSafeAreaInsets(); const { height: windowHeight } = useWindowDimensions();
   const composerKeyboardOffset = useRef(new NativeAnimated.Value(0)).current;
@@ -152,7 +152,7 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
   const scrollRef = useRef<ScrollView>(null); const inputRef = useRef<TextInput>(null); const conversationIdRef = useRef<string | undefined>(undefined);
   const conversationChangeCursorRef = useRef(0); const conversationObservationRef = useRef(0);
   const activeControllerRef = useRef<AbortController | null>(null); const activeTokenRef = useRef(0); const pendingAttachmentsRef = useRef(new Map<string, ComposerAttachment[]>());
-  const holdActiveRef = useRef(false); const capture = useVoiceInputAdapter(undefined, voiceInputMode); const captureRef = useRef(capture);
+  const holdActiveRef = useRef(false); const shortcutConsumedRef = useRef(false); const capture = useVoiceInputAdapter(undefined, voiceInputMode); const captureRef = useRef(capture);
   const [greeting, setGreeting] = useState(() => magiGreeting(null));
   const canonicalWork = useMemo(() => deriveCanonicalWorkState(canonicalActivity, messages), [canonicalActivity, messages]);
   const pendingAssistant = [...messages].reverse().find(row => row.role === 'assistant' && row.progress === 'working');
@@ -415,6 +415,11 @@ export function ChatCanvas({ onDrawerToggle = () => {}, drawerOpen = false, voic
     if (busy) setQueuedPrompts(current => [...current, item]); else void submitPrompt(item);
     setPromptText(''); setAttachments([]); setSendError(null);
   };
+  useEffect(() => {
+    if (!hydrated || shortcut !== 'running' || shortcutConsumedRef.current) return;
+    shortcutConsumedRef.current = true;
+    queuePrompt('What is running right now, and what is its current structured status?', 'text', []);
+  }, [hydrated, shortcut]); // eslint-disable-line react-hooks/exhaustive-deps -- one explicit App Intent invocation
   const handleSend = () => {
     const trimmed = promptText.trim();
     if (attachments.length && !trimmed) { setSendError('Add a message describing the attached file before sending.'); return; }
@@ -789,7 +794,8 @@ function SettingsSheet({ open, dark, animatedStyle, scrimStyle, health, loading,
 
 export default function ChatScreen() {
   const router = useRouter();
-  const { record } = useLocalSearchParams<{ record?: string | string[] }>(); const autoStartRecording = (Array.isArray(record) ? record[0] : record) === 'true';
+  const { record, shortcut } = useLocalSearchParams<{ record?: string | string[]; shortcut?: string | string[] }>(); const autoStartRecording = (Array.isArray(record) ? record[0] : record) === 'true';
+  const magiShortcut = (Array.isArray(shortcut) ? shortcut[0] : shortcut) === 'running' ? 'running' as const : undefined;
   const dark = isDarkTheme(useChatColorScheme()); const { width } = useWindowDimensions(); const isNarrow = width < 720; const drawerWidth = Math.min(isNarrow ? width * 0.82 : 310, 330);
   const [drawerOpen, setDrawerOpen] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [activityOpen, setActivityOpen] = useState(false); const [activeSection, setActiveSection] = useState<DrawerSection>(null); const [preferences, setPreferences] = useState<ChatPreferences>(DEFAULT_CHAT_PREFERENCES); const [preferencesReady, setPreferencesReady] = useState(false);
   const [executionProfiles, setExecutionProfiles] = useState<ExecutionProfile[]>([]);
@@ -892,7 +898,7 @@ export default function ChatScreen() {
   return <EnvironmentBackground hideBottomControls preserveCanvas><SafeAreaView style={styles.page}>
     {!preferencesReady ? <View testID="chat-appearance-loading" style={[styles.appearanceLoading, { backgroundColor: dark ? brand.obsidian : '#F7F8FA' }]} /> : <>
       <DrawerPanel open={drawerOpen && !settingsOpen && !selectedObjective} dark={dark} isNarrow={isNarrow} animatedStyle={drawerAnimatedStyle} panHandlers={isNarrow ? swipeToClose.panHandlers : {}} activeSection={activeSection} setActiveSection={setActiveSection} onClose={() => setDrawerOpen(false)} onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }} onOpenHome={() => setDrawerOpen(false)} onOpenActivity={() => { setDrawerOpen(false); setActivityOpen(true); }} objectives={objectives} onOpenObjective={objective => { setDrawerOpen(false); setSelectedObjectiveId(objective.objective_id); }} projects={projects} onCreateProject={async (name, description) => { const project = await createProject({ name, description }); setProjects(current => [project, ...current.filter(item => item.id !== project.id)]); }} attention={attention} activity={activity} errors={errors} loading={loading} refreshing={refreshing} onRefresh={() => { void refreshAll(); }} />
-      <Animated.View style={styles.chatStage}><ChatCanvas drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onRegisterRefresh={registerChatRefresh} onRefreshAll={refreshAll} globalRefreshing={refreshing} />
+      <Animated.View style={styles.chatStage}><ChatCanvas drawerOpen={drawerOpen} onDrawerToggle={() => setDrawerOpen(value => !value)} shortcut={magiShortcut} activityOpen={activityOpen} onActivityOpen={() => setActivityOpen(true)} onActivityClose={() => setActivityOpen(false)} voiceInputMode={preferences.voiceInputMode} voiceCapabilities={voiceCapabilities} voiceCaptureBehavior={preferences.voiceCaptureBehavior} voiceTranscriptBehavior={preferences.voiceTranscriptBehavior} autoStartRecording={autoStartRecording} onRegisterRefresh={registerChatRefresh} onRefreshAll={refreshAll} globalRefreshing={refreshing} />
         <Animated.View testID="chat-dim" pointerEvents={drawerOpen ? 'auto' : 'none'} style={[styles.chatDim, chatDimStyle]}>
           <TouchableOpacity testID="drawer-dismiss" accessibilityRole="button" accessibilityLabel="Close the Magistrate drawer" onPress={() => setDrawerOpen(false)} activeOpacity={1} style={styles.chatDimPress} />
         </Animated.View>

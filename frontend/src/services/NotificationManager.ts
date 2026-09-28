@@ -2,7 +2,7 @@ import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { AppState, AppStateStatus, Platform } from 'react-native';
-import { enqueuePendingIntent, PendingIntentPayload } from './PendingIntentRouter';
+import { enqueuePendingIntent, parsePendingIntent, pendingIntentPath, PendingIntentPayload } from './PendingIntentRouter';
 import {
   acknowledgeNotificationEvents,
   fetchNotificationEvents,
@@ -26,12 +26,29 @@ if (Platform.OS !== 'web') {
 
 export type NativePushStatus = 'not-started' | 'registering' | 'registered' | 'permission-required' | 'permission-denied' | 'unavailable' | 'offline' | 'error';
 
+function safeEventUrl(event?: NotificationEvent): string {
+  const parsed = parsePendingIntent(event?.deep_link || event?.url);
+  return parsed ? pendingIntentPath(parsed) : '/attention?overview=true';
+}
+
 function copyFor(events: NotificationEvent[]) {
-  if (events.length > 1) return { title: `${events.length} items need your attention`, body: 'Questions or captain decisions are waiting.', url: events[0]?.deep_link || events[0]?.url || '/attention' };
+  if (events.length > 1) return { title: `${events.length} updates need attention`, body: 'Open Magistrate to review them.', url: safeEventUrl(events[0]) };
   const event = events[0];
-  return event.notification_kind === 'pr_ready'
-    ? { title: 'A pull request is ready', body: event.subtitle, url: event.deep_link || event.url }
-    : { title: 'Your answer is needed', body: event.subtitle, url: event.deep_link || event.url };
+  const copy: Partial<Record<NotificationEvent['notification_kind'], [string, string]>> = {
+    captain_question: ['Your answer is needed', 'Open Magistrate to review an item that needs your attention.'],
+    consequential_decision: ['Your answer is needed', 'Open Magistrate to review an item that needs your attention.'],
+    blocker: ['Your answer is needed', 'Open Magistrate to review an item that needs your attention.'],
+    pr_ready: ['A pull request is ready', 'Open Magistrate to review it.'],
+    completion: ['Work completed', 'Open Magistrate to review the result.'],
+    failure: ['Work needs attention', 'Open Magistrate to review what happened.'],
+    stall: ['Work needs attention', 'Open Magistrate to review what happened.'],
+    budget: ['Usage needs attention', 'Open Magistrate to review account usage.'],
+    credit: ['Usage needs attention', 'Open Magistrate to review account usage.'],
+    repository_disconnected: ['A repository needs reconnecting', 'Open Magistrate to review the connection.'],
+    payment_issue: ['Billing needs attention', 'Open Magistrate to review billing.'],
+  };
+  const [title, body] = copy[event.notification_kind] || ['Magistrate attention', 'Open Magistrate to review the update.'];
+  return { title, body, url: safeEventUrl(event) };
 }
 
 function openNotificationData(value: unknown): void {
@@ -185,7 +202,12 @@ class NotificationManagerService {
 
   startMonitoring() {
     if (this.intervalId) return;
-    this.appStateSubscription = AppState.addEventListener('change', state => { this.appState = state; });
+    this.appState = AppState.currentState || 'active';
+    this.appStateSubscription = AppState.addEventListener('change', state => {
+      const resumed = this.appState !== 'active' && state === 'active';
+      this.appState = state;
+      if (resumed) void this.poll();
+    });
     if (Platform.OS !== 'web') {
       this.installNotificationRouting();
       // Do not trigger an OS permission prompt during authenticated startup.
@@ -205,7 +227,9 @@ class NotificationManagerService {
   }
 
   private async poll() {
-    if (this.polling) return;
+    // APNs/Expo owns background delivery. Foreground reconciliation resumes
+    // immediately on activation and never burns a background polling timer.
+    if (this.appState !== 'active' || this.polling) return;
     this.polling = true;
     try {
       // The gateway performs native delivery and acknowledges only successful

@@ -43,6 +43,7 @@
     },
     "plugins": [
       "expo-router",
+      "./plugins/withMagistrateAppIntents",
       "expo-notifications",
       [
         "expo-audio",

@@ -323,13 +323,13 @@ test('voice-to-text uses the same native message endpoint and never invokes voic
   const page = await browser.newPage();
   await page.evaluateOnNewDocument(installNativeGatewayMock);
   await page.evaluateOnNewDocument(stubSpeechSynthesis);
-  await page.goto(`${server.base}/voice`, { waitUntil: 'networkidle0' });
+  await page.goto(`${server.base}/voice?autostart=true`, { waitUntil: 'networkidle0' });
   await page.evaluate(() => localStorage.clear());
   await page.reload({ waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForFunction(() => document.body.innerText.includes('Listening'), { timeout: 20_000 });
   await new Promise(resolve => setTimeout(resolve, 900));
-  await page.click('[data-testid="voice-control"]');
+  await clickRendered(page, '[data-testid="voice-control"]');
   await page.waitForSelector('[data-testid="voice-conversation"]', { timeout: 20_000 });
   const transcript = await page.$eval('[data-testid="voice-conversation"]', element => element.innerText);
   assert.match(transcript, /Native voice message/);
