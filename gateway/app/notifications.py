@@ -21,10 +21,12 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from app.db import DB_PATH
+from app.push_receipts import PushDeliveryStore, install_schema as install_push_receipts
 
 NOTIFICATION_MODES = ("restricted", "moderate", "full")
 DEFAULT_NOTIFICATION_MODE = "moderate"
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
 MAX_PUSH_ATTEMPTS = 3
 
 # These are deliberately policy categories, not execution permissions.  A
@@ -90,6 +92,7 @@ def init_notification_db() -> None:
             cursor.execute("ALTER TABLE notification_preferences ADD COLUMN mode TEXT NOT NULL DEFAULT 'moderate'")
         if "updated_at" not in columns:
             cursor.execute("ALTER TABLE notification_preferences ADD COLUMN updated_at INTEGER")
+        install_push_receipts(conn)
         conn.commit()
     finally:
         conn.close()
@@ -209,6 +212,7 @@ async def send_push_notification(
     title: str,
     body: str,
     data: Optional[Dict[str, Any]] = None,
+    *, expected_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send one remote push, retrying transient Expo failures.
 
@@ -220,12 +224,14 @@ async def send_push_notification(
     if not registered:
         return {"status": "skipped", "reason": "No active native push token registered for user"}
     token = registered["push_token"]
+    if expected_token is not None and expected_token != token:
+        return {"status": "skipped", "detail": "Push registration changed"}
     payload = {"to": token, "sound": "default", "title": title, "body": body, "data": data or {}}
     last_error = "Push provider unavailable"
     for attempt in range(MAX_PUSH_ATTEMPTS):
         try:
             timeout = httpx.Timeout(10.0, connect=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 response = await client.post(os.getenv("MAGISTRATE_EXPO_PUSH_URL", EXPO_PUSH_URL), json=payload)
             try:
                 result = response.json()
@@ -236,23 +242,63 @@ async def send_push_notification(
                 ticket = ticket[0] if ticket else {}
             provider_status = ticket.get("status") if isinstance(ticket, dict) else None
             if response.is_success and provider_status == "ok":
-                return {"status": "sent", "attempts": attempt + 1, "response": result}
-            detail = ticket.get("message") if isinstance(ticket, dict) else None
-            last_error = str(detail or f"Push provider returned HTTP {response.status_code}")
+                ticket_id = ticket.get("id")
+                if isinstance(ticket_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", ticket_id):
+                    return {"status": "accepted", "attempts": attempt + 1, "ticket_id": ticket_id}
+                return {"status": "error", "detail": "Push ticket identity missing"}
+            last_error = "Push provider rejected notification"
             error_type = ticket.get("details", {}).get("error") if isinstance(ticket, dict) and isinstance(ticket.get("details"), dict) else None
-            if error_type in {"DeviceNotRegistered", "InvalidCredentials"}:
+            if error_type == "DeviceNotRegistered":
                 revoke_push_token(user_id, token)
                 return {"status": "revoked", "detail": last_error}
             if response.status_code < 500 and response.status_code != 429:
                 return {"status": "error", "attempts": attempt + 1, "detail": last_error}
-        except Exception as exc:
-            last_error = str(exc)
+        except Exception:
+            last_error = "Push provider unavailable"
         if attempt + 1 < MAX_PUSH_ATTEMPTS:
             # A short bounded backoff keeps request latency predictable while
             # allowing a transient provider/network failure to recover.
             import asyncio
             await asyncio.sleep(0.25 * (2 ** attempt))
-    return {"status": "error", "attempts": MAX_PUSH_ATTEMPTS, "detail": last_error}
+    return {"status": "error", "attempts": MAX_PUSH_ATTEMPTS, "detail": last_error, "retryable": True}
+
+
+async def reconcile_push_receipts() -> None:
+    """Bounded notification-only write-side reconciliation; never a runtime read.
+
+    An Expo receipt confirms handoff to APNs/FCM, not device arrival or viewing.
+    Missing/malformed responses stay pending with bounded backoff until expiry.
+    """
+    init_notification_db()
+    store = PushDeliveryStore(DB_PATH)
+    deliveries = store.claim_receipts()
+    if not deliveries:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10, trust_env=False, follow_redirects=False) as client:
+            async with client.stream("POST", os.getenv("MAGISTRATE_EXPO_PUSH_RECEIPTS_URL", EXPO_RECEIPTS_URL),
+                                     json={"ids": [row["ticket_id"] for row in deliveries]}) as response:
+                if not response.is_success:
+                    return
+                body = bytearray()
+                async for part in response.aiter_bytes():
+                    if len(body) + len(part) > 128 * 1024:
+                        return
+                    body.extend(part)
+        payload = json.loads(body)
+        receipts = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(receipts, dict):
+            return
+        for delivery in deliveries:
+            receipt = receipts.get(delivery["ticket_id"])
+            if not isinstance(receipt, dict) or receipt.get("status") not in {"ok", "error"}:
+                continue
+            details = receipt.get("details")
+            invalid = isinstance(details, dict) and details.get("error") == "DeviceNotRegistered"
+            store.receipt(delivery, delivered=receipt["status"] == "ok", invalid_token=invalid)
+    except Exception:
+        # No provider error body, token, identity or exception text is observable.
+        return
 
 
 def _fingerprint(item: Dict[str, Any]) -> str:
@@ -460,9 +506,13 @@ async def dispatch_notification_events(
     unread = _unread_events(user_id, attention_items, get_notification_preferences(user_id))
     if not registered or not events:
         return {**result, "unread": unread, "delivery": "web-or-in-app" if events else "none"}
-    delivered: List[str] = []
+    accepted: List[str] = []
     failures: List[Dict[str, Any]] = []
+    store = PushDeliveryStore(DB_PATH)
     for event in events:
+        claim = store.claim_send(user_id, str(event["id"]), _fingerprint(event), registered["push_token"])
+        if claim is None:
+            continue  # Pending, terminal or leased: never send again on a read.
         kind = event.get("notification_kind")
         title, body = _safe_push_copy(kind)
         safe_route = _safe_deep_link(event)
@@ -471,18 +521,22 @@ async def dispatch_notification_events(
             title,
             body,
             {**_push_intent_data(event), "url": safe_route, "item_id": event.get("id"), "notification_kind": kind},
+            expected_token=registered["push_token"],
         )
-        if outcome.get("status") == "sent":
-            delivered.append(str(event["id"]))
+        if outcome.get("status") == "accepted":
+            try:
+                store.accepted(claim, outcome["ticket_id"])
+                accepted.append(str(event["id"]))
+            except sqlite3.IntegrityError:
+                store.send_failed(claim, retryable=False)
+                failures.append({"id": event.get("id"), "status": "error", "detail": "Conflicting push ticket"})
         else:
+            store.send_failed(claim, retryable=outcome.get("retryable") is True)
             failures.append({"id": event.get("id"), "status": outcome.get("status"), "detail": outcome.get("detail")})
-    mark_notification_events_delivered(user_id, delivered)
-    # Native clients must not manufacture a local notification from this feed.
-    # Failed sends remain pending and are retried on the next reconciliation;
-    # successful sends are remote pushes but remain unread until viewed.
-    remaining = [event for event in events if str(event["id"]) not in delivered]
+    # Ticket acceptance is not receipt delivery; keep in-app fallback/unread.
+    # Native clients must never synthesize local notifications from this feed.
     unread = _unread_events(user_id, attention_items, get_notification_preferences(user_id))
-    return {**result, "events": remaining, "unread": unread, "delivery": "sent" if not failures else "partial", "failures": failures}
+    return {**result, "unread": unread, "delivery": "accepted" if accepted and not failures else "pending" if not failures else "partial", "failures": failures}
 
 
 def acknowledge_notification_events(user_id: str, item_ids: List[str]) -> None:

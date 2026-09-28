@@ -1,0 +1,46 @@
+diff --git a/node_modules/metro/src/Assets.js b/node_modules/metro/src/Assets.js
+index b34df88..ef446c2 100644
+--- a/node_modules/metro/src/Assets.js
++++ b/node_modules/metro/src/Assets.js
+@@ -15,6 +15,7 @@ var AssetPaths = _interopRequireWildcard(
+ var _crypto = _interopRequireDefault(require("crypto"));
+ var _fs = _interopRequireDefault(require("fs"));
+ var _imageSize = _interopRequireDefault(require("image-size"));
++var _imageSizeFromFile = require("image-size/fromFile");
+ var _path = _interopRequireDefault(require("path"));
+ function _interopRequireDefault(e) {
+   return e && e.__esModule ? e : { default: e };
+@@ -174,7 +175,11 @@ async function getAssetData(
+   const isImageInput = assetInfo.files[0].includes(".zip/")
+     ? _fs.default.readFileSync(assetInfo.files[0])
+     : assetInfo.files[0];
+-  const dimensions = isImage ? (0, _imageSize.default)(isImageInput) : null;
++  const dimensions = isImage
++    ? typeof isImageInput === "string"
++      ? await (0, _imageSizeFromFile.imageSizeFromFile)(isImageInput)
++      : (0, _imageSize.default)(isImageInput)
++    : null;
+   const scale = assetInfo.scales[0];
+   const assetData = {
+     __packager_asset: true,
+diff --git a/node_modules/metro/src/Assets.js.flow b/node_modules/metro/src/Assets.js.flow
+index b81e3f6..4489a9e 100644
+--- a/node_modules/metro/src/Assets.js.flow
++++ b/node_modules/metro/src/Assets.js.flow
+@@ -17,4 +17,5 @@ import crypto from 'crypto';
+ import fs from 'fs';
+ // $FlowFixMe[untyped-import] image-size
+ import getImageSize from 'image-size';
++import {imageSizeFromFile} from 'image-size/fromFile';
+ import path from 'path';
+@@ -221,5 +222,9 @@ export async function getAssetData(
+   const isImageInput = assetInfo.files[0].includes('.zip/')
+     ? fs.readFileSync(assetInfo.files[0])
+     : assetInfo.files[0];
+-  const dimensions = isImage ? getImageSize(isImageInput) : null;
++  const dimensions = isImage
++    ? typeof isImageInput === 'string'
++      ? await imageSizeFromFile(isImageInput)
++      : getImageSize(isImageInput)
++    : null;
+   const scale = assetInfo.scales[0];

@@ -12,6 +12,7 @@ from app.magi_chat_store import MagiChatNotFound, MagiChatStore
 from app.persistence import connect
 from app.projects import ProjectError, list_projects, get_project
 from app.project_memory import MemoryScope, ProjectMemoryStore
+from app.push_receipts import PushDeliveryStore
 
 projects_a = list_projects("tenant-a")["projects"]
 projects_b = list_projects("tenant-b")["projects"]
@@ -66,7 +67,11 @@ with connect(db.DB_PATH) as connection:
         ("f" * 64,),
     )
 
+assert PushDeliveryStore(db.DB_PATH).summary("tenant-a") == {"pending": 1}
+assert PushDeliveryStore(db.DB_PATH).summary("tenant-b") == {"pending": 1}
 delete_account("tenant-a", confirmation="DELETE tenant-a")
+assert PushDeliveryStore(db.DB_PATH).summary("tenant-a") == {}
+assert PushDeliveryStore(db.DB_PATH).summary("tenant-b") == {"pending": 1}
 with connect(db.DB_PATH) as connection:
     assert connection.execute(
         "SELECT COUNT(*) FROM hosted_execution_runs WHERE owner_user_id='tenant-a'"

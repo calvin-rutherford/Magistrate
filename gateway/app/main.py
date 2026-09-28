@@ -62,7 +62,7 @@ from app.attention_actions import (AttentionActionError, action_for_item, execut
                                    prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
 from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
                                list_registered_push_users, registered_local_hour,
-                               reconcile_notification_events, dispatch_notification_events,
+                               reconcile_notification_events, dispatch_notification_events, reconcile_push_receipts,
                                mark_notification_events_delivered, acknowledge_notification_events, get_notification_preferences,
                                update_notification_preferences)
 from app.providers.github import GitHubProviderAdapter
@@ -284,6 +284,7 @@ async def _reconcile_registered_notifications() -> None:
     while True:
         await asyncio.sleep(interval)
         try:
+            await reconcile_push_receipts()
             for user_id in list_registered_push_users():
                 items = await attention_service.get_unified_attention_items(user_id)
                 await dispatch_notification_events(user_id, items, local_hour=registered_local_hour(user_id))
@@ -1361,7 +1362,10 @@ async def get_notifications_preferences(principal: Principal = Depends(require_s
 @app.get('/api/v1/notifications/status')
 async def get_notifications_status(principal: Principal = Depends(require_scope('notifications'))):
     registered = get_registered_push_token(principal.user_id)
-    return {'native_push': 'registered' if registered else 'unavailable', 'platform': registered['platform'] if registered else None}
+    from app.push_receipts import PushDeliveryStore
+    from app.notifications import DB_PATH as notification_db
+    return {'native_push': 'registered' if registered else 'unavailable', 'platform': registered['platform'] if registered else None,
+            'receipts': PushDeliveryStore(notification_db).summary(principal.user_id)}
 
 @app.get('/api/v1/notifications/events')
 async def get_notification_events(

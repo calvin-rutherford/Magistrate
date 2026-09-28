@@ -39,7 +39,9 @@ Voice input mode selection and output/auto-listen preferences are persisted by `
 
 ## Local dev environment
 
-`npm ci` is the install for a fresh checkout and for CI. If `npx tsc`/`expo start` fails with `Cannot find module 'expo-*'` even though it's
+`npm ci` is the install for a fresh checkout and for CI. It must run the `patch-package` postinstall: `patches/` bridges the reviewed Metro/query-string call sites to patched image/URI parsers. `npm run test:release` guards exact versions and compatibility; see `../docs/SECURITY_MODEL.md` before updating or removing these patches.
+
+If `npx tsc`/`expo start` fails with `Cannot find module 'expo-*'` even though it's
 listed in `package.json`, the worktree's `node_modules` is stale — reinstall before debugging further.
 
 `expo-env.d.ts` and `.expo/types` are generated and git-ignored, and `expo/types` is what makes react-native-web-only style props (`touchAction`,
