@@ -1499,11 +1499,21 @@ class FirstmateDecisionService:
             )
         return owner_user_id
 
+    def _qualified_owner(self, owner_user_id: str) -> str:
+        from app.hosted_execution import hosted_execution_enabled
+        return (
+            _valid_owner(owner_user_id)
+            if hosted_execution_enabled()
+            else self._require_source_owner(owner_user_id)
+        )
+
     async def ingest_events(
         self, owner_user_id: str, batch: FirstmateDecisionEventBatch,
     ) -> list[dict[str, Any]]:
         """Persist one complete push projection without invoking Firstmate."""
-        owner_user_id = self._require_source_owner(owner_user_id)
+        # Hosted workload authentication supplies tenant ownership. The legacy
+        # local producer remains bound to its one configured bootstrap owner.
+        owner_user_id = self._qualified_owner(owner_user_id)
         if batch.source_instance_id != self.source_instance_id:
             raise FirstmateDecisionError(
                 "source_conflict", "The Firstmate decision source identity changed.", 409
@@ -1559,21 +1569,22 @@ class FirstmateDecisionService:
 
     async def reconcile(self, owner_user_id: str) -> list[dict[str, Any]]:
         """Read already-ingested decisions; observation never polls Firstmate."""
-        owner_user_id = self._require_source_owner(owner_user_id)
+        owner_user_id = self._qualified_owner(owner_user_id)
         return await asyncio.to_thread(self.store.pending, owner_user_id)
 
     @staticmethod
     def _authorize(principal: Principal) -> None:
         if not isinstance(principal, Principal) or not principal.has("command"):
             raise FirstmateDecisionError("unauthorized", "Command authorization is required.", 403)
+        from app.hosted_execution import hosted_execution_enabled
         owner_id = os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
-        if principal.user_id != owner_id:
-            raise FirstmateDecisionError("forbidden", "Only the authenticated owner may answer Firstmate decisions.", 403)
+        if not hosted_execution_enabled() and principal.user_id != owner_id:
+            raise FirstmateDecisionError("forbidden", "Only the authenticated owner may answer the local Firstmate runtime.", 403)
         if principal.expires_at <= int(time.time()):
             raise FirstmateDecisionError("unauthorized", "The authenticated session has expired.", 401)
 
     async def magi_context(self, owner_user_id: str, *, refresh: bool = True) -> dict[str, Any]:
-        owner_user_id = self._require_source_owner(owner_user_id)
+        owner_user_id = self._qualified_owner(owner_user_id)
         # ``refresh`` remains wire-compatible for composition callers, but a
         # model-context read is never authority to inspect execution runtime.
         del refresh
@@ -1609,7 +1620,7 @@ class FirstmateDecisionService:
     def attention_items(
         self, owner_user_id: str, *, decisions: Optional[list[dict[str, Any]]] = None, stale: bool = False
     ) -> list[dict[str, Any]]:
-        owner_user_id = self._require_source_owner(owner_user_id)
+        owner_user_id = self._qualified_owner(owner_user_id)
         rows = decisions if decisions is not None else self.store.pending(owner_user_id)
         result: list[dict[str, Any]] = []
         for decision in rows:
@@ -1783,4 +1794,10 @@ async def handle_firstmate_answer_decision(
     )
 
 
-firstmate_decisions = FirstmateDecisionService(FirstmateClient())
+def _default_decision_service() -> FirstmateDecisionService:
+    from app.hosted_execution import HostedDecisionCommandAdapter, hosted_execution_enabled
+    command = HostedDecisionCommandAdapter() if hosted_execution_enabled() else None
+    return FirstmateDecisionService(FirstmateClient(), command=command)
+
+
+firstmate_decisions = _default_decision_service()

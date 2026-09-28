@@ -72,6 +72,14 @@
   ],
   "rates": [
     {
+      "provider": "magistrate",
+      "model": "no-worker",
+      "input_usd_micros_per_million": 0,
+      "output_usd_micros_per_million": 0,
+      "compute_usd_micros_per_hour": 0,
+      "margin_bps": 0
+    },
+    {
       "provider": "openai",
       "model": "gpt-4o-mini",
       "input_usd_micros_per_million": 150000,

@@ -199,6 +199,40 @@ def test_shared_runtime_scopes_require_explicit_acknowledgement(scopes):
     assert set(granted["scopes"]) == set(scopes)
 
 
+def test_only_fully_configured_hosted_execution_removes_shared_runtime_acknowledgement(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("MAGISTRATE_HOSTED_EXECUTION_ENABLED", "true")
+    with pytest.raises(ValueError, match="completely configured"):
+        create_friend_beta_access_grant(
+            _user(), scopes=["read", "account", "command"],
+        )
+    cert = tmp_path / "client.crt"
+    key = tmp_path / "client.key"
+    ca = tmp_path / "ca.crt"
+    for path in (cert, key, ca):
+        path.write_text("test", encoding="utf-8")
+        path.chmod(0o600)
+    configured = {
+        "MAGISTRATE_WORKER_IMAGE": "registry.example/worker@sha256:" + "a" * 64,
+        "MAGISTRATE_WORKER_GATEWAY_URL": "https://gateway.internal",
+        "MAGISTRATE_ISOLATION_BACKEND_URL": "https://isolation.internal",
+        "MAGISTRATE_GITHUB_TOKEN_BROKER_URL": "https://broker.internal",
+        "MAGISTRATE_ISOLATION_CLIENT_CERT": str(cert),
+        "MAGISTRATE_ISOLATION_CLIENT_KEY": str(key),
+        "MAGISTRATE_ISOLATION_CA": str(ca),
+        "MAGISTRATE_WORKER_IDENTITY_KEY": "x" * 32,
+        "MAGISTRATE_WORKER_NETWORK_HOSTS": "gateway.internal,github.com",
+        "MAGISTRATE_GITHUB_PERMISSIONS": "contents:write,pull_requests:write",
+    }
+    for name, value in configured.items():
+        monkeypatch.setenv(name, value)
+    granted = create_friend_beta_access_grant(
+        _user(), scopes=["read", "account", "command"],
+    )
+    assert set(granted["scopes"]) == {"read", "account", "command"}
+
+
 def test_one_principal_cannot_accumulate_active_device_grants():
     user_id = _user()
     first = create_friend_beta_access_grant(user_id)

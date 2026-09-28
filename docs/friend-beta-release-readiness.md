@@ -14,10 +14,12 @@ streaming, tools, autonomous execution, or a second chat transport.
   binding; sharing it lets the later redeemer replace the earlier bearer.
 - The safe grant default is `read,account,notifications`. It supports account
   onboarding and an observer preview against the one operator-owned deployment.
-- `command` or `voice` reaches that shared operator runtime. The provisioning
-  CLI refuses either unless the operator supplies
-  `--allow-shared-runtime-access`. That flag records an operational
-  acknowledgement; it does **not** create tenant isolation.
+- In restricted local mode, `command` or `voice` reaches the shared operator
+  runtime. Provisioning refuses either unless the operator supplies
+  `--allow-shared-runtime-access`; that acknowledgement does **not** create
+  isolation. When the separately gated hosted mode in
+  [`hosted-execution.md`](./hosted-execution.md) is active, command objectives
+  use objective-bound ephemeral workers and do not require that acknowledgement.
 - The producer-only `response` scope can never be issued by the Friend Beta CLI.
 - Native keeps the grant in SecureStore as a renewal credential and exchanges
   it for short-lived bearer sessions. Web stores only the short bearer. A new
@@ -29,12 +31,12 @@ streaming, tools, autonomous execution, or a second chat transport.
 - Provider credentials, owner bootstrap credentials, runner addresses, socket
   paths, and harness credentials remain server-side.
 
-**Open product/security gate:** choose observer-only friends (recommended) or
-explicitly accept shared-runtime `command`/`voice` for the named cohort. The
-current generic `command` scope authorizes more than provider-native chat, so it
-must not be described as isolated friend chat. A dedicated least-privilege chat
-scope or isolated runtime is later work. Do not invite command-capable friends
-until the merge authority records that choice.
+**Open product/security gate:** restricted deployments must choose
+observer-only friends (recommended) or explicitly accept shared-runtime
+`command`/`voice` for the named cohort. Hosted deployments may provision
+command-capable principals only after every external isolation activation gate
+has passed. The generic `command` scope still authorizes non-chat command
+surfaces, so least-privilege scope review remains required.
 
 ## Ordered release procedure
 

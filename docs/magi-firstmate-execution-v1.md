@@ -4,12 +4,16 @@
 
 This additive bridge implements objective submission, product-safe Fleet,
 Activity, cancellation requests, and verified completion after Native Chat
-Phase 1. Firstmate remains the only scheduler and worker owner.
+Phase 1. In restricted mode Firstmate remains the local scheduler/worker owner;
+in public-SaaS mode the provider-neutral isolation backend owns ephemeral
+worker lifecycle under the durable hosted controller.
 
 - **Chat** offers one closed `firstmate.submit_objective` tool only for
   actionable work; ordinary conversation remains provider-native Chat.
 - **Firstmate intake** receives one deterministic queued task plus a bounded
-  native inbox wake. Gateway never spawns or supervises a worker.
+  native inbox wake in restricted mode. Hosted mode instead claims the same
+  accepted objective ledger and idempotently requests isolated capacity; see
+  [`hosted-execution.md`](./hosted-execution.md).
 - **Fleet and Activity** read persisted submission, execution-event, decision,
   and cancellation rows only. They never probe a process or terminal.
 - A new Chat row is generated only after a typed `objective.completed` event
@@ -76,13 +80,15 @@ wake. It is a doorbell, not a second scheduler. Capacity, dependencies,
 classification, worker creation, and queued-work reevaluation remain Firstmate's
 responsibility.
 
-A submission stays `submitting` until queue publication and the wake succeed.
-A process crash or wake failure therefore leaves a retryable persisted row. One
-bounded startup recovery pass replays `tasks-axi add` and the wake; the task's
-deterministic identity and a dispatch lease make replay and concurrent client
-retries idempotent. A process-start cutoff excludes submissions created by the
-new process, so startup recovery cannot race fresh request delivery. Recovery is
-write-side startup work, never a read path or polling timer.
+A restricted-mode submission stays `submitting` until queue publication and
+the wake succeed. A process crash or wake failure therefore leaves a retryable
+persisted row. One bounded startup recovery pass replays `tasks-axi add` and the
+wake; the task's deterministic identity and a dispatch lease make replay and
+concurrent client retries idempotent. Hosted mode marks that same durable row
+accepted without touching a shared Firstmate home; its write-side controller
+uses expiring launch leases, deterministic external execution identity, and
+continuous queued-work recovery. Neither mode performs execution work from a
+product read path.
 
 ## Product Fleet and cancellation
 

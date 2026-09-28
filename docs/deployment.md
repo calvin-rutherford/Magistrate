@@ -15,6 +15,13 @@ restorable managed snapshot acknowledged with
 `MAGISTRATE_POSTGRES_BACKUP_CONFIRMED=true` for each deploy. See
 [`identity-tenancy-data-lifecycle.md`](./identity-tenancy-data-lifecycle.md).
 
+For a public multi-tenant deployment, the shared local Firstmate runtime is not
+an execution boundary. Enable and activate the provider-neutral isolation path described in
+[`hosted-execution.md`](./hosted-execution.md); its external backend, enforced
+network policy, worker-image, and GitHub App broker gates must pass before
+claiming hosted execution readiness. Restricted installations may keep the flag off, but must
+not represent that mode as public-SaaS isolation.
+
 The base Phase 1 production settings are:
 
 ```dotenv
@@ -84,8 +91,11 @@ PYTHONPATH=. uv run python -m scripts.friend_beta_access issue \
 The output file must be absolute, new, outside the repository checkout, and
 mode `0600`. A principal can hold only one active grant; revoke it before
 reissue or use a new device principal. Default scopes are
-`read,account,notifications`; command/voice issuance requires the CLI's explicit
-shared-runtime acknowledgement and remains non-isolated. Use `list` for
+`read,account,notifications`; in restricted local mode command/voice issuance
+requires the CLI's explicit shared-runtime acknowledgement and remains
+non-isolated. Hosted mode omits that acknowledgement only when its complete
+fail-closed configuration validates; external activation evidence is still a
+release gate. Use `list` for
 content-free metadata and `revoke --grant-id ...` to retire the grant, every
 derived bearer, and that principal's push registration. A successful online
 app logout does the same; after an offline

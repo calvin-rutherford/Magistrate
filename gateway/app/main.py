@@ -86,6 +86,9 @@ from app.project_memory_api import router as project_memory_router
 from app.objective_cancellation import (
     ObjectiveCancellationError, objective_cancellation_service,
 )
+from app.hosted_execution import (
+    HostedExecutionConfig, get_hosted_controller, router as hosted_execution_router,
+)
 
 init_db()
 
@@ -130,6 +133,7 @@ app.include_router(firstmate_execution_router)
 app.include_router(firstmate_decision_router)
 app.include_router(billing_router)
 app.include_router(project_memory_router)
+app.include_router(hosted_execution_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -183,7 +187,13 @@ async def enforce_bounded_request_size(request: Request, call_next):
         request.method == 'POST'
         and request.url.path == '/api/v1/firstmate/decision-events'
     )
-    firstmate_structured_contract = firstmate_execution_contract or firstmate_decision_contract
+    hosted_worker_contract = request.method == 'POST' and bool(re.fullmatch(
+        r'/api/v1/hosted-execution/objectives/mgo_[0-9a-f]{32}/(?:events|decision-events|decision-answers/ack)',
+        request.url.path,
+    ))
+    firstmate_structured_contract = (
+        firstmate_execution_contract or firstmate_decision_contract or hosted_worker_contract
+    )
     if firstmate_structured_contract and length > MAX_FIRSTMATE_EXECUTION_EVENT_BYTES:
         return JSONResponse({'detail': 'The Firstmate execution event is too large.'}, status_code=413)
     bounded_contract_path = request.method == 'POST' and (
@@ -224,6 +234,7 @@ recent_activity_service = RecentActivityService(structured_runtime, github_app_s
 stt_adapter = VoiceInputAdapter()
 _notification_reconciler_task = None
 _firstmate_delivery_recovery_task = None
+_hosted_execution_task = None
 _PROCESS_STARTED_AT_MS = int(time.time() * 1000)
 
 
@@ -277,12 +288,15 @@ async def _reconcile_registered_notifications() -> None:
 
 @app.on_event('startup')
 async def start_notification_reconciler():
-    global _notification_reconciler_task, _firstmate_delivery_recovery_task
+    global _notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task
     validate_friend_beta_configuration()
     validate_provider_auth_configuration()
     validate_billing_configuration()
     validate_magi_chat_configuration()
     validate_github_app_configuration()
+    # Hosted mode is a fail-closed production boundary: validate every image,
+    # identity, mTLS, network, and resource setting before serving.
+    HostedExecutionConfig.from_env()
     # A process cannot resume an in-flight provider socket. Preserve the
     # reserved pair and expose a truthful, explicitly retryable failure.
     await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
@@ -294,15 +308,18 @@ async def start_notification_reconciler():
     _firstmate_delivery_recovery_task = asyncio.create_task(
         _recover_firstmate_deliveries_once()
     )
+    hosted_controller = get_hosted_controller()
+    if hosted_controller is not None:
+        _hosted_execution_task = asyncio.create_task(hosted_controller.run())
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
-    global _notification_reconciler_task, _firstmate_delivery_recovery_task
+    global _notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task
     tasks = [
-        task for task in (_notification_reconciler_task, _firstmate_delivery_recovery_task)
+        task for task in (_notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task)
         if task is not None
     ]
     for task in tasks:
@@ -311,6 +328,7 @@ async def stop_notification_reconciler():
         await asyncio.gather(*tasks, return_exceptions=True)
     _notification_reconciler_task = None
     _firstmate_delivery_recovery_task = None
+    _hosted_execution_task = None
 
 
 async def _bounded_event_frame(websocket: WebSocket, timeout: float) -> str:
@@ -627,13 +645,24 @@ oauth_transaction_store = OAuthTransactionStore()
 
 # HEALTH & RUNTIME
 
+def _execution_interface_readiness() -> dict[str, Any]:
+    if HostedExecutionConfig.from_env() is not None:
+        return {
+            'status': 'configured',
+            'mode': 'hosted-isolation',
+            'activation': 'not-observed',
+            'live_probe_performed': False,
+        }
+    return fm_client.get_execution_interface_readiness()
+
+
 @app.get('/api/v1/runtime')
 async def get_runtime(principal: Principal = Depends(require_scope('read'))):
     fleet, runtime = await asyncio.gather(
         asyncio.to_thread(structured_runtime.fleet, principal.user_id),
         asyncio.to_thread(structured_runtime.runtime, principal.user_id),
     )
-    execution_interface = fm_client.get_execution_interface_readiness()
+    execution_interface = _execution_interface_readiness()
     event_ingress = {
         'status': 'ready',
         'schemas': ['firstmate.execution-event.v1', 'firstmate.decision-events.v1'],
@@ -669,7 +698,7 @@ async def get_runtime(principal: Principal = Depends(require_scope('read'))):
 @app.get('/api/v1/health')
 async def get_health(principal: Principal = Depends(require_scope('read'))):
     runtime = await asyncio.to_thread(structured_runtime.runtime, principal.user_id)
-    execution_interface = fm_client.get_execution_interface_readiness()
+    execution_interface = _execution_interface_readiness()
     event_ingress = {
         'status': 'ready',
         'schemas': ['firstmate.execution-event.v1', 'firstmate.decision-events.v1'],
@@ -813,13 +842,28 @@ async def delete_current_account(
 ):
     """Permanently erase the authenticated principal and revoke every session."""
     response.headers['Cache-Control'] = 'no-store'
-    _clear_provider_cookie(response)
+    if contract.confirmation != f"DELETE {principal.user_id}":
+        raise HTTPException(
+            status_code=409,
+            detail="Account deletion confirmation does not match the authenticated account.",
+        )
     try:
-        return await asyncio.to_thread(
+        hosted_controller = get_hosted_controller()
+        if hosted_controller is not None:
+            await hosted_controller.retire_owner(principal.user_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Hosted workloads could not be retired; account data was preserved.",
+        ) from exc
+    try:
+        result = await asyncio.to_thread(
             delete_account, principal.user_id, confirmation=contract.confirmation,
         )
     except AccountDeletionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _clear_provider_cookie(response)
+    return result
 
 
 # PROJECTS

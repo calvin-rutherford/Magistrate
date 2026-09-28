@@ -67,12 +67,28 @@ class ObjectiveCancellationService:
         if current["status"] != "requested":
             return self._public(current, duplicate=duplicate)
         try:
-            await self.inbox.note(
-                f"Cancellation request {current['request_id']} targets authenticated Magi "
-                f"objective {current['task_id']}. Apply Firstmate's normal cancellation "
-                "policy and publish objective.cancelled only after cancellation is observed."
-            )
-        except FirstmateIntakeError as exc:
+            from app.hosted_execution import get_hosted_controller, hosted_execution_enabled
+            if hosted_execution_enabled():
+                controller = get_hosted_controller()
+                with connect(db.DB_PATH, timeout=10) as connection:
+                    run = connection.execute(
+                        """SELECT backend_execution_id, state FROM hosted_execution_runs
+                           WHERE owner_user_id = ? AND objective_id = ?""",
+                        (current["owner_user_id"], current["objective_id"]),
+                    ).fetchone()
+                if controller is None:
+                    raise FirstmateIntakeError("hosted-runtime-unavailable")
+                # The durable request itself is sufficient for queued work;
+                # the controller records accepted/cancelled without launching.
+                if run is not None and run[1] in {"launching", "running"}:
+                    await controller.transport.cancel(str(run[0]))
+            else:
+                await self.inbox.note(
+                    f"Cancellation request {current['request_id']} targets authenticated Magi "
+                    f"objective {current['task_id']}. Apply Firstmate's normal cancellation "
+                    "policy and publish objective.cancelled only after cancellation is observed."
+                )
+        except (FirstmateIntakeError, RuntimeError) as exc:
             with connect(db.DB_PATH) as failed_connection:
                 failed_connection.execute(
                     """UPDATE objective_cancellation_requests

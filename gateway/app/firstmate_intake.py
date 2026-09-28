@@ -192,7 +192,15 @@ async def reconcile_pending_objective_intake(
     counts = {"examined": len(rows), "recovered": 0, "failed": 0}
     if not rows:
         return counts
-    objective_dispatcher = dispatcher or TasksAxiObjectiveDispatcher()
+    if dispatcher is not None:
+        objective_dispatcher = dispatcher
+    else:
+        from app.hosted_execution import HostedObjectiveDispatcher, hosted_execution_enabled
+        objective_dispatcher = (
+            HostedObjectiveDispatcher()
+            if hosted_execution_enabled()
+            else TasksAxiObjectiveDispatcher()
+        )
     store = ObjectiveSubmissionStore()
     for row in rows:
         try:

@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -718,12 +718,59 @@ def _migration_project_context_plane(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _install_hosted_execution_schema(connection: sqlite3.Connection) -> None:
+    """Install the durable provider-neutral execution queue and answer outbox."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS hosted_execution_runs (
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL UNIQUE,
+        project TEXT NOT NULL,
+        tenant_key TEXT NOT NULL,
+        isolation_key TEXT NOT NULL,
+        backend_execution_id TEXT NOT NULL UNIQUE,
+        worker_token_hash TEXT NOT NULL UNIQUE,
+        worker_token_enc TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('queued','launching','running','terminal')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        lease_id TEXT,
+        lease_expires_at INTEGER,
+        last_error_code TEXT,
+        terminal_observed_at INTEGER,
+        cleaned_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(objective_id) REFERENCES magi_objective_submissions(objective_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_hosted_execution_capacity
+                           ON hosted_execution_runs(state, tenant_key, created_at)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_hosted_execution_cleanup
+                           ON hosted_execution_runs(state, cleaned_at)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS hosted_decision_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        lifecycle_identity TEXT NOT NULL,
+        answer_enc TEXT NOT NULL,
+        answer_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, task_id, lifecycle_identity, answer_sha256),
+        FOREIGN KEY(objective_id) REFERENCES hosted_execution_runs(objective_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_hosted_decision_pending
+                           ON hosted_decision_deliveries(objective_id, status, created_at)""")
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
     (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
     (4, "tenant-github-app", _migration_github_app),
     (5, "credit-billing-ledgers", _migration_credit_billing),
     (6, "project-context-plane", _migration_project_context_plane),
+    (7, "hosted-execution", _install_hosted_execution_schema),
 )
 
 
@@ -1872,6 +1919,10 @@ def _initialize_db() -> None:
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_objective ON firstmate_execution_events(owner_user_id, objective_id, occurred_at, created_at)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_wake ON firstmate_execution_events(generation_state, updated_at)')
+
+    # Provider-neutral hosted mode uses this durable queue for multi-instance
+    # launch leases, terminal cleanup, and objective-bound decision delivery.
+    _install_hosted_execution_schema(conn)
 
     # Billing uses integer microcredits throughout. Ledger rows are immutable;
     # account balances are a transactionally maintained projection that makes

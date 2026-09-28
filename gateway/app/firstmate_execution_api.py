@@ -35,6 +35,12 @@ async def post_firstmate_execution_event(
     principal: Principal = Depends(require_any_scope("response", "command")),
 ):
     """Persist one owner-scoped event and wake verified completion if present."""
+    from app.hosted_execution import hosted_execution_enabled
+    if hosted_execution_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Hosted execution events require objective-bound workload authentication.",
+        )
     try:
         return await firstmate_execution_service.ingest(principal.user_id, event)
     except (FirstmateExecutionNotFound, FirstmateExecutionConflict, BillingError, ValueError) as exc:

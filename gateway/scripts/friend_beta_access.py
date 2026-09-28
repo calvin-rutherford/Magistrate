@@ -73,7 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     issue.add_argument("--ttl-hours", type=int, default=7 * 24)
     issue.add_argument(
         "--allow-shared-runtime-access", action="store_true",
-        help="acknowledge that command/voice scopes reach the shared operator runtime",
+        help="restricted mode only: acknowledge command/voice access to the shared operator runtime",
     )
     issue.add_argument(
         "--output", required=True,

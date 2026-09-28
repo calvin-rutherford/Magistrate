@@ -888,7 +888,14 @@ class FirstmateObjectiveTools:
         memory_store: ProjectMemoryStore | None = None,
     ) -> None:
         self.store = store or ObjectiveSubmissionStore()
-        self.dispatcher = dispatcher or TasksAxiObjectiveDispatcher()
+        if dispatcher is None:
+            from app.hosted_execution import HostedObjectiveDispatcher, hosted_execution_enabled
+            dispatcher = (
+                HostedObjectiveDispatcher()
+                if hosted_execution_enabled()
+                else TasksAxiObjectiveDispatcher()
+            )
+        self.dispatcher = dispatcher
         self.credit_ledger = credit_ledger or CreditLedger()
         self.memory_store = memory_store or ProjectMemoryStore()
 
