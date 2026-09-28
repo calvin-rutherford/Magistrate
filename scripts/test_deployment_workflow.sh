@@ -53,4 +53,11 @@ for secret in \
   }
 done
 
-echo 'deployment workflow manual-only invariant passed'
+grep -Fq 'http://$DEPLOY_HOST:8000/readyz' "$WORKFLOW"
+grep -Fq '[[ "$status" == 200 ]]' "$WORKFLOW"
+if grep -Eq '2\?\?\|401|401\|403' "$WORKFLOW"; then
+  echo 'invariant failed: authentication rejection is not readiness' >&2
+  exit 1
+fi
+
+echo 'deployment workflow manual-only/readiness invariants passed'

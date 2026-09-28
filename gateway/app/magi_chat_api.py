@@ -14,6 +14,7 @@ from typing import Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth import Principal, require_any_scope, require_scope
+from app.telemetry import operation_span
 from app.contracts import NativeMagiMessageContract
 from app.magi_chat_service import MagiChatService
 from app.magi_chat_store import (
@@ -89,10 +90,11 @@ class _ConfiguredProvider:
         route_context: ModelRouteContext,
         tools: Sequence[MagiToolDefinition] = (),
     ) -> MagiModelResult:
-        return await _configured_model().complete_routed(
-            messages, system_context=system_context, request_id=request_id,
-            route_context=route_context, tools=tools,
-        )
+        with operation_span('routing'):
+            return await _configured_model().complete_routed(
+                messages, system_context=system_context, request_id=request_id,
+                route_context=route_context, tools=tools,
+            )
 
     async def complete(
         self,
@@ -102,9 +104,10 @@ class _ConfiguredProvider:
         request_id: str,
         tools: Sequence[MagiToolDefinition] = (),
     ) -> MagiModelResult:
-        return await _configured_model().complete(
-            messages, system_context=system_context, request_id=request_id, tools=tools,
-        )
+        with operation_span('routing'):
+            return await _configured_model().complete(
+                messages, system_context=system_context, request_id=request_id, tools=tools,
+            )
 
 
 magi_chat_store = MagiChatStore()

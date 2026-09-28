@@ -79,13 +79,12 @@ jobs:
 
       # This job is intentionally secret-free: authenticated session issuance
       # belongs only to the trusted deployment-host smoke script.
-      - name: Verify unauthenticated demo reachability
+      - name: Verify public assets and Gateway readiness
         env:
           DEPLOY_HOST: ${{ secrets.MAGISTRATE_DEPLOY_HOST }}
         run: |
           set -euo pipefail
           curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 15 "http://$DEPLOY_HOST:8000/" >/dev/null
-          # The health endpoint is authenticated; a 401 still proves the
-          # restarted backend is serving rather than a stale proxy response.
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "http://$DEPLOY_HOST:8000/api/v1/health")"
-          case "$status" in 2??|401|403) ;; *) echo "demo health check returned HTTP $status" >&2; exit 1 ;; esac
+          # Authentication rejects are reachability, not deployment readiness.
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "http://$DEPLOY_HOST:8000/readyz")"
+          [[ "$status" == 200 ]] || { echo "demo readiness returned HTTP $status" >&2; exit 1; }

@@ -12,7 +12,7 @@ import json
 import os
 import re
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
-from urllib.parse import urlsplit
+from app.production_security import validate_provider_url
 
 import httpx
 
@@ -445,11 +445,7 @@ class OpenAIMagiModel:
         if (not self.model or len(self.model) > 128
                 or any(not (character.isalnum() or character in "._:/-") for character in self.model)):
             raise RuntimeError("MAGISTRATE_MAGI_MODEL is invalid")
-        provider_url = urlsplit(self._base_url)
-        if (provider_url.scheme != "https" or not provider_url.hostname
-                or provider_url.username is not None or provider_url.password is not None
-                or provider_url.query or provider_url.fragment):
-            raise RuntimeError("MAGISTRATE_MAGI_PROVIDER_URL must be a credential-free HTTPS URL")
+        validate_provider_url(self._base_url)
         if not 1 <= self._max_output_tokens <= 65_536:
             raise RuntimeError("MAGISTRATE_MAGI_MAX_OUTPUT_TOKENS must be between 1 and 65536")
         if not 1 <= self._timeout_seconds <= 300:
@@ -520,12 +516,20 @@ class OpenAIMagiModel:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout_seconds, connect=min(10.0, self._timeout_seconds)),
                 transport=self._transport,
+                trust_env=False,
+                follow_redirects=False,
             ) as client:
-                response = await client.post(
-                    f"{self._base_url}/responses",
-                    headers=headers,
-                    json=request_payload,
-                )
+                async with client.stream(
+                    'POST', f"{self._base_url}/responses", headers=headers, json=request_payload,
+                ) as response:
+                    # Bound decoded bytes, including compressed responses, before
+                    # buffering/parsing untrusted provider JSON.
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(body) + len(chunk) > 4 * 1024 * 1024:
+                            raise MagiModelError('provider_invalid_response', retryable=True, billing_uncertain=True)
+                        body.extend(chunk)
+                    response = httpx.Response(response.status_code, content=bytes(body))
         except httpx.TimeoutException as exc:
             raise MagiModelError(
                 "provider_timeout", retryable=True, billing_uncertain=True,
@@ -536,7 +540,7 @@ class OpenAIMagiModel:
             raise MagiModelError(
                 "provider_unavailable", retryable=True, billing_uncertain=True,
             ) from exc
-        if response.status_code >= 400:
+        if response.status_code >= 300:
             # Provider bodies can echo request material. Deliberately classify
             # only the status and never propagate or log the body.
             retryable = response.status_code == 429 or response.status_code >= 500

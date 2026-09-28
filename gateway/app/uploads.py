@@ -69,9 +69,21 @@ _SUFFIX_TYPES = {
 _PROCESS_SIGNING_KEY = secrets.token_bytes(32)
 
 
+def avatar_root() -> Path:
+    from app.production_security import production_mode
+    default = (Path(db.DB_PATH).parent / 'avatars' if production_mode()
+               else Path(__file__).resolve().parents[1] / 'uploads' / 'avatars')
+    return Path(os.getenv('MAGISTRATE_AVATAR_DIR') or default)
+
+
 def _root() -> Path:
     configured = os.getenv("MAGISTRATE_OBJECT_STORAGE_DIR", "").strip() or os.getenv("MAGISTRATE_CHAT_UPLOAD_DIR", "").strip()
     root = Path(configured) if configured else Path(db.DB_PATH).parent / "private_objects"
+    if root.is_symlink() or root.absolute() != root.resolve():
+        raise ValueError('Upload storage must not contain symlinks.')
+    public = avatar_root().resolve()
+    if root.resolve().is_relative_to(public) or public.is_relative_to(root.resolve()):
+        raise ValueError('Private uploads must not overlap public avatars.')
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(root, 0o700)
     return root.resolve()
@@ -205,8 +217,8 @@ def _object_path(object_key: str) -> Path:
     if not _SAFE_OBJECT_KEY.fullmatch(object_key):
         raise ValueError("Invalid private object key.")
     root = _root()
-    candidate = (root / object_key).resolve()
-    if root not in candidate.parents:
+    candidate = root / object_key
+    if candidate.resolve() != candidate or root not in candidate.parents:
         raise ValueError("Invalid private object key.")
     return candidate
 
@@ -265,23 +277,42 @@ def save_upload(user_id: str, filename: str, media_type: Optional[str], content:
     digest = hashlib.sha256(content).hexdigest()
     object_key = f"{digest[:2]}/{digest[2:4]}/{leaf}"
     destination = _object_path(object_key)
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with destination.open("xb") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(destination, 0o600)
+    created = False
     try:
-        scan_status = _scan(destination)
-        now = int(time.time())
-        expires_at = now + _ttl("MAGISTRATE_UNATTACHED_UPLOAD_TTL_SECONDS", DEFAULT_UNATTACHED_TTL_SECONDS)
         with connect(db.DB_PATH) as conn:
+            # SQLite serializes writers; PostgreSQL's compatibility seam uses
+            # a transaction-scoped advisory lock across Gateway instances.
+            conn.execute('BEGIN IMMEDIATE')
+            for where, params, prefix, default_bytes, default_count in (
+                (' AND user_id=?', (user_id,), 'USER', 250 * 1024 * 1024, 500),
+                ('', (), 'GLOBAL', 5 * 1024 * 1024 * 1024, 10000),
+            ):
+                byte_limit = int(os.getenv(f'MAGISTRATE_UPLOAD_{prefix}_BYTES', str(default_bytes)))
+                count_limit = int(os.getenv(f'MAGISTRATE_UPLOAD_{prefix}_COUNT', str(default_count)))
+                size, count = conn.execute(
+                    'SELECT COALESCE(SUM(size),0), COUNT(*) FROM chat_uploads WHERE deleted_at IS NULL' + where, params,
+                ).fetchone()
+                if byte_limit <= 0 or count_limit <= 0:
+                    raise ValueError('Upload quota configuration is invalid.')
+                if size + len(content) > byte_limit or count + 1 > count_limit:
+                    raise ValueError('Upload storage quota exceeded.')
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            created = True
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            scan_status = _scan(destination)
+            now = int(time.time())
+            expires_at = now + _ttl("MAGISTRATE_UNATTACHED_UPLOAD_TTL_SECONDS", DEFAULT_UNATTACHED_TTL_SECONDS)
             conn.execute("""INSERT INTO chat_uploads
                 (upload_id,user_id,filename,media_type,size,path,created_at,object_key,sha256,scan_status,expires_at,deleted_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL)""",
                 (upload_id, user_id, safe_name, kind, len(content), "", now, object_key, digest, scan_status, expires_at))
     except Exception:
-        destination.unlink(missing_ok=True)
+        if created:
+            destination.unlink(missing_ok=True)
         raise
     return {"upload_id": upload_id, "filename": safe_name, "media_type": kind,
             "size": len(content), "status": "stored", "scan_status": scan_status,
@@ -346,13 +377,32 @@ def get_upload(user_id: str, upload_id: str) -> Optional[dict[str, Any]]:
         row = conn.execute("SELECT * FROM chat_uploads WHERE upload_id=? AND user_id=? AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at>?)", (upload_id, user_id, now)).fetchone()
     if not row: return None
     record = {key: row[key] for key in row.keys()}
-    try:
-        path = _object_path(record["object_key"]) if record.get("object_key") else Path(record["path"])
-    except ValueError:
-        return None
-    if not path.is_file(): return None
+    path = _safe_stored_path(record)
+    if path is None: return None
     record["path"] = str(path)  # internal only; public serializers select fields explicitly
     return record
+
+
+def _safe_stored_path(row: dict[str, Any]) -> Optional[Path]:
+    try:
+        if row.get('object_key'):
+            path = _object_path(row['object_key'])
+        else:
+            path = Path(row['path'])
+            if path != _root() / f"{row['upload_id']}-{row['filename']}":
+                return None
+        if (path.resolve() != path or path.is_symlink() or not path.is_file()
+                or path.stat().st_size != row['size']):
+            return None
+        return path
+    except (OSError, ValueError):
+        return None
+
+
+def discard_uploads(user_id: str, upload_ids: list[str]) -> None:
+    """Rollback this multipart batch only; never erase attached/foreign objects."""
+    for upload_id in upload_ids:
+        delete_upload(user_id, upload_id)
 
 
 def read_upload_content(user_id: str, upload_id: str) -> Optional[bytes]:

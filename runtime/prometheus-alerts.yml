@@ -1,0 +1,33 @@
+groups:
+  - name: magistrate-gateway
+    rules:
+      - alert: MagistrateScrapeUnavailable
+        expr: up{job="magistrate"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Magistrate operator telemetry is unavailable"}
+      - alert: MagistratePersistenceUnavailable
+        expr: magistrate_persisted_metrics_available == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "Magistrate persisted metrics cannot be read"}
+      - alert: MagistrateRequestErrors
+        expr: sum(rate(magistrate_operations_total{operation="http",outcome="error"}[5m])) / clamp_min(sum(rate(magistrate_operations_total{operation="http"}[5m])), 0.01) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Magistrate HTTP failures exceed five percent"}
+      - alert: MagistrateProviderErrors
+        expr: sum(increase(magistrate_operations_total{operation="provider",outcome="error"}[5m])) > 5
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Magi provider calls are failing"}
+      - alert: MagistrateAuthorizationOrAbuseSpike
+        expr: sum(rate(magistrate_operations_total{operation="http",outcome="rejected"}[5m])) > 2
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Investigate auth or request-boundary rejects; never log rejected bodies"}
+      - alert: MagistrateIntakeBacklog
+        expr: magistrate_intake_submitting > 0 or magistrate_accepted_unobserved > 10
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Persisted intake is not progressing; do not reconcile from reads"}

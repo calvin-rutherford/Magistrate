@@ -97,7 +97,8 @@ def _stage_files(connection: sqlite3.Connection, user_id: str) -> tuple[Path, li
     if profile and isinstance(profile[0], str) and profile[0].startswith("/uploads/avatars/"):
         avatar_name = profile[0].removeprefix("/uploads/avatars/")
         if avatar_name and avatar_name != "default_avatar.png" and Path(avatar_name).name == avatar_name:
-            candidates.append(Path(__file__).resolve().parents[1] / "uploads" / "avatars" / avatar_name)
+            from app.uploads import avatar_root
+            candidates.append(avatar_root() / avatar_name)
 
     root = Path(db.DB_PATH).parent / ".account-deletion"
     root.mkdir(mode=0o700, parents=True, exist_ok=True)

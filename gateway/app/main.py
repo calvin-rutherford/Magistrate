@@ -10,6 +10,12 @@ import secrets
 import time
 import re
 import unicodedata
+import hmac
+
+from app.production_security import cors_origins, validate_production_configuration
+from app.persistence import observation_connection
+from app.request_boundary import RequestBoundary
+from app.telemetry import prometheus_metrics, record
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -52,7 +58,6 @@ from app.recent_activity import RecentActivityService
 from app.activity_store import SourceEventConflict, list_activity, snapshot_activity, source_diagnostics
 from app.structured_runtime import StructuredRuntimeProjection
 from app.attention_service import attention_service
-from app.ar_glasses import router as ar_router
 from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
                                    prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
 from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
@@ -71,7 +76,7 @@ from app.usage import get_usage
 from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BYTES,
                          SIGNED_ACCESS_TTL_SECONDS, associate_uploads, delete_upload,
                          get_upload, save_upload, signed_access_token, validate_content,
-                         verify_signed_access)
+                         verify_signed_access, discard_uploads, avatar_root)
 from app.magi_chat_api import (magi_chat_readiness, magi_chat_service,
                                router as magi_chat_router,
                                validate_magi_chat_configuration)
@@ -93,6 +98,7 @@ from app.hosted_execution import (
 )
 from app.perception import MAX_PERCEPTION_EVENT_BYTES, router as perception_router
 
+validate_production_configuration()
 init_db()
 
 app = FastAPI(
@@ -102,19 +108,7 @@ app = FastAPI(
 )
 
 def _cors_origins() -> list[str]:
-    configured = os.getenv('MAGISTRATE_CORS_ORIGINS')
-    if configured is not None:
-        origins = [item.strip() for item in configured.split(',') if item.strip()]
-        if '*' in origins:
-            raise RuntimeError('Wildcard CORS is not permitted.')
-        if os.getenv('MAGISTRATE_ENV', '').lower() not in {'dev', 'development', 'test', 'testing'}:
-            for origin in origins:
-                if origin.startswith('http://') and not origin.startswith(('http://localhost', 'http://127.0.0.1', 'http://[::1]')):
-                    raise RuntimeError('Production CORS origins must use HTTPS.')
-        return origins
-    if os.getenv('MAGISTRATE_ENV', '').lower() in {'dev', 'development', 'test', 'testing'}:
-        return ['http://localhost:8081', 'http://localhost:19006']
-    raise RuntimeError('MAGISTRATE_CORS_ORIGINS is required outside explicit development/test mode.')
+    return cors_origins()
 
 
 app.add_middleware(
@@ -123,13 +117,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allow_headers=['Authorization', 'Content-Type'],
+    expose_headers=['X-Request-ID'],
 )
 
 GATEWAY_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = GATEWAY_DIR / 'uploads' / 'avatars'
-os.makedirs(UPLOADS_DIR, exist_ok=True)
-app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
-app.include_router(ar_router)
+UPLOADS_DIR = avatar_root()
+os.makedirs(UPLOADS_DIR, mode=0o700, exist_ok=True)
+# Only avatars are public. Never mount the parent of private chat attachments.
+app.mount('/uploads/avatars', StaticFiles(directory=str(UPLOADS_DIR)), name='avatars')
 app.include_router(github_app_router)
 app.include_router(magi_chat_router)
 app.include_router(firstmate_execution_router)
@@ -239,6 +234,10 @@ async def enforce_bounded_request_size(request: Request, call_next):
         request._body = bytes(body)
     return await call_next(request)
 
+# Outermost user middleware: every HTTP parser is behind a measured-byte cap.
+app.add_middleware(RequestBoundary)
+app.state.startup_complete = False
+
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
 structured_runtime = StructuredRuntimeProjection()
@@ -257,25 +256,23 @@ async def _recover_firstmate_deliveries_once() -> None:
             updated_before_ms=_PROCESS_STARTED_AT_MS,
         )
         if intake_recovery["examined"]:
-            print("Firstmate objective intake recovery:", intake_recovery)
+            record('recovery', outcome='ok')
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
-        # Keep cancellation recovery independent: an unavailable objective
-        # queue must not strand a cancellation note (or vice versa).
-        print("Firstmate objective intake recovery unavailable:", exc)
+    except Exception:
+        # Never log provider/subprocess exception text or row payloads.
+        record('recovery', outcome='error')
     try:
         cancellation_recovery = await objective_cancellation_service.recover_pending(
             updated_before_ms=_PROCESS_STARTED_AT_MS,
         )
         if cancellation_recovery["examined"]:
-            print("Firstmate cancellation delivery recovery:", cancellation_recovery)
+            record('recovery', outcome='ok')
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
-        # Persisted pending rows remain eligible for the next explicit restart;
-        # Firstmate availability must not make the observation API unavailable.
-        print("Firstmate cancellation delivery recovery unavailable:", exc)
+    except Exception:
+        # Persisted pending rows remain eligible for the next explicit restart.
+        record('recovery', outcome='error')
 
 
 async def _reconcile_registered_notifications() -> None:
@@ -292,15 +289,15 @@ async def _reconcile_registered_notifications() -> None:
                 await dispatch_notification_events(user_id, items, local_hour=registered_local_hour(user_id))
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            # A source/provider outage must not kill the reconciler; the next
-            # interval retries and the Attention tab remains the fallback.
-            print('Notification reconciler unavailable:', exc)
+        except Exception:
+            # A provider outage must not echo remote content into host logs.
+            record('notifications', outcome='error')
 
 
 @app.on_event('startup')
 async def start_notification_reconciler():
     global _notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task
+    validate_production_configuration()
     validate_friend_beta_configuration()
     validate_provider_auth_configuration()
     validate_billing_configuration()
@@ -325,11 +322,13 @@ async def start_notification_reconciler():
         _hosted_execution_task = asyncio.create_task(hosted_controller.run())
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
+    app.state.startup_complete = True
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
     global _notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task
+    app.state.startup_complete = False
     tasks = [
         task for task in (_notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task)
         if task is not None
@@ -762,6 +761,37 @@ async def get_soak_diagnostics(principal: Principal = Depends(require_scope('rea
         'native_chat': await magi_chat_service.diagnostics(principal.user_id),
     }
 
+@app.get('/livez', include_in_schema=False)
+async def liveness():
+    return {'status': 'alive'}
+
+
+@app.get('/readyz', include_in_schema=False)
+async def readiness():
+    # Read persisted state only. Never call providers, tools or a runtime probe.
+    from app import db
+    ready = app.state.startup_complete and magi_chat_readiness()['status'] == 'configured'
+    try:
+        with observation_connection(db.DB_PATH) as conn:
+            version = conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]
+            ready = ready and version == db.SCHEMA_VERSION
+    except Exception:
+        # Driver connection errors may contain authority; never expose them.
+        ready = False
+    return JSONResponse({'status': 'ready' if ready else 'unavailable'}, status_code=200 if ready else 503)
+
+
+@app.get('/internal/metrics', include_in_schema=False)
+async def metrics(authorization: Optional[str] = Header(None)):
+    # Product read scope must not expose other principals' traffic/spend.
+    token = os.getenv('MAGISTRATE_METRICS_TOKEN', '')
+    if not token:
+        raise HTTPException(404, 'Not found.')
+    if not hmac.compare_digest((authorization or '').encode(), f'Bearer {token}'.encode()):
+        raise HTTPException(401, 'Metrics authentication required.')
+    return Response(prometheus_metrics(), media_type='text/plain; version=0.0.4')
+
+
 # ACCOUNT PROFILE ENDPOINTS
 @app.get('/api/v1/account/profile')
 async def get_account_profile(principal: Principal = Depends(require_scope('account'))):
@@ -831,16 +861,16 @@ async def upload_account_avatar(
     filepath = UPLOADS_DIR / filename
     previous = get_profile(principal.user_id).get('avatar_url')
     try:
-        with filepath.open('xb') as handle:
+        fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'wb') as handle:
             handle.write(content)
-        os.chmod(filepath, 0o600)
         public_url = f'/uploads/avatars/{filename}'
         updated = update_profile(user_id=principal.user_id, avatar_url=public_url)
     except Exception:
         filepath.unlink(missing_ok=True)
         raise
     if isinstance(previous, str) and previous.startswith('/uploads/avatars/avatar_'):
-        old_path = (GATEWAY_DIR / previous.lstrip('/')).resolve()
+        old_path = (UPLOADS_DIR / previous.removeprefix('/uploads/avatars/')).resolve()
         if old_path.parent == UPLOADS_DIR.resolve() and old_path != filepath:
             old_path.unlink(missing_ok=True)
     return {'status': 'stored', 'avatar_url': public_url, 'profile': updated}
@@ -1417,20 +1447,11 @@ async def upload_chat_files(
             uploaded.append(save_upload(principal.user_id, file.filename or 'upload', file.content_type, content))
         if message_id:
             associate_uploads(principal.user_id, message_id, [item['upload_id'] for item in uploaded])
-    except HTTPException:
-        for item in uploaded:
-            try:
-                delete_upload(principal.user_id, item['upload_id'])
-            except ValueError:
-                pass
+    except Exception as exc:
+        discard_uploads(principal.user_id, [item['upload_id'] for item in uploaded])
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         raise
-    except ValueError as exc:
-        for item in uploaded:
-            try:
-                delete_upload(principal.user_id, item['upload_id'])
-            except ValueError:
-                pass
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     # The client must not infer processing success from a 200 alone. Report the
     # state the server actually reached: bytes stored and validated, and whether
     # the upload is already associated with a chat message.

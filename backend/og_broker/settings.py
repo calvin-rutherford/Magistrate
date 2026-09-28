@@ -3,8 +3,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
+# Historical Django/Celery laboratory only; never a production alternative.
+# Test imports remain supported without activating any live runtime.
+if os.getenv('MAGISTRATE_ENV', '').strip().lower() == 'production':
+    raise ImproperlyConfigured('Legacy Django is quarantined; production uses the Native Gateway.')
+
 # Load environment variables from .env file
 load_dotenv()
+if os.getenv('MAGISTRATE_ENV', '').strip().lower() == 'production':
+    raise ImproperlyConfigured('Legacy Django is quarantined; production uses the Native Gateway.')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent

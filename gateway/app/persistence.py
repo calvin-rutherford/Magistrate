@@ -11,6 +11,8 @@ import os
 import re
 import sqlite3
 from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 
@@ -212,6 +214,26 @@ class PostgresConnection:
             self.rollback()
         self.close()
         return False
+
+
+@contextmanager
+def observation_connection(path: str):
+    """Bounded read-only operations probes; never create or migrate a database."""
+    if is_postgres():
+        connection = connect(path, timeout=1)
+        try:
+            connection.execute('SET TRANSACTION READ ONLY')
+            connection.execute("SET LOCAL statement_timeout = '1000ms'")
+            yield connection
+        finally:
+            connection.rollback()
+            connection.close()
+    else:
+        connection = sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True, timeout=1)
+        try:
+            yield connection
+        finally:
+            connection.close()
 
 
 def connect(path: str | None = None, *, timeout: float = 5.0):
