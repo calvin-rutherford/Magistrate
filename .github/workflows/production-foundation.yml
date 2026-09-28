@@ -33,6 +33,7 @@ jobs:
         with:
           name: release-foundation-receipt
           path: .release/foundation.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
@@ -68,6 +69,12 @@ jobs:
         if: always()
         with:
           name: dependency-advisory-reports
-          path: .release/*-audit.json
+          # Include only these generated reports, never the private .release tree.
+          path: |
+            .release/frontend-audit.json
+            .release/pi-audit.json
+            .release/gateway-audit.json
+            .release/backend-audit.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

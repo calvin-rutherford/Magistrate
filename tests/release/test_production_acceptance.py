@@ -84,6 +84,47 @@ class ReleaseGateTests(unittest.TestCase):
         for line in rows:
             self.assertIn(line.split("|")[-2].strip(), gate.STATES)
 
+    def test_workflow_receipt_uploads_include_only_allowlisted_hidden_artifacts(self):
+        workflows = {
+            "production-foundation.yml": {
+                "release-foundation-receipt": [".release/foundation.json"],
+                "dependency-advisory-reports": [
+                    ".release/frontend-audit.json", ".release/pi-audit.json",
+                    ".release/gateway-audit.json", ".release/backend-audit.json",
+                ],
+            },
+            "gateway.yml": {
+                "client-contract-and-postgres-receipt": [
+                    ".release/postgres.json", ".release/client-protocol.json",
+                ],
+            },
+        }
+        self.assertIn(".release/", (ROOT / ".gitignore").read_text().splitlines())
+        for workflow, expected in workflows.items():
+            with self.subTest(workflow=workflow):
+                text = (ROOT / ".github/workflows" / workflow).read_text()
+                # Literal action inputs keep this gate dependency-free. Match
+                # each whole upload step, not settings in an unrelated job.
+                blocks = re.findall(
+                    r"(?m)^      - uses: actions/upload-artifact@v4\n((?:^        .*\n|^\n)*)", text,
+                )
+                self.assertEqual(len(blocks), len(expected))
+                self.assertEqual(text.count('run: test -z "$(git status --porcelain --untracked-files=all)"'), len(expected))
+                observed = {}
+                for block in blocks:
+                    inputs = dict(re.findall(r"(?m)^          ([\w-]+): (.+)$", block))
+                    name = inputs["name"]
+                    self.assertNotIn(name, observed)
+                    self.assertEqual(inputs.get("include-hidden-files"), "true", name)
+                    self.assertEqual(inputs.get("if-no-files-found"), "error", name)
+                    self.assertEqual(inputs.get("retention-days"), "14", name)
+                    paths = (re.findall(r"(?m)^            (.+)$", block)
+                             if inputs["path"] == "|" else [inputs["path"]])
+                    observed[name] = paths
+                # Opting into hidden paths must not publish private release
+                # packets, environment files or the dependency-audit venv.
+                self.assertEqual(observed, expected)
+
     def test_merged_registry_has_no_unimplemented_suite_or_retired_entrypoint(self):
         for suite in self.registry["suites"]:
             self.assertTrue(suite["commands"], suite["id"])
