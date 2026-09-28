@@ -166,6 +166,10 @@ def test_account_deletion_erases_only_authenticated_tenant_across_domains(monkey
                 (owner, now, now),
             )
             connection.execute(
+                "INSERT INTO account_onboarding(user_id,welcome_completed_at,created_at,updated_at) VALUES (?,?,?,?)",
+                (owner, now, now, now),
+            )
+            connection.execute(
                 "INSERT INTO account_credit_ledger(credit_event_id,owner_user_id,project_id,amount_microunits,reason,provider_event_id,created_at) VALUES (?,?,?,1000,'grant',?,?)",
                 (f"credit-{owner}", owner, project_id, f"provider-{owner}", now),
             )
@@ -221,7 +225,8 @@ def test_account_deletion_erases_only_authenticated_tenant_across_domains(monkey
             ("project_repositories", "owner_user_id"), ("magi_messages", "owner_user_id"),
             ("magi_objective_submissions", "owner_user_id"), ("activity_records", "user_id"),
             ("project_memories", "owner_user_id"), ("billing_accounts", "owner_user_id"),
-            ("account_credit_ledger", "owner_user_id"), ("execution_credentials", "user_id"),
+            ("account_onboarding", "user_id"), ("account_credit_ledger", "owner_user_id"),
+            ("execution_credentials", "user_id"),
             ("gateway_sessions", "user_id"), ("chat_uploads", "user_id"),
             ("oauth_transactions", "principal_id"),
         )

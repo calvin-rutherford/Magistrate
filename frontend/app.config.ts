@@ -9,6 +9,7 @@ export default ({ config }: { config: ExpoConfig }): ExpoConfig => {
   const gatewayUrl = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim();
   const easProjectId = process.env.EXPO_PUBLIC_EAS_PROJECT_ID?.trim();
   const googleIosScheme = process.env.EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID?.trim();
+  const googleIosClientId = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID?.trim();
 
   if (gatewayUrl) {
     const parsed = new URL(gatewayUrl);
@@ -30,6 +31,16 @@ export default ({ config }: { config: ExpoConfig }): ExpoConfig => {
   }
   if (googleIosScheme && !/^com\.googleusercontent\.apps\.[A-Za-z0-9._-]+$/.test(googleIosScheme)) {
     throw new Error('EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID is invalid.');
+  }
+  if (googleIosClientId) {
+    const match = /^([A-Za-z0-9._-]+)\.apps\.googleusercontent\.com$/.exec(googleIosClientId);
+    if (!match) throw new Error('EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID is invalid.');
+    if (googleIosScheme && googleIosScheme !== `com.googleusercontent.apps.${match[1]}`) {
+      throw new Error('The reversed Google iOS client ID does not match EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID.');
+    }
+  }
+  if (Boolean(googleIosScheme) !== Boolean(googleIosClientId)) {
+    throw new Error('Google iOS client ID and reversed callback scheme must be configured together.');
   }
   const configuredSchemes = Array.isArray(config.scheme)
     ? config.scheme : config.scheme ? [config.scheme] : [];

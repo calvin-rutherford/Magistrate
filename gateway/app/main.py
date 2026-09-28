@@ -20,10 +20,15 @@ from app.auth import (Principal, account_onboarding_required, authenticate_reque
                       validate_friend_beta_configuration, verify_token)
 from app.provider_auth import (
     PROVIDER_COOKIE_NAME, PROVIDER_COOKIE_PATH, create_challenge,
-    exchange_challenge, provider_availability, public_session_payload,
-    refresh_session as refresh_provider_session,
-    validate_provider_auth_configuration,
+    exchange_challenge, list_login_methods, provider_availability,
+    public_session_payload, refresh_session as refresh_provider_session,
+    unlink_login_method, validate_provider_auth_configuration,
 )
+from app.billing import (
+    MAX_WEBHOOK_BYTES, accept_webhook, billing_status, create_checkout,
+    create_portal, validate_billing_configuration,
+)
+from app.onboarding import acknowledge_welcome, onboarding_state
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
@@ -139,6 +144,8 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
     if request.url.path == '/api/v1/magi/messages' and length > MAX_PROMPT_REQUEST_BYTES:
         return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
+    if request.url.path == '/api/v1/billing/webhook' and length > MAX_WEBHOOK_BYTES:
+        return JSONResponse({'detail': 'Billing webhook is too large.'}, status_code=413)
     firstmate_execution_contract = request.method == 'POST' and bool(re.fullmatch(
         r'/api/v1/firstmate/execution-events(?:/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/wake)?',
         request.url.path,
@@ -246,6 +253,7 @@ async def start_notification_reconciler():
     global _notification_reconciler_task, _firstmate_delivery_recovery_task
     validate_friend_beta_configuration()
     validate_provider_auth_configuration()
+    validate_billing_configuration()
     validate_magi_chat_configuration()
     # A process cannot resume an in-flight provider socket. Preserve the
     # reserved pair and expose a truthful, explicitly retryable failure.
@@ -707,6 +715,55 @@ async def post_account_profile(
         ):
             raise HTTPException(status_code=422, detail='Display name is invalid.')
     return update_profile(user_id=principal.user_id, name=name, email=email, bio=bio, active_theme=active_theme)
+
+@app.get('/api/v1/account/onboarding')
+async def get_account_onboarding(principal: Principal = Depends(require_scope('account'))):
+    return onboarding_state(principal.user_id)
+
+
+@app.post('/api/v1/account/onboarding/welcome')
+async def complete_account_welcome(principal: Principal = Depends(require_scope('account'))):
+    acknowledge_welcome(principal.user_id)
+    return onboarding_state(principal.user_id)
+
+
+@app.get('/api/v1/account/login-methods')
+async def get_account_login_methods(principal: Principal = Depends(require_scope('account'))):
+    return list_login_methods(principal)
+
+
+@app.delete('/api/v1/account/login-methods/{provider}')
+async def delete_account_login_method(
+    provider: Literal['apple', 'google'],
+    principal: Principal = Depends(require_scope('account')),
+):
+    return unlink_login_method(principal, provider)
+
+
+@app.get('/api/v1/billing/status')
+async def get_billing_status(principal: Principal = Depends(require_scope('account'))):
+    return billing_status(principal.user_id)
+
+
+@app.post('/api/v1/billing/checkout')
+async def post_billing_checkout(principal: Principal = Depends(require_scope('account'))):
+    profile = get_profile(principal.user_id)
+    email = profile.get('email') if isinstance(profile, dict) else None
+    return await create_checkout(principal.user_id, email if isinstance(email, str) else None)
+
+
+@app.post('/api/v1/billing/portal')
+async def post_billing_portal(principal: Principal = Depends(require_scope('account'))):
+    return await create_portal(principal.user_id)
+
+
+@app.post('/api/v1/billing/webhook')
+async def post_billing_webhook(
+    request: Request,
+    stripe_signature: str = Header('', alias='Stripe-Signature'),
+):
+    return accept_webhook(await request.body(), stripe_signature)
+
 
 @app.post('/api/v1/account/avatar')
 async def upload_account_avatar(

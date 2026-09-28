@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -438,8 +438,51 @@ def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_provider_onboarding_and_billing(connection: sqlite3.Connection) -> None:
+    connection.execute("""CREATE TABLE IF NOT EXISTS account_onboarding (
+        user_id TEXT PRIMARY KEY,
+        welcome_completed_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )""")
+    now = int(time.time())
+    # Existing provider sessions and a fresh sign-in must derive the same gate.
+    # Backfill every connected login principal rather than creating progress
+    # lazily and allowing pre-deploy sessions to bypass GitHub/billing steps.
+    connection.execute(
+        """INSERT OR IGNORE INTO account_onboarding
+           (user_id, welcome_completed_at, created_at, updated_at)
+           SELECT DISTINCT user_id, CAST(NULL AS BIGINT), ?, ? FROM connected_accounts
+           WHERE account_kind = 'login' AND status = 'connected'""",
+        (now, now),
+    )
+    billing_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(billing_accounts)")
+    }
+    for column, definition in (
+        ("subscription_id", "TEXT"),
+        ("current_period_end", "BIGINT"),
+        ("provider_event_created", "BIGINT"),
+    ):
+        if column not in billing_columns:
+            connection.execute(f"ALTER TABLE billing_accounts ADD COLUMN {column} {definition}")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_accounts_customer ON billing_accounts(external_customer_ref)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_accounts_subscription ON billing_accounts(subscription_id)"
+    )
+    connection.execute("""CREATE TABLE IF NOT EXISTS billing_webhook_events (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        received_at INTEGER NOT NULL
+    )""")
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
+    (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
 )
 
 

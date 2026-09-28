@@ -354,6 +354,104 @@ def test_web_provider_session_is_cookie_backed_revocable_and_principal_stable(mo
     assert client.post("/api/v1/auth/provider/refresh", json={}).status_code == 401
 
 
+def test_matching_verified_emails_never_merge_independent_provider_sign_ins(monkeypatch):
+    monkeypatch.setenv("MAGISTRATE_APPLE_CLIENT_IDS", "io.magistrate.test")
+    monkeypatch.setenv("MAGISTRATE_GOOGLE_CLIENT_IDS", "google-ios-client")
+    monkeypatch.setenv("MAGISTRATE_GOOGLE_IOS_CLIENT_IDS", "google-ios-client")
+    assertion = 0
+
+    async def verified(provider, identity_token, raw_nonce):
+        nonlocal assertion
+        assertion += 1
+        return ProviderClaims(
+            provider=provider, subject=f"independent-{provider}-subject",
+            email="shared@example.test", email_verified=True, name="Same Email",
+            assertion_hash=hashlib.sha256(f"independent-{assertion}".encode()).hexdigest(),
+            audience="io.magistrate.test" if provider == "apple" else "google-ios-client",
+        )
+
+    monkeypatch.setattr("app.provider_auth.verify_identity_token", verified)
+    client = TestClient(app)
+    users = []
+    for provider, redirect in (("apple", None), ("google", "com.googleusercontent.apps.test:/oauthredirect")):
+        request = {"provider": provider, "client_platform": "native"}
+        if redirect:
+            request["redirect_uri"] = redirect
+        challenge = client.post("/api/v1/auth/provider/challenge", json=request).json()
+        exchange = {
+            "provider": provider, "challenge_id": challenge["challenge_id"],
+            "nonce": challenge["nonce"], "identity_token": f"{provider}-token",
+        }
+        if redirect:
+            exchange["redirect_uri"] = redirect
+        users.append(client.post("/api/v1/auth/provider/exchange", json=exchange).json()["user_id"])
+    assert users[0] != users[1]
+
+
+def test_authenticated_second_provider_link_becomes_recovery_without_email_merge(monkeypatch):
+    monkeypatch.setenv("MAGISTRATE_APPLE_CLIENT_IDS", "io.magistrate.test")
+    monkeypatch.setenv("MAGISTRATE_GOOGLE_CLIENT_IDS", "google-ios-client")
+    monkeypatch.setenv("MAGISTRATE_GOOGLE_IOS_CLIENT_IDS", "google-ios-client")
+    assertion = 0
+
+    async def verified(provider, identity_token, raw_nonce):
+        nonlocal assertion
+        assertion += 1
+        return ProviderClaims(
+            provider=provider, subject=f"{provider}-recovery-subject",
+            email="same-address@example.test", email_verified=True,
+            name="Recovery Person", assertion_hash=hashlib.sha256(f"link-{assertion}".encode()).hexdigest(),
+            audience="io.magistrate.test" if provider == "apple" else "google-ios-client",
+        )
+
+    monkeypatch.setattr("app.provider_auth.verify_identity_token", verified)
+    client = TestClient(app)
+    apple = client.post("/api/v1/auth/provider/challenge", json={
+        "provider": "apple", "client_platform": "native",
+    }).json()
+    signed_in = client.post("/api/v1/auth/provider/exchange", json={
+        "provider": "apple", "challenge_id": apple["challenge_id"],
+        "nonce": apple["nonce"], "identity_token": "apple-identity-token",
+    })
+    token = signed_in.json()["session_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    google = client.post("/api/v1/auth/provider/challenge", headers=headers, json={
+        "provider": "google", "action": "link", "client_platform": "native",
+        "redirect_uri": "com.googleusercontent.apps.test:/oauthredirect",
+    }).json()
+    linked = client.post("/api/v1/auth/provider/exchange", headers=headers, json={
+        "provider": "google", "challenge_id": google["challenge_id"],
+        "nonce": google["nonce"], "identity_token": "google-identity-token",
+        "redirect_uri": "com.googleusercontent.apps.test:/oauthredirect",
+    })
+    assert linked.status_code == 200
+    methods = client.get("/api/v1/account/login-methods", headers=headers).json()["methods"]
+    assert {method["provider"] for method in methods} == {"apple", "google"}
+    assert sum(method["current"] for method in methods) == 1
+
+    # The same verified email never created or selected a second principal; the
+    # explicit authenticated link action is the only merge authority.
+    with sqlite3.connect(db.DB_PATH) as connection:
+        owners = connection.execute(
+            """SELECT DISTINCT user_id FROM connected_accounts
+               WHERE account_kind = 'login' AND provider_username = 'same-address@example.test'""",
+        ).fetchall()
+    assert owners == [(signed_in.json()["user_id"],)]
+
+    removed = client.delete("/api/v1/account/login-methods/google", headers=headers)
+    assert removed.status_code == 200
+    google_sign_in = client.post("/api/v1/auth/provider/challenge", json={
+        "provider": "google", "client_platform": "native",
+        "redirect_uri": "com.googleusercontent.apps.test:/oauthredirect",
+    }).json()
+    refused = client.post("/api/v1/auth/provider/exchange", json={
+        "provider": "google", "challenge_id": google_sign_in["challenge_id"],
+        "nonce": google_sign_in["nonce"], "identity_token": "google-again",
+        "redirect_uri": "com.googleusercontent.apps.test:/oauthredirect",
+    })
+    assert refused.status_code == 403
+
+
 def test_native_refresh_rotates_and_reuse_retires_the_family(monkeypatch):
     monkeypatch.setenv("MAGISTRATE_APPLE_CLIENT_IDS", "io.magistrate.test")
     counter = 0

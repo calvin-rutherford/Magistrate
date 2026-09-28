@@ -33,7 +33,9 @@ async function open(mode = 'normal', preserveStorage = false) {
       localStorage.setItem('magistrate.provider-session-present.v1', '1');
     }
     const nativeFetch = window.fetch.bind(window);
-    const state = { mode, valid: false, calls: [], authCalls: [], userId: sessionStorage.getItem('__auth_test_user') || 'default_user', token: 'browser-test-session', profileName: '' };
+    let restoredAuthMethod = null;
+    try { restoredAuthMethod = JSON.parse(localStorage.getItem('magistrate.gateway.session') || 'null')?.auth_method || null; } catch {}
+    const state = { mode, valid: false, calls: [], authCalls: [], userId: sessionStorage.getItem('__auth_test_user') || 'default_user', token: 'browser-test-session', profileName: mode === 'friend' ? '' : 'Ready User', authMethod: restoredAuthMethod };
     const expiresAt = mode === 'expiry' ? Math.floor(Date.now() / 1000) + 20 : 4102444800;
     let validationFailures = mode === 'validation-failure' ? 1 : 0;
     window.__authLifecycle = state;
@@ -55,6 +57,7 @@ async function open(mode = 'normal', preserveStorage = false) {
         state.valid = true;
         state.userId = 'provider-user';
         state.token = 'provider-browser-session';
+        state.authMethod = 'google';
         return json({
           session_token: state.token, token_type: 'Bearer', expires_at: expiresAt,
           scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'],
@@ -80,9 +83,10 @@ async function open(mode = 'normal', preserveStorage = false) {
         try { body = JSON.parse(options.body || '{}'); } catch {}
         if (body.access_code !== `mgb_${'A'.repeat(43)}`) return json({ detail: 'Invalid or expired Friend Beta access code' }, 401);
         state.valid = true;
-        state.userId = 'friend-beta-user';
-        state.token = 'friend-beta-session';
-        return json({ session_token: state.token, token_type: 'Bearer', expires_at: expiresAt, scopes: ['read', 'account', 'notifications'], user_id: state.userId, auth_method: 'friend-beta-access', renewable_until: 4102444800, onboarding_required: !state.profileName });
+        state.userId = mode === 'friend' ? 'friend-beta-user' : (sessionStorage.getItem('__auth_test_user') || 'default_user');
+        state.token = mode === 'friend' ? 'friend-beta-session' : 'browser-test-session';
+        state.authMethod = 'friend-beta-access';
+        return json({ session_token: state.token, token_type: 'Bearer', expires_at: expiresAt, scopes: ['read', 'account', 'notifications'], user_id: state.userId, auth_method: state.authMethod, renewable_until: 4102444800, onboarding_required: mode === 'friend' && !state.profileName });
       }
       if (url.includes('/api/v1/auth/session')) {
         state.authCalls.push({ url, method, body: options.body || null });
@@ -101,15 +105,15 @@ async function open(mode = 'normal', preserveStorage = false) {
         }
         if (authorization === `Bearer ${state.token}`) {
           state.valid = true;
-          const friend = state.userId === 'friend-beta-user';
-          const provider = state.userId === 'provider-user';
+          const friend = state.authMethod === 'friend-beta-access';
+          const provider = state.authMethod === 'google';
           return json({
             authenticated: true, expires_at: expiresAt,
             scopes: friend ? ['read', 'account', 'notifications'] : ['read', 'account', 'providers', 'notifications', 'voice', 'command'],
             user_id: state.userId,
-            auth_method: friend ? 'friend-beta-access' : provider ? 'google' : 'operator-bootstrap',
+            auth_method: state.authMethod || 'operator-bootstrap',
             ...(provider ? { refresh_expires_at: 4102444800 } : {}),
-            onboarding_required: friend && !state.profileName,
+            onboarding_required: mode === 'friend' && !state.profileName,
           });
         }
         return json({ detail: 'Invalid or expired session' }, 401);
@@ -138,6 +142,7 @@ async function open(mode = 'normal', preserveStorage = false) {
         if (url.includes('/activity')) return json({ schema_version: 'activity.v1', records: [], next_cursor: 0, latest_cursor: 0, has_more: false, summary: { active_objectives: 0, operation_count: 0, pending_decisions: 0 }, reconciliation: 'persisted-only', sources: [] });
         if (url.includes('/execution/capabilities')) return json({ harnesses: [], profiles: [], source: 'test', configured: false });
         if (url.includes('/execution/settings')) return json({ profile_id: null, switching_behavior: 'migrate', unavailable_behavior: 'error', migration_supported: false, credentials: [] });
+        if (url.includes('/account/onboarding')) return json({ schema_version: 'account-onboarding.v1', required: mode === 'friend' && !state.profileName, next_step: mode === 'friend' && !state.profileName ? 'profile' : null, steps: { welcome: { complete: true }, profile: { complete: Boolean(state.profileName) }, github: { complete: true }, billing: { complete: true, available: true, status: 'active', current_period_end: null, customer_portal_available: true } } });
         if (url.includes('/account/profile') && method === 'POST') {
           state.profileName = typeof options.body?.get === 'function' ? String(options.body.get('name') || '') : '';
           return json({ user_id: state.userId, name: state.profileName, email: '', avatar_url: '', bio: '' });
@@ -189,9 +194,9 @@ async function principalCacheKeys(page, principal = 'default_user') {
 }
 
 async function connect(page) {
-  await page.waitForSelector('[data-testid="bootstrap-secret"]');
-  await page.type('[data-testid="bootstrap-secret"]', 'valid-bootstrap');
-  await page.click('[data-testid="connect-session"]');
+  await page.waitForSelector('[data-testid="friend-beta-access-code"]');
+  await page.type('[data-testid="friend-beta-access-code"]', `mgb_${'A'.repeat(43)}`);
+  await page.click('[data-testid="redeem-friend-beta"]');
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   await page.waitForSelector('[data-testid="magi-prompt"]');
   await page.waitForFunction(() => window.__authLifecycle.calls.some(call => call.url.includes('/execution/settings')));
@@ -244,18 +249,20 @@ test('fresh browser gates protected routes, rejects invalid bootstrap, then reac
   assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
   assert.equal(await page.evaluate(() => window.__authLifecycle.calls.length), 0);
 
-  await page.type('[data-testid="bootstrap-secret"]', 'wrong');
-  await page.click('[data-testid="connect-session"]');
+  const bootstrapCallsBeforeCustomerInput = await page.evaluate(() => window.__authLifecycle.authCalls.filter(call => call.url.endsWith('/auth/session') && call.method === 'POST').length);
+  await page.type('[data-testid="friend-beta-access-code"]', 'wrong');
+  await page.click('[data-testid="redeem-friend-beta"]');
   await page.waitForSelector('[data-testid="session-error"]');
   assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
   assert.equal(await page.evaluate(() => window.__authLifecycle.calls.length), 0);
+  assert.equal(await page.evaluate(() => window.__authLifecycle.authCalls.filter(call => call.url.endsWith('/auth/session') && call.method === 'POST').length), bootstrapCallsBeforeCustomerInput, 'customer UI must not submit operator bootstrap issuance');
 
-  await page.click('[data-testid="bootstrap-secret"]');
+  await page.click('[data-testid="friend-beta-access-code"]');
   await page.keyboard.down('Control');
   await page.keyboard.press('A');
   await page.keyboard.up('Control');
-  await page.type('[data-testid="bootstrap-secret"]', 'valid-bootstrap');
-  await page.click('[data-testid="connect-session"]');
+  await page.type('[data-testid="friend-beta-access-code"]', `mgb_${'A'.repeat(43)}`);
+  await page.click('[data-testid="redeem-friend-beta"]');
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   await page.type('[data-testid="magi-prompt"]', 'status please');
   await page.click('[data-testid="send-magi-prompt"]');
@@ -269,14 +276,14 @@ test('fresh browser gates protected routes, rejects invalid bootstrap, then reac
 test('a Friend Beta access code creates its own principal and requires profile onboarding before mounting Chat', async () => {
   const page = await open('friend');
   const accessCode = `mgb_${'A'.repeat(43)}`;
-  await page.waitForSelector('[data-testid="bootstrap-secret"]');
-  await page.type('[data-testid="bootstrap-secret"]', accessCode);
-  await page.click('[data-testid="connect-session"]');
+  await page.waitForSelector('[data-testid="friend-beta-access-code"]');
+  await page.type('[data-testid="friend-beta-access-code"]', accessCode);
+  await page.click('[data-testid="redeem-friend-beta"]');
 
-  await page.waitForSelector('[data-testid="friend-beta-onboarding-title"]');
+  await page.waitForSelector('[data-testid="onboarding-title"]');
   assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
-  await page.type('[data-testid="friend-beta-display-name"]', 'Ada Friend');
-  await page.click('[data-testid="friend-beta-complete-onboarding"]');
+  await page.type('[data-testid="onboarding-display-name"]', 'Ada Friend');
+  await page.click('[data-testid="onboarding-profile-continue"]');
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
 
   const evidence = await page.evaluate(() => ({
@@ -298,7 +305,7 @@ test('a Friend Beta access code creates its own principal and requires profile o
 test('web restore rejects a persisted Friend Beta renewal credential', async () => {
   const page = await open();
   const accessCode = `mgb_${'B'.repeat(43)}`;
-  await page.waitForSelector('[data-testid="bootstrap-secret"]');
+  await page.waitForSelector('[data-testid="friend-beta-access-code"]');
   await page.evaluate(code => localStorage.setItem('magistrate.gateway.session', JSON.stringify({
     token: 'browser-test-session', expires_at: 4102444800,
     scopes: ['read', 'account', 'notifications'], user_id: 'friend-beta-user',
@@ -306,7 +313,7 @@ test('web restore rejects a persisted Friend Beta renewal credential', async () 
     renewable_until: 4102444800,
   })), accessCode);
   await page.reload({ waitUntil: 'networkidle0' });
-  await page.waitForSelector('[data-testid="bootstrap-secret"]');
+  await page.waitForSelector('[data-testid="friend-beta-access-code"]');
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
   assert.equal(await page.evaluate(() => window.__authLifecycle.authCalls.some(call => call.url.includes('/auth/friend-beta/session'))), false);
   await page.close();
@@ -314,13 +321,13 @@ test('web restore rejects a persisted Friend Beta renewal credential', async () 
 
 test('a transient validation failure returns to the login gate and permits retry', async () => {
   const page = await open('validation-failure');
-  await page.type('[data-testid="bootstrap-secret"]', 'valid-bootstrap');
-  await page.click('[data-testid="connect-session"]');
+  await page.type('[data-testid="friend-beta-access-code"]', `mgb_${'A'.repeat(43)}`);
+  await page.click('[data-testid="redeem-friend-beta"]');
   await page.waitForSelector('[data-testid="session-error"]');
   assert.match(await page.$eval('[data-testid="session-status"]', node => node.textContent), /SESSION REQUIRED/);
   assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
 
-  await page.click('[data-testid="connect-session"]');
+  await page.click('[data-testid="redeem-friend-beta"]');
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   await page.close();
 });
@@ -354,7 +361,7 @@ test('obvious expiry invalidates the session, evicts principal chat caches, and 
   const page = await open('expiry');
   await connect(page);
   await seedPrincipalCache(page);
-  await page.waitForSelector('[data-testid="bootstrap-secret"]', { timeout: 30000 });
+  await page.waitForSelector('[data-testid="friend-beta-access-code"]', { timeout: 30000 });
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
   assert.deepEqual(await principalCacheKeys(page), []);
   await page.close();
@@ -366,7 +373,7 @@ test('an active protected 401 invalidates once, evicts principal chat caches, an
   await seedPrincipalCache(page);
   await page.type('[data-testid="magi-prompt"]', 'expire now');
   await page.click('[data-testid="send-magi-prompt"]');
-  await page.waitForSelector('[data-testid="bootstrap-secret"]');
+  await page.waitForSelector('[data-testid="friend-beta-access-code"]');
   const callsAtLogin = await page.evaluate(() => window.__authLifecycle.calls.length);
   await new Promise(resolve => setTimeout(resolve, 1200));
   assert.equal(await page.evaluate(() => window.__authLifecycle.calls.length), callsAtLogin);
@@ -401,7 +408,7 @@ test('logout revokes the session, evicts principal chat caches, and returns to t
   await page.waitForSelector('[data-testid="settings-logout"]');
   await page.$eval('[data-testid="settings-logout"]', element => element.scrollIntoView({ block: 'center' }));
   await page.click('[data-testid="settings-logout"]');
-  await page.waitForSelector('[data-testid="bootstrap-secret"]');
+  await page.waitForSelector('[data-testid="friend-beta-access-code"]');
   assert.equal(await page.$('[data-testid="branded-chat-shell"]'), null);
   assert.equal(await page.evaluate(() => localStorage.getItem('magistrate.gateway.session')), null);
   assert.deepEqual(await principalCacheKeys(page), []);
