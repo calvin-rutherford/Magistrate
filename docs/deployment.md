@@ -15,6 +15,13 @@ restorable managed snapshot acknowledged with
 `MAGISTRATE_POSTGRES_BACKUP_CONFIRMED=true` for each deploy. See
 [`identity-tenancy-data-lifecycle.md`](./identity-tenancy-data-lifecycle.md).
 
+For a public multi-tenant deployment, the shared local Firstmate runtime is not
+an execution boundary. Enable and activate the provider-neutral isolation path described in
+[`hosted-execution.md`](./hosted-execution.md); its external backend, enforced
+network policy, worker-image, and GitHub App broker gates must pass before
+claiming hosted execution readiness. Restricted installations may keep the flag off, but must
+not represent that mode as public-SaaS isolation.
+
 The base Phase 1 production settings are:
 
 ```dotenv

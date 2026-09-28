@@ -199,6 +199,14 @@ def test_shared_runtime_scopes_require_explicit_acknowledgement(scopes):
     assert set(granted["scopes"]) == set(scopes)
 
 
+def test_hosted_execution_removes_shared_runtime_acknowledgement(monkeypatch):
+    monkeypatch.setenv("MAGISTRATE_HOSTED_EXECUTION_ENABLED", "true")
+    granted = create_friend_beta_access_grant(
+        _user(), scopes=["read", "account", "command"],
+    )
+    assert set(granted["scopes"]) == {"read", "account", "command"}
+
+
 def test_one_principal_cannot_accumulate_active_device_grants():
     user_id = _user()
     first = create_friend_beta_access_grant(user_id)

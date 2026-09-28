@@ -185,10 +185,10 @@ def create_friend_beta_access_grant(
 ) -> dict[str, object]:
     """Create one independently revocable beta access code for an operator.
 
-    The default grant is observer/account-only. Command or voice scope requires
-    an explicit shared-runtime acknowledgement because those scopes reach the
-    operator-owned execution boundary; ``response`` is producer-only and can
-    never be granted by this interface.
+    The default grant is observer/account-only. In restricted local mode,
+    command or voice scope requires an explicit shared-runtime acknowledgement.
+    Hosted mode routes command execution through objective-bound isolation.
+    ``response`` is producer-only and can never be granted here.
     """
     user_id = user_id.strip() if isinstance(user_id, str) else user_id
     if not _valid_user_id(user_id) or not _FRIEND_BETA_USER_PATTERN.fullmatch(user_id):
@@ -201,7 +201,10 @@ def create_friend_beta_access_grant(
     if "response" in selected:
         raise ValueError("The response producer scope cannot be issued to Friend Beta users")
     elevated = selected.intersection(FRIEND_BETA_SHARED_RUNTIME_SCOPES)
-    if elevated and not allow_shared_runtime_access:
+    hosted_execution = os.getenv("MAGISTRATE_HOSTED_EXECUTION_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if elevated and not hosted_execution and not allow_shared_runtime_access:
         raise ValueError("Command or voice scope requires explicit shared-runtime risk acknowledgement")
     if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool):
         raise ValueError("Friend Beta grant lifetime must be an integer")
