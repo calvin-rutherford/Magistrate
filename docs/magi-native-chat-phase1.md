@@ -112,10 +112,13 @@ restart; startup changes any orphaned pending assistant to failed
 and permits an explicit same-id retry. Failed retries reuse the canonical pair,
 increment attempt state, and issue a deterministic provider idempotency key.
 
-Provider context includes at most forty prior completed native rows and at most
+Provider conversation context includes at most forty prior completed native rows and at most
 100,000 characters, admitting whole historical messages from newest to oldest.
-The current prompt is always complete. No terminal, execution, hidden tool, or
-legacy transcript row can enter that context.
+The current prompt is always complete. No terminal, hidden tool, or legacy
+transcript row can enter that history. The additive, provider-independent
+selective project/Fleet/Attention/multimodal context plane is specified in
+[`magi-context-plane-v1.md`](./magi-context-plane-v1.md); it passes only bounded
+persisted facts and never worker or conversation transcript dumps.
 
 ## Client integration
 

@@ -236,6 +236,8 @@ async def reconcile_pending_objective_intake(
             accepted=False,
             duplicate=True,
             attempt=attempt,
+            context_json=str(row["context_json"]),
+            context_sha256=str(row["context_sha256"]),
         )
         try:
             # A crash may have landed after the objective row but before its
@@ -249,7 +251,10 @@ async def reconcile_pending_objective_intake(
                 task_id=claim.task_id,
                 title=_task_title(contract),
                 project=contract.project,
-                body=_task_body(claim.objective_id, claim.contract_json),
+                body=_task_body(
+                    claim.objective_id, claim.contract_json,
+                    claim.context_json if claim.context_sha256 else None,
+                ),
             )
             store.accept(str(row["owner_user_id"]), claim)
         except (ObjectiveDispatchError, BillingError) as exc:

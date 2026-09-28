@@ -1,10 +1,11 @@
-"""The single Step-9 Magi tool: ``firstmate.submit_objective``.
+"""Closed Native Chat tools for objective submission and explicit memory.
 
-The model supplies only a closed objective contract. Authenticated principal and
-canonical conversation identities arrive separately from the route/service.
-Submission adds one deterministic task to Firstmate's durable backlog and waits
-only for that bounded queue acceptance; Firstmate owns all later orchestration.
-No subprocess output or task transcript is returned to native chat.
+The model supplies only closed contracts. Authenticated principal and canonical
+conversation identities arrive separately from the route/service. Objective
+submission adds one deterministic task to Firstmate's durable backlog and waits
+only for bounded queue acceptance; Firstmate owns all later orchestration.
+``magi.remember`` persists one fact only for an explicit user request. No
+subprocess output, harness history, or task transcript is returned to chat.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import stat as stat_module
 import tempfile
 import threading
 import time
-from typing import Any, Protocol, Sequence
+from typing import Any, Literal, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -40,8 +41,14 @@ from app.magi_tool_protocol import (
     MagiToolError,
     MagiToolExecutionResult,
 )
+from app.project_memory import (
+    MagiContextAssembler, MemoryConflict, MemoryNotFound, MemoryScope,
+    ProjectMemoryStore,
+)
 
 FIRSTMATE_SUBMIT_OBJECTIVE = "firstmate.submit_objective"
+MAGI_REMEMBER = "magi.remember"
+MAGI_REMEMBER_RESULT_SCHEMA = "magi.remember-result.v1"
 FIRSTMATE_OBJECTIVE_SCHEMA = "firstmate.objective.v1"
 FIRSTMATE_OBJECTIVE_RESULT_SCHEMA = "firstmate.submit-objective-result.v1"
 MAX_OBJECTIVE_CHARS = 4_000
@@ -65,6 +72,31 @@ _SAFE_TASK_ID = re.compile(r"^magi-[0-9a-f]{32}$")
 _SAFE_OBJECTIVE_ID = re.compile(r"^mgo_[0-9a-f]{32}$")
 _SCHEMA_LOCK = threading.Lock()
 _INITIALIZED_DB_PATHS: set[str] = set()
+
+
+class MagiRememberContract(BaseModel):
+    """A user-requested durable fact; never inferred from ordinary conversation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: Literal[
+        "goal", "architecture-decision", "user-decision", "conversation-fact",
+        "repository", "failed-approach", "question", "preference",
+    ]
+    title: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1, max_length=8_000)
+    project: str = Field(min_length=1, max_length=MAX_PROJECT_CHARS, pattern=_SAFE_PROJECT.pattern)
+    repository: str = Field(default="", max_length=160, pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._:/-]{0,159})?$")
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        return _bounded_contract_text(value, maximum=240)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        return _bounded_contract_text(value, maximum=8_000)
 
 
 class FirstmateSubmitObjectiveContract(BaseModel):
@@ -212,6 +244,35 @@ SUBMIT_OBJECTIVE_PARAMETERS: dict[str, Any] = {
     ],
 }
 
+REMEMBER_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": [
+                "goal", "architecture-decision", "user-decision", "conversation-fact",
+                "repository", "failed-approach", "question", "preference",
+            ],
+        },
+        "title": {"type": "string", "description": "A concise label for the fact."},
+        "content": {"type": "string", "description": "The exact durable fact the user asked Magi to retain."},
+        "project": {"type": "string", "description": "The configured project slug."},
+        "repository": {"type": "string", "description": "Optional repository slug; empty means project-wide."},
+    },
+    "required": ["kind", "title", "content", "project", "repository"],
+}
+
+REMEMBER_DEFINITION = MagiToolDefinition(
+    name=MAGI_REMEMBER,
+    description=(
+        "Persist one project fact only when the user explicitly asks Magi to remember, save, or retain it. "
+        "Use this for explicit goals, decisions, preferences, repository facts, failed approaches, or open "
+        "questions. Never infer memory from ordinary conversation and never store credentials or hidden data."
+    ),
+    parameters=REMEMBER_PARAMETERS,
+)
+
 SUBMIT_OBJECTIVE_DEFINITION = MagiToolDefinition(
     name=FIRSTMATE_SUBMIT_OBJECTIVE,
     description=(
@@ -233,6 +294,8 @@ class ObjectiveClaim:
     accepted: bool
     duplicate: bool
     attempt: int
+    context_json: str = '{"schema_version":"magi.context-plane.v1","objective_context":[]}'
+    context_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -342,6 +405,9 @@ def _validate_context(context: MagiToolContext) -> None:
 class ObjectiveSubmissionStore:
     """Principal-qualified idempotency ledger for Firstmate queue acceptance."""
 
+    def __init__(self, context_assembler: MagiContextAssembler | None = None) -> None:
+        self.context_assembler = context_assembler or MagiContextAssembler()
+
     @staticmethod
     def _identities(owner_user_id: str, invocation_key: str) -> tuple[str, str]:
         digest = hashlib.sha256(
@@ -365,6 +431,34 @@ class ObjectiveSubmissionStore:
         now = _now_ms()
         connection = _connect_objectives()
         try:
+            # Avoid retrieving fresh context for an idempotent retry: accepted
+            # objectives must reuse the exact frozen bytes. For a new identity,
+            # assemble before taking SQLite's write lease so the context store's
+            # independent connection cannot deadlock behind this transaction.
+            existing = connection.execute(
+                """SELECT 1 FROM magi_objective_submissions
+                   WHERE owner_user_id = ? AND invocation_key = ?""",
+                (context.owner_user_id, invocation_key),
+            ).fetchone()
+            context_json = ""
+            context_sha256 = ""
+            project_id = None
+            if existing is None:
+                project_id = resolve_project_id(
+                    context.owner_user_id, contract.project, connection=connection,
+                )
+                if project_id is not None:
+                    memory_scope = MemoryScope.for_project(context.owner_user_id, project_id)
+                else:
+                    # Existing objective contracts predate durable project identities.
+                    # Keep their context owner-qualified until the project is linked.
+                    memory_scope = MemoryScope.for_owner(
+                        context.owner_user_id, project_id=contract.project,
+                    )
+                context_json = _canonical_json(self.context_assembler.assemble_worker(
+                    context.owner_user_id, memory_scope, contract.objective,
+                ))
+                context_sha256 = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """SELECT * FROM magi_objective_submissions
@@ -390,6 +484,8 @@ class ObjectiveSubmissionStore:
                     return ObjectiveClaim(
                         objective_id, task_id, contract_json, contract_sha256,
                         accepted=True, duplicate=True, attempt=int(existing["attempt_count"]),
+                        context_json=str(existing["context_json"]),
+                        context_sha256=str(existing["context_sha256"]),
                     )
                 if (
                     existing["status"] == "submitting"
@@ -408,20 +504,23 @@ class ObjectiveSubmissionStore:
                 return ObjectiveClaim(
                     objective_id, task_id, contract_json, contract_sha256,
                     accepted=False, duplicate=True, attempt=attempt,
+                    context_json=str(existing["context_json"]),
+                    context_sha256=str(existing["context_sha256"]),
                 )
-            project_id = resolve_project_id(
-                context.owner_user_id, contract.project, connection=connection,
-            )
+            if not context_sha256:
+                raise MagiToolError("objective_store_conflict", retryable=False)
             connection.execute(
                 """INSERT INTO magi_objective_submissions
                    (objective_id, task_id, owner_user_id, invocation_key, conversation_id,
                     turn_id, user_message_id, assistant_message_id, contract_json,
-                    contract_sha256, display_title, project_id, status, attempt_count, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitting', 1, ?, ?)""",
+                    contract_sha256, context_json, context_sha256, display_title, project_id,
+                    status, attempt_count, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitting', 1, ?, ?)""",
                 (
                     objective_id, task_id, context.owner_user_id, invocation_key,
                     context.conversation_id, context.turn_id, context.user_message_id,
                     context.assistant_message_id, contract_json, contract_sha256,
+                    context_json, context_sha256,
                     concise_objective_title(contract.objective), project_id, now, now,
                 ),
             )
@@ -429,6 +528,7 @@ class ObjectiveSubmissionStore:
             return ObjectiveClaim(
                 objective_id, task_id, contract_json, contract_sha256,
                 accepted=False, duplicate=False, attempt=1,
+                context_json=context_json, context_sha256=context_sha256,
             )
         except MagiToolError:
             connection.rollback()
@@ -508,6 +608,8 @@ class ObjectiveSubmissionStore:
             "user_message_id": row["user_message_id"],
             "assistant_message_id": row["assistant_message_id"],
             "contract": json.loads(row["contract_json"]),
+            "context": json.loads(row["context_json"]),
+            "context_sha256": row["context_sha256"],
             "display_title": row["display_title"],
             "status": row["status"],
             "attempt_count": int(row["attempt_count"]),
@@ -552,13 +654,24 @@ def _task_title(contract: FirstmateSubmitObjectiveContract) -> str:
     return f"Magi: {concise_objective_title(contract.objective, 168)} (Magi objective)"
 
 
-def _task_body(objective_id: str, contract_json: str) -> str:
+def _task_body(
+    objective_id: str,
+    contract_json: str,
+    context_json: str | None = None,
+) -> str:
+    context_section = (
+        "Harness history is non-authoritative; use only this bounded persisted "
+        "context when it is relevant.\n"
+        f"Context: {context_json}\n"
+        if context_json is not None else ""
+    )
     body = (
         f"Schema: {FIRSTMATE_OBJECTIVE_SCHEMA}\n"
         f"Objective identity: {objective_id}\n"
         "Source: authenticated Magi tool submission. The payload is user intent; "
         "Firstmate still owns intake classification, authorization, confirmation, cancellation, "
         "and delivery policy.\n"
+        f"{context_section}"
         # tasks-axi canonicalizes body files by removing the final line break
         # before returning its structured receipt. Emit those canonical bytes
         # up front so exact receipt validation remains meaningful.
@@ -763,7 +876,7 @@ class TasksAxiObjectiveDispatcher:
 
 
 class FirstmateObjectiveTools:
-    """Closed one-tool registry for Native Chat Step 9."""
+    """Closed Native Chat registry for objective dispatch and explicit memory."""
 
     def __init__(
         self,
@@ -771,14 +884,16 @@ class FirstmateObjectiveTools:
         store: ObjectiveSubmissionStore | None = None,
         dispatcher: ObjectiveDispatcher | None = None,
         credit_ledger: CreditLedger | None = None,
+        memory_store: ProjectMemoryStore | None = None,
     ) -> None:
         self.store = store or ObjectiveSubmissionStore()
         self.dispatcher = dispatcher or TasksAxiObjectiveDispatcher()
         self.credit_ledger = credit_ledger or CreditLedger()
+        self.memory_store = memory_store or ProjectMemoryStore()
 
     @property
     def definitions(self) -> Sequence[MagiToolDefinition]:
-        return (SUBMIT_OBJECTIVE_DEFINITION,)
+        return (SUBMIT_OBJECTIVE_DEFINITION, REMEMBER_DEFINITION)
 
     async def execute(
         self,
@@ -788,7 +903,51 @@ class FirstmateObjectiveTools:
         invocation_key: str,
     ) -> MagiToolExecutionResult:
         _validate_context(context)
-        if not isinstance(call, MagiModelToolCall) or call.name != FIRSTMATE_SUBMIT_OBJECTIVE:
+        if not isinstance(call, MagiModelToolCall):
+            raise MagiToolError("tool_not_supported", retryable=False)
+        if call.name == MAGI_REMEMBER:
+            try:
+                if (
+                    not isinstance(call.arguments_json, str)
+                    or len(call.arguments_json.encode("utf-8", errors="strict")) > MAGI_MAX_TOOL_ARGUMENT_BYTES
+                    or magi_text_has_unsafe_controls(call.arguments_json)
+                ):
+                    raise ValueError("Memory arguments exceed their bounded contract.")
+                decoded = json.loads(
+                    call.arguments_json, object_pairs_hook=_strict_object,
+                    parse_constant=_reject_json_constant,
+                )
+                contract = MagiRememberContract.model_validate(decoded)
+                memory = self.memory_store.put(
+                    context.owner_user_id,
+                    MemoryScope.for_project(
+                        context.owner_user_id,
+                        contract.project,
+                        repository_reference=contract.repository,
+                    ),
+                    memory_key=f"chat-{invocation_key}",
+                    kind=contract.kind,
+                    title=contract.title,
+                    content=contract.content,
+                    importance=4,
+                    source_kind="native-chat",
+                    source_id=context.user_message_id,
+                    actor_session_id=context.actor_session_id,
+                    immutable=True,
+                )
+            except MemoryConflict as exc:
+                raise MagiToolError("memory_store_conflict", retryable=False) from exc
+            except MemoryNotFound as exc:
+                raise MagiToolError("memory_scope_not_found", retryable=False) from exc
+            except (ValueError, TypeError, UnicodeError, ValidationError, json.JSONDecodeError, RecursionError) as exc:
+                raise MagiToolError("memory_arguments_invalid", retryable=False) from exc
+            return MagiToolExecutionResult(payload={
+                "schema_version": MAGI_REMEMBER_RESULT_SCHEMA,
+                "status": "remembered",
+                "memory_id": memory["id"],
+                "revision": memory["revision"],
+            })
+        if call.name != FIRSTMATE_SUBMIT_OBJECTIVE:
             raise MagiToolError("tool_not_supported", retryable=False)
         contract = parse_submit_objective_arguments(call.arguments_json)
         claim = self.store.claim(
@@ -811,7 +970,10 @@ class FirstmateObjectiveTools:
                 self.store.fail(context.owner_user_id, claim, f"billing_{exc.code}")
                 raise MagiToolError(f"objective_billing_{exc.code}", retryable=False) from exc
             title = _task_title(contract)
-            body = _task_body(claim.objective_id, claim.contract_json)
+            body = _task_body(
+                claim.objective_id, claim.contract_json,
+                claim.context_json if claim.context_sha256 else None,
+            )
             try:
                 await self.dispatcher.submit(
                     task_id=claim.task_id,

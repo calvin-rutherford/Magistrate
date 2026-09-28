@@ -11,6 +11,7 @@ from app.account_lifecycle import delete_account
 from app.magi_chat_store import MagiChatNotFound, MagiChatStore
 from app.persistence import connect
 from app.projects import ProjectError, list_projects, get_project
+from app.project_memory import MemoryScope, ProjectMemoryStore
 
 projects_a = list_projects("tenant-a")["projects"]
 projects_b = list_projects("tenant-b")["projects"]
@@ -29,6 +30,23 @@ except MagiChatNotFound:
 else:
     raise AssertionError("tenant-b read tenant-a message")
 
+scope_a = MemoryScope.for_project(
+    "tenant-a", projects_a[0]["id"],
+    repository_reference=projects_a[0]["repositories"][0]["id"],
+)
+scope_b = MemoryScope.for_project(
+    "tenant-b", projects_b[0]["id"],
+    repository_reference=projects_b[0]["repositories"][0]["id"],
+)
+assert ProjectMemoryStore().search(
+    "tenant-b", scope_b, "tenant-a",
+    purpose="postgres-isolation", actor_session_id="postgres-verify",
+) == []
+assert len(ProjectMemoryStore().search(
+    "tenant-a", scope_a, "tenant-a",
+    purpose="postgres-isolation", actor_session_id="postgres-verify",
+)) == 1
+
 # Exercise deletion ordering with live bearer authority and PostgreSQL FKs.
 with connect(db.DB_PATH) as connection:
     connection.execute(
@@ -41,5 +59,9 @@ with connect(db.DB_PATH) as connection:
 delete_account("tenant-a", confirmation="DELETE tenant-a")
 assert list_projects("tenant-a")["projects"] == []
 assert list_projects("tenant-b")["projects"][0]["id"] == projects_b[0]["id"]
+assert len(ProjectMemoryStore().search(
+    "tenant-b", scope_b, "tenant-b",
+    purpose="postgres-after-erasure", actor_session_id="postgres-verify",
+)) == 1
 assert MagiChatStore().submission("tenant-b", "postgres-smoke-tenant-b")["user_message"]["content"] == "private message for tenant-b"
 print("postgres tenant isolation and selective account erasure passed")

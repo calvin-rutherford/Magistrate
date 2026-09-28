@@ -12,6 +12,7 @@ from app.magi_chat_service import MAGI_DIRECT_RESPONSE, MagiChatService
 from app.magi_chat_store import MagiChatStore
 from app.magi_firstmate_tools import (
     FIRSTMATE_SUBMIT_OBJECTIVE,
+    MAGI_REMEMBER,
     FirstmateObjectiveTools,
     ObjectiveDispatchError,
     ObjectiveDispatchReceipt,
@@ -412,7 +413,7 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
             assert body['tool_choice'] == 'required'
             assert 'messages' not in body
             assert [tool['name'] for tool in body['tools']] == [
-                'firstmate__submit_objective', 'magi__respond',
+                'firstmate__submit_objective', 'magi__remember', 'magi__respond',
             ]
             assert set(body['tools'][0]) == {
                 'type', 'name', 'description', 'parameters', 'strict',
@@ -468,7 +469,8 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
     assert offered['name'] == 'firstmate__submit_objective'
     assert offered['strict'] is True
     assert 'function' not in offered
-    assert requests[0]['tools'][1]['name'] == 'magi__respond'
+    assert requests[0]['tools'][1]['name'] == 'magi__remember'
+    assert requests[0]['tools'][2]['name'] == 'magi__respond'
 
     objective = await service.submit(
         'operator-a', 'responses-objective-0001',
@@ -490,7 +492,7 @@ async def test_command_authorized_turn_cannot_mask_missing_tool_selection_as_pro
     class ProseFallbackModel:
         async def complete(self, messages, *, system_context, request_id, tools=()):
             assert [definition.name for definition in tools] == [
-                FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_DIRECT_RESPONSE,
+                FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_REMEMBER, MAGI_DIRECT_RESPONSE,
             ]
             return MagiModelResult('I can help create that project.')
 
@@ -539,7 +541,7 @@ async def test_native_chat_routes_actionable_intent_once_but_answers_questions_d
     assert len(dispatcher.calls) == 1
     assert len(model.calls) == 2
     assert [definition.name for definition in model.calls[0]['tools']] == [
-        FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_DIRECT_RESPONSE,
+        FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_REMEMBER, MAGI_DIRECT_RESPONSE,
     ]
     assert model.calls[1]['tools'] == ()
     assert [message.role for message in model.calls[1]['messages'][-2:]] == ['assistant', 'tool']

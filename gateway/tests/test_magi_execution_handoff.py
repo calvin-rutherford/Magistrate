@@ -85,7 +85,7 @@ def test_acceptance_request_delegates_once_and_completes_only_from_evidence(monk
             assert body["tool_choice"] == "required"
             assert body["parallel_tool_calls"] is False
             assert [tool["name"] for tool in body["tools"]] == [
-                "firstmate__submit_objective", "magi__respond",
+                "firstmate__submit_objective", "magi__remember", "magi__respond",
             ]
             assert body["input"][-1] == {"role": "user", "content": ACCEPTANCE_REQUEST}
             objective_tool_calls += 1

@@ -26,6 +26,9 @@ _DIRECT_OWNER_TABLES: tuple[tuple[str, str], ...] = (
     ("credit_ledger", "owner_user_id"),
     ("billing_checkout_sessions", "owner_user_id"),
     ("billing_accounts", "owner_user_id"),
+    ("project_memory_retrievals", "owner_user_id"),
+    ("project_memory_audit", "owner_user_id"),
+    ("project_memory_entries", "owner_user_id"),
     ("project_memories", "owner_user_id"),
     ("project_repositories", "owner_user_id"),
     ("projects", "owner_user_id"),
@@ -129,6 +132,21 @@ def _delete_indirect_rows(connection: sqlite3.Connection, user_id: str, tables: 
         ("pi_semantic_dispatches", "user_id"),
     ):
         execute(table, f"DELETE FROM {table} WHERE {column} = ?", (user_id,))
+
+    # Search terms and revisions are indirect children of owner-qualified
+    # project memory. Remove them before their entries and durable projects.
+    execute(
+        "project_memory_terms",
+        """DELETE FROM project_memory_terms WHERE entry_id IN
+           (SELECT entry_id FROM project_memory_entries WHERE owner_user_id = ?)""",
+        (user_id,),
+    )
+    execute(
+        "project_memory_revisions",
+        """DELETE FROM project_memory_revisions WHERE entry_id IN
+           (SELECT entry_id FROM project_memory_entries WHERE owner_user_id = ?)""",
+        (user_id,),
+    )
 
     # Native Magi children, including upload associations, are removed before
     # their principal-owned messages/conversations.
