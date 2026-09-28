@@ -1,75 +1,33 @@
 import React from 'react';
-import { View, StyleSheet, StyleProp, ViewStyle, Platform } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-
-let BlurViewComponent: any = View;
-try {
-  // Resolved lazily: expo-blur has no web implementation, so a static import
-  // would break the web bundle.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const ExpoBlur = require('expo-blur');
-  if (ExpoBlur && ExpoBlur.BlurView) {
-    BlurViewComponent = ExpoBlur.BlurView;
-  }
-} catch {
-  BlurViewComponent = View;
-}
+import { View, StyleSheet, StyleProp, ViewStyle } from 'react-native';
+import { useChatColorScheme } from '../services/ChatPreferences';
 
 interface GlassSurfaceProps {
   children?: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   contentStyle?: StyleProp<ViewStyle>;
   variant?: 'surface' | 'card' | 'control' | 'alert' | 'circle';
+  /** Retained for source compatibility; restrained surfaces do not blur. */
   intensity?: number;
 }
 
+/** Tonal native surface. The historical name is retained to avoid churn. */
 export const GlassSurface: React.FC<GlassSurfaceProps> = ({
-  children,
-  style,
-  contentStyle,
-  variant = 'card',
-  intensity = 15
+  children, style, contentStyle, variant = 'card', intensity: _intensity,
 }) => {
-  const borderRadius =
-    variant === 'circle' || variant === 'control'
-      ? 9999
-      : variant === 'surface'
-      ? 24
-      : 18;
-
-  const isWeb = Platform.OS === 'web';
-
-  return (
-    <View style={[
-      styles.container,
-      { borderRadius },
-      isWeb ? ({ backdropFilter: 'blur(' + intensity + 'px)', WebkitBackdropFilter: 'blur(' + intensity + 'px)' } as any) : null,
-      style
-    ]}>
-      {!isWeb && (
-        <BlurViewComponent intensity={intensity} tint="dark" style={[StyleSheet.absoluteFill, { borderRadius }]} />
-      )}
-      <LinearGradient
-        colors={['rgba(255, 255, 255, 0.15)', 'rgba(255, 255, 255, 0.01)', 'rgba(255, 255, 255, 0.05)']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={[StyleSheet.absoluteFill, { borderRadius, opacity: 0.85 }]}
-      />
-      <View style={[styles.content, contentStyle]}>{children}</View>
-    </View>
-  );
+  const dark = useChatColorScheme() === 'dark';
+  const borderRadius = variant === 'circle' || variant === 'control' ? 9999 : variant === 'surface' ? 20 : 14;
+  return <View style={[
+    styles.container,
+    {
+      borderRadius,
+      backgroundColor: dark ? (variant === 'surface' ? '#111214' : '#1A1B1E') : (variant === 'surface' ? '#FFFFFF' : '#F1F2F4'),
+      borderColor: dark ? '#303238' : '#D9DCE1',
+    },
+    style,
+  ]}><View style={contentStyle}>{children}</View></View>;
 };
 
 const styles = StyleSheet.create({
-  container: {
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.02)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    elevation: 0
-  },
-  content: {
-    position: 'relative',
-    zIndex: 1
-  }
+  container: { overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, elevation: 0 },
 });
