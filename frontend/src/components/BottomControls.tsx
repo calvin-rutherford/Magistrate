@@ -37,19 +37,6 @@ export const BottomControls: React.FC = () => {
             </Svg>
           </TouchableOpacity>
 
-          {/* GESTURE / AR GLASSES BUTTON */}
-          <TouchableOpacity
-            style={styles.iconBtn}
-            onPress={() => router.push('/gesture' as any)}
-            activeOpacity={0.7}
-          >
-            <Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={pathname === '/gesture' ? "#72F5B1" : "#FFFFFF"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-              <Path d="M18 11V6a2 2 0 0 0-4 0v5" />
-              <Path d="M14 10V4a2 2 0 0 0-4 0v6" />
-              <Path d="M10 10.5V6a2 2 0 0 0-4 0v9" />
-              <Path d="M18 11a2 2 0 0 1 4 0v3c0 5-4 9-9 9h-1c-5 0-9-4-9-9v-2a2 2 0 0 1 4 0" />
-            </Svg>
-          </TouchableOpacity>
         </View>
       </GlassSurface>
     </View>

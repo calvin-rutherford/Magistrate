@@ -12,9 +12,11 @@ import json
 import os
 import re
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import httpx
+
+from app.production_security import validate_provider_url
 
 from app.magi_model import (
     MAGI_DEFAULT_MAX_OUTPUT_TOKENS,
@@ -49,12 +51,7 @@ def _encoded_attachment(attachment: MagiModelAttachment) -> str:
 
 def _safe_url(value: str, variable: str) -> str:
     result = value.rstrip("/")
-    parsed = urlsplit(result)
-    if (
-        parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
-        or parsed.password is not None or parsed.query or parsed.fragment
-    ):
-        raise RuntimeError(f"{variable} must be a credential-free HTTPS URL")
+    validate_provider_url(result)
     return result
 
 
@@ -98,6 +95,18 @@ def _usage(input_tokens: Any, output_tokens: Any, cached_tokens: Any = 0) -> Mag
 def _http_error(response: httpx.Response) -> MagiModelError:
     retryable = response.status_code == 429 or response.status_code >= 500
     return MagiModelError("provider_rejected_request", retryable=retryable)
+
+
+async def _bounded_post(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    async with client.stream('POST', url, **kwargs) as response:
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > 4 * 1024 * 1024:
+                raise MagiModelError('provider_invalid_response', billing_uncertain=True)
+            body.extend(chunk)
+        if response.status_code >= 300:
+            raise _http_error(response)
+        return httpx.Response(response.status_code, content=bytes(body))
 
 
 class AnthropicMagiModel:
@@ -236,10 +245,10 @@ class AnthropicMagiModel:
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout_seconds, connect=min(10, self._timeout_seconds)),
-                transport=self._transport,
+                transport=self._transport, trust_env=False, follow_redirects=False,
             ) as client:
-                response = await client.post(
-                    f"{self._base_url}/messages",
+                response = await _bounded_post(
+                    client, f"{self._base_url}/messages",
                     headers={
                         "x-api-key": self._api_key,
                         "anthropic-version": "2023-06-01",
@@ -411,10 +420,10 @@ class GoogleMagiModel:
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout_seconds, connect=min(10, self._timeout_seconds)),
-                transport=self._transport,
+                transport=self._transport, trust_env=False, follow_redirects=False,
             ) as client:
-                response = await client.post(
-                    f"{self._base_url}/models/{quote(self.model, safe='._-')}:generateContent",
+                response = await _bounded_post(
+                    client, f"{self._base_url}/models/{quote(self.model, safe='._-')}:generateContent",
                     headers={"x-goog-api-key": self._api_key, "X-Request-Id": request_id},
                     json=payload,
                 )

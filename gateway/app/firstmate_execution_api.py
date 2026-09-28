@@ -13,6 +13,7 @@ from app.firstmate_execution import (
     FirstmateExecutionService,
 )
 from app.magi_chat_api import magi_chat_service
+from app.telemetry import operation_span
 
 router = APIRouter(prefix="/api/v1/firstmate/execution-events", tags=["Firstmate execution events"])
 firstmate_execution_service = FirstmateExecutionService(magi_chat_service)
@@ -42,7 +43,8 @@ async def post_firstmate_execution_event(
             detail="Hosted execution events require objective-bound workload authentication.",
         )
     try:
-        return await firstmate_execution_service.ingest(principal.user_id, event)
+        with operation_span('execution_ingress', objective_id=event.objective_id):
+            return await firstmate_execution_service.ingest(principal.user_id, event)
     except (FirstmateExecutionNotFound, FirstmateExecutionConflict, BillingError, ValueError) as exc:
         raise _execution_error(exc) from exc
 

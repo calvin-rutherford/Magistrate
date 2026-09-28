@@ -31,6 +31,7 @@ from app.magi_model import (
 )
 from app.magi_providers import AnthropicMagiModel, GoogleMagiModel
 from app.persistence import connect
+from app.telemetry import operation_span
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _ROUTE_SCHEMA = "magi.model-routing.v1"
@@ -240,6 +241,7 @@ def _safe_id(value: Any, field: str) -> str:
 
 
 def validate_routing_config(raw: Any) -> RoutingCatalog:
+    from app.production_security import validate_provider_url
     if not isinstance(raw, Mapping) or raw.get("schema_version") != _ROUTE_SCHEMA:
         raise ValueError(f"model routing schema_version must be {_ROUTE_SCHEMA}")
     policy = raw.get("policy")
@@ -285,6 +287,10 @@ def validate_routing_config(raw: Any) -> RoutingCatalog:
                 or parsed_url.password is not None or parsed_url.query or parsed_url.fragment
             ):
                 raise ValueError(f"model route {candidate_id} has an invalid base_url")
+            try:
+                validate_provider_url(base_url)
+            except RuntimeError:
+                raise ValueError('Model route endpoint is not permitted.') from None
         try:
             reasoning = int(capabilities["reasoning"])
             context = int(capabilities["context_tokens"])
@@ -694,10 +700,11 @@ class RoutedMagiModel:
                     fallback_from = candidate.id
                     break
                 try:
-                    result = await self._provider(candidate).complete(
-                        messages, system_context=system_context,
-                        request_id=request_id, tools=tools,
-                    )
+                    with operation_span('provider'):
+                        result = await self._provider(candidate).complete(
+                            messages, system_context=system_context,
+                            request_id=request_id, tools=tools,
+                        )
                 except MagiModelError as exc:
                     self.store.settle(
                         route_id, usage=None, actual_micro_usd=None, error=exc,

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os
+if os.getenv('MAGISTRATE_LEGACY_LAB') != '1' or os.getenv('MAGISTRATE_ENV', '').lower() not in {'development', 'test'}:
+    raise SystemExit('Legacy CLI is quarantined. Use the authenticated web/native client.')
 import asyncio
 import json
 import websockets

@@ -2493,4 +2493,5 @@ def transition_agent_migration(
     return get_agent_migration(user_id, request_id)  # type: ignore[return-value]
 
 
-init_db()
+# Startup and store entry points initialize explicitly. Importing configuration
+# validators must never migrate a live database before the deployment backup.

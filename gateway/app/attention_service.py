@@ -6,6 +6,7 @@ from app.firstmate_decisions import FirstmateDecisionService, firstmate_decision
 from app.github_app import github_app_service
 from app.providers.jira import JiraProviderAdapter
 from app.providers.teams import TeamsProviderAdapter
+from app.telemetry import record
 
 jira_adapter = JiraProviderAdapter()
 teams_adapter = TeamsProviderAdapter()
@@ -52,7 +53,7 @@ class AttentionService:
         except Exception:
             # Persistence failures can carry local paths; expose no exception
             # detail and continue with independent providers.
-            print('Persisted Firstmate decisions unavailable')
+            record('attention', outcome='error')
 
         # GitHub App reads are installation- and principal-qualified. They are
         # safe for every tenant and remain separate from execution-runtime state.
@@ -79,8 +80,8 @@ class AttentionService:
                         'revision': pr.get('head_sha') or pr.get('updated_at'),
                         'deep_link': detail_url if pr.get('number') is not None else None
                     })
-        except Exception as e:
-            print('Error fetching GitHub attention:', e)
+        except Exception:
+            record('attention', outcome='error')
 
         # Jira/Teams still use deployment-level provider authority. Never
         # project that operator data into another authenticated tenant.
@@ -108,8 +109,8 @@ class AttentionService:
                         'notification_kind': 'blocker',
                         'revision': issue.get('updated_at') or issue.get('status')
                     })
-        except Exception as e:
-            print('Error fetching Jira attention:', e)
+        except Exception:
+            record('attention', outcome='error')
 
         try:
             mentions = await teams_adapter.get_mentions()
@@ -129,8 +130,8 @@ class AttentionService:
                         'notification_kind': 'captain_question',
                         'revision': mention.get('updated_at') or mention.get('id')
                     })
-        except Exception as e:
-            print('Error fetching Teams attention:', e)
+        except Exception:
+            record('attention', outcome='error')
 
         return items
 

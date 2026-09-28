@@ -3,6 +3,7 @@ name: Deployment contracts
 on:
   pull_request:
     paths:
+      - 'gateway/**'
       - 'runtime/firstmate-producer.lock.json'
       - 'scripts/install_firstmate_producer.sh'
       - 'scripts/deploy_magistrate.sh'
@@ -16,6 +17,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'gateway/**'
       - 'runtime/firstmate-producer.lock.json'
       - 'scripts/install_firstmate_producer.sh'
       - 'scripts/deploy_magistrate.sh'
@@ -35,6 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked preflight dependencies
+        run: cd gateway && uv sync --frozen
       - name: Verify demo workflow is manual-only
         run: bash scripts/test_deployment_workflow.sh
       - name: Exercise clean fast-forward and refusal safeguards
