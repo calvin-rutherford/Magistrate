@@ -16,8 +16,8 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Magistrate requires microphone access for voice interactions.",
         "NSSpeechRecognitionUsageDescription": "Magistrate uses speech recognition to transcribe your voice commands.",
-        "NSPhotoLibraryUsageDescription": "Magistrate allows uploading profile photos.",
-        "NSCameraUsageDescription": "Magistrate allows taking profile photos.",
+        "NSPhotoLibraryUsageDescription": "Choose photos to attach to a Magi conversation or your profile.",
+        "NSCameraUsageDescription": "Take a photo to attach to a Magi conversation or your profile.",
         "UIBackgroundModes": [
           "remote-notification"
         ]
@@ -61,7 +61,15 @@
       ],
       "expo-secure-store",
       "expo-apple-authentication",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose photos to attach to a Magi conversation or your profile.",
+          "cameraPermission": "Take a photo to attach to a Magi conversation or your profile.",
+          "microphonePermission": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

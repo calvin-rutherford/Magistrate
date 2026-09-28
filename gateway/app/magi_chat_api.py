@@ -34,7 +34,10 @@ from app.magi_routing import (
     RoutedMagiModel,
     load_routing_catalog,
 )
-from app.uploads import associate_uploads, get_upload, validate_upload_metadata
+from app.uploads import (
+    MAX_UPLOAD_TOTAL_BYTES, associate_uploads, get_upload, read_upload_content,
+    validate_upload_metadata,
+)
 
 
 model_route_store = ModelRouteStore()
@@ -147,6 +150,10 @@ async def post_magi_message(
     principal: Principal = Depends(require_any_scope("command", "voice")),
 ):
     attachments = []
+    if sum(attachment.size for attachment in contract.attachments) > MAX_UPLOAD_TOTAL_BYTES:
+        raise HTTPException(status_code=413, detail="The attachments in one message are too large.")
+    if len({attachment.upload_id for attachment in contract.attachments}) != len(contract.attachments):
+        raise HTTPException(status_code=422, detail="Attachment references must be unique.")
     for attachment in contract.attachments:
         stored = get_upload(principal.user_id, attachment.upload_id)
         if not stored:
@@ -157,7 +164,10 @@ async def post_magi_message(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        attachments.append(stored)
+        content = read_upload_content(principal.user_id, attachment.upload_id)
+        if content is None:
+            raise HTTPException(status_code=409, detail="An attached file failed storage integrity validation.")
+        attachments.append({**stored, "content": content})
     if attachments:
         try:
             associate_uploads(

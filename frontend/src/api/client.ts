@@ -11,6 +11,10 @@ import { setMagiConversationPrincipal } from '../services/MagiConversationSessio
 import { MagiMessageRecord, MagiMessageStatus, normalizeMagiMessageRecords } from '../services/MagiConversation';
 import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
 import { OperatingPermissionMode } from '../services/OperatingPermissionModes';
+import {
+  PerceptionEventV1, PerceptionResultV1, validatePerceptionEventV1,
+  validatePerceptionResultV1,
+} from '../protocol/PerceptionProtocol';
 
 // Production builds must provide an HTTPS gateway (usually same-origin on web).
 // HTTP localhost is intentionally limited to local development.
@@ -1603,11 +1607,50 @@ export async function updateUserProfile(profile: Partial<UserProfile>): Promise<
   return updated;
 }
 
+export async function submitPerceptionEvent(event: PerceptionEventV1): Promise<PerceptionResultV1> {
+  if (!validatePerceptionEventV1(event)) throw new Error('The perception event is not compatible with protocol v1.');
+  const response = await authorizedFetch(GATEWAY_URL + '/perception/events', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(event),
+  });
+  const result = await checkedJson<unknown>(response);
+  if (!validatePerceptionResultV1(result)) throw new Error('Gateway returned an invalid perception result.');
+  return result;
+}
+
+export async function confirmPerceptionEvent(eventId: string): Promise<PerceptionResultV1> {
+  if (!/^pev_[A-Za-z0-9_-]{12,96}$/.test(eventId)) throw new Error('Invalid perception event identity.');
+  const response = await authorizedFetch(`${GATEWAY_URL}/perception/events/${encodeURIComponent(eventId)}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema_version: 'magistrate.perception-confirmation.v1', revision: 1, confirmed: true }),
+  });
+  const result = await checkedJson<unknown>(response);
+  if (!validatePerceptionResultV1(result) || result.event_id !== eventId) {
+    throw new Error('Gateway returned an invalid perception confirmation.');
+  }
+  return result;
+}
+
 export const CHAT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const CHAT_MAX_UPLOAD_COUNT = 10;
 export const CHAT_MAX_UPLOAD_TOTAL_BYTES = 50 * 1024 * 1024;
-const CHAT_ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'application/pdf', 'application/json', 'application/zip', 'application/gzip', 'text/csv', 'text/plain', 'text/markdown']);
-const CHAT_ALLOWED_OCTET_SUFFIXES = new Set(['.txt', '.md', '.json', '.csv', '.pdf', '.zip', '.gz', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']);
+const CHAT_ALLOWED_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+  'application/pdf', 'application/json', 'application/xml', 'application/javascript',
+  'application/zip', 'application/gzip', 'application/msword', 'application/vnd.ms-excel',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/csv', 'text/plain', 'text/markdown', 'text/html', 'text/css', 'text/javascript',
+  'text/xml', 'text/x-python', 'text/x-shellscript', 'text/x-c', 'text/x-c++',
+  'text/x-java-source', 'text/x-rust', 'text/x-go',
+]);
+const CHAT_ALLOWED_OCTET_SUFFIXES = new Set([
+  '.txt', '.md', '.json', '.csv', '.xml', '.html', '.htm', '.css', '.js', '.mjs',
+  '.ts', '.tsx', '.jsx', '.py', '.sh', '.c', '.h', '.cpp', '.java', '.rs', '.go',
+  '.yaml', '.yml', '.toml', '.sql', '.log', '.pdf', '.zip', '.gz', '.doc', '.docx',
+  '.xls', '.xlsx', '.ppt', '.pptx',
+]);
 
 export interface ChatUpload {
   upload_id: string;
@@ -1621,7 +1664,7 @@ export interface ChatUpload {
 }
 
 /** Strip an upload record down to the fields the prompt contract accepts. */
-export function attachmentManifest(uploads: ChatUpload[]): Array<Pick<ChatUpload, 'upload_id' | 'filename' | 'media_type' | 'size'>> {
+export function attachmentManifest(uploads: ChatUpload[]): Pick<ChatUpload, 'upload_id' | 'filename' | 'media_type' | 'size'>[] {
   return uploads.map(({ upload_id, filename, media_type, size }) => ({ upload_id, filename, media_type, size }));
 }
 
@@ -1645,7 +1688,7 @@ export function validateChatAttachment(filename: string, mimeType: string | unde
   return null;
 }
 
-export async function uploadChatFile(uri: string, filename: string, mimeType?: string, messageId?: string): Promise<ChatUpload> {
+export async function uploadChatFile(uri: string, filename: string, mimeType?: string, messageId?: string, onProgress?: (fraction: number) => void): Promise<ChatUpload> {
   const formData = new FormData();
   if (typeof window !== 'undefined') {
     const response = await rawFetch(uri);
@@ -1662,10 +1705,16 @@ export async function uploadChatFile(uri: string, filename: string, mimeType?: s
     formData.append('files', { uri, name: filename, type: declaredType } as any);
   }
   if (messageId) formData.append('message_id', messageId);
+  // Fetch does not expose upload-byte progress portably across web and React
+  // Native. Report only observed lifecycle boundaries rather than inventing an
+  // interpolated percentage; adapters may render the interval indeterminately.
+  onProgress?.(0);
   const res = await authorizedFetch(GATEWAY_URL + '/uploads', { method: 'POST', body: formData });
   const data = await checkedJson<{ uploads?: unknown[] }>(res);
   if (!data.uploads?.length) throw new Error('Gateway returned no upload record.');
-  return normalizeChatUpload(data.uploads[0]);
+  const uploaded = normalizeChatUpload(data.uploads[0]);
+  onProgress?.(1);
+  return uploaded;
 }
 
 export async function uploadUserAvatar(imageUri: string, mimeType: string = 'image/jpeg'): Promise<any> {

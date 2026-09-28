@@ -6,6 +6,7 @@ import pytest
 from app.magi_chat_api import validate_magi_chat_configuration
 from app.magi_model import (
     MAGI_MAX_RESPONSE_CHARACTERS,
+    MagiModelAttachment,
     MagiModelError,
     MagiModelMessage,
     MagiModelToolCall,
@@ -47,6 +48,37 @@ async def test_openai_model_returns_exact_complete_text_without_logging_or_norma
     assert result.usage.input_tokens == 20
     assert result.usage.output_tokens == 10
     assert result.usage.cached_input_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_openai_model_encodes_owner_loaded_images_and_documents_as_provider_inputs():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        parts = body['input'][-1]['content']
+        assert parts[0] == {'type': 'input_text', 'text': 'inspect'}
+        assert parts[1]['type'] == 'input_image'
+        assert parts[1]['image_url'] == 'data:image/png;base64,iVBORw0KGgo='
+        assert parts[2] == {
+            'type': 'input_file', 'filename': 'notes.txt',
+            'file_data': 'data:text/plain;base64,aGVsbG8=',
+        }
+        return httpx.Response(200, json={
+            'status': 'completed',
+            'output': [{'type': 'message', 'role': 'assistant',
+                        'content': [{'type': 'output_text', 'text': 'done'}]}],
+        })
+
+    model = OpenAIMagiModel(
+        api_key='server-only-secret', model='test-model', base_url='https://provider.invalid/v1',
+        transport=httpx.MockTransport(handler),
+    )
+    result = await model.complete([
+        MagiModelMessage('user', 'inspect', attachments=(
+            MagiModelAttachment('pixel.png', 'image/png', b'\x89PNG\r\n\x1a\n'),
+            MagiModelAttachment('notes.txt', 'text/plain', b'hello'),
+        )),
+    ], system_context='system', request_id='attachment-request')
+    assert result.text == 'done'
 
 
 @pytest.mark.asyncio

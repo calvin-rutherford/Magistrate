@@ -7,6 +7,7 @@ unknown protocol payloads are never returned as prose.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 import json
 import os
 import re
@@ -56,11 +57,21 @@ class MagiToolDefinition:
 
 
 @dataclass(frozen=True)
+class MagiModelAttachment:
+    """Provider-neutral current-turn file input; bytes never become a path."""
+
+    filename: str
+    media_type: str
+    content: bytes
+
+
+@dataclass(frozen=True)
 class MagiModelMessage:
     role: str
     content: str | None
     tool_calls: tuple[MagiModelToolCall, ...] = ()
     tool_call_id: str | None = None
+    attachments: tuple[MagiModelAttachment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -175,7 +186,7 @@ def _response_input(messages: Sequence[MagiModelMessage]) -> list[dict[str, Any]
             raise MagiModelError("provider_invalid_request", retryable=False)
         if message.role == "tool":
             if (
-                message.tool_calls
+                message.tool_calls or message.attachments
                 or not isinstance(message.tool_call_id, str)
                 or not _TOOL_CALL_ID.fullmatch(message.tool_call_id)
                 or not isinstance(message.content, str)
@@ -195,8 +206,10 @@ def _response_input(messages: Sequence[MagiModelMessage]) -> list[dict[str, Any]
             continue
         if message.role not in {"user", "assistant"} or message.tool_call_id is not None:
             raise MagiModelError("provider_invalid_request", retryable=False)
+        if message.attachments and message.role != "user":
+            raise MagiModelError("provider_invalid_request", retryable=False)
         if message.tool_calls:
-            if message.role != "assistant" or len(message.tool_calls) > MAGI_MAX_TOOL_CALLS:
+            if message.attachments or message.role != "assistant" or len(message.tool_calls) > MAGI_MAX_TOOL_CALLS:
                 raise MagiModelError("provider_invalid_request", retryable=False)
             if message.content is not None:
                 if not isinstance(message.content, str):
@@ -228,7 +241,28 @@ def _response_input(messages: Sequence[MagiModelMessage]) -> list[dict[str, Any]
             maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
             code="provider_invalid_request",
         )
-        items.append({"role": message.role, "content": message.content})
+        if not message.attachments:
+            items.append({"role": message.role, "content": message.content})
+            continue
+        if len(message.attachments) > 10 or sum(len(item.content) for item in message.attachments) > 50 * 1024 * 1024:
+            raise MagiModelError("provider_invalid_attachment", retryable=False)
+        content_parts: list[dict[str, str]] = [{"type": "input_text", "text": message.content}]
+        for attachment in message.attachments:
+            if (
+                not isinstance(attachment, MagiModelAttachment)
+                or not attachment.filename or len(attachment.filename) > 160
+                or not isinstance(attachment.content, bytes)
+                or len(attachment.content) > 25 * 1024 * 1024
+                or not re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+", attachment.media_type)
+            ):
+                raise MagiModelError("provider_invalid_attachment", retryable=False)
+            encoded = base64.b64encode(attachment.content).decode("ascii")
+            data_url = f"data:{attachment.media_type};base64,{encoded}"
+            if attachment.media_type.startswith("image/"):
+                content_parts.append({"type": "input_image", "image_url": data_url})
+            else:
+                content_parts.append({"type": "input_file", "filename": attachment.filename, "file_data": data_url})
+        items.append({"role": "user", "content": content_parts})
     return items
 
 
