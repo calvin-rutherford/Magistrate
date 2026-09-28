@@ -10,6 +10,12 @@ import secrets
 import time
 import re
 import unicodedata
+import hmac
+
+from app.production_security import cors_origins, validate_production_configuration
+from app.persistence import observation_connection
+from app.request_boundary import RequestBoundary
+from app.telemetry import prometheus_metrics, record
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -20,30 +26,38 @@ from app.auth import (Principal, account_onboarding_required, authenticate_reque
                       validate_friend_beta_configuration, verify_token)
 from app.provider_auth import (
     PROVIDER_COOKIE_NAME, PROVIDER_COOKIE_PATH, create_challenge,
-    exchange_challenge, provider_availability, public_session_payload,
-    refresh_session as refresh_provider_session,
-    validate_provider_auth_configuration,
+    exchange_challenge, list_login_methods, provider_availability,
+    public_session_payload, refresh_session as refresh_provider_session,
+    unlink_login_method, validate_provider_auth_configuration,
 )
+from app.onboarding import acknowledge_welcome, onboarding_state
 from app.herdr_client import HerdrClient
 from app.firstmate_client import FirstmateClient
 from app.execution_capabilities import get_execution_capabilities, validate_execution_selection, profile_selection
+from app.execution_routing import ExecutionRequirements, select_execution_profile
 from app.contracts import (ExecutionSettingsContract, ExecutionCredentialContract,
                            NotificationAckContract, NotificationPreferencesContract, AttentionActionContract,
                            AttentionActionExecuteContract, RoutingPreferenceContract,
+                           ExecutionRouteRequirementsContract,
                            AgentMigrationRequestContract, AgentMigrationTransitionContract,
                            ActivityCatchUpContract, MAGI_MAX_RESPONSE_BYTES,
                            RenameAgentContract)
 from app.stt_adapter import VoiceInputAdapter, TranscriptionError
-from app.db import (init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
+from app.db import (database_health, init_db, get_profile, update_profile, get_connected_accounts, upsert_connected_account,
                     disconnect_account, get_execution_preferences, get_execution_credential_status,
                     save_execution_preferences, save_execution_credential, delete_execution_credential,
                     create_agent_migration, get_agent_migration, get_agent_migration_by_idempotency, transition_agent_migration)
-from app.github_service import github_service
+from app.account_lifecycle import AccountDeletionError, delete_account
+from app.projects import (ProjectError, bind_github_repository, create_project,
+                          delete_project, get_project, list_projects,
+                          unbind_repository, update_project)
+from app.github_app import (MAX_WEBHOOK_BYTES as GITHUB_MAX_WEBHOOK_BYTES,
+                            github_app_service, router as github_app_router,
+                            validate_github_app_configuration)
 from app.recent_activity import RecentActivityService
 from app.activity_store import SourceEventConflict, list_activity, snapshot_activity, source_diagnostics
 from app.structured_runtime import StructuredRuntimeProjection
 from app.attention_service import attention_service
-from app.ar_glasses import router as ar_router
 from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
                                    prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
 from app.notifications import (register_push_token, revoke_push_token, get_registered_push_token,
@@ -60,7 +74,9 @@ from app.providers.teams import TeamsProviderAdapter
 from app.oauth_transactions import OAuthTransactionError, OAuthTransactionStore
 from app.usage import get_usage
 from app.uploads import (MAX_UPLOAD_BYTES, MAX_UPLOAD_COUNT, MAX_UPLOAD_TOTAL_BYTES,
-                         associate_uploads, save_upload, get_upload)
+                         SIGNED_ACCESS_TTL_SECONDS, associate_uploads, delete_upload,
+                         get_upload, save_upload, signed_access_token, validate_content,
+                         verify_signed_access, discard_uploads, avatar_root)
 from app.magi_chat_api import (magi_chat_readiness, magi_chat_service,
                                router as magi_chat_router,
                                validate_magi_chat_configuration)
@@ -71,10 +87,18 @@ from app.firstmate_execution_api import (
     firstmate_execution_service, router as firstmate_execution_router,
 )
 from app.firstmate_decision_api import router as firstmate_decision_router
+from app.billing import MAX_WEBHOOK_BYTES, validate_billing_configuration
+from app.billing_api import router as billing_router
+from app.project_memory_api import router as project_memory_router
 from app.objective_cancellation import (
     ObjectiveCancellationError, objective_cancellation_service,
 )
+from app.hosted_execution import (
+    HostedExecutionConfig, get_hosted_controller, router as hosted_execution_router,
+)
+from app.perception import MAX_PERCEPTION_EVENT_BYTES, router as perception_router
 
+validate_production_configuration()
 init_db()
 
 app = FastAPI(
@@ -84,37 +108,31 @@ app = FastAPI(
 )
 
 def _cors_origins() -> list[str]:
-    configured = os.getenv('MAGISTRATE_CORS_ORIGINS')
-    if configured is not None:
-        origins = [item.strip() for item in configured.split(',') if item.strip()]
-        if '*' in origins:
-            raise RuntimeError('Wildcard CORS is not permitted.')
-        if os.getenv('MAGISTRATE_ENV', '').lower() not in {'dev', 'development', 'test', 'testing'}:
-            for origin in origins:
-                if origin.startswith('http://') and not origin.startswith(('http://localhost', 'http://127.0.0.1', 'http://[::1]')):
-                    raise RuntimeError('Production CORS origins must use HTTPS.')
-        return origins
-    if os.getenv('MAGISTRATE_ENV', '').lower() in {'dev', 'development', 'test', 'testing'}:
-        return ['http://localhost:8081', 'http://localhost:19006']
-    raise RuntimeError('MAGISTRATE_CORS_ORIGINS is required outside explicit development/test mode.')
+    return cors_origins()
 
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allow_headers=['Authorization', 'Content-Type'],
+    expose_headers=['X-Request-ID'],
 )
 
 GATEWAY_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = GATEWAY_DIR / 'uploads' / 'avatars'
-os.makedirs(UPLOADS_DIR, exist_ok=True)
-app.mount('/uploads', StaticFiles(directory=str(GATEWAY_DIR / 'uploads')), name='uploads')
-app.include_router(ar_router)
+UPLOADS_DIR = avatar_root()
+os.makedirs(UPLOADS_DIR, mode=0o700, exist_ok=True)
+# Only avatars are public. Never mount the parent of private chat attachments.
+app.mount('/uploads/avatars', StaticFiles(directory=str(UPLOADS_DIR)), name='avatars')
+app.include_router(github_app_router)
 app.include_router(magi_chat_router)
 app.include_router(firstmate_execution_router)
 app.include_router(firstmate_decision_router)
+app.include_router(billing_router)
+app.include_router(project_memory_router)
+app.include_router(hosted_execution_router)
+app.include_router(perception_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -133,8 +151,41 @@ async def enforce_bounded_request_size(request: Request, call_next):
         return JSONResponse({'detail': 'Invalid request size.'}, status_code=400)
     if request.url.path == '/api/v1/uploads' and length > MAX_UPLOAD_REQUEST_BYTES:
         return JSONResponse({'detail': 'The upload request is too large.'}, status_code=413)
-    if request.url.path == '/api/v1/magi/messages' and length > MAX_PROMPT_REQUEST_BYTES:
-        return JSONResponse({'detail': 'The prompt request is too large.'}, status_code=413)
+    if (
+        request.url.path == '/api/v1/magi/messages'
+        or request.url.path.startswith('/api/v1/magi/memory/entries/')
+    ) and length > MAX_PROMPT_REQUEST_BYTES:
+        return JSONResponse({'detail': 'The Magi request is too large.'}, status_code=413)
+    perception_contract = request.method == 'POST' and (
+        request.url.path == '/api/v1/perception/events'
+        or bool(re.fullmatch(r'/api/v1/perception/events/pev_[A-Za-z0-9_-]{12,96}/confirm', request.url.path))
+    )
+    if perception_contract and content_length is None:
+        return JSONResponse({'detail': 'A perception request size is required.'}, status_code=411)
+    github_webhook = request.method == 'POST' and request.url.path == '/api/v1/github/webhooks'
+    github_install = request.method == 'POST' and request.url.path == '/api/v1/github/app/install'
+    stripe_webhook = request.method == 'POST' and request.url.path in {
+        '/api/v1/billing/webhook', '/api/v1/billing/webhooks/stripe',
+    }
+    if perception_contract:
+        body_cap, too_large = MAX_PERCEPTION_EVENT_BYTES, 'The perception request is too large.'
+    elif github_webhook:
+        body_cap, too_large = GITHUB_MAX_WEBHOOK_BYTES, 'Webhook payload is too large.'
+    elif github_install:
+        body_cap, too_large = 4096, 'The GitHub App request is too large.'
+    elif stripe_webhook:
+        body_cap, too_large = MAX_WEBHOOK_BYTES, 'The Stripe webhook is too large.'
+    else:
+        body_cap, too_large = 0, ''
+    if body_cap and length > body_cap:
+        return JSONResponse({'detail': too_large}, status_code=413)
+    if body_cap:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > body_cap:
+                return JSONResponse({'detail': too_large}, status_code=413)
+            body.extend(chunk)
+        request._body = bytes(body)
     firstmate_execution_contract = request.method == 'POST' and bool(re.fullmatch(
         r'/api/v1/firstmate/execution-events(?:/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/wake)?',
         request.url.path,
@@ -143,7 +194,13 @@ async def enforce_bounded_request_size(request: Request, call_next):
         request.method == 'POST'
         and request.url.path == '/api/v1/firstmate/decision-events'
     )
-    firstmate_structured_contract = firstmate_execution_contract or firstmate_decision_contract
+    hosted_worker_contract = request.method == 'POST' and bool(re.fullmatch(
+        r'/api/v1/hosted-execution/objectives/mgo_[0-9a-f]{32}/(?:events|decision-events|decision-answers/ack)',
+        request.url.path,
+    ))
+    firstmate_structured_contract = (
+        firstmate_execution_contract or firstmate_decision_contract or hosted_worker_contract
+    )
     if firstmate_structured_contract and length > MAX_FIRSTMATE_EXECUTION_EVENT_BYTES:
         return JSONResponse({'detail': 'The Firstmate execution event is too large.'}, status_code=413)
     bounded_contract_path = request.method == 'POST' and (
@@ -177,13 +234,18 @@ async def enforce_bounded_request_size(request: Request, call_next):
         request._body = bytes(body)
     return await call_next(request)
 
+# Outermost user middleware: every HTTP parser is behind a measured-byte cap.
+app.add_middleware(RequestBoundary)
+app.state.startup_complete = False
+
 herdr_client = HerdrClient()
 fm_client = FirstmateClient()
 structured_runtime = StructuredRuntimeProjection()
-recent_activity_service = RecentActivityService(structured_runtime, github_service)
+recent_activity_service = RecentActivityService(structured_runtime, github_app_service)
 stt_adapter = VoiceInputAdapter()
 _notification_reconciler_task = None
 _firstmate_delivery_recovery_task = None
+_hosted_execution_task = None
 _PROCESS_STARTED_AT_MS = int(time.time() * 1000)
 
 
@@ -194,25 +256,23 @@ async def _recover_firstmate_deliveries_once() -> None:
             updated_before_ms=_PROCESS_STARTED_AT_MS,
         )
         if intake_recovery["examined"]:
-            print("Firstmate objective intake recovery:", intake_recovery)
+            record('recovery', outcome='ok')
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
-        # Keep cancellation recovery independent: an unavailable objective
-        # queue must not strand a cancellation note (or vice versa).
-        print("Firstmate objective intake recovery unavailable:", exc)
+    except Exception:
+        # Never log provider/subprocess exception text or row payloads.
+        record('recovery', outcome='error')
     try:
         cancellation_recovery = await objective_cancellation_service.recover_pending(
             updated_before_ms=_PROCESS_STARTED_AT_MS,
         )
         if cancellation_recovery["examined"]:
-            print("Firstmate cancellation delivery recovery:", cancellation_recovery)
+            record('recovery', outcome='ok')
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
-        # Persisted pending rows remain eligible for the next explicit restart;
-        # Firstmate availability must not make the observation API unavailable.
-        print("Firstmate cancellation delivery recovery unavailable:", exc)
+    except Exception:
+        # Persisted pending rows remain eligible for the next explicit restart.
+        record('recovery', outcome='error')
 
 
 async def _reconcile_registered_notifications() -> None:
@@ -229,18 +289,23 @@ async def _reconcile_registered_notifications() -> None:
                 await dispatch_notification_events(user_id, items, local_hour=registered_local_hour(user_id))
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            # A source/provider outage must not kill the reconciler; the next
-            # interval retries and the Attention tab remains the fallback.
-            print('Notification reconciler unavailable:', exc)
+        except Exception:
+            # A provider outage must not echo remote content into host logs.
+            record('notifications', outcome='error')
 
 
 @app.on_event('startup')
 async def start_notification_reconciler():
-    global _notification_reconciler_task, _firstmate_delivery_recovery_task
+    global _notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task
+    validate_production_configuration()
     validate_friend_beta_configuration()
     validate_provider_auth_configuration()
+    validate_billing_configuration()
     validate_magi_chat_configuration()
+    validate_github_app_configuration()
+    # Hosted mode is a fail-closed production boundary: validate every image,
+    # identity, mTLS, network, and resource setting before serving.
+    HostedExecutionConfig.from_env()
     # A process cannot resume an in-flight provider socket. Preserve the
     # reserved pair and expose a truthful, explicitly retryable failure.
     await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
@@ -252,15 +317,20 @@ async def start_notification_reconciler():
     _firstmate_delivery_recovery_task = asyncio.create_task(
         _recover_firstmate_deliveries_once()
     )
+    hosted_controller = get_hosted_controller()
+    if hosted_controller is not None:
+        _hosted_execution_task = asyncio.create_task(hosted_controller.run())
     if os.getenv('MAGISTRATE_DISABLE_NOTIFICATION_RECONCILER', '').lower() not in {'1', 'true', 'yes'}:
         _notification_reconciler_task = asyncio.create_task(_reconcile_registered_notifications())
+    app.state.startup_complete = True
 
 
 @app.on_event('shutdown')
 async def stop_notification_reconciler():
-    global _notification_reconciler_task, _firstmate_delivery_recovery_task
+    global _notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task
+    app.state.startup_complete = False
     tasks = [
-        task for task in (_notification_reconciler_task, _firstmate_delivery_recovery_task)
+        task for task in (_notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task)
         if task is not None
     ]
     for task in tasks:
@@ -269,6 +339,7 @@ async def stop_notification_reconciler():
         await asyncio.gather(*tasks, return_exceptions=True)
     _notification_reconciler_task = None
     _firstmate_delivery_recovery_task = None
+    _hosted_execution_task = None
 
 
 async def _bounded_event_frame(websocket: WebSocket, timeout: float) -> str:
@@ -401,6 +472,33 @@ class ProviderRefreshRequest(BaseModel):
 class ObjectiveCancellationRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class AccountDeletionRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    confirmation: str = Field(min_length=8, max_length=256)
+
+
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=120)
+    slug: Optional[str] = Field(None, min_length=1, max_length=64)
+    description: str = Field('', max_length=2000)
+
+
+class ProjectUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    description: Optional[str] = Field(None, max_length=2000)
+    status: Optional[Literal['active', 'archived']] = None
+
+
+class RepositoryBindingRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    full_name: str = Field(min_length=3, max_length=201)
+    html_url: str = Field(min_length=19, max_length=500)
+    provider_repository_id: Optional[str] = Field(None, max_length=128)
+    default_branch: Optional[str] = Field(None, max_length=255)
 
 
 def _optional_principal(request: Request, authorization: Optional[str]) -> Optional[Principal]:
@@ -558,13 +656,24 @@ oauth_transaction_store = OAuthTransactionStore()
 
 # HEALTH & RUNTIME
 
+def _execution_interface_readiness() -> dict[str, Any]:
+    if HostedExecutionConfig.from_env() is not None:
+        return {
+            'status': 'configured',
+            'mode': 'hosted-isolation',
+            'activation': 'not-observed',
+            'live_probe_performed': False,
+        }
+    return fm_client.get_execution_interface_readiness()
+
+
 @app.get('/api/v1/runtime')
 async def get_runtime(principal: Principal = Depends(require_scope('read'))):
     fleet, runtime = await asyncio.gather(
         asyncio.to_thread(structured_runtime.fleet, principal.user_id),
         asyncio.to_thread(structured_runtime.runtime, principal.user_id),
     )
-    execution_interface = fm_client.get_execution_interface_readiness()
+    execution_interface = _execution_interface_readiness()
     event_ingress = {
         'status': 'ready',
         'schemas': ['firstmate.execution-event.v1', 'firstmate.decision-events.v1'],
@@ -600,7 +709,7 @@ async def get_runtime(principal: Principal = Depends(require_scope('read'))):
 @app.get('/api/v1/health')
 async def get_health(principal: Principal = Depends(require_scope('read'))):
     runtime = await asyncio.to_thread(structured_runtime.runtime, principal.user_id)
-    execution_interface = fm_client.get_execution_interface_readiness()
+    execution_interface = _execution_interface_readiness()
     event_ingress = {
         'status': 'ready',
         'schemas': ['firstmate.execution-event.v1', 'firstmate.decision-events.v1'],
@@ -608,6 +717,7 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
     }
     provider = magi_chat_readiness()
     producer = fm_client.get_producer_readiness()
+    database = await asyncio.to_thread(database_health)
     degraded: List[str] = []
     if provider['enabled'] and provider['status'] != 'configured':
         degraded.append('magi-provider')
@@ -615,12 +725,15 @@ async def get_health(principal: Principal = Depends(require_scope('read'))):
         degraded.append('firstmate-execution-interface')
     if producer['required'] and producer['status'] != 'ready':
         degraded.append('firstmate-producer')
+    if database['status'] != 'healthy':
+        degraded.append('database')
     return {
         'status': 'degraded' if degraded else 'healthy',
         'degraded_sources': degraded,
         'service': 'magistrate-gateway',
         'version': '1.1.0',
         'gateway_ready': True,
+        'database': database,
         'magi_provider': provider,
         'execution_interface': execution_interface,
         'event_ingress': event_ingress,
@@ -648,6 +761,37 @@ async def get_soak_diagnostics(principal: Principal = Depends(require_scope('rea
         'native_chat': await magi_chat_service.diagnostics(principal.user_id),
     }
 
+@app.get('/livez', include_in_schema=False)
+async def liveness():
+    return {'status': 'alive'}
+
+
+@app.get('/readyz', include_in_schema=False)
+async def readiness():
+    # Read persisted state only. Never call providers, tools or a runtime probe.
+    from app import db
+    ready = app.state.startup_complete and magi_chat_readiness()['status'] == 'configured'
+    try:
+        with observation_connection(db.DB_PATH) as conn:
+            version = conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]
+            ready = ready and version == db.SCHEMA_VERSION
+    except Exception:
+        # Driver connection errors may contain authority; never expose them.
+        ready = False
+    return JSONResponse({'status': 'ready' if ready else 'unavailable'}, status_code=200 if ready else 503)
+
+
+@app.get('/internal/metrics', include_in_schema=False)
+async def metrics(authorization: Optional[str] = Header(None)):
+    # Product read scope must not expose other principals' traffic/spend.
+    token = os.getenv('MAGISTRATE_METRICS_TOKEN', '')
+    if not token:
+        raise HTTPException(404, 'Not found.')
+    if not hmac.compare_digest((authorization or '').encode(), f'Bearer {token}'.encode()):
+        raise HTTPException(401, 'Metrics authentication required.')
+    return Response(prometheus_metrics(), media_type='text/plain; version=0.0.4')
+
+
 # ACCOUNT PROFILE ENDPOINTS
 @app.get('/api/v1/account/profile')
 async def get_account_profile(principal: Principal = Depends(require_scope('account'))):
@@ -671,21 +815,184 @@ async def post_account_profile(
             raise HTTPException(status_code=422, detail='Display name is invalid.')
     return update_profile(user_id=principal.user_id, name=name, email=email, bio=bio, active_theme=active_theme)
 
+@app.get('/api/v1/account/onboarding')
+async def get_account_onboarding(principal: Principal = Depends(require_scope('account'))):
+    return onboarding_state(principal.user_id)
+
+
+@app.post('/api/v1/account/onboarding/welcome')
+async def complete_account_welcome(principal: Principal = Depends(require_scope('account'))):
+    acknowledge_welcome(principal.user_id)
+    return onboarding_state(principal.user_id)
+
+
+@app.get('/api/v1/account/login-methods')
+async def get_account_login_methods(principal: Principal = Depends(require_scope('account'))):
+    return list_login_methods(principal)
+
+
+@app.delete('/api/v1/account/login-methods/{provider}')
+async def delete_account_login_method(
+    provider: Literal['apple', 'google'],
+    principal: Principal = Depends(require_scope('account')),
+):
+    return unlink_login_method(principal, provider)
+
+
 @app.post('/api/v1/account/avatar')
 async def upload_account_avatar(
     file: UploadFile = File(...),
     principal: Principal = Depends(require_scope('account'))
 ):
-    safe_name = Path(file.filename or 'avatar').name
-    safe_name = re.sub(r'[^A-Za-z0-9._-]', '_', safe_name)[:128] or 'avatar'
-    filename = f'{principal.user_id}_{int(time.time())}_{safe_name}'
-    filepath = os.path.join(UPLOADS_DIR, filename)
-    content = await file.read()
-    with open(filepath, 'wb') as f:
-        f.write(content)
-    public_url = f'/uploads/avatars/{filename}'
-    updated = update_profile(user_id=principal.user_id, avatar_url=public_url)
-    return {'status': 'success', 'avatar_url': public_url, 'profile': updated}
+    content = await file.read(5 * 1024 * 1024 + 1)
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail='Avatar images must be 5 MB or smaller.')
+    try:
+        media_type = validate_content(file.content_type, file.filename or 'avatar', content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    extensions = {
+        'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+        'image/webp': '.webp', 'image/bmp': '.bmp',
+    }
+    if media_type not in extensions:
+        raise HTTPException(status_code=422, detail='An image avatar is required.')
+    filename = f'avatar_{secrets.token_urlsafe(24)}{extensions[media_type]}'
+    filepath = UPLOADS_DIR / filename
+    previous = get_profile(principal.user_id).get('avatar_url')
+    try:
+        fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(content)
+        public_url = f'/uploads/avatars/{filename}'
+        updated = update_profile(user_id=principal.user_id, avatar_url=public_url)
+    except Exception:
+        filepath.unlink(missing_ok=True)
+        raise
+    if isinstance(previous, str) and previous.startswith('/uploads/avatars/avatar_'):
+        old_path = (UPLOADS_DIR / previous.removeprefix('/uploads/avatars/')).resolve()
+        if old_path.parent == UPLOADS_DIR.resolve() and old_path != filepath:
+            old_path.unlink(missing_ok=True)
+    return {'status': 'stored', 'avatar_url': public_url, 'profile': updated}
+
+
+@app.delete('/api/v1/account')
+async def delete_current_account(
+    contract: AccountDeletionRequest,
+    response: Response,
+    principal: Principal = Depends(require_scope('account')),
+):
+    """Permanently erase the authenticated principal and revoke every session."""
+    response.headers['Cache-Control'] = 'no-store'
+    if contract.confirmation != f"DELETE {principal.user_id}":
+        raise HTTPException(
+            status_code=409,
+            detail="Account deletion confirmation does not match the authenticated account.",
+        )
+    try:
+        hosted_controller = get_hosted_controller()
+        if hosted_controller is not None:
+            await hosted_controller.retire_owner(principal.user_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Hosted workloads could not be retired; account data was preserved.",
+        ) from exc
+    try:
+        result = await asyncio.to_thread(
+            delete_account, principal.user_id, confirmation=contract.confirmation,
+        )
+    except AccountDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _clear_provider_cookie(response)
+    return result
+
+
+# PROJECTS
+
+def _project_call(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except ProjectError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.get('/api/v1/projects')
+async def get_projects(
+    include_archived: bool = Query(False),
+    limit: int = Query(100, ge=1, le=200),
+    principal: Principal = Depends(require_scope('read')),
+):
+    return await asyncio.to_thread(
+        list_projects, principal.user_id, include_archived=include_archived, limit=limit,
+    )
+
+
+@app.post('/api/v1/projects', status_code=201)
+async def post_project(
+    contract: ProjectCreateRequest,
+    principal: Principal = Depends(require_scope('account')),
+):
+    return await asyncio.to_thread(
+        _project_call, create_project, principal.user_id,
+        name=contract.name, slug=contract.slug, description=contract.description,
+    )
+
+
+@app.get('/api/v1/projects/{project_id}')
+async def get_project_detail(
+    project_id: str,
+    principal: Principal = Depends(require_scope('read')),
+):
+    return await asyncio.to_thread(_project_call, get_project, principal.user_id, project_id)
+
+
+@app.patch('/api/v1/projects/{project_id}')
+async def patch_project(
+    project_id: str,
+    contract: ProjectUpdateRequest,
+    principal: Principal = Depends(require_scope('account')),
+):
+    return await asyncio.to_thread(
+        _project_call, update_project, principal.user_id, project_id,
+        name=contract.name, description=contract.description, status=contract.status,
+    )
+
+
+@app.delete('/api/v1/projects/{project_id}', status_code=204)
+async def remove_project(
+    project_id: str,
+    principal: Principal = Depends(require_scope('account')),
+):
+    await asyncio.to_thread(_project_call, delete_project, principal.user_id, project_id)
+    return Response(status_code=204)
+
+
+@app.post('/api/v1/projects/{project_id}/repositories', status_code=201)
+async def post_project_repository(
+    project_id: str,
+    contract: RepositoryBindingRequest,
+    principal: Principal = Depends(require_scope('providers')),
+):
+    return await asyncio.to_thread(
+        _project_call, bind_github_repository, principal.user_id, project_id,
+        full_name=contract.full_name, html_url=contract.html_url,
+        provider_repository_id=contract.provider_repository_id,
+        default_branch=contract.default_branch,
+    )
+
+
+@app.delete('/api/v1/projects/{project_id}/repositories/{repository_id}', status_code=204)
+async def remove_project_repository(
+    project_id: str,
+    repository_id: str,
+    principal: Principal = Depends(require_scope('providers')),
+):
+    await asyncio.to_thread(
+        _project_call, unbind_repository, principal.user_id, project_id, repository_id,
+    )
+    return Response(status_code=204)
+
 
 # OAUTH & CONNECTED ACCOUNTS ENDPOINTS
 def _provider_connection_state(adapter, account: dict) -> Dict[str, Any]:
@@ -829,21 +1136,6 @@ async def disconnect_oauth_provider(provider: str, principal: Principal = Depend
     disconnect_account(principal.user_id, provider)
     return {'status': 'disconnected', 'provider': provider}
 
-# LIVE GITHUB PR ENDPOINTS
-@app.get('/api/v1/github/pulls')
-async def list_github_pulls(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50), refresh: bool = Query(False), principal: Principal = Depends(require_scope('providers'))):
-    try:
-        return await github_service.get_pull_requests(page, per_page, refresh)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-@app.get('/api/v1/github/pulls/{number}')
-async def get_github_pull(number: int, refresh: bool = Query(False), principal: Principal = Depends(require_scope('providers'))):
-    try:
-        return await github_service.get_pull_request(number, refresh)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
 @app.get('/api/v1/recent-activity')
 async def get_recent_activity(limit: int = Query(20, ge=1, le=50), refresh: bool = Query(False), principal: Principal = Depends(require_scope('read'))):
     try:
@@ -942,10 +1234,12 @@ async def post_canonical_activity_catch_up(
 # JIRA & TEAMS ENDPOINTS
 @app.get('/api/v1/jira/issues')
 async def get_jira_issues(principal: Principal = Depends(require_scope('providers'))):
+    _require_owner(principal)
     return await jira_adapter.get_assigned_issues()
 
 @app.get('/api/v1/teams/mentions')
 async def get_teams_mentions(principal: Principal = Depends(require_scope('providers'))):
+    _require_owner(principal)
     return await teams_adapter.get_mentions()
 
 # UNIFIED ATTENTION ENDPOINT
@@ -1026,6 +1320,7 @@ async def get_attention_action(action_key: str, principal: Principal = Depends(r
 
 @app.get('/api/v1/usage')
 async def get_usage_summary(provider: Optional[str] = None, principal: Principal = Depends(require_scope('read'))):
+    _require_owner(principal)
     try:
         return await get_usage(provider)
     except RuntimeError as exc:
@@ -1152,8 +1447,11 @@ async def upload_chat_files(
             uploaded.append(save_upload(principal.user_id, file.filename or 'upload', file.content_type, content))
         if message_id:
             associate_uploads(principal.user_id, message_id, [item['upload_id'] for item in uploaded])
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        discard_uploads(principal.user_id, [item['upload_id'] for item in uploaded])
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise
     # The client must not infer processing success from a 200 alone. Report the
     # state the server actually reached: bytes stored and validated, and whether
     # the upload is already associated with a chat message.
@@ -1161,14 +1459,57 @@ async def upload_chat_files(
     return {'uploads': [{**item, 'attached': attached} for item in uploaded]}
 
 
-@app.get('/api/v1/uploads/{upload_id}')
-async def download_chat_file(upload_id: str, principal: Principal = Depends(require_scope('command'))):
-    if not re.fullmatch(r'^[A-Za-z0-9_-]{16,64}$', upload_id):
-        raise HTTPException(status_code=404, detail='Upload not found.')
+@app.post('/api/v1/uploads/{upload_id}/access')
+async def create_chat_file_access(upload_id: str, principal: Principal = Depends(require_scope('command'))):
+    """Mint a short-lived, owner-bound URL without exposing a storage path."""
     upload = get_upload(principal.user_id, upload_id)
     if not upload:
         raise HTTPException(status_code=404, detail='Upload not found.')
-    return FileResponse(upload['path'], media_type=upload['media_type'], filename=upload['filename'])
+    expires_at = int(time.time()) + SIGNED_ACCESS_TTL_SECONDS
+    signature = signed_access_token(principal.user_id, upload_id, expires_at)
+    return {
+        'schema_version': 'magistrate.artifact-access.v1',
+        'artifact_id': upload_id,
+        'expires_at': expires_at,
+        'url': f'/api/v1/uploads/{upload_id}?expires={expires_at}&signature={signature}',
+    }
+
+
+@app.get('/api/v1/uploads/{upload_id}')
+async def download_chat_file(
+    upload_id: str,
+    expires: Optional[int] = Query(None),
+    signature: Optional[str] = Query(None),
+    principal: Principal = Depends(require_scope('command')),
+):
+    if not re.fullmatch(r'^[A-Za-z0-9_-]{16,64}$', upload_id):
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    # Ordinary authenticated URLs remain compatible with persisted chat rows.
+    # If a signed URL is supplied, both its owner-bound signature and the
+    # current authenticated principal must validate; signatures never replace auth.
+    if (expires is None) != (signature is None) or (
+        expires is not None and signature is not None
+        and not verify_signed_access(principal.user_id, upload_id, expires, signature)
+    ):
+        raise HTTPException(status_code=403, detail='Artifact access has expired.')
+    upload = get_upload(principal.user_id, upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    return FileResponse(
+        upload['path'], media_type=upload['media_type'], filename=upload['filename'],
+        headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store'},
+    )
+
+
+@app.delete('/api/v1/uploads/{upload_id}', status_code=204)
+async def remove_chat_file(upload_id: str, principal: Principal = Depends(require_scope('command'))):
+    try:
+        removed = delete_upload(principal.user_id, upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail='Upload not found.')
+    return Response(status_code=204)
 
 
 @app.post('/api/v1/voice/transcribe')
@@ -1189,6 +1530,30 @@ async def get_execution_capability_inventory(principal: Principal = Depends(requ
         return get_execution_capabilities(principal.user_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+
+
+@app.post('/api/v1/execution/route-recommendation')
+async def recommend_execution_route(
+    contract: ExecutionRouteRequirementsContract,
+    principal: Principal = Depends(require_scope('command')),
+):
+    """Select a truthful launch profile without driving any harness lifecycle."""
+    try:
+        capabilities = get_execution_capabilities(principal.user_id)
+        route = select_execution_profile(
+            capabilities['profiles'],
+            ExecutionRequirements(**contract.model_dump()),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail='Execution capability inventory is unavailable.') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        'schema_version': 'execution.route-recommendation.v1',
+        'selection': route.__dict__,
+        'execution_started': False,
+        'consumer': 'firstmate',
+    }
 
 
 def _routing_delivery(preference: Dict[str, Any], user_id: str) -> Dict[str, Any]:

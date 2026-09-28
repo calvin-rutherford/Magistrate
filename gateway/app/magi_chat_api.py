@@ -6,6 +6,7 @@ and chat identity come from this authenticated route rather than model JSON.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Optional, Sequence
@@ -13,6 +14,7 @@ from typing import Optional, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth import Principal, require_any_scope, require_scope
+from app.telemetry import operation_span
 from app.contracts import NativeMagiMessageContract
 from app.magi_chat_service import MagiChatService
 from app.magi_chat_store import (
@@ -26,18 +28,29 @@ from app.magi_model import (
     MagiModelMessage,
     MagiModelResult,
     MagiToolDefinition,
-    OpenAIMagiModel,
 )
-from app.uploads import associate_uploads, get_upload, validate_upload_metadata
+from app.magi_routing import (
+    ModelRouteContext,
+    ModelRouteStore,
+    RoutedMagiModel,
+    load_routing_catalog,
+)
+from app.uploads import (
+    MAX_UPLOAD_TOTAL_BYTES, associate_uploads, get_upload, read_upload_content,
+    validate_upload_metadata,
+)
 
 
-def _configured_model() -> OpenAIMagiModel:
-    provider = os.getenv("MAGISTRATE_MAGI_MODEL_PROVIDER", "openai").strip().lower()
-    if provider != "openai":
-        # Phase 1 intentionally supports one concrete provider. Unknown values
-        # fail startup rather than silently selecting another inference path.
-        raise RuntimeError("MAGISTRATE_MAGI_MODEL_PROVIDER must be openai")
-    return OpenAIMagiModel()
+model_route_store = ModelRouteStore()
+
+
+def _configured_model() -> RoutedMagiModel:
+    legacy_provider = os.getenv("MAGISTRATE_MAGI_MODEL_PROVIDER", "").strip().lower()
+    if legacy_provider and legacy_provider != "routed":
+        raise RuntimeError(
+            "MAGISTRATE_MAGI_MODEL_PROVIDER is retired; configure the routed provider catalog"
+        )
+    return RoutedMagiModel(load_routing_catalog(), store=model_route_store)
 
 
 def validate_magi_chat_configuration() -> None:
@@ -55,16 +68,33 @@ def magi_chat_readiness() -> dict[str, object]:
             "status": "invalid", "enabled": True,
             "provider": None, "live_probe_performed": False,
         }
+    configured_providers = list(model.configured_provider_ids)
     return {
         "status": "configured" if model.configured else "unconfigured",
         "enabled": True,
-        "provider": "openai",
+        "provider": "routed",
+        "configured_providers": configured_providers,
         "live_probe_performed": False,
     }
 
 
 class _ConfiguredProvider:
-    """Resolve provider secrets lazily at the native request boundary."""
+    """Resolve routing policy and provider secrets at the request boundary."""
+
+    async def complete_routed(
+        self,
+        messages: Sequence[MagiModelMessage],
+        *,
+        system_context: str,
+        request_id: str,
+        route_context: ModelRouteContext,
+        tools: Sequence[MagiToolDefinition] = (),
+    ) -> MagiModelResult:
+        with operation_span('routing'):
+            return await _configured_model().complete_routed(
+                messages, system_context=system_context, request_id=request_id,
+                route_context=route_context, tools=tools,
+            )
 
     async def complete(
         self,
@@ -74,9 +104,10 @@ class _ConfiguredProvider:
         request_id: str,
         tools: Sequence[MagiToolDefinition] = (),
     ) -> MagiModelResult:
-        return await _configured_model().complete(
-            messages, system_context=system_context, request_id=request_id, tools=tools,
-        )
+        with operation_span('routing'):
+            return await _configured_model().complete(
+                messages, system_context=system_context, request_id=request_id, tools=tools,
+            )
 
 
 magi_chat_store = MagiChatStore()
@@ -96,10 +127,22 @@ def _conversation_id(value: str) -> str:
 
 def _error_response(result: dict) -> dict:
     if result.get("status") == "failed":
+        code = result.get("error_code")
+        if code == "route_fallback_confirmation_required":
+            message = (
+                "The available fallback may materially increase cost. Review the request and retry "
+                "with explicit confirmation to authorize that fallback."
+            )
+        elif code == "model_budget_exhausted":
+            message = "The configured model budget is exhausted. No paid fallback was attempted."
+        elif code == "no_reliably_capable_model":
+            message = "No configured, available model reliably satisfies this request."
+        else:
+            message = "Magi could not complete this response. The user message is saved and may be retried."
         return {
             **result,
-            "error": "Magi could not complete this response. The user message is saved and may be retried.",
-            "retryable": True,
+            "error": message,
+            "retryable": code != "model_budget_exhausted",
         }
     return result
 
@@ -110,6 +153,10 @@ async def post_magi_message(
     principal: Principal = Depends(require_any_scope("command", "voice")),
 ):
     attachments = []
+    if sum(attachment.size for attachment in contract.attachments) > MAX_UPLOAD_TOTAL_BYTES:
+        raise HTTPException(status_code=413, detail="The attachments in one message are too large.")
+    if len({attachment.upload_id for attachment in contract.attachments}) != len(contract.attachments):
+        raise HTTPException(status_code=422, detail="Attachment references must be unique.")
     for attachment in contract.attachments:
         stored = get_upload(principal.user_id, attachment.upload_id)
         if not stored:
@@ -120,7 +167,10 @@ async def post_magi_message(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        attachments.append(stored)
+        content = read_upload_content(principal.user_id, attachment.upload_id)
+        if content is None:
+            raise HTTPException(status_code=409, detail="An attached file failed storage integrity validation.")
+        attachments.append({**stored, "content": content})
     if attachments:
         try:
             associate_uploads(
@@ -143,6 +193,8 @@ async def post_magi_message(
             # can receive an execution tool only with the existing command
             # authority. Tool JSON can never grant that scope to itself.
             allow_tools=principal.has("command"),
+            explicit_confirmation=contract.explicit_confirmation,
+            actor_session_id=principal.session_id,
         )
     except MagiChatNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -225,3 +277,18 @@ async def get_magi_chat_diagnostics(
     principal: Principal = Depends(require_scope("read")),
 ):
     return await magi_chat_service.diagnostics(principal.user_id)
+
+
+@router.get("/model-routes")
+async def get_magi_model_routes(
+    limit: int = Query(50, ge=1, le=100),
+    principal: Principal = Depends(require_scope("read")),
+):
+    """Return principal-scoped, content-free route/cost/failover evidence."""
+    paid = await asyncio.to_thread(
+        model_route_store.summary, principal.user_id, limit=limit,
+    )
+    closures = await asyncio.to_thread(
+        magi_chat_store.route_closures, principal.user_id, limit=limit,
+    )
+    return {**paid, "turn_closures": closures}

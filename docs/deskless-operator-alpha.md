@@ -98,9 +98,9 @@ once; malformed, external, unsupported, and duplicate targets are ignored.
 This preserves the target across authenticated cold start, background,
 terminated, duplicate, malformed, and unauthenticated launches. Voice starts
 only after the authenticated route is mounted and microphone setup is ready.
-The Siri adapter now points at the voice intent, but it remains a URL adapter:
-there is no native App Intent, Siri registration, or Action Button implementation
-and none is claimed.
+This historical slice originally stopped at a URL adapter. Native App Intents,
+Shortcuts, and the Action Button entry were added later; the current contract
+and external verification boundary are in [`ios-voice-shortcuts.md`](./ios-voice-shortcuts.md).
 
 ### Push prerequisite seam
 
@@ -122,8 +122,9 @@ must not be presented as multi-user device management.
 Voice remains foreground-only final STT/TTS with explicit visible capture and
 tap interruption. Unused `audio` and `fetch` background modes were removed;
 `remote-notification` is retained for the push capability. There is no ambient
-background listening, native Siri capture, Action Button handler, VAD, or
-physical audio-route proof.
+background listening or native Siri capture. Current foreground App Intents and
+the Action Button shortcut do not change that boundary; physical audio-route
+proof remains an external device gate.
 
 ## DEAT-001 gate
 

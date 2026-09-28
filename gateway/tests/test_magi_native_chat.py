@@ -85,7 +85,7 @@ def test_native_api_is_authenticated_owned_and_independent_of_execution_infrastr
     assert payload['assistant_message']['content'].encode() == expected.encode()
     assert len(fake.calls) == 2
     assert fake.offered_tools == [
-        ('firstmate.submit_objective', 'magi.respond'), (),
+        ('firstmate.submit_objective', 'magi.remember', 'magi.respond'), (),
     ]
 
     duplicate = client.post('/api/v1/magi/messages', headers=TEST_HEADERS, json=body).json()

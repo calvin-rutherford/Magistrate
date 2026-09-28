@@ -24,7 +24,9 @@ class GitHubProviderAdapter(ProviderAdapter):
         return 'GitHub OAuth is not configured on this gateway (missing ' + ', '.join(missing) + ').'
 
     def default_scopes(self) -> List[str]:
-        return ['repo', 'read:org', 'user:email']
+        # OAuth is optional account identity only. Repository authority belongs
+        # exclusively to the least-privilege GitHub App installation flow.
+        return ['read:user', 'user:email']
 
     def get_authorization_url(self, state: str = '') -> str:
         client_id = self.client_id or os.getenv('GITHUB_OAUTH_CLIENT_ID', '')
@@ -89,4 +91,4 @@ class GitHubProviderAdapter(ProviderAdapter):
         return profile
 
     def capabilities(self) -> List[str]:
-        return ['read_prs', 'manage_repos', 'execute_firstmate']
+        return ['account_identity']

@@ -13,6 +13,7 @@ import json
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import time
 from contextlib import contextmanager
 from typing import Any, Literal, Optional
@@ -85,7 +86,7 @@ def _valid_visible_text(value: str) -> bool:
 
 @contextmanager
 def _session():
-    conn = sqlite3.connect(db.DB_PATH, timeout=_BUSY_TIMEOUT_SECONDS)
+    conn = connect(db.DB_PATH, timeout=_BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     try:
         with conn:

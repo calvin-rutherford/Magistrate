@@ -10,11 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
+from app.persistence import connect
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -27,14 +29,18 @@ MAX_PUSH_ATTEMPTS = 3
 
 # These are deliberately policy categories, not execution permissions.  A
 # mode can change alert volume only; it never authorizes a command.
-RESTRICTED_KINDS = frozenset({"captain_question", "blocker"})
-MODERATE_KINDS = RESTRICTED_KINDS | frozenset({"pr_ready", "milestone", "stall", "failure"})
-FULL_KINDS = frozenset({"captain_question", "blocker", "stall", "failure", "completion", "consequential_decision"})
+ACCOUNT_ATTENTION_KINDS = frozenset({"budget", "credit", "repository_disconnected", "payment_issue"})
+RESTRICTED_KINDS = frozenset({"captain_question", "blocker", "consequential_decision"}) | ACCOUNT_ATTENTION_KINDS
+MODERATE_KINDS = RESTRICTED_KINDS | frozenset({"pr_ready", "milestone", "stall", "failure", "completion"})
+FULL_KINDS = frozenset({"captain_question", "blocker", "stall", "failure", "completion", "consequential_decision"}) | ACCOUNT_ATTENTION_KINDS
+# A terminal outcome can be useful without demanding a captain action. It may
+# be pushed once, but the client will not turn it into an unread Attention dot.
+INFORMATIONAL_KINDS = frozenset({"completion", "failure"})
 KNOWN_PLATFORMS = frozenset({"ios", "android", "native"})
 
 
 def init_notification_db() -> None:
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         cursor = conn.cursor()
         cursor.execute("""
@@ -109,7 +115,7 @@ def register_push_token(user_id: str, push_token: str, platform: str = "ios", ti
         raise ValueError("timezone_offset_minutes must be between -840 and 840.")
     init_notification_db()
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.execute("""
             INSERT INTO push_tokens (user_id, push_token, platform, updated_at, revoked_at, timezone_offset_minutes)
             VALUES (?, ?, ?, ?, NULL, ?)
@@ -123,7 +129,7 @@ def register_push_token(user_id: str, push_token: str, platform: str = "ios", ti
 
 def revoke_push_token(user_id: str, push_token: Optional[str] = None) -> Dict[str, Any]:
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         if push_token:
             conn.execute("UPDATE push_tokens SET revoked_at=? WHERE user_id=? AND push_token=?", (int(time.time()), user_id, push_token.strip()))
         else:
@@ -136,7 +142,7 @@ def get_registered_push_token(user_id: str) -> Optional[Dict[str, Any]]:
     enabled_value = os.getenv("MAGISTRATE_FRIEND_BETA_ENABLED", "false").strip().lower()
     friend_enabled = enabled_value in {"1", "true", "yes", "on"}
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT push_token, platform, timezone_offset_minutes FROM push_tokens WHERE user_id=? AND revoked_at IS NULL",
             (user_id,),
@@ -162,7 +168,7 @@ def list_registered_push_users() -> List[str]:
     enabled_value = os.getenv("MAGISTRATE_FRIEND_BETA_ENABLED", "false").strip().lower()
     friend_enabled = enabled_value in {"1", "true", "yes", "on"}
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         has_grants = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='friend_beta_access_grants'",
         ).fetchone()
@@ -279,7 +285,7 @@ def _quiet(local_hour: Optional[int], quiet_start: Optional[int], quiet_end: Opt
 
 def get_notification_preferences(user_id: str) -> Dict[str, Any]:
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT enabled, quiet_start, quiet_end, mode FROM notification_preferences WHERE user_id=?", (user_id,)).fetchone()
     if not row:
@@ -306,10 +312,11 @@ def reconcile_notification_events(
     mode = preferences["mode"]
     actionable = {
         str(item["id"]): item for item in attention_items
-        if item.get("requires_action") is True and _mode_for_kind(mode, item.get("notification_kind"), bool(item.get("consequential")))
+        if (item.get("requires_action") is True or item.get("notification_kind") in INFORMATIONAL_KINDS)
+        and _mode_for_kind(mode, item.get("notification_kind"), bool(item.get("consequential")))
     }
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         existing = {row["item_id"]: row for row in conn.execute("SELECT * FROM notification_state WHERE user_id=?", (user_id,)).fetchall()}
         for item_id, row in existing.items():
@@ -354,7 +361,7 @@ def _unread_events(user_id: str, attention_items: List[Dict[str, Any]], preferen
         return []
     items_by_id = {str(item["id"]): item for item in attention_items}
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT item_id FROM notification_state WHERE user_id=? AND active=1 AND viewed=0",
             (user_id,),
@@ -365,16 +372,58 @@ def _unread_events(user_id: str, attention_items: List[Dict[str, Any]], preferen
 def mark_notification_events_delivered(user_id: str, item_ids: List[str]) -> None:
     """Record provider/browser delivery without clearing the unread indicator."""
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.executemany(
             "UPDATE notification_state SET delivered=1 WHERE user_id=? AND item_id=? AND active=1",
             [(user_id, item_id) for item_id in item_ids],
         )
 
 
+def _safe_deep_link(event: Dict[str, Any]) -> str:
+    """Keep notification navigation inside the public app route vocabulary."""
+    route = str(event.get("deep_link") or event.get("url") or "")
+    parsed = urlparse(route)
+    query = parse_qs(parsed.query)
+    if parsed.scheme or parsed.netloc:
+        return "/attention?overview=true"
+    item = query.get("item", [""])[0]
+    if parsed.path == "/attention" and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", item):
+        return "/attention?" + urlencode({"item": item})
+    if parsed.path == "/attention" and query.get("overview") == ["true"]:
+        return "/attention?overview=true"
+    agent_id = query.get("agentId", [""])[0]
+    if parsed.path == "/chat" and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", agent_id):
+        return "/chat?" + urlencode({"agentId": agent_id})
+    if parsed.path == "/chat" and query.get("shortcut") == ["running"]:
+        return "/chat?shortcut=running"
+    number = query.get("number", [""])[0]
+    if parsed.path == "/pr-detail" and re.fullmatch(r"[1-9][0-9]{0,8}", number):
+        return "/pr-detail?" + urlencode({"number": number})
+    return "/attention?overview=true"
+
+
+def _safe_push_copy(kind: Optional[str]) -> tuple[str, str]:
+    """Visible push copy never exposes repository, task, provider, or billing identifiers."""
+    if kind in {"captain_question", "consequential_decision", "blocker"}:
+        return "Your answer is needed", "Open Magistrate to review an item that needs your attention."
+    if kind == "completion":
+        return "Work completed", "Open Magistrate to review the result."
+    if kind in {"failure", "stall"}:
+        return "Work needs attention", "Open Magistrate to review what happened."
+    if kind in {"budget", "credit"}:
+        return "Usage needs attention", "Open Magistrate to review account usage."
+    if kind == "repository_disconnected":
+        return "A repository needs reconnecting", "Open Magistrate to review the connection."
+    if kind == "payment_issue":
+        return "Billing needs attention", "Open Magistrate to review billing."
+    if kind == "pr_ready":
+        return "A pull request is ready", "Open Magistrate to review it."
+    return "Magistrate attention", "Open Magistrate to review the update."
+
+
 def _push_intent_data(event: Dict[str, Any]) -> Dict[str, Any]:
     """Return a versioned, app-owned target alongside the legacy URL field."""
-    route = str(event.get("deep_link") or event.get("url") or "/attention")
+    route = _safe_deep_link(event)
     parsed = urlparse(route)
     query = parse_qs(parsed.query)
     target_type = "attention"
@@ -415,12 +464,13 @@ async def dispatch_notification_events(
     failures: List[Dict[str, Any]] = []
     for event in events:
         kind = event.get("notification_kind")
-        title = "Your answer is needed" if kind in {"captain_question", "consequential_decision", "blocker"} else event.get("title", "Magistrate attention")
+        title, body = _safe_push_copy(kind)
+        safe_route = _safe_deep_link(event)
         outcome = await send_push_notification(
             user_id,
             title,
-            event.get("subtitle") or "An item needs your attention.",
-            {**_push_intent_data(event), "url": event.get("deep_link") or event.get("url", "/attention"), "item_id": event.get("id"), "notification_kind": kind},
+            body,
+            {**_push_intent_data(event), "url": safe_route, "item_id": event.get("id"), "notification_kind": kind},
         )
         if outcome.get("status") == "sent":
             delivered.append(str(event["id"]))
@@ -438,7 +488,7 @@ async def dispatch_notification_events(
 def acknowledge_notification_events(user_id: str, item_ids: List[str]) -> None:
     """Acknowledge items as viewed; this is the unread-dot clear operation."""
     init_notification_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.executemany("UPDATE notification_state SET delivered=1, viewed=1 WHERE user_id=? AND item_id=? AND active=1", [(user_id, item_id) for item_id in item_ids])
 
 
@@ -457,7 +507,7 @@ def update_notification_preferences(
         raise ValueError("quiet hours must be between 0 and 23")
     init_notification_db()
     now = int(time.time())
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect(DB_PATH) as conn:
         conn.execute("""
             INSERT INTO notification_preferences(user_id,enabled,quiet_start,quiet_end,mode,updated_at) VALUES(?,?,?,?,?,?)
             ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled, quiet_start=excluded.quiet_start,

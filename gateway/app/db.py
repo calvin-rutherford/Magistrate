@@ -3,12 +3,14 @@ import sqlite3
 import base64
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Dict, Any, List, Optional, Tuple
 from cryptography.fernet import Fernet
 from cryptography.fernet import InvalidToken
+from app.persistence import connect, is_postgres
 
 # Deployments must provide an absolute path outside the checkout so upgrades
 # cannot replace or strand the operator's SQLite state. Development and tests
@@ -16,10 +18,17 @@ from cryptography.fernet import InvalidToken
 # was omitted.
 _environment_at_import = os.getenv('MAGISTRATE_ENV', '').strip().lower()
 _configured_db_path = os.getenv('MAGISTRATE_DB_PATH', '').strip()
+_database_url = os.getenv('MAGISTRATE_DATABASE_URL', '').strip()
+_state_dir = os.getenv('MAGISTRATE_STATE_DIR', '').strip()
 DEFAULT_CIPHERTEXT_VERSION = 'v1'
 DEVELOPMENT_MODES = frozenset({'dev', 'development', 'test', 'testing'})
 DB_PATH = _configured_db_path
-if not DB_PATH and _environment_at_import in DEVELOPMENT_MODES:
+if _database_url:
+    if not _state_dir and _environment_at_import not in DEVELOPMENT_MODES:
+        raise RuntimeError('MAGISTRATE_STATE_DIR is required with PostgreSQL outside development/test mode')
+    state_root = Path(_state_dir) if _state_dir else Path(__file__).resolve().parents[1]
+    DB_PATH = str(state_root / 'postgresql.state')
+elif not DB_PATH and _environment_at_import in DEVELOPMENT_MODES:
     DB_PATH = str(Path(__file__).resolve().parents[1] / 'magistrate.db')
 LEGACY_MIGRATION_FLAG = 'MAGISTRATE_ALLOW_LEGACY_MIGRATION'
 ROTATION_FLAG = 'MAGISTRATE_KEY_ROTATION_ENABLED'
@@ -256,7 +265,7 @@ def _rewrite_oauth_credentials(
     if limit < 1 or limit > MAX_ROTATION_ROWS:
         raise SecretRotationError(f'limit must be between 1 and {MAX_ROTATION_ROWS}')
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         rows = conn.execute(
             'SELECT id, access_token_enc, refresh_token_enc FROM oauth_credentials LIMIT ?',
@@ -336,7 +345,558 @@ def rotate_oauth_credentials(
     """Rotate OAuth and live Pi ciphertext; retain the historical API name."""
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
-def init_db():
+
+SCHEMA_VERSION = 8
+
+
+def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
+    statements = (
+        """CREATE TABLE IF NOT EXISTS workspaces (
+            workspace_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK(kind IN ('personal')),
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS projects (
+            project_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            owner_user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL CHECK(kind IN ('standalone','github')),
+            status TEXT NOT NULL CHECK(status IN ('active','archived')),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, slug),
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id),
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_projects_owner_status ON projects(owner_user_id, status, updated_at)",
+        """CREATE TABLE IF NOT EXISTS project_repositories (
+            repository_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            provider TEXT NOT NULL CHECK(provider IN ('github')),
+            provider_repository_id TEXT,
+            full_name TEXT NOT NULL,
+            html_url TEXT NOT NULL,
+            default_branch TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, provider, full_name),
+            FOREIGN KEY(project_id) REFERENCES projects(project_id),
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_project_repositories_project ON project_repositories(owner_user_id, project_id)",
+        """CREATE TABLE IF NOT EXISTS project_memories (
+            memory_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            memory_key TEXT NOT NULL,
+            value_enc TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, project_id, memory_key),
+            FOREIGN KEY(project_id) REFERENCES projects(project_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS billing_accounts (
+            owner_user_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            external_customer_ref TEXT,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS account_credit_ledger (
+            credit_event_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT,
+            amount_microunits INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            provider_event_id TEXT,
+            created_at INTEGER NOT NULL,
+            UNIQUE(owner_user_id, provider_event_id),
+            FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id),
+            FOREIGN KEY(project_id) REFERENCES projects(project_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_credit_ledger_owner ON account_credit_ledger(owner_user_id, created_at)",
+    )
+    for statement in statements:
+        connection.execute(statement)
+    objective_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(magi_objective_submissions)")
+    }
+    if "project_id" not in objective_columns:
+        connection.execute("ALTER TABLE magi_objective_submissions ADD COLUMN project_id TEXT")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_magi_objectives_project ON magi_objective_submissions(owner_user_id, project_id, created_at)"
+    )
+
+
+def _migration_provider_onboarding_and_billing(connection: sqlite3.Connection) -> None:
+    connection.execute("""CREATE TABLE IF NOT EXISTS account_onboarding (
+        user_id TEXT PRIMARY KEY,
+        welcome_completed_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )""")
+    now = int(time.time())
+    # Existing provider sessions and a fresh sign-in must derive the same gate.
+    # Backfill every connected login principal rather than creating progress
+    # lazily and allowing pre-deploy sessions to bypass GitHub/billing steps.
+    connection.execute(
+        """INSERT OR IGNORE INTO account_onboarding
+           (user_id, welcome_completed_at, created_at, updated_at)
+           SELECT DISTINCT user_id, CAST(NULL AS BIGINT), ?, ? FROM connected_accounts
+           WHERE account_kind = 'login' AND status = 'connected'""",
+        (now, now),
+    )
+    billing_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(billing_accounts)")
+    }
+    for column, definition in (
+        ("subscription_id", "TEXT"),
+        ("current_period_end", "BIGINT"),
+        ("provider_event_created", "BIGINT"),
+    ):
+        if column not in billing_columns:
+            connection.execute(f"ALTER TABLE billing_accounts ADD COLUMN {column} {definition}")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_accounts_customer ON billing_accounts(external_customer_ref)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_accounts_subscription ON billing_accounts(subscription_id)"
+    )
+    connection.execute("""CREATE TABLE IF NOT EXISTS billing_webhook_events (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        received_at INTEGER NOT NULL
+    )""")
+
+
+def _migration_credit_billing(connection: sqlite3.Connection) -> None:
+    """Extend the tenant billing account into the credit execution authority."""
+    billing_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(billing_accounts)")
+    }
+    for column, definition in (
+        ("catalog_id", "TEXT"),
+        ("current_period_start", "BIGINT"),
+        ("cancel_at_period_end", "BIGINT NOT NULL DEFAULT 0"),
+        ("grace_ends_at", "BIGINT"),
+        ("available_microcredits", "BIGINT NOT NULL DEFAULT 0"),
+        ("reserved_microcredits", "BIGINT NOT NULL DEFAULT 0"),
+        ("period_spend_microcredits", "BIGINT NOT NULL DEFAULT 0"),
+        ("period_key", "TEXT"),
+    ):
+        if column not in billing_columns:
+            connection.execute(f"ALTER TABLE billing_accounts ADD COLUMN {column} {definition}")
+    connection.execute("UPDATE billing_accounts SET catalog_id = 'free' WHERE catalog_id IS NULL")
+
+    webhook_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(billing_webhook_events)")
+    }
+    for column, definition in (
+        ("payload_sha256", "TEXT"),
+        ("processed_at", "BIGINT"),
+    ):
+        if column not in webhook_columns:
+            connection.execute(f"ALTER TABLE billing_webhook_events ADD COLUMN {column} {definition}")
+
+    connection.execute("""CREATE TABLE IF NOT EXISTS credit_ledger (
+        entry_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        entry_type TEXT NOT NULL CHECK(entry_type IN
+            ('included_grant','topup','reservation','release','settlement','refund','adjustment')),
+        amount_microcredits BIGINT NOT NULL,
+        balance_after_microcredits BIGINT NOT NULL,
+        reservation_id TEXT,
+        objective_id TEXT,
+        source TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_owner ON credit_ledger(owner_user_id, created_at DESC, entry_id)")
+    connection.execute("""CREATE TABLE IF NOT EXISTS credit_reservations (
+        reservation_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        estimated_microcredits BIGINT NOT NULL,
+        actual_microcredits BIGINT,
+        status TEXT NOT NULL CHECK(status IN ('reserved','settled','released')),
+        usage_json TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, objective_id),
+        UNIQUE(owner_user_id, idempotency_key)
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_credit_reservations_active ON credit_reservations(owner_user_id, status)")
+    connection.execute("""CREATE TABLE IF NOT EXISTS execution_usage_ledger (
+        usage_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        reservation_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens BIGINT NOT NULL,
+        output_tokens BIGINT NOT NULL,
+        compute_milliseconds BIGINT NOT NULL,
+        cost_microcredits BIGINT NOT NULL,
+        created_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, event_id),
+        UNIQUE(owner_user_id, objective_id)
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_execution_usage_owner ON execution_usage_ledger(owner_user_id, created_at DESC, usage_id)")
+    connection.execute("""CREATE TABLE IF NOT EXISTS billing_checkout_sessions (
+        stripe_session_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        catalog_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('subscription','credit_pack')),
+        idempotency_key TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )""")
+
+
+def _migration_github_app(connection: sqlite3.Connection) -> None:
+    # Customer repository authority comes only from a GitHub App installation.
+    # Installation tokens are short-lived and memory-only; no token column is
+    # deliberately present in this schema.
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_app_installations (
+        installation_id INTEGER PRIMARY KEY,
+        user_id TEXT,
+        account_id INTEGER,
+        account_login TEXT NOT NULL DEFAULT '',
+        account_type TEXT NOT NULL DEFAULT '',
+        repository_selection TEXT NOT NULL DEFAULT 'selected',
+        status TEXT NOT NULL DEFAULT 'active',
+        permissions_json TEXT NOT NULL DEFAULT '{}',
+        events_json TEXT NOT NULL DEFAULT '[]',
+        suspended_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_reconciled_at INTEGER,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_github_installations_user
+                           ON github_app_installations(user_id, status)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_app_repositories (
+        installation_id INTEGER NOT NULL,
+        repository_id INTEGER NOT NULL,
+        owner_login TEXT NOT NULL,
+        name TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        private INTEGER NOT NULL DEFAULT 0,
+        default_branch TEXT NOT NULL DEFAULT '',
+        html_url TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1,
+        deleted_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(installation_id, repository_id),
+        FOREIGN KEY(installation_id) REFERENCES github_app_installations(installation_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_github_repositories_name
+                           ON github_app_repositories(installation_id, full_name, active)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_app_transactions (
+        state_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        consumed_at INTEGER,
+        FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        event_name TEXT NOT NULL,
+        action TEXT,
+        payload_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        processed_at INTEGER,
+        error_code TEXT
+    )""")
+
+
+def _migration_project_context_plane(connection: sqlite3.Connection) -> None:
+    """Install the provider-independent, owner/project-qualified memory ledger."""
+    statements = (
+        """CREATE TABLE IF NOT EXISTS project_memory_entries (
+            entry_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL DEFAULT '',
+            memory_key TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            importance INTEGER NOT NULL CHECK(importance BETWEEN 1 AND 5),
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            deleted_at INTEGER,
+            UNIQUE(owner_user_id, tenant_id, organization_id, workspace_id,
+                   project_id, repository_id, memory_key)
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_project_memory_scope
+            ON project_memory_entries(owner_user_id, tenant_id, organization_id,
+               workspace_id, project_id, repository_id, updated_at)""",
+        """CREATE TABLE IF NOT EXISTS project_memory_terms (
+            entry_id TEXT NOT NULL,
+            term TEXT NOT NULL,
+            PRIMARY KEY(entry_id, term),
+            FOREIGN KEY(entry_id) REFERENCES project_memory_entries(entry_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_project_memory_term ON project_memory_terms(term, entry_id)",
+        """CREATE TABLE IF NOT EXISTS project_memory_revisions (
+            entry_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            actor_session_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(entry_id, revision),
+            FOREIGN KEY(entry_id) REFERENCES project_memory_entries(entry_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS project_memory_audit (
+            owner_user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            entry_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('created','updated','deleted')),
+            actor_session_id TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            previous_event_sha256 TEXT NOT NULL,
+            event_sha256 TEXT NOT NULL,
+            occurred_at INTEGER NOT NULL,
+            PRIMARY KEY(owner_user_id, tenant_id, organization_id, workspace_id,
+                        project_id, repository_id, sequence),
+            UNIQUE(event_sha256),
+            FOREIGN KEY(entry_id) REFERENCES project_memory_entries(entry_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS project_memory_retrievals (
+            retrieval_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            actor_session_id TEXT NOT NULL,
+            query_sha256 TEXT NOT NULL,
+            selected_ids_json TEXT NOT NULL,
+            result_count INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_project_memory_retrieval_scope
+            ON project_memory_retrievals(owner_user_id, tenant_id, organization_id,
+               workspace_id, project_id, repository_id, created_at)""",
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
+def _migration_files_and_perception(connection: sqlite3.Connection) -> None:
+    """Install owner-scoped file retention and device-neutral perception state."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS chat_uploads (
+        upload_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, filename TEXT NOT NULL,
+        media_type TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL,
+        created_at INTEGER NOT NULL, object_key TEXT, sha256 TEXT,
+        scan_status TEXT NOT NULL DEFAULT 'legacy', expires_at INTEGER,
+        deleted_at INTEGER
+    )""")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(chat_uploads)")}
+    additions = {
+        "object_key": "ALTER TABLE chat_uploads ADD COLUMN object_key TEXT",
+        "sha256": "ALTER TABLE chat_uploads ADD COLUMN sha256 TEXT",
+        "scan_status": "ALTER TABLE chat_uploads ADD COLUMN scan_status TEXT NOT NULL DEFAULT 'legacy'",
+        "expires_at": "ALTER TABLE chat_uploads ADD COLUMN expires_at INTEGER",
+        "deleted_at": "ALTER TABLE chat_uploads ADD COLUMN deleted_at INTEGER",
+    }
+    for column, statement in additions.items():
+        if column not in columns:
+            connection.execute(statement)
+    connection.execute("""CREATE TABLE IF NOT EXISTS chat_message_attachments (
+        message_id TEXT NOT NULL, user_id TEXT NOT NULL, upload_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (message_id, upload_id),
+        FOREIGN KEY(upload_id) REFERENCES chat_uploads(upload_id)
+    )""")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_uploads_expiry ON chat_uploads(expires_at, deleted_at)"
+    )
+    connection.execute("""CREATE TABLE IF NOT EXISTS perception_events (
+        event_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+        modality TEXT NOT NULL, confidence REAL NOT NULL, intent_kind TEXT NOT NULL,
+        impact TEXT NOT NULL, artifact_ref TEXT, authorization_state TEXT NOT NULL,
+        reason TEXT, revision INTEGER NOT NULL DEFAULT 1, observed_at_ms INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, confirmed_at INTEGER,
+        PRIMARY KEY(owner_user_id, event_id)
+    )""")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_perception_owner_expiry ON perception_events(owner_user_id, expires_at)"
+    )
+
+
+def _install_hosted_execution_schema(connection: sqlite3.Connection) -> None:
+    """Install the durable provider-neutral execution queue and answer outbox."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS hosted_execution_runs (
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL UNIQUE,
+        project TEXT NOT NULL,
+        tenant_key TEXT NOT NULL,
+        isolation_key TEXT NOT NULL,
+        backend_execution_id TEXT NOT NULL UNIQUE,
+        worker_token_hash TEXT NOT NULL UNIQUE,
+        worker_token_enc TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('queued','launching','running','terminal')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        lease_id TEXT,
+        lease_expires_at INTEGER,
+        last_error_code TEXT,
+        terminal_observed_at INTEGER,
+        cleaned_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(objective_id) REFERENCES magi_objective_submissions(objective_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_hosted_execution_capacity
+                           ON hosted_execution_runs(state, tenant_key, created_at)""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_hosted_execution_cleanup
+                           ON hosted_execution_runs(state, cleaned_at)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS hosted_decision_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        lifecycle_identity TEXT NOT NULL,
+        answer_enc TEXT NOT NULL,
+        answer_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, task_id, lifecycle_identity, answer_sha256),
+        FOREIGN KEY(objective_id) REFERENCES hosted_execution_runs(objective_id)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_hosted_decision_pending
+                           ON hosted_decision_deliveries(objective_id, status, created_at)""")
+
+
+_SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
+    (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
+    (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
+    (4, "tenant-github-app", _migration_github_app),
+    (5, "credit-billing-ledgers", _migration_credit_billing),
+    (6, "project-context-plane", _migration_project_context_plane),
+    (7, "hosted-execution", _install_hosted_execution_schema),
+    (8, "files-and-perception", _migration_files_and_perception),
+)
+
+
+def apply_schema_migrations(
+    connection: sqlite3.Connection,
+    migrations: Optional[tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...]] = None,
+) -> None:
+    """Apply pending migrations with one rollback boundary per migration."""
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            applied_at INTEGER NOT NULL
+        )"""
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES (1, 'legacy-baseline', ?)",
+        (int(time.time()),),
+    )
+    applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+    selected = _SCHEMA_MIGRATIONS if migrations is None else migrations
+    for version, name, migration in selected:
+        if version in applied:
+            continue
+        connection.execute(f"SAVEPOINT migration_{version}")
+        try:
+            migration(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                (version, name, int(time.time())),
+            )
+            connection.execute(f"RELEASE SAVEPOINT migration_{version}")
+        except Exception:
+            connection.execute(f"ROLLBACK TO SAVEPOINT migration_{version}")
+            connection.execute(f"RELEASE SAVEPOINT migration_{version}")
+            raise
+
+
+def database_health() -> Dict[str, Any]:
+    """Return content-free migration and integrity evidence."""
+    init_db()
+    started = time.monotonic()
+    connection = connect(DB_PATH, timeout=5)
+    try:
+        if is_postgres():
+            connection.execute("SELECT 1").fetchone()
+            integrity = "reachable"
+        else:
+            integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        return {
+            "status": "healthy" if integrity in {"ok", "reachable"} and version == SCHEMA_VERSION else "degraded",
+            "backend": "postgresql" if is_postgres() else "sqlite",
+            "schema_version": version,
+            "expected_schema_version": SCHEMA_VERSION,
+            "integrity": integrity,
+            "latency_ms": max(0, int((time.monotonic() - started) * 1000)),
+            "multi_instance_safe": is_postgres(),
+        }
+    finally:
+        connection.close()
+
+
+_DATABASE_INIT_LOCK = threading.Lock()
+_INITIALIZED_DATABASES: set[tuple[str, str]] = set()
+
+
+def init_db() -> None:
+    """Initialize/migrate PostgreSQL once; retain SQLite's repair-on-open behavior."""
+    if not is_postgres():
+        _initialize_db()
+        return
+    identity = (os.getenv('MAGISTRATE_DATABASE_URL', '').strip(), DB_PATH)
+    if identity in _INITIALIZED_DATABASES:
+        return
+    with _DATABASE_INIT_LOCK:
+        if identity in _INITIALIZED_DATABASES:
+            return
+        _initialize_db()
+        _INITIALIZED_DATABASES.add(identity)
+
+
+def _initialize_db() -> None:
     validate_secret_configuration()
     if not DB_PATH:
         raise SecretConfigurationError(
@@ -348,8 +908,12 @@ def init_db():
     if not os.path.isabs(DB_PATH):
         raise SecretConfigurationError('MAGISTRATE_DB_PATH must be an absolute persistent path')
     os.makedirs(db_parent, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
+    if is_postgres():
+        # One transaction-scoped lock makes concurrent instance startup and
+        # additive schema migration deterministic without a separate migrator.
+        cursor.execute("SELECT pg_advisory_xact_lock(1296126537)")
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -1114,6 +1678,56 @@ def init_db():
         updated_at INTEGER NOT NULL
     )
     ''')
+    # Content-free paid-inference ledger. Costs use integer micro-USD and an
+    # explicit conservative budget charge; NULL actual cost means the provider
+    # did not report usage, never that the call was free.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_model_routes (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        route_category TEXT NOT NULL CHECK(route_category IN (
+            'DIRECT_CONVERSATION','READ_ONLY_INVESTIGATION','EXECUTION',
+            'DECISION_RESPONSE','HIGH_IMPACT_ACTION')),
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        capability_class TEXT NOT NULL,
+        attempt_ordinal INTEGER NOT NULL,
+        fallback_from TEXT,
+        state TEXT NOT NULL CHECK(state IN ('reserved','succeeded','failed')),
+        estimated_cost_micro_usd INTEGER NOT NULL CHECK(estimated_cost_micro_usd >= 0),
+        actual_cost_micro_usd INTEGER CHECK(actual_cost_micro_usd >= 0),
+        budget_charge_micro_usd INTEGER NOT NULL CHECK(budget_charge_micro_usd >= 0),
+        input_tokens INTEGER CHECK(input_tokens >= 0),
+        output_tokens INTEGER CHECK(output_tokens >= 0),
+        error_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, request_id, attempt_ordinal)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_model_routes_budget ON magi_model_routes(owner_user_id, created_at, state)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_model_routes_model ON magi_model_routes(provider_id, model_id, state)')
+    # One content-free policy closure per native human turn, including turns
+    # intentionally stopped before a paid provider call.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS magi_turn_routes (
+        assistant_message_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        route_category TEXT NOT NULL CHECK(route_category IN (
+            'DIRECT_CONVERSATION','READ_ONLY_INVESTIGATION','EXECUTION',
+            'DECISION_RESPONSE','HIGH_IMPACT_ACTION')),
+        permission_granted INTEGER NOT NULL CHECK(permission_granted IN (0,1)),
+        explicit_confirmation INTEGER NOT NULL CHECK(explicit_confirmation IN (0,1)),
+        outcome TEXT NOT NULL CHECK(outcome IN (
+            'routing','direct-response','objective-accepted','memory-saved',
+            'confirmation-required','failed','cancelled')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(assistant_message_id) REFERENCES magi_messages(id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_turn_routes_owner ON magi_turn_routes(owner_user_id, updated_at)')
 
     # The Firstmate adapter has its own non-destructive consumer position. It
     # never reads or mutates Firstmate/Pi cursor sidecars. Source rows are
@@ -1254,6 +1868,10 @@ def init_db():
     }
     if 'display_title' not in objective_submission_columns:
         cursor.execute('ALTER TABLE magi_objective_submissions ADD COLUMN display_title TEXT')
+    if 'context_json' not in objective_submission_columns:
+        cursor.execute("ALTER TABLE magi_objective_submissions ADD COLUMN context_json TEXT NOT NULL DEFAULT '{\"schema_version\":\"magi.context-plane.v1\",\"objective_context\":[]}'")
+    if 'context_sha256' not in objective_submission_columns:
+        cursor.execute("ALTER TABLE magi_objective_submissions ADD COLUMN context_sha256 TEXT NOT NULL DEFAULT ''")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_owner_task ON magi_objective_submissions(owner_user_id, task_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_magi_objectives_chat_turn ON magi_objective_submissions(owner_user_id, conversation_id, turn_id)')
     cursor.execute('''
@@ -1345,6 +1963,110 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_objective ON firstmate_execution_events(owner_user_id, objective_id, occurred_at, created_at)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_firstmate_execution_wake ON firstmate_execution_events(generation_state, updated_at)')
 
+    # Provider-neutral hosted mode uses this durable queue for multi-instance
+    # launch leases, terminal cleanup, and objective-bound decision delivery.
+    _install_hosted_execution_schema(conn)
+
+    # Billing uses integer microcredits throughout. Ledger rows are immutable;
+    # account balances are a transactionally maintained projection that makes
+    # reservation decisions cheap without weakening the audit trail.
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS billing_accounts (
+        owner_user_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL DEFAULT 'stripe',
+        external_customer_ref TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        subscription_id TEXT,
+        current_period_end INTEGER,
+        provider_event_created INTEGER,
+        catalog_id TEXT,
+        current_period_start INTEGER,
+        cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+        grace_ends_at INTEGER,
+        available_microcredits INTEGER NOT NULL DEFAULT 0,
+        reserved_microcredits INTEGER NOT NULL DEFAULT 0,
+        period_spend_microcredits INTEGER NOT NULL DEFAULT 0,
+        period_key TEXT,
+        FOREIGN KEY(owner_user_id) REFERENCES user_profiles(user_id)
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS credit_ledger (
+        entry_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        entry_type TEXT NOT NULL CHECK(entry_type IN
+            ('included_grant','topup','reservation','release','settlement','refund','adjustment')),
+        amount_microcredits INTEGER NOT NULL,
+        balance_after_microcredits INTEGER NOT NULL,
+        reservation_id TEXT,
+        objective_id TEXT,
+        source TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_credit_ledger_entries_owner ON credit_ledger(owner_user_id, created_at DESC, entry_id)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS credit_reservations (
+        reservation_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        estimated_microcredits INTEGER NOT NULL,
+        actual_microcredits INTEGER,
+        status TEXT NOT NULL CHECK(status IN ('reserved','settled','released')),
+        usage_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, objective_id),
+        UNIQUE(owner_user_id, idempotency_key)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_credit_reservations_active ON credit_reservations(owner_user_id, status)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS execution_usage_ledger (
+        usage_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        objective_id TEXT NOT NULL,
+        reservation_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        compute_milliseconds INTEGER NOT NULL,
+        cost_microcredits INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, event_id),
+        UNIQUE(owner_user_id, objective_id)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_execution_usage_owner ON execution_usage_ledger(owner_user_id, created_at DESC, usage_id)')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS billing_webhook_events (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        payload_sha256 TEXT,
+        processed_at INTEGER
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS billing_checkout_sessions (
+        stripe_session_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        catalog_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('subscription','credit_pack')),
+        idempotency_key TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(owner_user_id, idempotency_key)
+    )
+    ''')
+
     # Bounded counters make the soak's known loss mode observable without
     # retaining terminal bytes, prompts, replies, tool payloads, or identifiers
     # from an unknown audience.
@@ -1398,20 +2120,35 @@ def init_db():
     )
     ''')
 
-    cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = 'default_user'")
-    if not cursor.fetchone():
-        now = int(time.time())
-        cursor.execute('''
-        INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
-        VALUES ('default_user', 'Spectre Operator', 'spectre@magistrate.io', '/uploads/avatars/default_avatar.png', 'Firstmate Master Operator', 'dusk-mountain', ?, ?)
-        ''', (now, now))
+    cursor.execute('''CREATE TABLE IF NOT EXISTS deployment_metadata (
+        metadata_key TEXT PRIMARY KEY, metadata_value TEXT NOT NULL, updated_at INTEGER NOT NULL
+    )''')
+    bootstrap_user_id = os.getenv('MAGISTRATE_BOOTSTRAP_USER_ID', 'default_user').strip()
+    bootstrap_seeded = cursor.execute(
+        "SELECT 1 FROM deployment_metadata WHERE metadata_key = 'bootstrap-profile-seeded'"
+    ).fetchone()
+    if not bootstrap_seeded:
+        cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (bootstrap_user_id,))
+        if not cursor.fetchone():
+            now = int(time.time())
+            cursor.execute('''
+            INSERT INTO user_profiles (user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at)
+            VALUES (?, 'Spectre Operator', 'spectre@magistrate.io', '/uploads/avatars/default_avatar.png', 'Firstmate Master Operator', 'dusk-mountain', ?, ?)
+            ''', (bootstrap_user_id, now, now))
+        cursor.execute(
+            "INSERT INTO deployment_metadata(metadata_key, metadata_value, updated_at) VALUES ('bootstrap-profile-seeded', 'true', ?)",
+            (int(time.time()),),
+        )
 
+    apply_schema_migrations(conn)
+    if is_postgres():
+        conn.apply_deferred_foreign_keys()
     conn.commit()
     conn.close()
 
 def get_profile(user_id: str = 'default_user') -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT user_id, name, email, avatar_url, bio, active_theme, created_at, updated_at FROM user_profiles WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
@@ -1441,7 +2178,7 @@ def get_profile(user_id: str = 'default_user') -> Dict[str, Any]:
 
 def update_profile(user_id: str = 'default_user', name: Optional[str] = None, email: Optional[str] = None, avatar_url: Optional[str] = None, bio: Optional[str] = None, active_theme: Optional[str] = None) -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     now = int(time.time())
 
@@ -1471,7 +2208,7 @@ def update_profile(user_id: str = 'default_user', name: Optional[str] = None, em
 
 def get_connected_accounts(user_id: str = 'default_user') -> List[Dict[str, Any]]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     # A stored 'connected' row is not by itself evidence of a usable account.
     # Join the credential so callers can tell a real, unexpired OAuth grant from
@@ -1511,7 +2248,7 @@ def upsert_connected_account(
     provider_user_id: str = '',
 ) -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     now = int(time.time())
 
@@ -1552,7 +2289,7 @@ def upsert_connected_account(
 
 def disconnect_account(user_id: str, provider: str) -> bool:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     cursor = conn.cursor()
     account_id = f'{user_id}_{provider}'
     now = int(time.time())
@@ -1569,7 +2306,7 @@ def disconnect_account(user_id: str, provider: str) -> bool:
 def get_execution_credential_status(user_id: str = 'default_user') -> Dict[str, bool]:
     """Return only credential-presence flags; secret values never leave this module."""
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         rows = conn.execute(
             'SELECT credential_key, secret_enc FROM execution_credentials WHERE user_id = ?',
@@ -1587,7 +2324,7 @@ def save_execution_credential(user_id: str, credential_key: str, secret: str) ->
     now = int(time.time())
     encrypted = encrypt_token(secret)
     credential_id = f'{user_id}_{credential_key}'
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         conn.execute('''
         INSERT INTO execution_credentials (id, user_id, credential_key, secret_enc, created_at, updated_at)
@@ -1602,7 +2339,7 @@ def save_execution_credential(user_id: str, credential_key: str, secret: str) ->
 
 def delete_execution_credential(user_id: str, credential_key: str) -> bool:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         conn.execute('DELETE FROM execution_credentials WHERE user_id = ? AND credential_key = ?', (user_id, credential_key))
         conn.commit()
@@ -1613,7 +2350,7 @@ def delete_execution_credential(user_id: str, credential_key: str) -> bool:
 
 def get_execution_preferences(user_id: str = 'default_user') -> Dict[str, Any]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         row = conn.execute(
             'SELECT profile_id, routing_profile_id, switching_behavior, unavailable_behavior FROM execution_preferences WHERE user_id = ?',
@@ -1643,7 +2380,7 @@ def save_execution_preferences(
         raise ValueError('Unavailable behavior must be error or fallback.')
     init_db()
     now = int(time.time())
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         conn.execute('''
         INSERT INTO execution_preferences (user_id, profile_id, routing_profile_id, switching_behavior, unavailable_behavior, updated_at)
@@ -1674,7 +2411,7 @@ def _migration_row(row: sqlite3.Row | tuple) -> Dict[str, Any]:
 
 def get_agent_migration(user_id: str, request_id: str) -> Optional[Dict[str, Any]]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         row = conn.execute('''
             SELECT request_id, agent_id, idempotency_key, target_profile_id, target_harness,
@@ -1688,7 +2425,7 @@ def get_agent_migration(user_id: str, request_id: str) -> Optional[Dict[str, Any
 
 def get_agent_migration_by_idempotency(user_id: str, idempotency_key: str) -> Optional[Dict[str, Any]]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         row = conn.execute('''
             SELECT request_id, agent_id, idempotency_key, target_profile_id, target_harness,
@@ -1706,7 +2443,7 @@ def create_agent_migration(
     init_db()
     request_id = 'migration_' + hashlib.sha256(f'{user_id}\0{idempotency_key}'.encode()).hexdigest()[:20]
     now = int(time.time())
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         existing = get_agent_migration_by_idempotency(user_id, idempotency_key)
         if existing:
@@ -1744,7 +2481,7 @@ def transition_agent_migration(
         raise ValueError(f"Migration cannot move from {current['status']} to {state}.")
     now = int(time.time())
     error = evidence if state == 'failed' else None
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect(DB_PATH)
     try:
         with conn:
             conn.execute('''
@@ -1756,4 +2493,5 @@ def transition_agent_migration(
     return get_agent_migration(user_id, request_id)  # type: ignore[return-value]
 
 
-init_db()
+# Startup and store entry points initialize explicitly. Importing configuration
+# validators must never migrate a live database before the deployment backup.

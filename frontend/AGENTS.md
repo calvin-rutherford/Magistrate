@@ -31,7 +31,7 @@ Startup may render a validated principal-qualified cache while Gateway is unavai
 
 `src/input/VoiceInputAdapter.ts` (`useVoiceInputAdapter`) is the one seam for microphone capture: it wraps `expo-audio` recording, exposes live `amplitude` (0-1, ~100ms cadence) for waveform UI, and on web also drives the Web Speech API for interim transcript callbacks. Pair `capture.stop()` with `transcribeVoiceAudio()` from `src/api/client.ts`, then submit the text through the same Native Magi API and conversation as typed input. Test it in headless Chrome with fake media-device/UI flags.
 
-Voice input mode selection is persisted as `magistrate.voice.input-mode` by `ChatPreferences.ts`; capability definitions and fallback resolution live in `src/services/VoiceInputModes.ts`. Keep speech mode selection separate from execution harness/model routing, and keep gateway STT credentials server-side.
+Voice input mode selection and output/auto-listen preferences are persisted by `ChatPreferences.ts`; capability definitions and fallback resolution live in `src/services/VoiceInputModes.ts`. Keep speech mode selection separate from execution harness/model routing, and keep gateway STT credentials server-side. iOS App Intents and the Action Button shortcut are foreground-only app-target code in `native/ios/MagistrateAppIntents.swift`, installed by `plugins/withMagistrateAppIntents.js`; preserve their allowlisted pending-intent routes and same Native Magi thread.
 
 ## Web push notifications
 

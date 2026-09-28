@@ -3,6 +3,9 @@ from typing import Dict, Any, Optional
 
 import httpx
 
+from app.production_security import validate_provider_url
+from app.telemetry import operation_span
+
 SUPPORTED_AUDIO_TYPES = {
     'audio/m4a', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/webm',
     'audio/x-m4a', 'video/mp4', 'application/octet-stream'
@@ -30,7 +33,11 @@ class VoiceInputAdapter:
             'reason': None if configured else 'The gateway speech provider is not configured.',
         }
 
-    async def transcribe_audio(self, audio_bytes: bytes, source: str = 'iphone',
+    async def transcribe_audio(self, audio_bytes: bytes, **kwargs) -> Dict[str, Any]:
+        with operation_span('provider'):
+            return await self._transcribe_audio(audio_bytes, **kwargs)
+
+    async def _transcribe_audio(self, audio_bytes: bytes, source: str = 'iphone',
                                content_type: str = 'application/octet-stream',
                                filename: str = 'speech.m4a') -> Dict[str, Any]:
         if not audio_bytes:
@@ -42,15 +49,16 @@ class VoiceInputAdapter:
             raise TranscriptionError(f'Unsupported audio type: {normalized_type}', 415)
         if self.provider != 'openai' or not self.api_key:
             raise TranscriptionError('Speech transcription is not configured on the gateway.', 503)
+        validate_provider_url(self.base_url)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0), trust_env=False, follow_redirects=False) as client:
                 response = await client.post(
                     f'{self.base_url}/audio/transcriptions',
                     headers={'Authorization': f'Bearer {self.api_key}'},
                     data={'model': self.model, 'response_format': 'json'},
                     files={'file': (filename, audio_bytes, normalized_type)},
                 )
-            if response.status_code >= 400:
+            if response.status_code >= 300:
                 raise TranscriptionError('Speech provider rejected the recording.', 502)
             text = str(response.json().get('text', '')).strip()
         except TranscriptionError:

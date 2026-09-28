@@ -18,8 +18,8 @@ async def get_usage(provider: Optional[str] = None) -> Dict[str, Any]:
     except (FileNotFoundError, asyncio.TimeoutError) as exc:
         raise RuntimeError('Usage data is unavailable.') from exc
     if process.returncode != 0:
-        detail = stderr.decode('utf-8', errors='replace').strip()
-        raise RuntimeError(detail or 'Usage data is unavailable.')
+        # quota-axi errors may echo credentials or local paths.
+        raise RuntimeError('Usage data is unavailable.')
     try:
         payload = json.loads(stdout.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -54,5 +54,5 @@ def _summarize_provider(raw: Dict[str, Any]) -> Dict[str, Any]:
         'windows': windows,
     }
     if isinstance(state.get('error'), str):
-        result['error'] = state['error']
+        result['error'] = 'Provider usage is unavailable.'
     return result

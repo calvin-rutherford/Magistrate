@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from app.persistence import connect
 import time
 from typing import Any
 
@@ -45,7 +46,7 @@ class ObjectiveCancellationService:
 
     async def _notify(self, row: sqlite3.Row, *, duplicate: bool) -> dict[str, Any]:
         now = int(time.time() * 1000)
-        with sqlite3.connect(db.DB_PATH, timeout=10) as delivery_connection:
+        with connect(db.DB_PATH, timeout=10) as delivery_connection:
             delivery_connection.row_factory = sqlite3.Row
             delivery_connection.execute(
                 """UPDATE objective_cancellation_requests
@@ -66,13 +67,29 @@ class ObjectiveCancellationService:
         if current["status"] != "requested":
             return self._public(current, duplicate=duplicate)
         try:
-            await self.inbox.note(
-                f"Cancellation request {current['request_id']} targets authenticated Magi "
-                f"objective {current['task_id']}. Apply Firstmate's normal cancellation "
-                "policy and publish objective.cancelled only after cancellation is observed."
-            )
-        except FirstmateIntakeError as exc:
-            with sqlite3.connect(db.DB_PATH) as failed_connection:
+            from app.hosted_execution import get_hosted_controller, hosted_execution_enabled
+            if hosted_execution_enabled():
+                controller = get_hosted_controller()
+                with connect(db.DB_PATH, timeout=10) as connection:
+                    run = connection.execute(
+                        """SELECT backend_execution_id, state FROM hosted_execution_runs
+                           WHERE owner_user_id = ? AND objective_id = ?""",
+                        (current["owner_user_id"], current["objective_id"]),
+                    ).fetchone()
+                if controller is None:
+                    raise FirstmateIntakeError("hosted-runtime-unavailable")
+                # The durable request itself is sufficient for queued work;
+                # the controller records accepted/cancelled without launching.
+                if run is not None and run[1] in {"launching", "running"}:
+                    await controller.transport.cancel(str(run[0]))
+            else:
+                await self.inbox.note(
+                    f"Cancellation request {current['request_id']} targets authenticated Magi "
+                    f"objective {current['task_id']}. Apply Firstmate's normal cancellation "
+                    "policy and publish objective.cancelled only after cancellation is observed."
+                )
+        except (FirstmateIntakeError, RuntimeError) as exc:
+            with connect(db.DB_PATH) as failed_connection:
                 failed_connection.execute(
                     """UPDATE objective_cancellation_requests
                        SET error_code = 'intake_unavailable',
@@ -86,7 +103,7 @@ class ObjectiveCancellationService:
                 503,
             ) from exc
         delivered_at = int(time.time() * 1000)
-        with sqlite3.connect(db.DB_PATH, timeout=10) as delivered_connection:
+        with connect(db.DB_PATH, timeout=10) as delivered_connection:
             delivered_connection.row_factory = sqlite3.Row
             delivered_connection.execute(
                 """UPDATE objective_cancellation_requests
@@ -110,7 +127,7 @@ class ObjectiveCancellationService:
         if not isinstance(cutoff, int) or isinstance(cutoff, bool) or cutoff < 0:
             raise ValueError("updated_before_ms must be a non-negative integer")
         db.init_db()
-        with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+        with connect(db.DB_PATH, timeout=10) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """SELECT request.*,
@@ -130,7 +147,7 @@ class ObjectiveCancellationService:
             if row["terminal_phase"] is not None:
                 now = int(time.time() * 1000)
                 observed = row["terminal_phase"] == "objective.cancelled"
-                with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+                with connect(db.DB_PATH, timeout=10) as connection:
                     connection.execute(
                         """UPDATE objective_cancellation_requests
                            SET status = ?, error_code = ?, notification_status = 'delivered',
@@ -143,7 +160,7 @@ class ObjectiveCancellationService:
                     )
                 counts["terminal"] += 1
                 continue
-            with sqlite3.connect(db.DB_PATH, timeout=10) as connection:
+            with connect(db.DB_PATH, timeout=10) as connection:
                 connection.row_factory = sqlite3.Row
                 connection.execute(
                     """UPDATE objective_cancellation_requests
@@ -179,7 +196,7 @@ class ObjectiveCancellationService:
             )
         db.init_db()
         now = int(time.time() * 1000)
-        connection = sqlite3.connect(db.DB_PATH, timeout=10)
+        connection = connect(db.DB_PATH, timeout=10)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("BEGIN IMMEDIATE")

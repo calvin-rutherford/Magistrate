@@ -33,22 +33,23 @@ graph TD
 |-----------|------------|----------------|
 | **Frontend** | React Native / Expo | Provides the cross-platform UI (iOS/Web) for observing agent state, reviewing PRs, and issuing commands. |
 | **Gateway** | FastAPI / Python | Authenticates requests, owns native Magi chat persistence/provider calls, and exposes governed fleet data. |
-| **Multiplexer** | Herdr / Tmux | Manages the lifecycle and terminal sessions of the background agents, allowing Magistrate to read standard output and inject keystrokes. |
+| **Execution** | Firstmate structured contracts | Owns objective execution; Gateway projects persisted events and provides explicit governed actions, not terminal-derived conversation. |
 | **Agents** | Claude Code / Codex | The actual autonomous entities executing commands, orchestrated by the primary `firstmate` agent. |
 
 Phase 1 normal Chat and Voice do not route through the multiplexer or agents;
 they use the direct provider edge and additive native SQLite transcript above.
-Herdr/Firstmate remain for fleet surfaces and explicit legacy rollback. See
-[`docs/magi-native-chat-phase1.md`](docs/magi-native-chat-phase1.md).
+Fleet reads project structured persisted events; Herdr is reserved for explicit
+non-chat control seams. There is no legacy transport rollback. See
+[`docs/native-chat-architecture.md`](docs/native-chat-architecture.md).
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.10+
-- Node.js 18+ and npm
+- Python 3.12+ and uv
+- Node.js 22.13+ and npm
 - [gh CLI](https://cli.github.com/) (authenticated for PR data)
-- Herdr (configured with active tmux sessions)
+- Pinned Firstmate only for explicitly enabled execution actions
 
 ### Running Locally
 
@@ -62,8 +63,8 @@ Herdr/Firstmate remain for fleet surfaces and explicit legacy rollback. See
    The gateway relies on FastAPI and Uvicorn. Ensure your virtual environment is active.
    ```bash
    cd gateway
-   pip install -r requirements.txt
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   uv sync --frozen
+   MAGISTRATE_ENV=development uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
    ```
    *Note: Ensure `.env` is configured with any necessary environment variables.*
 
@@ -71,10 +72,16 @@ Herdr/Firstmate remain for fleet surfaces and explicit legacy rollback. See
    The frontend can be run as a local web application or exported statically.
    ```bash
    cd ../frontend
-   npm install
+   npm ci
    npx expo start --web
    ```
 
 ## Development & Deployment
 
-For deployment, the gateway is managed via `systemd` (e.g., `magistrate-gateway.service`), and the frontend is exported statically (`npx expo export -p web`) and served via an HTTP server or CDN.
+Current production and recovery authority: [Security and operations](docs/production-security-operations.md).
+Use the Native Gateway (`cd gateway && uv sync --frozen`) and an explicit private
+environment; the root Django/CLI launchers are not production entrypoints. `scripts/deploy_magistrate.sh` owns guarded Gateway
+updates. There is no legacy/Pi transport rollback; Herdr is not polled by normal
+product reads. See [Native Chat architecture](docs/native-chat-architecture.md).
+Remaining dependency, App Store and tenant-isolation release gates are recorded
+explicitly in the operations runbook; do not interpret a passing build as release approval.

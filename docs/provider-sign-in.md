@@ -10,7 +10,7 @@ Magistrate supports provider-backed account identity on the iPhone client and we
 - Web receives refresh authority only in the `magistrate_provider_refresh` Secure, HttpOnly, SameSite=Lax cookie. JavaScript persists only a non-authoritative “session may exist” marker and obtains a fresh bearer after reload.
 - Every refresh consumes the presented token and revokes prior family bearers. Families are bound to their native-or-web delivery channel; channel mismatch or reuse of a consumed token retires the entire family and push delivery.
 - Logout retires the provider family, all of its bearers, push registration, and the browser cookie. Provider-account disablement also invalidates bearer validation.
-- Apple and Google subjects are never merged by email. A stable provider subject maps back to the same Magistrate principal; linking a second provider requires the authenticated link action.
+- Apple and Google subjects are never merged by email. A stable provider subject maps back to the same Magistrate principal; linking a second provider requires the authenticated link action. Account Settings lists those login methods, refuses removal of the current or last method, and makes a removed subject unusable until it is re-linked from another authenticated method.
 
 The client-platform challenge is fail-closed. Web challenges require an HTTP(S) redirect and return cookie authority; Google native challenges require an allowlisted custom-scheme redirect. Platform-specific audiences are checked when configured, preventing a web assertion from selecting the native JSON refresh channel. Apple authorization receives the SHA-256 digest of the raw one-time nonce, while the raw nonce remains bound to the Gateway challenge and exchange.
 
@@ -63,8 +63,26 @@ EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID=com.googleusercontent.apps....
 
 The reversed Google client ID is added to Expo's app schemes at build time. Apple native uses bundle identifier `io.magistrate.cockpit`. Rebuild the native binary after changing entitlement, bundle, OAuth client, or URL-scheme configuration.
 
+## First-run onboarding and billing
+
+A provider principal is gated from protected product routes by durable `account-onboarding.v1` state. The additive migration backfills existing connected login principals so pre-deploy sessions and fresh sign-ins cannot observe different gates. Onboarding resumes, in order, through welcome acknowledgement, profile naming, a genuinely credential-backed GitHub OAuth connection, and an active/trialing Stripe subscription before entering Magi. GitHub and billing completion are derived from canonical credential/subscription rows, not browser-return parameters. A checkout redirect never grants access; only a timestamp-bound, HMAC-verified Stripe webhook can change subscription state.
+
+Stripe is optional only in the sense that an entirely absent integration leaves onboarding truthfully blocked. Partial or unsafe configuration refuses Gateway startup. The catalog-backed production configuration uses `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `MAGISTRATE_BILLING_CATALOG_PATH`, and `MAGISTRATE_BILLING_RETURN_ORIGINS`; register `/api/v1/billing/webhooks/stripe`. The earlier single-price `MAGISTRATE_STRIPE_*` variables and `/api/v1/billing/webhook` remain accepted during migration, but new activation must follow the exact multi-plan and credit-ledger runbook in [`billing-and-credits.md`](billing-and-credits.md). Checkout embeds the opaque Magistrate user ID in Checkout and Subscription metadata; do not edit that metadata in provider automation. Checkout and customer-portal URLs are always server-created.
+
+GitHub onboarding uses the existing authenticated OAuth transaction boundary. Add the exact app and native return locations to `MAGISTRATE_OAUTH_REDIRECT_URIS`, and register the Gateway's `/api/v1/auth/github/callback` in the GitHub OAuth App. The operator bootstrap endpoint remains a curl/automation recovery boundary; production customer UI accepts only `mgb_` Friend Beta invitations and never submits arbitrary text to bootstrap issuance.
+
 ## Rollout and verification
 
-`gateway/app/db.py` applies additive columns/tables during `init_db()`. Back up the SQLite database before rollout, deploy the Gateway first, and then ship clients built with matching IDs and redirects.
+`gateway/app/db.py` applies the additive onboarding/billing migration through the shared SQLite/PostgreSQL persistence seam during `init_db()`. Take a transactionally consistent database backup before rollout, deploy the Gateway first, and then ship clients built with matching IDs and redirects.
 
-Automated coverage verifies signed assertions, audience/time/nonce checks, replay protection, stable principal mapping, web cookie-only continuity, native rotation/reuse revocation, logout, and cross-platform redirect refusal. A release still requires real Apple and Google test accounts against the registered deployment callbacks; repository tests cannot substitute for provider-console and physical-iPhone evidence.
+Automated coverage verifies signed assertions, audience/time/nonce checks, replay protection, stable principal mapping, authenticated linking, recovery-method removal, web cookie-only continuity, native rotation/reuse revocation, logout, cross-platform redirect refusal, resumable onboarding, and signed billing state. A release still requires real Apple, Google, GitHub, and Stripe test/live accounts against the registered deployment callbacks plus a physical-iPhone run; repository tests cannot substitute for provider-console evidence.
+
+### `BLOCKED_EXTERNAL` activation checklist
+
+Repository-controlled implementation is complete without committing fake identifiers or secrets. Release authority remains blocked externally until the owner records evidence for all of the following:
+
+1. Apple App ID `io.magistrate.cockpit`, Sign in with Apple capability, Service ID, key, web return origin, and real native/web account runs.
+2. Google iOS and web OAuth clients, consent screen publication/test-user policy, exact reversed iOS URL scheme, exact web origin, and real native/web account runs.
+3. GitHub OAuth App callback plus every exact `MAGISTRATE_OAUTH_REDIRECT_URIS` return location used by released clients.
+4. Stripe live product/price, webhook endpoint and signing secret, customer portal configuration, and observed signed `active` plus cancellation events.
+5. EAS production variables (`EXPO_PUBLIC_GATEWAY_URL`, Google public client identifiers), a real App Store Connect app record, and physical TestFlight login/restart/logout/recovery evidence.

@@ -24,6 +24,8 @@ class MagiToolContext:
     user_message_id: str
     assistant_message_id: str
     command_authorized: bool
+    explicit_confirmation: bool = False
+    actor_session_id: str = "system"
 
 
 @dataclass(frozen=True)

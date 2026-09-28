@@ -1,0 +1,49 @@
+# Review/install in nginx's http context; replace domain and certificate paths.
+# Never log URI/query/header/body: OAuth codes and bearer grants are sensitive.
+log_format magistrate_safe escape=json '{"status":$status,"duration":$request_time,"request_id":"$upstream_http_x_request_id"}';
+limit_req_zone $binary_remote_addr zone=magistrate_auth:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=magistrate_api:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=magistrate_connections:10m;
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+server {
+    listen 443 ssl;
+    server_name REPLACE_WITH_PUBLIC_DOMAIN;
+    ssl_certificate /etc/ssl/magistrate/fullchain.pem;
+    ssl_certificate_key /etc/ssl/magistrate/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log /var/log/nginx/magistrate.json magistrate_safe;
+    add_header Strict-Transport-Security 'max-age=31536000' always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    client_max_body_size 54m;
+    client_body_timeout 30s;
+    client_header_timeout 10s;
+    keepalive_timeout 10s;
+    limit_conn magistrate_connections 16;
+    limit_req_status 429;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 330s;
+    proxy_send_timeout 30s;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    # The edge is the authority; do not forward a client-supplied IP chain.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    location /internal/ { return 404; }
+    location /api/v1/auth/ {
+        limit_req zone=magistrate_auth burst=20 nodelay;
+        client_max_body_size 1m;
+        proxy_pass http://127.0.0.1:8000;
+    }
+    location / {
+        limit_req zone=magistrate_api burst=40 nodelay;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        # nginx inherits proxy headers only when none are defined locally.
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_pass http://127.0.0.1:8000;
+    }
+}

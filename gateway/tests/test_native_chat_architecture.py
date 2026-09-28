@@ -44,6 +44,7 @@ def test_native_magi_is_the_only_registered_human_conversation_api():
         "/api/v1/conversations/{target}/replay",
         "/api/v1/conversations/{target}/events",
         "/api/v1/conversations/{target}/reset",
+        "/ws/ar-interface",
     }
     assert not ({path for _, path in routes} & retired_paths)
 
@@ -74,5 +75,4 @@ def test_structured_execution_and_non_chat_agent_controls_remain_registered():
         ("POST", "/api/v1/agents/{agent_id}/send-key"),
         ("POST", "/api/v1/agents/{agent_id}/interrupt"),
         ("POST", "/api/v1/agents/{agent_id}/rename"),
-        ("WEBSOCKET", "/ws/ar-interface"),
     } <= routes

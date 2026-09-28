@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from app.persistence import connect
 import time
 import unicodedata
 from contextlib import contextmanager
@@ -132,7 +133,7 @@ def _now() -> int:
 
 @contextmanager
 def _session(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(db.DB_PATH, timeout=_BUSY_TIMEOUT_SECONDS)
+    conn = connect(db.DB_PATH, timeout=_BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     try:
         with conn:

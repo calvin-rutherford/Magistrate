@@ -19,6 +19,12 @@ async def post_firstmate_decision_events(
     principal: Principal = Depends(require_any_scope("response", "command")),
 ):
     """Persist a complete owner-scoped projection; never inspect live runtime."""
+    from app.hosted_execution import hosted_execution_enabled
+    if hosted_execution_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Hosted decisions require objective-bound workload authentication.",
+        )
     try:
         decisions = await firstmate_decisions.ingest_events(principal.user_id, batch)
     except FirstmateDecisionError as exc:

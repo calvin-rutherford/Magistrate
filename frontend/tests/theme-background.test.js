@@ -4,17 +4,14 @@ const path = require('node:path');
 const test = require('node:test');
 const read = relative => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
 
-test('custom theme uses persisted preferences and has safe upload controls', () => {
+test('legacy custom-theme data remains migratable but is absent from customer appearance UI', () => {
   const preferences = read('src/services/ChatPreferences.ts');
   const account = read('app/(tabs)/account.tsx');
   assert.match(preferences, /CHAT_CUSTOM_BACKGROUND_KEY/);
-  assert.match(preferences, /saveCustomBackground/);
-  assert.match(preferences, /removeCustomBackground/);
-  assert.match(account, /account-custom-background-upload/);
-  assert.match(account, /customBackgroundPreview/);
-  assert.match(account, /account-custom-background-remove/);
-  assert.match(account, /10 \* 1024 \* 1024/);
-  assert.match(account, /pickerResult\.canceled/);
+  assert.match(preferences, /removeItem\(CHAT_CUSTOM_BACKGROUND_KEY\)/);
+  assert.doesNotMatch(account, /account-custom-background-upload/);
+  assert.doesNotMatch(account, /customBackgroundPreview/);
+  assert.match(account, /flat productivity canvas without wallpaper/);
 });
 
 test('the MVP appearance defaults and persistence contract are explicit', () => {
@@ -25,7 +22,9 @@ test('the MVP appearance defaults and persistence contract are explicit', () => 
   assert.match(preferences, /removeItem\(CHAT_CUSTOM_BACKGROUND_KEY\)/);
   const settings = read('app/(tabs)/chat.tsx');
   assert.match(settings, /settings-usage-section/);
-  assert.match(settings, /Authenticated quota data only/);
+  assert.match(settings, /Execution is reserved before a worker starts/);
+  assert.match(settings, /billing-account-summary/);
+  assert.match(settings, /PROVIDER QUOTAS/);
   assert.doesNotMatch(settings, /key: 'usage'/);
   assert.match(settings, /settings-execution-section/);
   assert.match(settings, /settings-theme-options/);

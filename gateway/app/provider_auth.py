@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import sqlite3
+from app.persistence import connect
 import time
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -37,6 +38,7 @@ from app.auth import (
     _revoke_push_delivery,
     _validated_scopes,
 )
+from app.onboarding import ensure_provider_onboarding, onboarding_required_in_transaction
 
 ProviderName = Literal["apple", "google"]
 ChallengeAction = Literal["sign_in", "link"]
@@ -346,7 +348,7 @@ def create_challenge(
     nonce = secrets.token_urlsafe(32)
     nonce_hash = hashlib.sha256(nonce.encode("ascii")).hexdigest()
     db.init_db()
-    with sqlite3.connect(db.DB_PATH) as connection:
+    with connect(db.DB_PATH) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
         _cleanup_expired_session_families(connection, now)
@@ -662,7 +664,7 @@ async def exchange_challenge(
         raise HTTPException(status_code=401, detail="The sign-in challenge is invalid or expired.")
     db.init_db()
     now = int(time.time())
-    with sqlite3.connect(db.DB_PATH) as connection:
+    with connect(db.DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
         challenge = connection.execute(
             "SELECT * FROM provider_auth_challenges WHERE challenge_id = ?", (challenge_id,),
@@ -695,7 +697,7 @@ async def exchange_challenge(
     requested_name = _display_name(display_name) or claims.name
     scopes = _provider_scopes()
 
-    connection = sqlite3.connect(db.DB_PATH, timeout=10)
+    connection = connect(db.DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys = ON")
@@ -722,6 +724,14 @@ async def exchange_challenge(
         owner_user_id = principal.user_id if principal else None
         if account is not None and action == "link" and account["user_id"] != owner_user_id:
             raise HTTPException(status_code=409, detail="That provider identity belongs to another account.")
+        if account is not None and action == "sign_in" and account["status"] != "connected":
+            raise HTTPException(status_code=403, detail="This sign-in method was removed from the account. Use a linked recovery method.")
+        if account is None and action == "link" and connection.execute(
+            """SELECT 1 FROM connected_accounts
+               WHERE user_id = ? AND provider = ? AND account_kind = 'login' AND status = 'connected'""",
+            (owner_user_id, provider),
+        ).fetchone():
+            raise HTTPException(status_code=409, detail=f"A {provider.title()} sign-in is already linked to this account.")
         if account is None:
             user_id = owner_user_id or ("usr_" + secrets.token_urlsafe(18))
             account_id = "login_" + secrets.token_urlsafe(18)
@@ -786,6 +796,7 @@ async def exchange_challenge(
                 "provider": provider, "user_id": user_id,
             }
 
+        ensure_provider_onboarding(connection, user_id, now)
         family_id = "psf_" + secrets.token_urlsafe(18)
         refresh_token = _new_refresh_token()
         refresh_expires_at = _refresh_expiry(now)
@@ -805,14 +816,11 @@ async def exchange_challenge(
                VALUES(?,?,?,?)""",
             (_hash_token(refresh_token), family_id, now, refresh_expires_at),
         )
-        refreshed_profile = connection.execute(
-            "SELECT name FROM user_profiles WHERE user_id = ?", (user_id,),
-        ).fetchone()
         payload = _session_payload(
             connection, user_id=user_id, account_id=account_id, provider=provider,
             family_id=family_id, scopes=scopes, now=now,
             refresh_expires_at=refresh_expires_at, refresh_token=refresh_token,
-            onboarding_required=not refreshed_profile or not str(refreshed_profile[0]).strip(),
+            onboarding_required=onboarding_required_in_transaction(connection, user_id),
         )
         payload["_client_platform"] = str(current["client_platform"])
         connection.commit()
@@ -832,7 +840,7 @@ def refresh_session(refresh_token: str, *, client_platform: ClientPlatform) -> d
     now = int(time.time())
     token_hash = _hash_token(refresh_token)
     db.init_db()
-    connection = sqlite3.connect(db.DB_PATH, timeout=10)
+    connection = connect(db.DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys = ON")
@@ -912,15 +920,12 @@ def refresh_session(refresh_token: str, *, client_platform: ClientPlatform) -> d
             "UPDATE provider_session_families SET last_rotated_at = ? WHERE family_id = ?",
             (now, family_id),
         )
-        profile = connection.execute(
-            "SELECT name FROM user_profiles WHERE user_id = ?", (row["user_id"],),
-        ).fetchone()
         payload = _session_payload(
             connection,
             user_id=str(row["user_id"]), account_id=str(row["connected_account_id"]),
             provider=str(row["provider"]), family_id=family_id, scopes=scopes, now=now,
             refresh_expires_at=int(row["expires_at"]), refresh_token=next_refresh,
-            onboarding_required=not profile or not str(profile[0]).strip(),
+            onboarding_required=onboarding_required_in_transaction(connection, str(row["user_id"])),
         )
         connection.commit()
         return payload
@@ -940,6 +945,72 @@ def public_session_payload(payload: dict[str, Any], *, include_refresh_token: bo
     if include_refresh_token:
         result["refresh_token"] = payload["_refresh_token"]
     return result
+
+
+def list_login_methods(principal: Principal) -> dict[str, Any]:
+    db.init_db()
+    with connect(db.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """SELECT id, provider, provider_username, created_at, last_authenticated_at
+               FROM connected_accounts
+               WHERE user_id = ? AND account_kind = 'login' AND status = 'connected'
+               ORDER BY created_at, provider""",
+            (principal.user_id,),
+        ).fetchall()
+    return {
+        "schema_version": "provider-login-methods.v1",
+        "methods": [{
+            "provider": str(row["provider"]),
+            "label": str(row["provider_username"] or ""),
+            "current": str(row["id"]) == principal.auth_account_id,
+            "linked_at": int(row["created_at"]),
+            "last_authenticated_at": int(row["last_authenticated_at"]) if row["last_authenticated_at"] is not None else None,
+        } for row in rows],
+    }
+
+
+def unlink_login_method(principal: Principal, provider: ProviderName) -> dict[str, Any]:
+    if provider not in {"apple", "google"}:
+        raise HTTPException(status_code=404, detail="Sign-in provider not supported.")
+    db.init_db()
+    now = int(time.time())
+    with connect(db.DB_PATH, timeout=10) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN IMMEDIATE")
+        methods = connection.execute(
+            """SELECT id, provider FROM connected_accounts
+               WHERE user_id = ? AND account_kind = 'login' AND status = 'connected'""",
+            (principal.user_id,),
+        ).fetchall()
+        target = next((row for row in methods if row["provider"] == provider), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="That sign-in method is not linked.")
+        if str(target["id"]) == principal.auth_account_id:
+            raise HTTPException(status_code=409, detail="Sign in with another linked provider before removing the current method.")
+        if len(methods) <= 1:
+            raise HTTPException(status_code=409, detail="At least one sign-in method must remain linked.")
+        family_ids = [str(row[0]) for row in connection.execute(
+            "SELECT family_id FROM provider_session_families WHERE connected_account_id = ? AND revoked_at IS NULL",
+            (target["id"],),
+        ).fetchall()]
+        connection.execute(
+            "UPDATE connected_accounts SET status = 'disconnected', updated_at = ? WHERE id = ?",
+            (now, target["id"]),
+        )
+        for family_id in family_ids:
+            connection.execute(
+                """UPDATE provider_session_families
+                   SET revoked_at = COALESCE(revoked_at, ?), revoke_reason = 'login-method-removed'
+                   WHERE family_id = ?""",
+                (now, family_id),
+            )
+            connection.execute(
+                "UPDATE gateway_sessions SET revoked_at = ? WHERE provider_session_id = ? AND revoked_at IS NULL",
+                (now, family_id),
+            )
+    return {"schema_version": "provider-account-link.v1", "status": "unlinked", "provider": provider}
 
 
 def revoke_provider_family(connection: sqlite3.Connection, family_id: str, user_id: str, now: int) -> None:

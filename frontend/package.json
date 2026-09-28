@@ -23,6 +23,7 @@
     "expo-image-picker": "~57.0.16",
     "expo-linear-gradient": "~57.0.1",
     "expo-linking": "~57.0.9",
+    "expo-network": "~57.0.2",
     "expo-notifications": "~57.0.17",
     "expo-router": "~57.0.20",
     "expo-secure-store": "~57.0.3",
@@ -47,7 +48,7 @@
     "@types/react": "~19.2.2",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~57.0.2",
-    "puppeteer-core": "^24.43.1",
+    "puppeteer-core": "^25.12.0",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -59,10 +60,11 @@
     "lint": "expo lint",
     "typegen": "expo customize tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:release && npm run test:agent-status && npm run test:ambient && npm run test:theme && npm run test:chat-formatting && npm run test:native-chat && npm run test:canonical-activity && npm run test:pending-intents && npm run test:voice && npm run test:operating-permissions && npm run test:auth && npm run test:chat && npm run test:shell && npm run test:home && npm run test:github && npm run test:notifications && npm run test:truthful",
+    "test": "npm run test:release && npm run test:product-ui && npm run test:agent-status && npm run test:ambient && npm run test:theme && npm run test:chat-formatting && npm run test:native-chat && npm run test:canonical-activity && npm run test:pending-intents && npm run test:protocol && npm run test:voice && npm run test:operating-permissions && npm run test:auth && npm run test:chat && npm run test:shell && npm run test:home && npm run test:github && npm run test:notifications && npm run test:truthful",
     "beta:preflight": "node scripts/friend-beta-release-preflight.mjs",
     "eas-build-pre-install": "node scripts/friend-beta-release-preflight.mjs --profile \"$EAS_BUILD_PROFILE\"",
     "test:release": "node --test tests/friend-beta-release-preflight.test.mjs",
+    "test:product-ui": "node --test tests/product-ui-contract.test.js",
     "test:auth": "node --test tests/auth-lifecycle.web.test.js",
     "test:chat": "node --test tests/chat-mic-contract.test.js",
     "test:shell": "node --test tests/workspace-shell.web.test.js",
@@ -73,12 +75,18 @@
     "test:canonical-activity": "npx tsx --test tests/canonical-activity.test.ts",
     "test:chat-formatting": "npx tsx --test tests/chat-formatting.test.ts",
     "test:pending-intents": "npx tsx --test tests/pending-intents.test.ts",
-    "test:voice": "npx tsx --test tests/voice-session.test.ts tests/voice-branding.test.ts tests/voice-input-modes.test.ts tests/voice-envelope.test.ts && node --test tests/voice-page.web.test.js",
+    "test:protocol": "npx tsx --test tests/perception-protocol.test.ts",
+    "test:voice": "npx tsx --test tests/voice-session.test.ts tests/voice-branding.test.ts tests/voice-input-modes.test.ts tests/voice-envelope.test.ts tests/voice-tetrahedron.test.ts tests/ios-entry-config.test.ts && node --test tests/voice-page.web.test.js",
     "test:notifications": "node --test tests/notifications.web.test.js",
     "test:github": "node --test tests/github-prs.web.test.js",
     "test:ambient": "node --test tests/ambient-source.test.js",
     "test:theme": "node --test tests/theme-background.test.js",
     "test:truthful": "node --test tests/truthful-contracts.web.test.js"
+  },
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    }
   },
   "private": true
 }

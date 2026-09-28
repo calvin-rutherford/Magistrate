@@ -2,6 +2,7 @@ import json
 import os
 import re
 import hashlib
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 from app.db import get_execution_credential_status
@@ -14,6 +15,37 @@ def _safe(value: Any, message: str) -> str:
     if not isinstance(value, str) or not SAFE_CAPABILITY_ID.fullmatch(value):
         raise ValueError(message)
     return value
+
+
+def _routing_metadata(raw: Any, model_id: str) -> Dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f'Execution model {model_id} has invalid routing metadata.')
+    required = {'reasoning', 'context_tokens', 'tools', 'multimodal', 'reliability', 'latency_ms', 'estimated_cost_usd'}
+    if set(raw) != required:
+        raise ValueError(f'Execution model {model_id} routing metadata must be closed and complete.')
+    try:
+        reasoning = int(raw['reasoning'])
+        context_tokens = int(raw['context_tokens'])
+        reliability = Decimal(str(raw['reliability']))
+        latency_ms = int(raw['latency_ms'])
+        estimated_cost = Decimal(str(raw['estimated_cost_usd']))
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        raise ValueError(f'Execution model {model_id} has invalid routing metrics.') from exc
+    if (
+        not 1 <= reasoning <= 5 or context_tokens < 1024
+        or type(raw['tools']) is not bool or type(raw['multimodal']) is not bool
+        or not Decimal(0) <= reliability <= Decimal(1)
+        or latency_ms < 1 or not estimated_cost.is_finite() or estimated_cost < 0
+    ):
+        raise ValueError(f'Execution model {model_id} routing metrics are out of bounds.')
+    return {
+        'reasoning': reasoning, 'context_tokens': context_tokens,
+        'tools': raw['tools'], 'multimodal': raw['multimodal'],
+        'reliability': str(reliability), 'latency_ms': latency_ms,
+        'estimated_cost_usd': f'{estimated_cost:.6f}',
+    }
 
 
 def _validate_inventory(value: Any, credential_status: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
@@ -78,6 +110,7 @@ def _validate_inventory(value: Any, credential_status: Optional[Dict[str, bool]]
             reason = raw_model.get('availability_reason')
             if not available and not isinstance(reason, str):
                 reason = 'A compatible credential is required.' if auth_state == 'required' else 'This profile is unavailable.'
+            routing = _routing_metadata(raw_model.get('routing'), model_id)
             profile = {
                 'id': profile_id,
                 'variant': variant,
@@ -91,6 +124,8 @@ def _validate_inventory(value: Any, credential_status: Optional[Dict[str, bool]]
                 'availability_reason': reason,
                 'auth': {'required': auth_required, 'credential_key': credential_key, 'status': auth_state},
             }
+            if routing is not None:
+                profile['routing'] = routing
             profiles.append(profile)
             # Keep the legacy harness/model projection wire-compatible for
             # older clients; the unified profiles list above is authoritative

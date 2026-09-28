@@ -11,6 +11,10 @@ import { setMagiConversationPrincipal } from '../services/MagiConversationSessio
 import { MagiMessageRecord, MagiMessageStatus, normalizeMagiMessageRecords } from '../services/MagiConversation';
 import { VoiceInputCapabilities, VoiceInputMode } from '../services/VoiceInputModes';
 import { OperatingPermissionMode } from '../services/OperatingPermissionModes';
+import {
+  PerceptionEventV1, PerceptionResultV1, validatePerceptionEventV1,
+  validatePerceptionResultV1,
+} from '../protocol/PerceptionProtocol';
 
 // Production builds must provide an HTTPS gateway (usually same-origin on web).
 // HTTP localhost is intentionally limited to local development.
@@ -296,15 +300,18 @@ export interface ProviderAuthChallenge {
 }
 
 export async function createProviderAuthChallenge(
-  provider: 'apple' | 'google', redirectUri?: string,
+  provider: 'apple' | 'google', redirectUri?: string, action: 'sign_in' | 'link' = 'sign_in',
 ): Promise<ProviderAuthChallenge> {
-  const response = await fetchRaw(`${GATEWAY_URL}/auth/provider/challenge`, {
+  const init: RequestInit = {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      provider, action: 'sign_in', client_platform: Platform.OS === 'web' ? 'web' : 'native',
+      provider, action, client_platform: Platform.OS === 'web' ? 'web' : 'native',
       ...(redirectUri ? { redirect_uri: redirectUri } : {}),
     }),
-  });
+  };
+  const response = action === 'link'
+    ? await authorizedFetch(`${GATEWAY_URL}/auth/provider/challenge`, init)
+    : await fetchRaw(`${GATEWAY_URL}/auth/provider/challenge`, init);
   const payload = await readResponsePayload(response);
   if (!response.ok) throw responseError(response, payload);
   if (!payload || typeof payload !== 'object') throw new Error('Gateway returned an invalid sign-in challenge.');
@@ -317,13 +324,21 @@ export async function createProviderAuthChallenge(
   return value as unknown as ProviderAuthChallenge;
 }
 
+export interface ProviderAccountLink {
+  schema_version: 'provider-account-link.v1';
+  status: 'linked' | 'unlinked';
+  provider: 'apple' | 'google';
+  user_id?: string;
+}
+
 export async function exchangeProviderAuthChallenge(input: {
   provider: 'apple' | 'google'; challengeId: string; nonce: string;
   identityToken?: string; authorizationCode?: string; redirectUri?: string;
-  displayName?: string;
-}): Promise<GatewaySession> {
-  const revision = ++sessionRevision;
-  const response = await fetchRaw(`${GATEWAY_URL}/auth/provider/exchange`, {
+  displayName?: string; action?: 'sign_in' | 'link';
+}): Promise<GatewaySession | ProviderAccountLink> {
+  const action = input.action || 'sign_in';
+  const revision = action === 'sign_in' ? ++sessionRevision : sessionRevision;
+  const init: RequestInit = {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       provider: input.provider, challenge_id: input.challengeId, nonce: input.nonce,
@@ -332,9 +347,20 @@ export async function exchangeProviderAuthChallenge(input: {
       ...(input.redirectUri ? { redirect_uri: input.redirectUri } : {}),
       ...(input.displayName ? { display_name: input.displayName } : {}),
     }),
-  });
+  };
+  const response = action === 'link'
+    ? await authorizedFetch(`${GATEWAY_URL}/auth/provider/exchange`, init)
+    : await fetchRaw(`${GATEWAY_URL}/auth/provider/exchange`, init);
   const payload = await readResponsePayload(response);
   if (!response.ok) throw responseError(response, payload);
+  if (action === 'link') {
+    const link = payload as Partial<ProviderAccountLink> | null;
+    if (!link || link.schema_version !== 'provider-account-link.v1'
+      || link.status !== 'linked' || link.provider !== input.provider) {
+      throw new Error('Gateway returned an invalid provider link result.');
+    }
+    return link as ProviderAccountLink;
+  }
   const session = sessionFromPayload(payload);
   if (!session || session.authMethod !== input.provider || !session.refreshExpiresAt) {
     throw new Error('Gateway returned an invalid provider session.');
@@ -693,6 +719,16 @@ export async function invalidateGatewaySession(
   return invalidationPromise;
 }
 
+export async function deleteGatewayAccount(confirmation: string): Promise<void> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmation }),
+  });
+  await checkedJson<{ status: 'deleted' }>(res);
+  await invalidateGatewaySession('Your Magistrate account was deleted.');
+}
+
 export async function logoutGatewaySession(): Promise<void> {
   const token = sessionToken;
   // Close protected UI and cancel any in-flight renewal before waiting on the
@@ -837,6 +873,37 @@ export interface UsageSummary {
   source: 'quota-axi' | string;
 }
 
+export interface BillingLedgerEntry {
+  entry_id: string;
+  type: 'included_grant' | 'topup' | 'reservation' | 'release' | 'settlement' | 'refund' | 'adjustment';
+  amount_microcredits: number;
+  balance_after_microcredits: number;
+  objective_id?: string | null;
+  created_at: number;
+}
+
+export interface BillingAccount {
+  schema_version: 'magistrate.billing-account.v1';
+  catalog_id: string;
+  plan_name: string;
+  subscription_status: string;
+  current_period_end: number | null;
+  cancel_at_period_end: boolean;
+  grace_ends_at: number | null;
+  balance_microcredits: number;
+  reserved_microcredits: number;
+  period_spend_microcredits: number;
+  low_credit_warning: boolean;
+  entitlements: Record<string, boolean>;
+  limits: { concurrency: number; monthly_spend_microcredits: number };
+  ledger: BillingLedgerEntry[];
+  usage: {
+    usage_id: string; event_id: string; objective_id: string; provider: string; model: string;
+    input_tokens: number; output_tokens: number; compute_milliseconds: number;
+    cost_microcredits: number; created_at: number;
+  }[];
+}
+
 export interface HealthInfo {
   status: 'healthy' | 'degraded' | string;
   service: string;
@@ -962,7 +1029,7 @@ export interface AttentionItem {
 }
 
 export interface NotificationEvent extends AttentionItem {
-  notification_kind: 'captain_question' | 'pr_ready' | 'blocker' | 'stall' | 'failure' | 'milestone' | 'completion' | 'consequential_decision';
+  notification_kind: 'captain_question' | 'pr_ready' | 'blocker' | 'stall' | 'failure' | 'milestone' | 'completion' | 'consequential_decision' | 'budget' | 'credit' | 'repository_disconnected' | 'payment_issue';
   url: string;
   deep_link?: string | null;
   revision?: string;
@@ -1087,11 +1154,46 @@ export function normalizeAuthProvider(raw: unknown): AuthProviderInfo | null {
   };
 }
 
+export interface GitHubAppInstallation {
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  repository_selection: 'all' | 'selected';
+  status: 'active' | 'suspended' | 'removed';
+  last_reconciled_at: number | null;
+}
+
+export interface GitHubAppStatus {
+  schema_version: 'github-app-readiness.v1';
+  status: 'configured' | 'BLOCKED_EXTERNAL';
+  configured: boolean;
+  app_slug: string | null;
+  required_permissions: Record<string, 'read'>;
+  required_events: string[];
+  repository_selection: 'selected_repositories_recommended';
+  installation_tokens: 'server-only';
+  installations: GitHubAppInstallation[];
+  repository_count: number;
+}
+
+export interface GitHubRepository {
+  installation_id: number;
+  id: number;
+  owner: string;
+  name: string;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  html_url: string;
+  active: boolean;
+}
+
 export interface GitHubPR {
   id: number;
   number: number;
   title: string;
   repository: string;
+  repository_id?: number;
   author: string;
   branch: string | null;
   state: string;
@@ -1127,6 +1229,7 @@ export interface RecentActivityItem {
   project: string;
   url: string | null;
   pull_request_number: number | null;
+  repository_id?: number | null;
 }
 
 export interface RecentActivityFeed {
@@ -1245,6 +1348,43 @@ export async function requestAgentMigration(agentId: string, profileId: string, 
 export async function fetchAgentMigration(agentId: string, requestId: string): Promise<AgentMigration> {
   const res = await authorizedFetch(`${GATEWAY_URL}/agents/${encodeURIComponent(agentId)}/migration-requests/${encodeURIComponent(requestId)}`);
   return checkedJson<AgentMigration>(res);
+}
+
+export interface ProjectRepository {
+  id: string;
+  provider: 'github' | string;
+  full_name: string;
+  html_url: string;
+  default_branch: string | null;
+}
+
+export interface CustomerProject {
+  schema_version: 'project.v1';
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  kind: 'standalone' | 'github';
+  status: 'active' | 'archived';
+  created_at: number;
+  updated_at: number;
+  repositories: ProjectRepository[];
+}
+
+export async function fetchProjects(): Promise<CustomerProject[]> {
+  const res = await authorizedFetch(GATEWAY_URL + '/projects');
+  const value = await checkedJson<{ schema_version: 'projects.v1'; projects: CustomerProject[] }>(res);
+  if (value?.schema_version !== 'projects.v1' || !Array.isArray(value.projects)) throw new Error('Gateway returned invalid project data.');
+  return value.projects;
+}
+
+export async function createProject(input: { name: string; description?: string; slug?: string }): Promise<CustomerProject> {
+  const res = await authorizedFetch(GATEWAY_URL + '/projects', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+  const value = await checkedJson<CustomerProject>(res);
+  if (value?.schema_version !== 'project.v1' || typeof value.id !== 'string') throw new Error('Gateway returned invalid project data.');
+  return value;
 }
 
 export interface FleetObjective {
@@ -1454,6 +1594,53 @@ export async function fetchUserProfile(): Promise<UserProfile> {
   return profile;
 }
 
+export interface AccountOnboardingState {
+  schema_version: 'account-onboarding.v1';
+  required: boolean;
+  next_step: 'welcome' | 'profile' | 'github' | 'billing' | null;
+  steps: {
+    welcome: { complete: boolean };
+    profile: { complete: boolean };
+    github: { complete: boolean; available: boolean; unavailable_reason: string | null };
+    billing: {
+      complete: boolean; available: boolean; status: string;
+      current_period_end: number | null; customer_portal_available: boolean;
+    };
+  };
+}
+
+export async function fetchAccountOnboarding(): Promise<AccountOnboardingState> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/onboarding`);
+  const value = await checkedJson<AccountOnboardingState>(res);
+  if (value?.schema_version !== 'account-onboarding.v1' || typeof value.required !== 'boolean'
+    || !value.steps || !['welcome', 'profile', 'github', 'billing', null].includes(value.next_step)) {
+    throw new Error('Gateway returned invalid onboarding state.');
+  }
+  return value;
+}
+
+export async function acknowledgeAccountWelcome(): Promise<AccountOnboardingState> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/onboarding/welcome`, { method: 'POST' });
+  return checkedJson<AccountOnboardingState>(res);
+}
+
+export interface ProviderLoginMethod {
+  provider: 'apple' | 'google'; label: string; current: boolean;
+  linked_at: number; last_authenticated_at: number | null;
+}
+export async function fetchProviderLoginMethods(): Promise<ProviderLoginMethod[]> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/login-methods`);
+  const value = await checkedJson<{ schema_version: string; methods: ProviderLoginMethod[] }>(res);
+  if (value.schema_version !== 'provider-login-methods.v1' || !Array.isArray(value.methods)) {
+    throw new Error('Gateway returned invalid sign-in methods.');
+  }
+  return value.methods;
+}
+export async function unlinkProviderLoginMethod(provider: 'apple' | 'google'): Promise<ProviderAccountLink> {
+  const res = await authorizedFetch(`${GATEWAY_URL}/account/login-methods/${provider}`, { method: 'DELETE' });
+  return checkedJson<ProviderAccountLink>(res);
+}
+
 export async function updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
   const formData = new FormData();
   Object.entries(profile).forEach(([key, value]) => {
@@ -1467,11 +1654,50 @@ export async function updateUserProfile(profile: Partial<UserProfile>): Promise<
   return updated;
 }
 
+export async function submitPerceptionEvent(event: PerceptionEventV1): Promise<PerceptionResultV1> {
+  if (!validatePerceptionEventV1(event)) throw new Error('The perception event is not compatible with protocol v1.');
+  const response = await authorizedFetch(GATEWAY_URL + '/perception/events', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(event),
+  });
+  const result = await checkedJson<unknown>(response);
+  if (!validatePerceptionResultV1(result)) throw new Error('Gateway returned an invalid perception result.');
+  return result;
+}
+
+export async function confirmPerceptionEvent(eventId: string): Promise<PerceptionResultV1> {
+  if (!/^pev_[A-Za-z0-9_-]{12,96}$/.test(eventId)) throw new Error('Invalid perception event identity.');
+  const response = await authorizedFetch(`${GATEWAY_URL}/perception/events/${encodeURIComponent(eventId)}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema_version: 'magistrate.perception-confirmation.v1', revision: 1, confirmed: true }),
+  });
+  const result = await checkedJson<unknown>(response);
+  if (!validatePerceptionResultV1(result) || result.event_id !== eventId) {
+    throw new Error('Gateway returned an invalid perception confirmation.');
+  }
+  return result;
+}
+
 export const CHAT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const CHAT_MAX_UPLOAD_COUNT = 10;
 export const CHAT_MAX_UPLOAD_TOTAL_BYTES = 50 * 1024 * 1024;
-const CHAT_ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'application/pdf', 'application/json', 'application/zip', 'application/gzip', 'text/csv', 'text/plain', 'text/markdown']);
-const CHAT_ALLOWED_OCTET_SUFFIXES = new Set(['.txt', '.md', '.json', '.csv', '.pdf', '.zip', '.gz', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']);
+const CHAT_ALLOWED_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+  'application/pdf', 'application/json', 'application/xml', 'application/javascript',
+  'application/zip', 'application/gzip', 'application/msword', 'application/vnd.ms-excel',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/csv', 'text/plain', 'text/markdown', 'text/html', 'text/css', 'text/javascript',
+  'text/xml', 'text/x-python', 'text/x-shellscript', 'text/x-c', 'text/x-c++',
+  'text/x-java-source', 'text/x-rust', 'text/x-go',
+]);
+const CHAT_ALLOWED_OCTET_SUFFIXES = new Set([
+  '.txt', '.md', '.json', '.csv', '.xml', '.html', '.htm', '.css', '.js', '.mjs',
+  '.ts', '.tsx', '.jsx', '.py', '.sh', '.c', '.h', '.cpp', '.java', '.rs', '.go',
+  '.yaml', '.yml', '.toml', '.sql', '.log', '.pdf', '.zip', '.gz', '.doc', '.docx',
+  '.xls', '.xlsx', '.ppt', '.pptx',
+]);
 
 export interface ChatUpload {
   upload_id: string;
@@ -1485,7 +1711,7 @@ export interface ChatUpload {
 }
 
 /** Strip an upload record down to the fields the prompt contract accepts. */
-export function attachmentManifest(uploads: ChatUpload[]): Array<Pick<ChatUpload, 'upload_id' | 'filename' | 'media_type' | 'size'>> {
+export function attachmentManifest(uploads: ChatUpload[]): Pick<ChatUpload, 'upload_id' | 'filename' | 'media_type' | 'size'>[] {
   return uploads.map(({ upload_id, filename, media_type, size }) => ({ upload_id, filename, media_type, size }));
 }
 
@@ -1509,7 +1735,7 @@ export function validateChatAttachment(filename: string, mimeType: string | unde
   return null;
 }
 
-export async function uploadChatFile(uri: string, filename: string, mimeType?: string, messageId?: string): Promise<ChatUpload> {
+export async function uploadChatFile(uri: string, filename: string, mimeType?: string, messageId?: string, onProgress?: (fraction: number) => void): Promise<ChatUpload> {
   const formData = new FormData();
   if (typeof window !== 'undefined') {
     const response = await rawFetch(uri);
@@ -1526,10 +1752,16 @@ export async function uploadChatFile(uri: string, filename: string, mimeType?: s
     formData.append('files', { uri, name: filename, type: declaredType } as any);
   }
   if (messageId) formData.append('message_id', messageId);
+  // Fetch does not expose upload-byte progress portably across web and React
+  // Native. Report only observed lifecycle boundaries rather than inventing an
+  // interpolated percentage; adapters may render the interval indeterminately.
+  onProgress?.(0);
   const res = await authorizedFetch(GATEWAY_URL + '/uploads', { method: 'POST', body: formData });
   const data = await checkedJson<{ uploads?: unknown[] }>(res);
   if (!data.uploads?.length) throw new Error('Gateway returned no upload record.');
-  return normalizeChatUpload(data.uploads[0]);
+  const uploaded = normalizeChatUpload(data.uploads[0]);
+  onProgress?.(1);
+  return uploaded;
 }
 
 export async function uploadUserAvatar(imageUri: string, mimeType: string = 'image/jpeg'): Promise<any> {
@@ -1569,6 +1801,35 @@ export async function fetchUsage(): Promise<UsageSummary> {
   const data = await checkedJson<UsageSummary>(res);
   if (!data || !Array.isArray(data.providers)) throw new Error('Gateway returned invalid usage data.');
   return data;
+}
+
+export async function fetchBillingAccount(): Promise<BillingAccount> {
+  const res = await authorizedFetch(GATEWAY_URL + '/billing/account', {});
+  const data = await checkedJson<BillingAccount>(res);
+  if (!data || data.schema_version !== 'magistrate.billing-account.v1' || typeof data.balance_microcredits !== 'number' || !Array.isArray(data.ledger) || !Array.isArray(data.usage)) {
+    throw new Error('Gateway returned invalid billing data.');
+  }
+  return data;
+}
+
+export async function createBillingPortal(returnUrl: string, idempotencyKey: string): Promise<string> {
+  const res = await authorizedFetch(GATEWAY_URL + '/billing/portal', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ return_url: returnUrl, idempotency_key: idempotencyKey }),
+  });
+  const data = await checkedJson<{ portal_url: string }>(res);
+  if (!data || typeof data.portal_url !== 'string' || !data.portal_url.startsWith('https://')) throw new Error('Gateway returned an invalid billing portal.');
+  return data.portal_url;
+}
+
+export async function createBillingCheckout(catalogId: string, returnUrl: string, idempotencyKey: string): Promise<string> {
+  const res = await authorizedFetch(GATEWAY_URL + '/billing/checkout', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ catalog_id: catalogId, return_url: returnUrl, idempotency_key: idempotencyKey }),
+  });
+  const data = await checkedJson<{ checkout_url: string }>(res);
+  if (!data || typeof data.checkout_url !== 'string' || !data.checkout_url.startsWith('https://')) throw new Error('Gateway returned an invalid checkout.');
+  return data.checkout_url;
 }
 
 export async function fetchExecutionCapabilities(): Promise<ExecutionCapabilities> {
@@ -1624,6 +1885,34 @@ async function checkedJson<T>(res: Response): Promise<T> {
   return data as T;
 }
 
+export async function fetchGitHubAppStatus(): Promise<GitHubAppStatus> {
+  const res = await authorizedFetch(GATEWAY_URL + '/github/app/status');
+  const data = await checkedJson<GitHubAppStatus>(res);
+  if (!Array.isArray(data.installations) || typeof data.configured !== 'boolean') {
+    throw new Error('Gateway returned invalid GitHub App status.');
+  }
+  return data;
+}
+
+export async function beginGitHubAppInstall(redirectUri: string): Promise<{ auth_url: string; expires_in: number }> {
+  const res = await authorizedFetch(GATEWAY_URL + '/github/app/install', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uri: redirectUri }),
+  });
+  return checkedJson(res);
+}
+
+export async function reconcileGitHubInstallation(installationId: number): Promise<{ status: 'reconciled'; repositories: GitHubRepository[] }> {
+  const res = await authorizedFetch(GATEWAY_URL + `/github/installations/${installationId}/reconcile`, { method: 'POST' });
+  return checkedJson(res);
+}
+
+export async function fetchGitHubRepositories(): Promise<GitHubRepository[]> {
+  const res = await authorizedFetch(GATEWAY_URL + '/github/repositories');
+  const data = await checkedJson<{ items: GitHubRepository[] }>(res);
+  if (!Array.isArray(data.items)) throw new Error('Gateway returned invalid repository data.');
+  return data.items;
+}
+
 export async function fetchGitHubPRs(page = 1, refresh = false): Promise<GitHubPRPage> {
   const res = await authorizedFetch(GATEWAY_URL + `/github/pulls?page=${page}&per_page=20&refresh=${refresh}`, {
   });
@@ -1632,8 +1921,10 @@ export async function fetchGitHubPRs(page = 1, refresh = false): Promise<GitHubP
   return data as GitHubPRPage;
 }
 
-export async function fetchGitHubPR(number: number, refresh = false): Promise<GitHubPR> {
-  const res = await authorizedFetch(GATEWAY_URL + `/github/pulls/${number}?refresh=${refresh}`, {
+export async function fetchGitHubPR(number: number, refresh = false, repositoryId?: number): Promise<GitHubPR> {
+  const params = new URLSearchParams({ refresh: String(refresh) });
+  if (repositoryId !== undefined) params.set('repository_id', String(repositoryId));
+  const res = await authorizedFetch(GATEWAY_URL + `/github/pulls/${number}?${params.toString()}`, {
   });
   return checkedJson<GitHubPR>(res);
 }

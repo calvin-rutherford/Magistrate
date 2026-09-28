@@ -36,6 +36,10 @@ class NativeMagiMessageContract(BaseModel):
     source: Literal['text', 'voice'] = 'text'
     attachments: List[UploadedAttachmentContract] = Field(default_factory=list, max_length=10)
     retry_failed: bool = False
+    # Required for host-classified production/data/credential/spend/release
+    # actions. It authorizes only this new idempotent submission; it is never
+    # inferred from conversational prose or reused from an earlier message.
+    explicit_confirmation: bool = False
 
     @field_validator('content')
     @classmethod
@@ -52,6 +56,19 @@ class ExecutionSettingsContract(BaseModel):
     routing_profile_id: Optional[str] = Field(default=None, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
     switching_behavior: Optional[Literal['migrate', 'new-session']] = None
     unavailable_behavior: Optional[Literal['error', 'fallback']] = None
+
+
+class ExecutionRouteRequirementsContract(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    reasoning: int = Field(default=1, ge=1, le=5)
+    context_tokens: int = Field(default=0, ge=0, le=10_000_000)
+    tools: bool = True
+    multimodal: bool = False
+    max_latency_ms: Optional[int] = Field(default=None, ge=1, le=300_000)
+    preferred_profile_id: Optional[str] = Field(
+        default=None, max_length=128,
+        pattern=r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$',
+    )
 
 
 class RoutingPreferenceContract(BaseModel):

@@ -87,13 +87,14 @@ not proof that a process is currently alive.
 
 ## Write boundaries
 
-The only normal process-starting execution edge is the command-authorized
-`firstmate.submit_objective` tool. Its `tasks-axi add` subprocess is bounded,
-receives a private body file and minimal environment, and is invoked only after
-the model selected the closed tool and host authorization admitted it. A retry
-uses the durable objective idempotency record rather than dispatching again.
-Cancellation or a bound failure may signal only that exact child; Gateway never
-signals a process group.
+The only normal execution entry is the command-authorized
+`firstmate.submit_objective` tool. In restricted mode its `tasks-axi add`
+subprocess is bounded, receives a private body file and minimal environment,
+and runs only after host authorization. In public-SaaS mode no shared local
+command runs: the accepted objective enters the provider-neutral hosted
+controller, which idempotently requests one isolated worker over mTLS. Both
+modes reuse durable objective identity on retry. See
+[`hosted-execution.md`](./hosted-execution.md).
 
 Progress enters at `POST /api/v1/firstmate/execution-events` with `response` or
 `command` scope. Decisions enter at
@@ -116,10 +117,11 @@ The following routes never invoke Firstmate or Herdr:
   adapter); and
 - native Magi history, replay, diagnostics, and WebSocket delivery.
 
-Gateway startup performs native-store recovery only. It registers no Firstmate
-activity reconciler, no execution observation loop, and no replacement timer.
-The retired activity poll interval and reconciler-disable controls were
-removed and must not be reintroduced.
+Gateway startup performs native-store recovery and write-side delivery
+recovery. Hosted mode additionally starts its durable queue/lease controller;
+that loop creates and cleans isolated capacity but never serves a read or
+manufactures observed worker state. There remains no Firstmate/Herdr activity
+reconciler or read-side execution timer.
 
 ## Retained compatibility inventory
 

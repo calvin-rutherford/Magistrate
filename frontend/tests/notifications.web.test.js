@@ -102,6 +102,16 @@ test('new attention transition uses one real browser notification, an unread dot
   await page.close();
 });
 
+test('outcome notification uses product-safe copy rather than internal event metadata', async () => {
+  const completion = { ...events[0], id: 'internal-run-44', title: 'runner-7 in secret/repo', subtitle: 'host /private/path used 83 credits', requires_action: false, notification_kind: 'completion', url: '/chat?shortcut=running', deep_link: '/chat?shortcut=running' };
+  const page = await openApp({ notificationMode: 'granted', eventBatch: [[completion]], attention: [completion] });
+  await page.waitForFunction(() => window.__browserNotifications.length === 1);
+  const delivered = await page.evaluate(() => window.__browserNotifications[0]);
+  assert.deepEqual({ title: delivered.title, body: delivered.body }, { title: 'Work completed', body: 'Open Magistrate to review the result.' });
+  assert.doesNotMatch(JSON.stringify(delivered), /runner-7|secret\/repo|private\/path/);
+  await page.close();
+});
+
 test('denied or unsupported browser notifications retain a quiet unread drawer fallback without a popup', async () => {
   for (const notificationMode of ['denied', 'unsupported']) {
     const page = await openApp({ notificationMode, eventBatch: [[events[0], events[1]]] });

@@ -7,11 +7,12 @@ unknown protocol payloads are never returned as prose.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 import json
 import os
 import re
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
-from urllib.parse import urlsplit
+from app.production_security import validate_provider_url
 
 import httpx
 
@@ -56,11 +57,30 @@ class MagiToolDefinition:
 
 
 @dataclass(frozen=True)
+class MagiModelAttachment:
+    """Provider-neutral current-turn file input; bytes never become a path."""
+
+    filename: str
+    media_type: str
+    content: bytes
+
+
+@dataclass(frozen=True)
 class MagiModelMessage:
     role: str
     content: str | None
     tool_calls: tuple[MagiModelToolCall, ...] = ()
     tool_call_id: str | None = None
+    attachments: tuple[MagiModelAttachment, ...] = ()
+
+
+@dataclass(frozen=True)
+class MagiModelUsage:
+    """Provider-reported billable token counts (never inferred as actual usage)."""
+
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,16 +90,28 @@ class MagiModelResult:
     text: str | None
     finish_reason: str = "stop"
     tool_calls: tuple[MagiModelToolCall, ...] = ()
+    usage: MagiModelUsage | None = None
 
 
 class MagiModelError(RuntimeError):
     """Safe, content-free provider failure suitable for service classification."""
 
-    def __init__(self, code: str, *, retryable: bool = True, tool_calls: int = 0):
+    def __init__(
+        self,
+        code: str,
+        *,
+        retryable: bool = True,
+        tool_calls: int = 0,
+        billing_uncertain: bool = False,
+    ):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
         self.tool_calls = max(0, int(tool_calls))
+        # A timeout or interrupted response may have consumed paid inference.
+        # Routers must reserve it conservatively and must not silently multiply
+        # that possible cost unless policy explicitly permits doing so.
+        self.billing_uncertain = bool(billing_uncertain)
 
 
 @runtime_checkable
@@ -154,7 +186,7 @@ def _response_input(messages: Sequence[MagiModelMessage]) -> list[dict[str, Any]
             raise MagiModelError("provider_invalid_request", retryable=False)
         if message.role == "tool":
             if (
-                message.tool_calls
+                message.tool_calls or message.attachments
                 or not isinstance(message.tool_call_id, str)
                 or not _TOOL_CALL_ID.fullmatch(message.tool_call_id)
                 or not isinstance(message.content, str)
@@ -174,8 +206,10 @@ def _response_input(messages: Sequence[MagiModelMessage]) -> list[dict[str, Any]
             continue
         if message.role not in {"user", "assistant"} or message.tool_call_id is not None:
             raise MagiModelError("provider_invalid_request", retryable=False)
+        if message.attachments and message.role != "user":
+            raise MagiModelError("provider_invalid_request", retryable=False)
         if message.tool_calls:
-            if message.role != "assistant" or len(message.tool_calls) > MAGI_MAX_TOOL_CALLS:
+            if message.attachments or message.role != "assistant" or len(message.tool_calls) > MAGI_MAX_TOOL_CALLS:
                 raise MagiModelError("provider_invalid_request", retryable=False)
             if message.content is not None:
                 if not isinstance(message.content, str):
@@ -207,7 +241,28 @@ def _response_input(messages: Sequence[MagiModelMessage]) -> list[dict[str, Any]
             maximum_bytes=MAGI_MAX_RESPONSE_BYTES,
             code="provider_invalid_request",
         )
-        items.append({"role": message.role, "content": message.content})
+        if not message.attachments:
+            items.append({"role": message.role, "content": message.content})
+            continue
+        if len(message.attachments) > 10 or sum(len(item.content) for item in message.attachments) > 50 * 1024 * 1024:
+            raise MagiModelError("provider_invalid_attachment", retryable=False)
+        content_parts: list[dict[str, str]] = [{"type": "input_text", "text": message.content}]
+        for attachment in message.attachments:
+            if (
+                not isinstance(attachment, MagiModelAttachment)
+                or not attachment.filename or len(attachment.filename) > 160
+                or not isinstance(attachment.content, bytes)
+                or len(attachment.content) > 25 * 1024 * 1024
+                or not re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+", attachment.media_type)
+            ):
+                raise MagiModelError("provider_invalid_attachment", retryable=False)
+            encoded = base64.b64encode(attachment.content).decode("ascii")
+            data_url = f"data:{attachment.media_type};base64,{encoded}"
+            if attachment.media_type.startswith("image/"):
+                content_parts.append({"type": "input_image", "image_url": data_url})
+            else:
+                content_parts.append({"type": "input_file", "filename": attachment.filename, "file_data": data_url})
+        items.append({"role": "user", "content": content_parts})
     return items
 
 
@@ -295,6 +350,19 @@ def _parse_response_tool_calls(
     return tuple(parsed)
 
 
+def _openai_usage(payload: Mapping[str, Any]) -> MagiModelUsage | None:
+    raw = payload.get("usage")
+    if not isinstance(raw, Mapping):
+        return None
+    input_tokens = raw.get("input_tokens")
+    output_tokens = raw.get("output_tokens")
+    details = raw.get("input_tokens_details")
+    cached = details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
+    if not all(type(value) is int and value >= 0 for value in (input_tokens, output_tokens, cached)):
+        return None
+    return MagiModelUsage(input_tokens, output_tokens, cached)
+
+
 def _response_text(output: list[Any]) -> tuple[str | None, list[Any]]:
     """Extract only assistant output text and function calls from Responses."""
     text_parts: list[str] = []
@@ -377,11 +445,7 @@ class OpenAIMagiModel:
         if (not self.model or len(self.model) > 128
                 or any(not (character.isalnum() or character in "._:/-") for character in self.model)):
             raise RuntimeError("MAGISTRATE_MAGI_MODEL is invalid")
-        provider_url = urlsplit(self._base_url)
-        if (provider_url.scheme != "https" or not provider_url.hostname
-                or provider_url.username is not None or provider_url.password is not None
-                or provider_url.query or provider_url.fragment):
-            raise RuntimeError("MAGISTRATE_MAGI_PROVIDER_URL must be a credential-free HTTPS URL")
+        validate_provider_url(self._base_url)
         if not 1 <= self._max_output_tokens <= 65_536:
             raise RuntimeError("MAGISTRATE_MAGI_MAX_OUTPUT_TOKENS must be between 1 and 65536")
         if not 1 <= self._timeout_seconds <= 300:
@@ -452,17 +516,31 @@ class OpenAIMagiModel:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout_seconds, connect=min(10.0, self._timeout_seconds)),
                 transport=self._transport,
+                trust_env=False,
+                follow_redirects=False,
             ) as client:
-                response = await client.post(
-                    f"{self._base_url}/responses",
-                    headers=headers,
-                    json=request_payload,
-                )
+                async with client.stream(
+                    'POST', f"{self._base_url}/responses", headers=headers, json=request_payload,
+                ) as response:
+                    # Bound decoded bytes, including compressed responses, before
+                    # buffering/parsing untrusted provider JSON.
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(body) + len(chunk) > 4 * 1024 * 1024:
+                            raise MagiModelError('provider_invalid_response', retryable=True, billing_uncertain=True)
+                        body.extend(chunk)
+                    response = httpx.Response(response.status_code, content=bytes(body))
         except httpx.TimeoutException as exc:
-            raise MagiModelError("provider_timeout", retryable=True) from exc
-        except httpx.HTTPError as exc:
+            raise MagiModelError(
+                "provider_timeout", retryable=True, billing_uncertain=True,
+            ) from exc
+        except httpx.ConnectError as exc:
             raise MagiModelError("provider_unavailable", retryable=True) from exc
-        if response.status_code >= 400:
+        except httpx.HTTPError as exc:
+            raise MagiModelError(
+                "provider_unavailable", retryable=True, billing_uncertain=True,
+            ) from exc
+        if response.status_code >= 300:
             # Provider bodies can echo request material. Deliberately classify
             # only the status and never propagate or log the body.
             retryable = response.status_code == 429 or response.status_code >= 500
@@ -493,7 +571,10 @@ class OpenAIMagiModel:
                     "provider_tool_call_unsupported", retryable=False, tool_calls=len(raw_calls),
                 )
             calls = _parse_response_tool_calls(raw_calls, provider_tool_names)
-            return MagiModelResult(text=text, finish_reason="tool_calls", tool_calls=calls)
+            return MagiModelResult(
+                text=text, finish_reason="tool_calls", tool_calls=calls,
+                usage=_openai_usage(payload),
+            )
         if not isinstance(text, str) or not text.strip():
             raise MagiModelError("provider_empty_response", retryable=True)
         if magi_text_has_unsafe_controls(text):
@@ -504,4 +585,6 @@ class OpenAIMagiModel:
             raise MagiModelError("provider_invalid_unicode", retryable=True) from exc
         if len(text) > MAGI_MAX_RESPONSE_CHARACTERS or len(encoded) > MAGI_MAX_RESPONSE_BYTES:
             raise MagiModelError("response_too_large", retryable=True)
-        return MagiModelResult(text=text, finish_reason="stop")
+        return MagiModelResult(
+            text=text, finish_reason="stop", usage=_openai_usage(payload),
+        )

@@ -8,6 +8,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_ROOT = path.resolve(HERE, '..');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ASC_APP_ID = /^[1-9][0-9]{5,14}$/;
+const GOOGLE_IOS_CLIENT_ID = /^([A-Za-z0-9._-]+)\.apps\.googleusercontent\.com$/;
 const SECRET_PUBLIC_NAME = /(secret|token|password|credential|api[_-]?key|private[_-]?key)/i;
 
 function readJson(name) {
@@ -61,6 +62,27 @@ export function evaluateFriendBetaRelease({ profile, env, app, eas, packageJson 
       'testflight-production-profile', 'production must be a store build with autoIncrement');
     check(ASC_APP_ID.test(eas?.submit?.production?.ios?.ascAppId || ''),
       'app-store-connect-link', 'set the public numeric ascAppId after the App Store Connect record exists');
+    const googleIosClientId = String(env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID || '').trim();
+    const googleMatch = GOOGLE_IOS_CLIENT_ID.exec(googleIosClientId);
+    const reversedGoogleClientId = String(env.EXPO_PUBLIC_GOOGLE_IOS_REVERSED_CLIENT_ID || '').trim();
+    check(Boolean(googleMatch), 'google-ios-client-id', 'set the real Google iOS OAuth client ID in the EAS production environment');
+    check(Boolean(googleMatch) && reversedGoogleClientId === `com.googleusercontent.apps.${googleMatch?.[1]}`,
+      'google-ios-callback-scheme', 'the reversed Google iOS client ID must exactly match the OAuth client');
+    check(/^[A-Z0-9]{10}$/.test(env.APPLE_TEAM_ID || ''),
+      'apple-team-linked', 'production requires the approved APPLE_TEAM_ID');
+    for (const [name, id] of [['EXPO_PUBLIC_PRIVACY_URL', 'privacy-url'], ['EXPO_PUBLIC_SUPPORT_URL', 'support-url']]) {
+      let url;
+      try { url = new URL(env[name]); } catch { url = null; }
+      check(Boolean(url && url.protocol === 'https:' && !url.username && !url.password
+        && !url.search && !url.hash && url.hostname.includes('.')
+        && !/(?:^|\.)(?:localhost|local|internal|invalid|test|example)$/.test(url.hostname)
+        && !/^\d+(?:\.\d+){3}$/.test(url.hostname) && !url.hostname.includes(':')),
+      id, `set ${name} to the published public HTTPS page; URL syntax is not publication evidence`);
+    }
+    const plist = expo?.ios?.infoPlist || {};
+    check(['NSMicrophoneUsageDescription', 'NSSpeechRecognitionUsageDescription', 'NSPhotoLibraryUsageDescription']
+      .every(key => typeof plist[key] === 'string' && plist[key].trim().length > 20),
+    'privacy-strings', 'production requires meaningful voice and photo permission descriptions');
   }
 
   const configuredOwner = String(env.EXPO_OWNER || '').trim();
@@ -78,6 +100,11 @@ export function evaluateFriendBetaRelease({ profile, env, app, eas, packageJson 
     check(!gateway.username && !gateway.password && !gateway.search && !gateway.hash,
       'gateway-url-public-config', 'Gateway URL must not contain credentials, query parameters, or a fragment');
     check(gateway.pathname.endsWith('/api/v1'), 'gateway-api-root', 'Gateway URL must end with /api/v1');
+    if (profile === 'production') {
+      check(!/^\d+(?:\.\d+){3}$/.test(gateway.hostname) && !gateway.hostname.includes(':')
+        && !/(?:^|\.)(?:localhost|local|internal|invalid|test|example)$/.test(gateway.hostname),
+      'production-gateway-dns', 'production requires a public Gateway DNS name');
+    }
   }
 
   const unsafePublicNames = Object.keys(env).filter(name => name.startsWith('EXPO_PUBLIC_') && SECRET_PUBLIC_NAME.test(name));

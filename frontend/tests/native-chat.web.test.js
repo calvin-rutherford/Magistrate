@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { launchBrowser, startWebServer } = require('./helpers/web-server');
+const { clickRendered, launchBrowser, startWebServer } = require('./helpers/web-server');
 
 let server;
 let browser;
@@ -113,6 +113,18 @@ function installNativeGatewayMock() {
         objective_id: 'mgo_product_0001', status: 'requested', requested_at: 1789000005000,
         observed_at: null, duplicate: false });
     }
+    if (url.endsWith('/api/v1/projects')) {
+      increment('workspace-projects-refresh-count');
+      if (options.method === 'POST') {
+        increment('workspace-project-create-count');
+        const body = JSON.parse(options.body || '{}');
+        const project = { schema_version: 'project.v1', id: 'prj_browser_0001', name: body.name, slug: 'launch-control', description: body.description || '', kind: 'standalone', status: 'active', repositories: [], created_at: 1789000005000, updated_at: 1789000005000 };
+        localStorage.setItem('workspace-project-record', JSON.stringify(project));
+        return json(project, 201);
+      }
+      const stored = localStorage.getItem('workspace-project-record');
+      return json({ schema_version: 'projects.v1', projects: stored ? [JSON.parse(stored)] : [] });
+    }
     if (url.endsWith('/api/v1/fleet')) {
       increment('workspace-fleet-refresh-count');
       return json({ schema: 'magistrate.fleet-projection.v1', source: 'persisted-structured-state',
@@ -223,7 +235,7 @@ test('one workspace refresh coordinates Chat, Fleet, Activity and Attention and 
   await page.waitForSelector('[data-testid="drawer-refresh"]');
 
   const keys = [
-    'workspace-chat-refresh-count', 'workspace-fleet-refresh-count',
+    'workspace-chat-refresh-count', 'workspace-fleet-refresh-count', 'workspace-projects-refresh-count',
     'workspace-activity-refresh-count', 'workspace-attention-refresh-count',
     'workspace-recent-refresh-count', 'workspace-providers-refresh-count',
     'workspace-health-refresh-count',
@@ -262,6 +274,28 @@ test('one workspace refresh coordinates Chat, Fleet, Activity and Attention and 
   await page.close();
 });
 
+test('Projects creates and renders a durable standalone project through the Gateway', async () => {
+  const page = await browser.newPage();
+  await page.evaluateOnNewDocument(installNativeGatewayMock);
+  await page.goto(`${server.base}/chat`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
+  await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
+  await clickRendered(page, '[data-testid="brand-drawer-toggle"]');
+  await page.waitForSelector('[data-testid="drawer-refresh"]');
+  await new Promise(resolve => setTimeout(resolve, 400));
+  await page.$eval('[data-testid="drawer-section-projects"]', button => button.click());
+  await page.waitForSelector('[data-testid="project-create-form"]');
+  await page.type('[data-testid="project-name-input"]', 'Launch control');
+  await page.type('[data-testid="project-description-input"]', 'Standalone customer project');
+  await clickRendered(page, '[data-testid="project-create-submit"]');
+  await page.waitForFunction(() => document.body.innerText.includes('Launch control'));
+  assert.equal(await page.evaluate(() => Number(localStorage.getItem('workspace-project-create-count') || '0')), 1);
+  const request = await page.evaluate(() => JSON.parse(localStorage.getItem('workspace-project-record')));
+  assert.equal(request.kind, 'standalone');
+  assert.match(request.name, /Launch control/);
+  await page.close();
+});
+
 test('an activity outage does not interrupt an active native LLM turn', async () => {
   const page = await browser.newPage();
   await page.evaluateOnNewDocument(() => {
@@ -289,13 +323,13 @@ test('voice-to-text uses the same native message endpoint and never invokes voic
   const page = await browser.newPage();
   await page.evaluateOnNewDocument(installNativeGatewayMock);
   await page.evaluateOnNewDocument(stubSpeechSynthesis);
-  await page.goto(`${server.base}/voice`, { waitUntil: 'networkidle0' });
+  await page.goto(`${server.base}/voice?autostart=true`, { waitUntil: 'networkidle0' });
   await page.evaluate(() => localStorage.clear());
   await page.reload({ waitUntil: 'networkidle0' });
   await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
   await page.waitForFunction(() => document.body.innerText.includes('Listening'), { timeout: 20_000 });
   await new Promise(resolve => setTimeout(resolve, 900));
-  await page.click('[data-testid="voice-control"]');
+  await clickRendered(page, '[data-testid="voice-control"]');
   await page.waitForSelector('[data-testid="voice-conversation"]', { timeout: 20_000 });
   const transcript = await page.$eval('[data-testid="voice-conversation"]', element => element.innerText);
   assert.match(transcript, /Native voice message/);
