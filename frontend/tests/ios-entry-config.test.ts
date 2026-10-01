@@ -9,8 +9,28 @@ const app = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'ut
 test('iOS App Intents expose product entries through foreground allowlisted routes', () => {
   for (const intent of ['StartMagistrateIntent', 'TalkToMagistrateIntent', 'AskMagistrateIntent', 'WhatsRunningIntent', 'WhatNeedsAttentionIntent', 'MagistrateVoiceIntent']) assert.match(swift, new RegExp(`struct ${intent}`));
   assert.match(swift, /openAppWhenRun: Bool \{ true \}/);
-  assert.match(swift, /magistrate:\/voice\?autostart=true/);
+  for (const route of [
+    'magistrate:/voice?autostart=true',
+    'magistrate:/chat?shortcut=running',
+    'magistrate:/attention?overview=true',
+  ]) assert.ok(swift.includes(route));
   assert.doesNotMatch(swift, /https?:|URLSession|AVAudio/);
+});
+
+test('OpenURLIntent dependency boundary requires iOS 18', () => {
+  for (const declaration of [
+    'private enum MagistrateIntentDestination',
+    'protocol MagistrateOpeningIntent',
+    'extension MagistrateOpeningIntent',
+    'struct StartMagistrateIntent',
+    'struct TalkToMagistrateIntent',
+    'struct AskMagistrateIntent',
+    'struct WhatsRunningIntent',
+    'struct WhatNeedsAttentionIntent',
+    'struct MagistrateVoiceIntent',
+    'struct MagistrateAppShortcuts',
+  ]) assert.ok(swift.includes(`@available(iOS 18.0, *)\n${declaration}`), `${declaration} must require iOS 18`);
+  assert.match(swift, /OpenURLIntent\(Self\.destination\)/);
 });
 
 test('native configuration has microphone copy, foreground-only audio, push, and App Intents plugin', () => {
