@@ -12,9 +12,12 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",
     "@types/node": "^22.0.0",
-    "typescript": "~6.0.3"
+    "brace-expansion": "5.0.12",
+    "typescript": "~6.0.3",
+    "undici": "8.10.2"
   },
   "scripts": {
+    "postinstall": "node scripts/ensure-safe-transitives.mjs",
     "typecheck": "tsc --noEmit",
     "test": "sh -c 'trap \"rm -rf .test-dist\" EXIT; tsc --noEmit false --outDir .test-dist && node --test tests/*.test.mjs'"
   },
