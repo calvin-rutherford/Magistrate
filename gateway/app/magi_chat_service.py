@@ -64,6 +64,14 @@ _TOOL_ACK_INTERNAL_MARKERS = (
     "tool call", "tool result", "orchestrat", "mgo_", "magi-",
 )
 MAGI_DIRECT_RESPONSE = "magi.respond"
+_FIRSTMATE_SUBMIT_OBJECTIVE = "firstmate.submit_objective"
+_MAGI_REMEMBER = "magi.remember"
+_EXPLICIT_MEMORY_REQUEST = re.compile(
+    r"^\s*(?:(?:please|kindly)\s+)?(?:remember|save|retain)\b"
+    r"|^\s*(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:remember|save|retain)\b"
+    r"|^\s*i\s+(?:want|need|would\s+like)\s+you\s+to\s+(?:remember|save|retain)\b",
+    re.IGNORECASE,
+)
 MAGI_DIRECT_RESPONSE_DEFINITION = MagiToolDefinition(
     name=MAGI_DIRECT_RESPONSE,
     description=(
@@ -244,6 +252,31 @@ class MagiChatService:
             used += size
         selected.reverse()
         return selected
+
+    @staticmethod
+    def _route_tool_definitions(
+        category: RouteCategory,
+        content: str,
+        available: Sequence[MagiToolDefinition],
+    ) -> tuple[MagiToolDefinition, ...]:
+        """Bind host-classified intent to the only capabilities the model can select."""
+        by_name = {definition.name: definition for definition in available}
+        if category in {
+            RouteCategory.READ_ONLY_INVESTIGATION,
+            RouteCategory.EXECUTION,
+            RouteCategory.HIGH_IMPACT_ACTION,
+        }:
+            objective = by_name.get(_FIRSTMATE_SUBMIT_OBJECTIVE)
+            return (objective,) if objective is not None else ()
+        if category == RouteCategory.DIRECT_CONVERSATION:
+            selected: list[MagiToolDefinition] = []
+            if _EXPLICIT_MEMORY_REQUEST.search(content):
+                memory = by_name.get(_MAGI_REMEMBER)
+                if memory is not None:
+                    selected.append(memory)
+            selected.append(MAGI_DIRECT_RESPONSE_DEFINITION)
+            return tuple(selected)
+        return (MAGI_DIRECT_RESPONSE_DEFINITION,)
 
     @staticmethod
     def _provider_request_id(
@@ -584,10 +617,16 @@ class MagiChatService:
             # can be analyzed by a capable model, but can never authorize an
             # execution tool invocation in the same turn.
             tools_enabled = allow_tools and self.tool_executor is not None and not attachments
-            execution_definitions = tuple(self.tool_executor.definitions) if tools_enabled else ()
+            available_definitions = (
+                tuple(self.tool_executor.definitions) if tools_enabled else ()
+            )
             definitions = (
-                (*execution_definitions, MAGI_DIRECT_RESPONSE_DEFINITION)
+                self._route_tool_definitions(category, content, available_definitions)
                 if tools_enabled else ()
+            )
+            executable_definitions = tuple(
+                definition for definition in definitions
+                if definition.name != MAGI_DIRECT_RESPONSE
             )
             result = await self._model_completion(
                 model_messages,
@@ -649,7 +688,7 @@ class MagiChatService:
                 response = self._validated_result(direct)
                 route_outcome = "direct-response"
             elif call is not None:
-                if call.name not in {definition.name for definition in execution_definitions}:
+                if call.name not in {definition.name for definition in executable_definitions}:
                     raise MagiModelError(
                         "provider_unknown_tool_call", retryable=False, tool_calls=1,
                     )

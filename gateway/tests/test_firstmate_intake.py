@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from app import db
+from app.billing import CreditLedger
 from app.firstmate_intake import reconcile_pending_objective_intake
 from app.magi_firstmate_tools import (
     FirstmateSubmitObjectiveContract,
@@ -116,6 +117,11 @@ async def test_startup_replays_crash_window_once_with_deterministic_task_identit
     assert row[0] == "accepted"
     assert row[1] == 2
     assert row[2] is not None
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT status FROM credit_reservations WHERE objective_id = ?",
+            (claim.objective_id,),
+        ).fetchone()[0] == "reserved"
 
     again = await reconcile_pending_objective_intake(dispatcher)
     assert again["examined"] == 0
@@ -125,9 +131,23 @@ async def test_startup_replays_crash_window_once_with_deterministic_task_identit
 @pytest.mark.asyncio
 async def test_failed_wake_recovers_after_restart_without_duplicate_objective():
     claim, _, context = _pending_claim("e")
+    ledger = CreditLedger()
+    initial = ledger.summary(context.owner_user_id)
     first_boot = RecoveringDispatcher(failures=1)
     failed = await reconcile_pending_objective_intake(first_boot)
     assert failed["failed"] >= 1
+    after_failure = ledger.summary(context.owner_user_id)
+    assert after_failure["balance_microcredits"] == initial["balance_microcredits"]
+    assert after_failure["reserved_microcredits"] == 0
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT status FROM credit_reservations WHERE objective_id = ?",
+            (claim.objective_id,),
+        ).fetchone()[0] == "released"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM credit_ledger WHERE objective_id = ? AND entry_type = 'release'",
+            (claim.objective_id,),
+        ).fetchone()[0] == 1
 
     with sqlite3.connect(db.DB_PATH) as connection:
         row = connection.execute(
@@ -148,3 +168,36 @@ async def test_failed_wake_recovers_after_restart_without_duplicate_objective():
             (context.owner_user_id, claim.objective_id),
         ).fetchall()
     assert rows == [("accepted",)]
+
+
+@pytest.mark.asyncio
+async def test_invalid_reconciled_contract_releases_an_existing_reservation():
+    claim, _, context = _pending_claim("i")
+    ledger = CreditLedger()
+    initial = ledger.summary(context.owner_user_id)
+    ledger.reserve_objective(
+        context.owner_user_id,
+        claim.objective_id,
+        idempotency_key=f"objective:{claim.objective_id}",
+    )
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute(
+            "UPDATE magi_objective_submissions SET contract_json = '{' WHERE objective_id = ?",
+            (claim.objective_id,),
+        )
+
+    result = await reconcile_pending_objective_intake(RecoveringDispatcher())
+
+    assert result["failed"] >= 1
+    summary = ledger.summary(context.owner_user_id)
+    assert summary["balance_microcredits"] == initial["balance_microcredits"]
+    assert summary["reserved_microcredits"] == 0
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT status, last_error_code FROM magi_objective_submissions WHERE objective_id = ?",
+            (claim.objective_id,),
+        ).fetchone() == ("failed", "objective_contract_invalid")
+        assert connection.execute(
+            "SELECT status FROM credit_reservations WHERE objective_id = ?",
+            (claim.objective_id,),
+        ).fetchone()[0] == "released"

@@ -202,12 +202,13 @@ async def reconcile_pending_objective_intake(
             else TasksAxiObjectiveDispatcher()
         )
     store = ObjectiveSubmissionStore()
+    credit_ledger = CreditLedger()
     for row in rows:
         try:
             contract = FirstmateSubmitObjectiveContract.model_validate_json(row["contract_json"])
         except (ValueError, TypeError):
             with connect(db.DB_PATH, timeout=10) as connection:
-                connection.execute(
+                changed = connection.execute(
                     """UPDATE magi_objective_submissions
                        SET status = 'failed', attempt_count = ?,
                            last_error_code = 'objective_contract_invalid', updated_at = ?
@@ -217,6 +218,12 @@ async def reconcile_pending_objective_intake(
                         MAX_STARTUP_INTAKE_RETRIES, int(time.time() * 1000),
                         row["objective_id"], row["owner_user_id"],
                     ),
+                ).rowcount
+            if changed == 1:
+                credit_ledger.release_objective(
+                    str(row["owner_user_id"]),
+                    str(row["objective_id"]),
+                    reason="invalid-contract",
                 )
             counts["failed"] += 1
             continue
@@ -247,10 +254,11 @@ async def reconcile_pending_objective_intake(
             context_json=str(row["context_json"]),
             context_sha256=str(row["context_sha256"]),
         )
+        reservation: dict[str, Any] | None = None
         try:
             # A crash may have landed after the objective row but before its
             # reservation. Recovery must restore the same pre-start hard gate.
-            CreditLedger().reserve_objective(
+            reservation = credit_ledger.reserve_objective(
                 str(row["owner_user_id"]),
                 claim.objective_id,
                 idempotency_key=f"objective:{claim.objective_id}",
@@ -269,10 +277,16 @@ async def reconcile_pending_objective_intake(
             reason = str(exc)
             prefix = "objective_dispatch" if isinstance(exc, ObjectiveDispatchError) else "objective_billing"
             safe_reason = getattr(exc, "code", reason)
-            store.fail(
+            failed = store.fail(
                 str(row["owner_user_id"]), claim,
                 f"{prefix}_{safe_reason}" if safe_reason else f"{prefix}_failed",
             )
+            if failed and reservation is not None and reservation.get("status") == "reserved":
+                credit_ledger.release_objective(
+                    str(row["owner_user_id"]),
+                    claim.objective_id,
+                    reason="intake-failed",
+                )
             counts["failed"] += 1
         else:
             counts["recovered"] += 1

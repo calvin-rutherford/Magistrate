@@ -12,7 +12,6 @@ from app.magi_chat_service import MAGI_DIRECT_RESPONSE, MagiChatService
 from app.magi_chat_store import MagiChatStore
 from app.magi_firstmate_tools import (
     FIRSTMATE_SUBMIT_OBJECTIVE,
-    MAGI_REMEMBER,
     FirstmateObjectiveTools,
     ObjectiveDispatchError,
     ObjectiveDispatchReceipt,
@@ -419,6 +418,111 @@ class IntentRoutingModel:
         return MagiModelResult('Here is a direct conversational answer.')
 
 
+class RouteCapabilityModel:
+    def __init__(self, selected_tool, expected_tools, *, objective=None):
+        self.selected_tool = selected_tool
+        self.expected_tools = expected_tools
+        self.objective = objective
+        self.calls = []
+
+    async def complete(self, messages, *, system_context, request_id, tools=()):
+        self.calls.append(tuple(definition.name for definition in tools))
+        if messages[-1].role == 'tool':
+            result = json.loads(messages[-1].content)
+            if result['status'] == 'respond':
+                return MagiModelResult('Direct answer.')
+            return MagiModelResult('Accepted for execution.')
+        assert [definition.name for definition in tools] == self.expected_tools
+        arguments = (
+            objective_arguments(objective=self.objective)
+            if self.selected_tool == FIRSTMATE_SUBMIT_OBJECTIVE else '{}'
+        )
+        return MagiModelResult(
+            None,
+            finish_reason='tool_calls',
+            tool_calls=(MagiModelToolCall(
+                id='call_route_capability',
+                name=self.selected_tool,
+                arguments_json=arguments,
+            ),),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('prompt', ['2 + 2', 'Explain dependency injection'])
+async def test_direct_conversation_cannot_create_an_objective_or_reservation(
+    monkeypatch, tmp_path, prompt,
+):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'direct-capabilities.sqlite3'))
+    _ensure_operator()
+    dispatcher = FakeDispatcher()
+    model = RouteCapabilityModel(MAGI_DIRECT_RESPONSE, [MAGI_DIRECT_RESPONSE])
+    service = MagiChatService(
+        model,
+        store=MagiChatStore(),
+        profile_loader=lambda _: {},
+        tool_executor=FirstmateObjectiveTools(
+            store=ObjectiveSubmissionStore(), dispatcher=dispatcher,
+        ),
+    )
+
+    result = await service.submit(
+        'operator-a', f'direct-capabilities-{prompt.replace(" ", "-")}', prompt,
+        allow_tools=True,
+    )
+
+    assert result['status'] == 'completed'
+    assert result['assistant_message']['content'] == 'Direct answer.'
+    assert dispatcher.calls == []
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute('SELECT COUNT(*) FROM magi_objective_submissions').fetchone()[0] == 0
+        assert connection.execute('SELECT COUNT(*) FROM credit_reservations').fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('prompt', 'confirmed', 'category'), [
+    ('Fix the failing login test', False, 'EXECUTION'),
+    ('Investigate why the API is timing out', False, 'READ_ONLY_INVESTIGATION'),
+    ('Deploy this to production', True, 'HIGH_IMPACT_ACTION'),
+])
+async def test_action_routes_offer_only_objective_submission(
+    monkeypatch, tmp_path, prompt, confirmed, category,
+):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / f'{category.lower()}.sqlite3'))
+    _ensure_operator()
+    dispatcher = FakeDispatcher()
+    model = RouteCapabilityModel(
+        FIRSTMATE_SUBMIT_OBJECTIVE,
+        [FIRSTMATE_SUBMIT_OBJECTIVE],
+        objective=prompt,
+    )
+    service = MagiChatService(
+        model,
+        store=MagiChatStore(),
+        profile_loader=lambda _: {},
+        tool_executor=FirstmateObjectiveTools(
+            store=ObjectiveSubmissionStore(), dispatcher=dispatcher,
+        ),
+    )
+
+    result = await service.submit(
+        'operator-a', f'action-capabilities-{category.lower()}', prompt,
+        allow_tools=True,
+        explicit_confirmation=confirmed,
+    )
+
+    assert result['status'] == 'completed'
+    assert len(dispatcher.calls) == 1
+    assert model.calls == [(FIRSTMATE_SUBMIT_OBJECTIVE,), ()]
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            'SELECT route_category FROM magi_turn_routes'
+        ).fetchone()[0] == category
+        assert connection.execute(
+            "SELECT status FROM credit_reservations"
+        ).fetchone()[0] == 'reserved'
+
+
 @pytest.mark.asyncio
 async def test_responses_provider_service_keeps_ordinary_chat_and_objective_delegation(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'responses-service.sqlite3'))
@@ -437,9 +541,11 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
             assert body['reasoning'] == {'effort': 'high'}
             assert body['tool_choice'] == 'required'
             assert 'messages' not in body
-            assert [tool['name'] for tool in body['tools']] == [
-                'firstmate__submit_objective', 'magi__remember', 'magi__respond',
-            ]
+            expected = (
+                ['magi__respond'] if len(requests) == 1
+                else ['firstmate__submit_objective']
+            )
+            assert [tool['name'] for tool in body['tools']] == expected
             assert set(body['tools'][0]) == {
                 'type', 'name', 'description', 'parameters', 'strict',
             }
@@ -491,11 +597,9 @@ async def test_responses_provider_service_keeps_ordinary_chat_and_objective_dele
     assert requests[0]['reasoning'] == {'effort': 'high'}
     offered = requests[0]['tools'][0]
     assert offered['type'] == 'function'
-    assert offered['name'] == 'firstmate__submit_objective'
+    assert offered['name'] == 'magi__respond'
     assert offered['strict'] is True
     assert 'function' not in offered
-    assert requests[0]['tools'][1]['name'] == 'magi__remember'
-    assert requests[0]['tools'][2]['name'] == 'magi__respond'
 
     objective = await service.submit(
         'operator-a', 'responses-objective-0001',
@@ -517,7 +621,7 @@ async def test_command_authorized_turn_cannot_mask_missing_tool_selection_as_pro
     class ProseFallbackModel:
         async def complete(self, messages, *, system_context, request_id, tools=()):
             assert [definition.name for definition in tools] == [
-                FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_REMEMBER, MAGI_DIRECT_RESPONSE,
+                FIRSTMATE_SUBMIT_OBJECTIVE,
             ]
             return MagiModelResult('I can help create that project.')
 
@@ -566,7 +670,7 @@ async def test_native_chat_routes_actionable_intent_once_but_answers_questions_d
     assert len(dispatcher.calls) == 1
     assert len(model.calls) == 2
     assert [definition.name for definition in model.calls[0]['tools']] == [
-        FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_REMEMBER, MAGI_DIRECT_RESPONSE,
+        FIRSTMATE_SUBMIT_OBJECTIVE,
     ]
     assert model.calls[1]['tools'] == ()
     assert [message.role for message in model.calls[1]['messages'][-2:]] == ['assistant', 'tool']
@@ -639,7 +743,7 @@ async def test_native_chat_preserves_the_models_immediate_user_language_acknowle
     )
     result = await service.submit(
         'operator-a', 'objective-language-0001',
-        'Añade un endpoint de salud a Magistrate y pruébalo.',
+        'Add a health endpoint to Magistrate and test it.',
         allow_tools=True,
     )
     assert result['status'] == 'completed'
@@ -671,6 +775,95 @@ async def test_accepted_objective_uses_truthful_ack_fallback_instead_of_internal
     assert 'task_id' not in text
     assert 'completed' not in text
     assert len(dispatcher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_dispatch_releases_reserved_credits_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'failed-dispatch-credit.sqlite3'))
+    _ensure_operator()
+    ledger = CreditLedger()
+    initial = ledger.summary('operator-a')
+    dispatcher = FakeDispatcher(fail_count=1)
+    tools = FirstmateObjectiveTools(
+        store=ObjectiveSubmissionStore(), dispatcher=dispatcher, credit_ledger=ledger,
+    )
+    call = MagiModelToolCall(
+        'call_failed_dispatch', FIRSTMATE_SUBMIT_OBJECTIVE, objective_arguments(),
+    )
+
+    with pytest.raises(MagiToolError) as failed:
+        await tools.execute(call, context=tool_context(), invocation_key='d' * 64)
+
+    assert failed.value.code == 'objective_dispatch_failed'
+    summary = ledger.summary('operator-a')
+    assert summary['balance_microcredits'] == initial['balance_microcredits']
+    assert summary['reserved_microcredits'] == 0
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            'SELECT status FROM magi_objective_submissions'
+        ).fetchone()[0] == 'failed'
+        assert connection.execute(
+            'SELECT status FROM credit_reservations'
+        ).fetchone()[0] == 'released'
+        assert connection.execute(
+            "SELECT COUNT(*) FROM credit_ledger WHERE entry_type = 'release'"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_failed_dispatch_keeps_one_reservation_and_one_release(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'repeated-failed-dispatch.sqlite3'))
+    _ensure_operator()
+    ledger = CreditLedger()
+    initial = ledger.summary('operator-a')
+    dispatcher = FakeDispatcher(fail_count=2)
+    tools = FirstmateObjectiveTools(
+        store=ObjectiveSubmissionStore(), dispatcher=dispatcher, credit_ledger=ledger,
+    )
+    call = MagiModelToolCall(
+        'call_repeated_failure', FIRSTMATE_SUBMIT_OBJECTIVE, objective_arguments(),
+    )
+
+    for _ in range(2):
+        with pytest.raises(MagiToolError, match='objective_dispatch_failed'):
+            await tools.execute(call, context=tool_context(), invocation_key='e' * 64)
+
+    summary = ledger.summary('operator-a')
+    assert summary['balance_microcredits'] == initial['balance_microcredits']
+    assert summary['reserved_microcredits'] == 0
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute('SELECT COUNT(*) FROM credit_reservations').fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM credit_ledger WHERE entry_type = 'release'"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_dispatch_retains_active_reservation(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'successful-dispatch-credit.sqlite3'))
+    _ensure_operator()
+    ledger = CreditLedger()
+    initial = ledger.summary('operator-a')
+    tools = FirstmateObjectiveTools(
+        store=ObjectiveSubmissionStore(), dispatcher=FakeDispatcher(), credit_ledger=ledger,
+    )
+
+    result = await tools.execute(
+        MagiModelToolCall('call_success', FIRSTMATE_SUBMIT_OBJECTIVE, objective_arguments()),
+        context=tool_context(), invocation_key='f' * 64,
+    )
+
+    assert result.payload['status'] == 'accepted'
+    summary = ledger.summary('operator-a')
+    assert summary['balance_microcredits'] < initial['balance_microcredits']
+    assert summary['reserved_microcredits'] > 0
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            'SELECT status FROM credit_reservations'
+        ).fetchone()[0] == 'reserved'
+        assert connection.execute(
+            "SELECT COUNT(*) FROM credit_ledger WHERE entry_type = 'release'"
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
