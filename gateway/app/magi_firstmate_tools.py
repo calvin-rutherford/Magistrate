@@ -564,22 +564,23 @@ class ObjectiveSubmissionStore:
         finally:
             connection.close()
 
-    def fail(self, owner_user_id: str, claim: ObjectiveClaim, code: str) -> None:
+    def fail(self, owner_user_id: str, claim: ObjectiveClaim, code: str) -> bool:
         safe_code = code if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", code or "") else "objective_dispatch_failed"
         connection: sqlite3.Connection | None = None
         try:
             connection = _connect_objectives()
-            connection.execute(
+            changed = connection.execute(
                 """UPDATE magi_objective_submissions
                    SET status = 'failed', last_error_code = ?, updated_at = ?
                    WHERE objective_id = ? AND owner_user_id = ? AND status != 'accepted'""",
                 (safe_code, _now_ms(), claim.objective_id, owner_user_id),
-            )
+            ).rowcount
             connection.commit()
+            return changed == 1
         except sqlite3.Error:
             # The original safe dispatch error remains authoritative. Never
             # replace it with exception text from best-effort failure recording.
-            return
+            return False
         finally:
             if connection is not None:
                 connection.close()
@@ -974,8 +975,9 @@ class FirstmateObjectiveTools:
             # Reserve before the queue edge. This transaction is the hard stop:
             # insufficient balance, spend cap, entitlement, or concurrency
             # means Firstmate never receives a task and cannot start a worker.
+            reservation: dict[str, Any] | None = None
             try:
-                self.credit_ledger.reserve_objective(
+                reservation = self.credit_ledger.reserve_objective(
                     context.owner_user_id,
                     claim.objective_id,
                     idempotency_key=f"objective:{claim.objective_id}",
@@ -986,12 +988,12 @@ class FirstmateObjectiveTools:
             except BillingError as exc:
                 self.store.fail(context.owner_user_id, claim, f"billing_{exc.code}")
                 raise MagiToolError(f"objective_billing_{exc.code}", retryable=False) from exc
-            title = _task_title(contract)
-            body = _task_body(
-                claim.objective_id, claim.contract_json,
-                claim.context_json if claim.context_sha256 else None,
-            )
             try:
+                title = _task_title(contract)
+                body = _task_body(
+                    claim.objective_id, claim.contract_json,
+                    claim.context_json if claim.context_sha256 else None,
+                )
                 await self.dispatcher.submit(
                     task_id=claim.task_id,
                     title=title,
@@ -1004,12 +1006,29 @@ class FirstmateObjectiveTools:
                 raise
             except ObjectiveDispatchError as exc:
                 reason = str(exc)
-                self.store.fail(
+                failed = self.store.fail(
                     context.owner_user_id,
                     claim,
                     f"objective_dispatch_{reason}" if reason else "objective_dispatch_failed",
                 )
+                if failed and reservation is not None and reservation.get("status") == "reserved":
+                    self.credit_ledger.release_objective(
+                        context.owner_user_id,
+                        claim.objective_id,
+                        reason="dispatch-failed",
+                    )
                 raise MagiToolError("objective_dispatch_failed") from exc
+            except MagiToolError as exc:
+                # Contract materialization can still fail after reservation but
+                # before the dispatcher receives anything.
+                failed = self.store.fail(context.owner_user_id, claim, exc.code)
+                if failed and reservation is not None and reservation.get("status") == "reserved":
+                    self.credit_ledger.release_objective(
+                        context.owner_user_id,
+                        claim.objective_id,
+                        reason="submission-failed",
+                    )
+                raise
             self.store.accept(context.owner_user_id, claim)
         return MagiToolExecutionResult(payload={
             "schema_version": FIRSTMATE_OBJECTIVE_RESULT_SCHEMA,

@@ -358,14 +358,14 @@ class RememberingModel:
         if messages[-1].role == "tool":
             result = json.loads(messages[-1].content)
             assert result["status"] == "remembered"
-            return MagiModelResult("I’ll remember that preference for this project.")
+            return MagiModelResult("I’ll remember that project fact.")
         return MagiModelResult(
             None, finish_reason="tool_calls",
             tool_calls=(MagiModelToolCall(
                 "call-remember", MAGI_REMEMBER, json.dumps({
-                    "kind": "preference",
-                    "title": "Test execution preference",
-                    "content": "Prefer focused regression tests before the full suite.",
+                    "kind": "conversation-fact",
+                    "title": "Project database",
+                    "content": "This project uses PostgreSQL.",
                     "project": "Magistrate",
                     "repository": "",
                 }),
@@ -386,23 +386,30 @@ async def test_explicit_chat_memory_is_persisted_and_retrieved_on_a_later_turn(m
     )
     remembered = await service.submit(
         "captain-a", "remember-client-0001",
-        "Remember that I prefer focused regression tests before the full suite.",
+        "Remember that this project uses PostgreSQL",
         allow_tools=True,
     )
     assert remembered["status"] == "completed"
     assert remembered["assistant_message"]["content"].startswith("I’ll remember")
     assert [definition.name for definition in model.calls[0][2]] == [
-        FIRSTMATE_SUBMIT_OBJECTIVE, MAGI_REMEMBER, "magi.respond",
+        MAGI_REMEMBER, "magi.respond",
     ]
+    with sqlite3.connect(db.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM magi_objective_submissions"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM credit_reservations"
+        ).fetchone()[0] == 0
 
     next_provider = CapturingModel("I have that preference.")
     next_service = MagiChatService(
         next_provider, store=MagiChatStore(), profile_loader=lambda _: {},
     )
     await next_service.submit(
-        "captain-a", "remember-client-0002", "Which regression tests do I prefer?",
+        "captain-a", "remember-client-0002", "Which database does this project use?",
     )
-    assert "Prefer focused regression tests before the full suite." in next_provider.calls[0][1]
+    assert "This project uses PostgreSQL." in next_provider.calls[0][1]
 
 
 class CapturingModel:

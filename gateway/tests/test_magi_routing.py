@@ -294,6 +294,7 @@ async def test_unconfirmed_high_impact_turn_makes_no_model_or_objective_call(mon
     assert 'explicit confirmation' in result['assistant_message']['content']
     with sqlite3.connect(db.DB_PATH) as connection:
         assert connection.execute('SELECT COUNT(*) FROM magi_objective_submissions').fetchone()[0] == 0
+        assert connection.execute('SELECT COUNT(*) FROM credit_reservations').fetchone()[0] == 0
         assert connection.execute('SELECT COUNT(*) FROM magi_model_routes').fetchone()[0] == 0
         assert connection.execute(
             'SELECT route_category, outcome FROM magi_turn_routes'
