@@ -20,6 +20,7 @@ production-complete declaration. Historical `COMPLETE` labels are not evidence.
 | Upload/resource safety | Existing private owner-bound uploads and actual-byte caps remain in `uploads.py`/ASGI middleware. | Do not bypass caps, content validation, idempotency or provider budgets with personal entitlement. | No changes to those boundaries; integration must run upload/security suites. Foundation admission tests are not upload evidence. |
 | Running service/data ownership | Dedicated Gateway user unit is active/running under the inspected service account; executable is `uv`; working directory is the separate deploy checkout's `gateway`. SQLite has private file permissions. | No service or live database edits. Verify any eventual activation under operator change control. | Selected systemd properties, executable/port inspection and read-only schema existence checks below. No secrets or row contents read out. |
 | Personal UI/native polish | Chat shell, voice, push and App Intents already exist; this lane did not exercise them on a device. | Allocated UI/native lanes finish personal-first presentation and decision-return loop. | Their browser/native test reports and later physical-device evidence; **not established here**. |
+| Current dependency gate | Fresh CI audit failed on the unchanged main frontend lock: 22 high, 1 critical. Narrow compatible updates below remove the critical and one root high advisory; 21 propagated high findings remain. | Await compatible upstream braces/node-forge releases or separately review a dependency replacement; never waive the advisory gate or force Expo/React Native downgrades. | Full frontend validation passes after the two-package correction; `npm audit --audit-level=low --json` still exits 1. **Release blocked**, not clean. |
 
 ## Baseline and operational evidence
 
@@ -209,3 +210,53 @@ app/contracts.py tests/test_personal_deployment.py` and `git diff --check` passe
 This slice neither composes startup/routes nor claims activated personal
 execution. No service changes, real objective dispatch, provider spending,
 external deployment, live DB writes or physical-device tests were performed.
+
+### Dependency follow-up: safe partial remediation, gate still blocked
+
+The failed Production foundation run
+<https://github.com/calvin-rutherford/Magistrate/actions/runs/39054449371>
+reported 22 high/1 critical frontend advisories. Current remote main remained at
+the observed baseline; its frontend manifest and lock were byte-identical to the
+foundation commit. Reproduced with the exact CI `npm ci` then
+`npm audit --audit-level=low --json` command, not a weakened audit level.
+
+Read [the versioned Expo 57 documentation](https://docs.expo.dev/versions/v57.0.0/):
+SDK 57 targets RN 0.86, React 19.2.3 and React Native Web 0.21. Retained that
+contract, Metro 0.84.4 and both existing parser compatibility patches. Only two
+transitive lock entries changed, within their consumers' compatible ranges:
+
+- `shell-quote` 1.10.0 → **1.12.0**, addressing
+  [GHSA-pqg4-j6r4-53mv](https://github.com/advisories/GHSA-pqg4-j6r4-53mv)
+  (patched since 1.11.0). Added a real quote/parse compatibility check and all four
+  line-terminator-after-comment refusals, without executing injected shell text.
+- `source-map-js` 1.2.1 → **1.2.2**, addressing
+  [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q).
+  Added valid indexed-map enumeration plus excessive/invalid offset refusals in
+  a time-bounded subprocess.
+
+Validation after correction: `npm ci`, `npm run test:release` (**10 passed**),
+`npm run typegen`, `npm run typecheck`, `npm run lint` (0 errors, 15 existing
+warnings), full `npm test` (**148 passed**), `npx expo export --platform web`, the
+**103 + 47** Gateway suites above, compile and diff checks all passed. No extra
+untracked files were generated. One new source-map fixture initially assumed
+indexed lookup semantics unrelated to this fix; it now verifies actual mapping
+enumeration and preserves the hostile-offset refusal.
+
+**Remaining blocker:** the final frontend audit still exits **1**, reporting
+**21 high, 0 critical** findings rooted in:
+
+- `braces` **3.0.3**, [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm):
+  every published version is affected (`<=3.0.3`); reached through micromatch in
+  Metro/patch-package tooling.
+- `node-forge` **1.4.0**, [GHSA-86w9-cpqp-85rv](https://github.com/advisories/GHSA-86w9-cpqp-85rv):
+  every published version is affected (`<=1.4.0`); Expo CLI and its code-signing
+  certificate dependency still require it.
+
+Official advisory API records returned `first_patched_version: null` for both;
+registry version lists confirmed these are the newest releases. The audit's
+suggested Expo 44/RN 0.72/patch-package 6 downgrades violate the supported
+compatibility contract and were **not applied**. A local parser/crypto patch
+would not clear the unchanged package advisory gate and is not a reviewed
+upstream replacement. No audit suppression, risk waiver, forced framework
+migration or claim that other dependency scans passed is made. Later audit
+steps are not established by a frontend-failing CI job.
