@@ -264,14 +264,14 @@ async def test_unified_attention_includes_owner_decision_without_legacy_action(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('answer', ['Approve option B.\nPreserve the bounded adapter exactly.', 'Decline. Do not proceed with this request.'])
 async def test_answer_handler_uses_exact_native_bytes_confirmation_and_idempotent_resume(
-    isolated_decision_db,
+    isolated_decision_db, answer,
 ):
     firstmate = FakeFirstmate([captain_record()])
     command = FakeCommand({"task-alpha": "2026-09-13T20:00:00Z#2"})
     service = FirstmateDecisionService(firstmate, command=command)
     decision = (await ingest_legacy_snapshot(service, firstmate))[0]
-    answer = "Use option B.\nPreserve the bounded adapter exactly."
     insert_native_user_message("mgm_answer_one", answer)
     arguments = {
         "decision_id": decision["decision_id"],
@@ -490,6 +490,23 @@ async def test_answers_reject_malformed_stale_foreign_unconfirmed_and_resolved_r
             native_user_message_id="mgm_fresh_answer",
         )
     assert already_resolved.value.code == "already_resolved"
+    assert command.answers == []
+
+
+@pytest.mark.asyncio
+async def test_expired_confirmation_cannot_deliver_an_answer(isolated_decision_db):
+    firstmate = FakeFirstmate([captain_record()])
+    command = FakeCommand({'task-alpha': '2026-09-13T20:00:00Z#2'})
+    service = FirstmateDecisionService(firstmate, command=command)
+    decision = (await ingest_legacy_snapshot(service, firstmate))[0]
+    insert_native_user_message('mgm_expired_answer', 'Approve this request.')
+    arguments = {'decision_id': decision['decision_id'], 'decision_revision': decision['revision']}
+    prepared = await service.prepare_tool_answer(principal(), arguments, native_user_message_id='mgm_expired_answer')
+    with sqlite3.connect(db.DB_PATH) as connection:
+        connection.execute('UPDATE firstmate_decision_answer_confirmations SET expires_at=1')
+    with pytest.raises(FirstmateDecisionError) as expired:
+        await service.execute_tool_answer(principal(), arguments, native_user_message_id='mgm_expired_answer', confirmation_token=prepared['confirmation_token'])
+    assert expired.value.code == 'confirmation_invalid'
     assert command.answers == []
 
 

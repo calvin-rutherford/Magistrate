@@ -68,7 +68,7 @@ def test_sparse_outcomes_and_account_issues_are_supported_with_product_safe_copy
     completion['url'] = 'https://infrastructure.invalid/private'
     events = notifications.reconcile_notification_events('captain', [completion])['events']
     assert [event['id'] for event in events] == ['internal-run-44']
-    assert notifications._safe_push_copy('completion') == ('Work completed', 'Open Magistrate to review the result.')
+    assert notifications._safe_push_copy('completion') == ('Work completed', 'Open the app to review the result.')
     assert notifications._safe_deep_link(completion) == '/attention?overview=true'
     for kind in ('budget', 'credit', 'repository_disconnected', 'payment_issue'):
         assert notifications._mode_for_kind('restricted', kind)
@@ -139,6 +139,11 @@ async def test_remote_push_retries_and_deduplicates_by_fingerprint(monkeypatch, 
             return Response(503, {}) if len(calls) == 1 else Response(200, {'data': {'status': 'ok', 'id': 'ticket-retry'}})
 
     monkeypatch.setattr(notifications.httpx, 'AsyncClient', Client)
+    clock = [1_800_000_000]
+    monkeypatch.setattr('app.push_receipts.time.time', lambda: clock[0])
+    result = await notifications.dispatch_notification_events('captain', [item()])
+    assert result['delivery'] == 'partial' and len(calls) == 1
+    clock[0] += 121
     result = await notifications.dispatch_notification_events('captain', [item()])
     assert result['delivery'] == 'accepted'
     assert len(calls) == 2
