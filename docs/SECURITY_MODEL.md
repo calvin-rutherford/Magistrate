@@ -1,7 +1,8 @@
 # Security model — release authority boundaries
 
-Authority: [production matrix](PRODUCTION_STATUS.md). Repository controls and
-advisory remediation: **COMPLETE**. Deployed isolation, legal/security review
+Authority: [production matrix](PRODUCTION_STATUS.md). Repository controls are
+implemented; current advisory remediation is **BLOCKED** on upstream dependency
+fixes (see the 2026-10-17 status below). Deployed isolation, legal/security review
 and physical-device evidence: **BLOCKED_EXTERNAL**. No compliance certification,
 penetration test or production threat-model approval is inferred from unit tests.
 
@@ -70,14 +71,68 @@ malicious ICNS/HEIF/JXL/query fixtures. Full browser tests and export are still
 mandatory; a lockfile-only audit is insufficient. Re-review/remove the bridges
 when supported upstream consumers adopt these APIs; never blindly bump a patch.
 
-Current local `npm audit` reports **zero** advisories for frontend and Pi adapter;
-`pip-audit 2.10.1` reports **zero known vulnerabilities** in the installed locked
+At the dated **2026-09-28** reconciliation, local `npm audit` reported **zero**
+advisories for frontend and Pi adapter; `pip-audit 2.10.1` reported **zero known
+vulnerabilities** in the installed locked
 Gateway and installed retained backend environments. Editable project source is
 not an advisory package. These are point-in-time database lookups, not proof of
 absence of vulnerabilities. CI's `Locked dependency advisory checks` reruns all
 four scans; reports are separate from hermetic receipts. No risk waiver or
 unresolved upstream exception is being claimed. Isolate CI/build credentials
 from untrusted repo code even with a clean scan.
+
+## Current dependency status — 2026-10-17: release blocked
+
+The historical zero-advisory receipt above is not the current release state.
+The unchanged main frontend lock reproduced **22 high / 1 critical** findings.
+Two compatible transitive updates (`shell-quote` 1.10.0 → 1.12.0 and
+`source-map-js` 1.2.1 → 1.2.2) removed the critical command-injection advisory
+and indexed-source-map denial-of-service advisory, leaving **21 high**.
+
+A separately reviewed, SDK-57-compatible cleanup now selects only
+**`@expo/metro-file-map` 57.0.3 → 57.0.4** in the lock. This maintained upstream
+release removes its `micromatch` dependency in favor of explicit extension,
+basename and prefix matching, including upstream's dotfile/multipart-extension
+correction: <https://github.com/expo/expo/pull/51093>. No new direct dependency,
+override, parser fork, framework downgrade or audit-workflow change was added.
+Expo 57 / RN 0.86.3, Metro 0.84.4 and both existing compatibility patches remain.
+
+The exact **`npm audit --audit-level=low --json`** gate still reports
+**20 high / 0 critical**, exit **1**. These are affected package-name entries
+propagated from two root advisories, not 20 independently demonstrated exploits:
+
+- [braces, GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm):
+  all published versions through 3.0.3 are affected. Two unscoped Metro file-map
+  installations and `patch-package → find-yarn-workspace-root → micromatch`
+  retain the dependency. Removing Expo's one edge does not remove this root.
+- [node-forge, GHSA-86w9-cpqp-85rv](https://github.com/advisories/GHSA-86w9-cpqp-85rv):
+  all published versions through 1.4.0 are affected. Expo CLI retains both its
+  direct dependency and its code-signing-certificate helper's dependency.
+
+Registry/advisory checks found no published patched version for either root.
+A proposed crypto fix or an unreleased Metro removal is not an available safe
+lock update. Ordinary Metro matching and local signing flows have narrower
+reachability than arbitrary attacker-controlled library inputs; that does not
+clear the full installed-graph audit or establish an application exploit.
+Production static assets are not the Node build graph, but builds/development
+remain security boundaries and are still scanned in full. Keep untrusted builds
+away from production/signing credentials.
+
+Compatibility coverage in `frontend/tests/dependency-compatibility.test.js`
+checks the exact file-map version and removed edge, positive/negative extension,
+dotfile, multipart-extension, basename and prefix cases, and real filesystem
+add/change/delete notifications using the maintained fallback watcher. Fixtures
+contain only synthetic files in the ignored worktree and are removed afterward;
+this is local watcher evidence, not a device or deployment claim. Full install,
+frontend release/tests/typecheck/lint/export, Gateway suites and final audit
+results are recorded in [the completion checklist](completion-checklist.md).
+
+**The advisory gate remains red.** No risk waiver, suppression, lower threshold,
+production-only dependency omission or release approval is inferred. This
+frontend failure does not establish current Pi/backend/Gateway audit results;
+the dated clean reports above remain historical evidence only. Full remediation
+requires compatible upstream fixes or a separately reviewed maintained consumer
+replacement covering every remaining edge.
 
 ## Lifecycle, secrets and recovery
 
