@@ -98,8 +98,8 @@ test('Home renders live agent identity and links agent context to the sole Magi 
   await page.locator('::-p-text(Live captain)').click();
   await page.waitForFunction(() => location.pathname === '/chat');
   await page.waitForSelector('[data-testid="magi-prompt"]');
-  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
-  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('aria-label')), 'Message Magi');
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('placeholder')), 'Message');
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('aria-label')), 'Message the assistant');
   await page.close();
 });
 

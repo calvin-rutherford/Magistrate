@@ -27,9 +27,13 @@ test('iOS composer follows keyboard frames without double-counting the home indi
   assert.match(chat, /behavior=\{Platform\.OS === 'android' \? 'height' : undefined\}/);
 });
 
-test('chat keeps one voice entry point on restrained blur-free surfaces', () => {
+test('chat keeps one voice entry point and limits blur to a reduced-transparency-aware header', () => {
   assert.doesNotMatch(chat, /testID="chat-primary-action"/);
   assert.match(chat, /testID="inline-mic-button"/);
+  assert.match(chat, /function HeaderBackdrop/);
+  assert.match(chat, /<BlurView[^>]+intensity=\{22\}/);
+  assert.match(chat, /reducedTransparency/);
+  assert.match(chat, /isReduceTransparencyEnabled/);
   assert.match(chat, /const blurStyle = \(_radius: number\) => null/);
   assert.match(chat, /function NativeGlassBlur[\s\S]*?return null/);
   assert.doesNotMatch(chat, /backdropFilter: `blur/);
