@@ -346,7 +346,7 @@ def rotate_oauth_credentials(
     return _rewrite_oauth_credentials(rotate_encrypted_token, limit=limit, apply=apply)
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def _migration_projects_and_tenancy(connection: sqlite3.Connection) -> None:
@@ -811,6 +811,34 @@ def _migration_push_receipts(connection: sqlite3.Connection) -> None:
     install_schema(connection)
 
 
+def _migration_personal_resources(connection: sqlite3.Connection) -> None:
+    connection.execute("""CREATE TABLE personal_resource_reservations (
+        objective_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        actor_session_id TEXT NOT NULL,
+        contract_sha256 TEXT NOT NULL,
+        policy_json TEXT NOT NULL,
+        repository_json TEXT NOT NULL,
+        reserved_micro_usd INTEGER NOT NULL CHECK(reserved_micro_usd > 0),
+        implementation_workers INTEGER NOT NULL CHECK(implementation_workers BETWEEN 1 AND 2),
+        status TEXT NOT NULL CHECK(status IN ('reserved','settled','released')),
+        actual_micro_usd INTEGER,
+        usage_json TEXT,
+        settlement_event_id TEXT,
+        period_key TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(objective_id) REFERENCES magi_objective_submissions(objective_id)
+    )""")
+    connection.execute('CREATE INDEX idx_personal_resources_owner ON personal_resource_reservations(owner_user_id,status)')
+    connection.execute('ALTER TABLE firstmate_decisions ADD COLUMN request_json TEXT')
+    connection.execute('''CREATE TABLE objective_state_projections (
+        owner_user_id TEXT NOT NULL, objective_id TEXT NOT NULL,
+        revision INTEGER NOT NULL, record_json TEXT NOT NULL,
+        PRIMARY KEY(owner_user_id,objective_id)
+    )''')
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (2, "projects-and-tenant-lifecycle", _migration_projects_and_tenancy),
     (3, "provider-onboarding-and-billing", _migration_provider_onboarding_and_billing),
@@ -820,6 +848,7 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
     (7, "hosted-execution", _install_hosted_execution_schema),
     (8, "files-and-perception", _migration_files_and_perception),
     (9, "durable-push-receipts", _migration_push_receipts),
+    (10, "personal-resources-and-decision-binding", _migration_personal_resources),
 )
 
 

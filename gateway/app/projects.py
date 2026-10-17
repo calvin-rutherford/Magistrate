@@ -307,6 +307,30 @@ def unbind_repository(owner_user_id: str, project_id: str, repository_id: str) -
             conn.execute("UPDATE projects SET kind = 'standalone', updated_at = ? WHERE project_id = ? AND owner_user_id = ?", (_now_ms(), project_id, owner_user_id))
 
 
+def execution_repository(connection, owner_user_id: str, project_id: str | None) -> dict[str, Any] | None:
+    """One current server-authorized repository, never a model-selected path."""
+    if not project_id:
+        return None
+    rows = connection.execute(
+        """SELECT app_repo.installation_id, app_repo.repository_id,
+                  app_repo.full_name, project_repo.repository_id
+           FROM project_repositories AS project_repo
+           JOIN github_app_repositories AS app_repo
+             ON lower(app_repo.full_name) = lower(project_repo.full_name) AND app_repo.active = 1
+           JOIN github_app_installations AS installation
+             ON installation.installation_id = app_repo.installation_id
+            AND installation.user_id = project_repo.owner_user_id AND installation.status = 'active'
+           WHERE project_repo.owner_user_id = ? AND project_repo.project_id = ?
+             AND project_repo.provider = 'github'
+           ORDER BY app_repo.installation_id, app_repo.repository_id LIMIT 2""",
+        (owner_user_id, project_id),
+    ).fetchall()
+    if len(rows) != 1:
+        return None
+    return {'installation_id': int(rows[0][0]), 'provider_repository_id': int(rows[0][1]),
+            'repository': str(rows[0][2]), 'project_repository_id': str(rows[0][3])}
+
+
 def resolve_project_id(owner_user_id: str, project_reference: str, *, connection: sqlite3.Connection | None = None) -> Optional[str]:
     """Resolve an active project by opaque id, slug, or exact display name."""
     own = connection is None

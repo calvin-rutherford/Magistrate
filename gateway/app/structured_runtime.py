@@ -18,6 +18,21 @@ from app.magi_firstmate_tools import concise_objective_title
 
 FLEET_PROJECTION_SCHEMA = "magistrate.fleet-projection.v1"
 RUNTIME_PROJECTION_SCHEMA = "magistrate.runtime-projection.v1"
+# Loaded by main only after validating the server configuration; never inferred
+# from client IDs, prefixes, subscription rows, or runtime observation.
+_deployment_policy = None
+
+
+def deployment_policy():
+    from app.deployment_mode import DeploymentMode
+    return _deployment_policy if _deployment_policy is not None else DeploymentMode.from_env()
+
+
+def personal_owner(user_id: str) -> bool:
+    policy = deployment_policy()
+    return policy.personal and user_id == policy.contract.owner_principal_id
+
+
 _MAX_OBJECTIVES = 2_000
 _MAX_EXECUTION_EVENTS = 20_000
 _TERMINAL_PHASES = frozenset({
@@ -86,6 +101,36 @@ def _phase_status(phase: Optional[str], terminal_phase: Optional[str]) -> tuple[
     if phase in _WORKING_PHASES:
         return "in_flight", "working"
     return "queued", "queued"
+
+
+def persist_objective_state(connection, owner: str, objective_id: str, *, recovering: bool = False) -> None:
+    """Write-side projection under the caller's transaction; never invoked by GET."""
+    from app.contracts import ObjectiveStateContract
+    from app.deployment_mode import project_objective_state, advance_objective_state
+    submission = connection.execute('SELECT status,task_id FROM magi_objective_submissions WHERE owner_user_id=? AND objective_id=?', (owner, objective_id)).fetchone()
+    execution = connection.execute('SELECT task_id,terminal_phase FROM firstmate_execution_objectives WHERE owner_user_id=? AND objective_id=?', (owner, objective_id)).fetchone()
+    if not submission and not execution:
+        return
+    task_id = execution[0] if execution else submission[1]
+    phases = {row[0] for row in connection.execute('SELECT phase FROM firstmate_execution_events WHERE owner_user_id=? AND objective_id=?', (owner, objective_id))}
+    # Persisted running evidence cannot be erased by late accepted/progress pushes.
+    phase = 'worker.started' if phases & _WORKING_PHASES else 'objective.accepted' if 'objective.accepted' in phases else None
+    waiting = connection.execute("SELECT 1 FROM firstmate_decisions WHERE owner_user_id=? AND task_id=? AND state IN ('pending','answering') LIMIT 1", (owner, task_id)).fetchone() is not None
+    cancelled = connection.execute('SELECT 1 FROM objective_cancellation_requests WHERE owner_user_id=? AND objective_id=? LIMIT 1', (owner, objective_id)).fetchone() is not None
+    previous = connection.execute('SELECT record_json FROM objective_state_projections WHERE owner_user_id=? AND objective_id=?', (owner, objective_id)).fetchone()
+    current = ObjectiveStateContract.model_validate_json(previous[0]) if previous else None
+    incoming = project_objective_state(objective_id=objective_id, owner_principal_id=owner,
+        revision=current.revision + 1 if current else 1, submission_status=submission[0] if submission else None,
+        execution_phase=phase, terminal_phase=execution[1] if execution else None,
+        waiting_for_input=waiting, cancellation_requested=cancelled, recovering=recovering)
+    if current:
+        incoming = advance_objective_state(current, incoming)
+        if incoming.model_dump(exclude={'revision'}) == current.model_dump(exclude={'revision'}):
+            return
+    connection.execute('''INSERT INTO objective_state_projections(owner_user_id,objective_id,revision,record_json)
+        VALUES (?,?,?,?) ON CONFLICT(owner_user_id,objective_id) DO UPDATE SET
+        revision=excluded.revision,record_json=excluded.record_json''',
+        (owner, objective_id, incoming.revision, incoming.model_dump_json()))
 
 
 class StructuredRuntimeProjection:
@@ -211,9 +256,13 @@ class StructuredRuntimeProjection:
                    WHERE owner_user_id = ? ORDER BY updated_at, request_id""",
                 (owner_user_id,),
             ).fetchall()
+            projections = {row[0]: json.loads(row[1]) for row in connection.execute(
+                'SELECT objective_id,record_json FROM objective_state_projections WHERE owner_user_id=? LIMIT ?',
+                (owner_user_id, _MAX_OBJECTIVES + 1))}
         if (
             len(submissions) > _MAX_OBJECTIVES
             or len(objectives) > _MAX_OBJECTIVES
+            or len(projections) > _MAX_OBJECTIVES
             or len(events) > _MAX_EXECUTION_EVENTS
         ):
             raise RuntimeError("The persisted Fleet projection exceeds its bounded capacity.")
@@ -364,6 +413,8 @@ class StructuredRuntimeProjection:
                 ),
             })
 
+        for task in tasks:
+            task['objective_state'] = projections.get(task['objective_id'])
         tasks.sort(key=lambda item: (int(item["updated_at"]), str(item["task_id"])), reverse=True)
         return tasks
 
@@ -373,7 +424,7 @@ class StructuredRuntimeProjection:
         product_fields = (
             "objective_id", "title", "goal", "project", "state", "status",
             "last_event_at", "accepted_at", "created_at", "updated_at", "terminal",
-            "activity", "workers", "artifacts", "decisions", "cancellation",
+            "activity", "workers", "artifacts", "decisions", "cancellation", "objective_state",
         )
         product_tasks = [
             {field: task[field] for field in product_fields}
