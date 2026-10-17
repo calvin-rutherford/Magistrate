@@ -3,7 +3,7 @@ const test = require('node:test');
 const { launchBrowser, startWebServer } = require('./helpers/web-server');
 
 const events = [
-  { id: 'question-1', provider: 'firstmate', title: 'Deployment choice', subtitle: 'Choose the rollout window.', priority: 'HIGH', status: 'needs-decision', project: 'Magistrate', target_id: 'deploy-1', context: { task_id: 'task-1', decision_id: 'deploy-1', decision_key: 'deploy-1', decision_revision: 1 }, action: { schema_version: 'attention-action.v1', action_key: 'aa1_attention_question_1', decision_key: 'deploy-1', source_revision: '1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, allowed_actions: ['approve', 'reject'], confirmation_required: true, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, status: 'available' }, url: '/attention?item=question-1', deep_link: '/attention?item=question-1', requires_action: true, notification_kind: 'captain_question', revision: '1' },
+  { id: 'question-1', provider: 'firstmate', title: 'Deployment choice', subtitle: 'Choose the rollout window.', priority: 'HIGH', status: 'needs-decision', project: 'Magistrate', target_id: 'deploy-1', context: { decision_id: 'deploy-1', decision_revision: 1, answer_via: 'Magi Chat', source_status: 'current' }, url: '/attention?item=question-1', deep_link: '/attention?item=question-1', requires_action: true, notification_kind: 'captain_question', revision: '1' },
   { id: 'pr-2', provider: 'github', title: 'Review ready', subtitle: 'A pull request needs your review.', priority: 'MEDIUM', status: 'ready', url: '/pr-detail?number=2', deep_link: '/pr-detail?number=2', requires_action: true, notification_kind: 'pr_ready', revision: '1' }
 ];
 
@@ -24,13 +24,14 @@ test.after(async () => {
   await server?.stop();
 });
 
-async function openApp({ notificationMode, eventBatch = [], attention = events, notificationTestResponses = [], url = '/chat' } = {}) {
+async function openApp({ notificationMode, eventBatch = [], attention = events, notificationTestResponses = [], chatAnswer = 'Approve option A.', decisionMode = 'normal', url = '/chat' } = {}) {
   const page = await browser.newPage();
-  await page.evaluateOnNewDocument(({ mode, batch, attentionItems, testResponses }) => {
+  await page.evaluateOnNewDocument(({ mode, batch, attentionItems, testResponses, canonicalAnswer, answerMode }) => {
     window.__notificationEvents = [...batch];
     window.__notificationTestResponses = [...testResponses];
     window.__notificationCalls = [];
     window.__attentionActionCalls = [];
+    window.__decisionAnswerCalls = [];
     window.__browserNotifications = [];
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (resource, options) => {
@@ -57,18 +58,24 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
         const next = window.__notificationEvents.shift() || [];
         return Promise.resolve(new Response(JSON.stringify({ events: next, unread: next }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
-      if (requestUrl.includes('/api/v1/attention/actions/by-item/')) {
-        const action = attentionItems.find(item => item.action)?.action;
-        return Promise.resolve(new Response(JSON.stringify(action || { status: 'unsupported' }), { status: action ? 200 : 404, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/magi/conversations/current')) {
+        const createdAt = 1792260000000;
+        const message = { id: 'mgm_canonical_answer_1', conversation_id: 'mgc_attention_test_1', turn_id: 'mgt_attention_test_1', client_message_id: 'client-answer-1', reply_to_message_id: null, role: 'user', content: canonicalAnswer, status: 'completed', source: 'text', sequence_index: 1, revision: 1, attachments: [], created_at: createdAt, updated_at: createdAt };
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'magi.native-chat.v1', conversation: { id: 'mgc_attention_test_1', created_at: createdAt, updated_at: createdAt }, conversation_id: 'mgc_attention_test_1', messages: [message], latest_change: 1 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
-      if (requestUrl.includes('/api/v1/attention/actions/') && requestUrl.endsWith('/prepare')) {
-        window.__attentionActionCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
-        const requestBody = JSON.parse(options?.body || '{}');
-        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'attention-action.v1', status: 'confirmation_required', action_key: 'aa1_attention_question_1', action: requestBody.action || 'approve', decision_key: 'deploy-1', source_revision: '1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, confirmation_token: 'confirmation-token-123456', expires_at: 4102444800 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/decisions/deploy-1/confirmation')) {
+        window.__decisionAnswerCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
+        if (answerMode === 'stale') return Promise.resolve(new Response(JSON.stringify({ detail: { code: 'stale', message: 'The Firstmate decision revision is stale.' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }));
+        if (answerMode === 'duplicate') return Promise.resolve(new Response(JSON.stringify({ schema_version: 'firstmate.answer-decision-result.v1', tool_name: 'firstmate.answer_decision', decision_id: 'deploy-1', decision_revision: 1, status: 'succeeded', error_code: null, evidence: { provider: 'firstmate', operation: 'firstmate.answer_decision', confirmation_recorded: true, release_requested: true, answer_bytes: canonicalAnswer.length }, timestamp: 1792260001000, idempotent: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'firstmate.answer-decision-result.v1', tool_name: 'firstmate.answer_decision', decision_id: 'deploy-1', decision_revision: 1, status: 'confirmation_required', confirmation_token: 'confirmation-token-123456', expires_at: 4102444800000, target: { decision_id: 'deploy-1', decision_revision: 1, title: 'Deployment choice', question: 'Choose the rollout window.', project: 'Magistrate' }, consequence: 'Records the exact canonical Native Chat answer and releases held work.', reversible: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
-      if (requestUrl.includes('/api/v1/attention/actions/') && requestUrl.endsWith('/execute')) {
+      if (requestUrl.includes('/api/v1/decisions/deploy-1/answer')) {
+        window.__decisionAnswerCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'firstmate.answer-decision-result.v1', tool_name: 'firstmate.answer_decision', decision_id: 'deploy-1', decision_revision: 1, status: 'succeeded', error_code: null, evidence: { provider: 'firstmate', operation: 'firstmate.answer_decision', confirmation_recorded: true, release_requested: true, answer_bytes: canonicalAnswer.length }, timestamp: 1792260001000, idempotent: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (requestUrl.includes('/api/v1/attention/actions/')) {
         window.__attentionActionCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
-        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'attention-action.v1', action_key: 'aa1_attention_question_1', action: 'approve', decision_key: 'deploy-1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, status: 'succeeded', evidence: { provider: 'firstmate', decision_key: 'deploy-1', target_id: 'task-1', operation: 'captain-hold-answer', recorded: true }, timestamp: 1700000000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        return Promise.resolve(new Response(JSON.stringify({ detail: 'Legacy action path is forbidden.' }), { status: 500, headers: { 'Content-Type': 'application/json' } }));
       }
       if (requestUrl.includes('/api/v1/attention/unified')) return Promise.resolve(new Response(JSON.stringify(attentionItems), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/account/profile')) return Promise.resolve(new Response(JSON.stringify({ user_id: 'default_user', name: 'Owner', email: '', avatar_url: '', bio: '' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -97,7 +104,7 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
       }
       Object.defineProperty(window, 'Notification', { configurable: true, value: FakeNotification });
     } else Object.defineProperty(window, 'Notification', { configurable: true, value: undefined });
-  }, { mode: notificationMode, batch: eventBatch, attentionItems: attention, testResponses: notificationTestResponses });
+  }, { mode: notificationMode, batch: eventBatch, attentionItems: attention, testResponses: notificationTestResponses, canonicalAnswer: chatAnswer, answerMode: decisionMode });
   await page.goto(`${BASE}${url}`, { waitUntil: 'networkidle0' });
   return page;
 }
@@ -143,22 +150,50 @@ test('a PR Attention target preserves exact in-app detail routing and metadata',
   await page.close();
 });
 
-test('Attention approve/reject requires explicit confirmation and displays bounded evidence', async () => {
-  const page = await openApp({ notificationMode: 'unsupported', url: '/attention', eventBatch: [[]] });
-  await page.click('[data-testid="attention-item-question-1"]');
-  await page.click('[data-testid="attention-reject-question-1"]');
-  await page.waitForSelector('[data-testid="attention-confirmation"]');
-  assert.match(await page.$eval('[data-testid="attention-confirmation"]', node => node.textContent), /REJECT|task-1|Consequence|Reversible: Yes/);
-  assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 1, 'prepare is not execution');
-  await page.click('[data-testid="attention-action-cancel"]');
-  assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 1, 'cancel never executes');
-  await page.click('[data-testid="attention-approve-question-1"]');
-  await page.waitForSelector('[data-testid="attention-confirmation"]');
-  await page.click('[data-testid="attention-action-confirm"]');
-  await page.waitForSelector('[data-testid="attention-action-evidence"]');
-  assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 3, 'only prepare and one execute are sent');
-  assert.match(await page.$eval('[data-testid="attention-action-evidence"]', node => node.textContent), /SUCCEEDED|deploy-1|task-1/);
-  await page.close();
+test('Attention sends exact canonical approve and decline Chat rows through the request-bound flow', async () => {
+  for (const answer of ['Approve option A.', 'Decline. Do not proceed.']) {
+    const page = await openApp({ notificationMode: 'unsupported', url: '/attention', eventBatch: [[]], chatAnswer: answer });
+    await page.click('[data-testid="attention-item-question-1"]');
+    await page.click('[data-testid="attention-review-answer-question-1"]');
+    await page.waitForSelector('[data-testid="attention-confirmation"]');
+    assert.equal(await page.$eval('[data-testid="attention-answer-preview"]', node => node.textContent), answer);
+    assert.equal(await page.evaluate(() => window.__decisionAnswerCalls.length), 1, 'confirmation preparation is not execution');
+    await page.click('[data-testid="attention-action-confirm"]');
+    await page.waitForSelector('[data-testid="attention-action-evidence"]');
+    const calls = await page.evaluate(() => window.__decisionAnswerCalls);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(JSON.parse(calls[0].body), { decision_revision: 1, native_user_message_id: 'mgm_canonical_answer_1' });
+    assert.deepEqual(JSON.parse(calls[1].body), { decision_revision: 1, native_user_message_id: 'mgm_canonical_answer_1', confirmation_token: 'confirmation-token-123456' });
+    assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 0, 'legacy attention-action.v1 is never called');
+    assert.match(await page.$eval('[data-testid="attention-action-evidence"]', node => node.textContent), /SUCCEEDED|deploy-1|canonical answer bytes|Later execution progress is not implied/);
+    await page.close();
+  }
+});
+
+test('Attention cancellation, stale revisions, and duplicate answers fail closed', async () => {
+  const cancelled = await openApp({ notificationMode: 'unsupported', url: '/attention', eventBatch: [[]], chatAnswer: 'Decline. Do not proceed.' });
+  await cancelled.click('[data-testid="attention-item-question-1"]');
+  await cancelled.click('[data-testid="attention-review-answer-question-1"]');
+  await cancelled.waitForSelector('[data-testid="attention-confirmation"]');
+  await cancelled.click('[data-testid="attention-action-cancel"]');
+  assert.equal(await cancelled.evaluate(() => window.__decisionAnswerCalls.length), 1, 'cancel never sends an answer');
+  await cancelled.close();
+
+  const stale = await openApp({ notificationMode: 'unsupported', url: '/attention', eventBatch: [[]], decisionMode: 'stale' });
+  await stale.click('[data-testid="attention-item-question-1"]');
+  await stale.click('[data-testid="attention-review-answer-question-1"]');
+  await stale.waitForSelector('[data-testid="attention-action-error"]');
+  assert.match(await stale.$eval('[data-testid="attention-action-error"]', node => node.textContent), /revision is stale/i);
+  assert.equal(await stale.evaluate(() => window.__decisionAnswerCalls.length), 1);
+  await stale.close();
+
+  const duplicate = await openApp({ notificationMode: 'unsupported', url: '/attention', eventBatch: [[]], decisionMode: 'duplicate' });
+  await duplicate.click('[data-testid="attention-item-question-1"]');
+  await duplicate.click('[data-testid="attention-review-answer-question-1"]');
+  await duplicate.waitForSelector('[data-testid="attention-action-evidence"]');
+  assert.equal(await duplicate.evaluate(() => window.__decisionAnswerCalls.length), 1, 'an idempotent existing outcome is not executed twice');
+  assert.equal(await duplicate.$('[data-testid="attention-confirmation"]'), null);
+  await duplicate.close();
 });
 
 test('the authenticated notification test distinguishes provider evidence from unknown phone delivery', async () => {

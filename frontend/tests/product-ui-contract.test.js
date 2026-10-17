@@ -72,8 +72,11 @@ test('notification decisions are revision-pinned and test evidence never claims 
   const account = read('app/(tabs)/account.tsx');
   const client = read('src/api/client.ts');
   assert.match(attention, /compareDecisionDestination\(decisionParam, revisionParam/);
-  assert.match(attention, /action\?\.status === 'available' && !navigationBlocked/);
-  assert.match(attention, /confirmation\.source_revision !== item\.action\.source_revision/);
+  assert.match(attention, /currentDecisionDestination\(latestItem\)/);
+  assert.match(attention, /prepareDecisionAnswer\(current\.decisionId, current\.revision, message\.id\)/);
+  assert.match(attention, /executeDecisionAnswer\(current\.decisionId, current\.revision, answerMessage\.id, confirmation\.confirmation_token\)/);
+  assert.doesNotMatch(attention, /prepareAttentionAction|executeAttentionAction|fetchAttentionActionForItem/);
+  assert.doesNotMatch(client, /\/attention\/actions\//);
   assert.match(account, /Phone delivery: Unknown · Seen on phone: Unknown/);
   assert.match(account, /same test identity will be reused/i);
   assert.match(client, /observed_phone_delivery !== 'unknown'/);
