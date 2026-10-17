@@ -3,7 +3,7 @@ const test = require('node:test');
 const { launchBrowser, startWebServer } = require('./helpers/web-server');
 
 const events = [
-  { id: 'question-1', provider: 'firstmate', title: 'Deployment choice', subtitle: 'Choose the rollout window.', priority: 'HIGH', status: 'needs-decision', project: 'Magistrate', target_id: 'deploy-1', context: { task_id: 'task-1', decision_key: 'deploy-1' }, action: { schema_version: 'attention-action.v1', action_key: 'aa1_attention_question_1', decision_key: 'deploy-1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, allowed_actions: ['approve', 'reject'], confirmation_required: true, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, status: 'available' }, url: '/attention?item=question-1', deep_link: '/attention?item=question-1', requires_action: true, notification_kind: 'captain_question', revision: '1' },
+  { id: 'question-1', provider: 'firstmate', title: 'Deployment choice', subtitle: 'Choose the rollout window.', priority: 'HIGH', status: 'needs-decision', project: 'Magistrate', target_id: 'deploy-1', context: { task_id: 'task-1', decision_id: 'deploy-1', decision_key: 'deploy-1', decision_revision: 1 }, action: { schema_version: 'attention-action.v1', action_key: 'aa1_attention_question_1', decision_key: 'deploy-1', source_revision: '1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, allowed_actions: ['approve', 'reject'], confirmation_required: true, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, status: 'available' }, url: '/attention?item=question-1', deep_link: '/attention?item=question-1', requires_action: true, notification_kind: 'captain_question', revision: '1' },
   { id: 'pr-2', provider: 'github', title: 'Review ready', subtitle: 'A pull request needs your review.', priority: 'MEDIUM', status: 'ready', url: '/pr-detail?number=2', deep_link: '/pr-detail?number=2', requires_action: true, notification_kind: 'pr_ready', revision: '1' }
 ];
 
@@ -24,10 +24,11 @@ test.after(async () => {
   await server?.stop();
 });
 
-async function openApp({ notificationMode, eventBatch = [], attention = events, url = '/chat' } = {}) {
+async function openApp({ notificationMode, eventBatch = [], attention = events, notificationTestResponses = [], url = '/chat' } = {}) {
   const page = await browser.newPage();
-  await page.evaluateOnNewDocument(({ mode, batch, attentionItems }) => {
+  await page.evaluateOnNewDocument(({ mode, batch, attentionItems, testResponses }) => {
     window.__notificationEvents = [...batch];
+    window.__notificationTestResponses = [...testResponses];
     window.__notificationCalls = [];
     window.__attentionActionCalls = [];
     window.__browserNotifications = [];
@@ -37,6 +38,11 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
       if (requestUrl.includes('/api/v1/auth/session')) {
         const payload = options?.method === 'POST' ? { session_token: 'browser-test-session', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' } : { authenticated: true, expires_at: 4102444800, scopes: ['read', 'account', 'providers', 'notifications', 'voice', 'command'], user_id: 'default_user' };
         return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (requestUrl.includes('/api/v1/notifications/test')) {
+        window.__notificationCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
+        const next = window.__notificationTestResponses.shift();
+        return Promise.resolve(new Response(JSON.stringify(next?.body || { detail: 'No test response configured.' }), { status: next?.status || 500, headers: { 'Content-Type': 'application/json' } }));
       }
       if (requestUrl.includes('/api/v1/notifications/events/delivered')) {
         window.__notificationCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
@@ -58,13 +64,19 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
       if (requestUrl.includes('/api/v1/attention/actions/') && requestUrl.endsWith('/prepare')) {
         window.__attentionActionCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
         const requestBody = JSON.parse(options?.body || '{}');
-        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'attention-action.v1', status: 'confirmation_required', action_key: 'aa1_attention_question_1', action: requestBody.action || 'approve', decision_key: 'deploy-1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, confirmation_token: 'confirmation-token-123456', expires_at: 4102444800 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'attention-action.v1', status: 'confirmation_required', action_key: 'aa1_attention_question_1', action: requestBody.action || 'approve', decision_key: 'deploy-1', source_revision: '1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, consequence: 'Records the choice against the exact Firstmate decision.', reversible: true, confirmation_token: 'confirmation-token-123456', expires_at: 4102444800 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (requestUrl.includes('/api/v1/attention/actions/') && requestUrl.endsWith('/execute')) {
         window.__attentionActionCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
         return Promise.resolve(new Response(JSON.stringify({ schema_version: 'attention-action.v1', action_key: 'aa1_attention_question_1', action: 'approve', decision_key: 'deploy-1', target: { provider: 'firstmate', task_id: 'task-1', decision_key: 'deploy-1' }, status: 'succeeded', evidence: { provider: 'firstmate', decision_key: 'deploy-1', target_id: 'task-1', operation: 'captain-hold-answer', recorded: true }, timestamp: 1700000000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (requestUrl.includes('/api/v1/attention/unified')) return Promise.resolve(new Response(JSON.stringify(attentionItems), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/account/profile')) return Promise.resolve(new Response(JSON.stringify({ user_id: 'default_user', name: 'Owner', email: '', avatar_url: '', bio: '' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/account/login-methods')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'provider-login-methods.v1', methods: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/account/onboarding')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'account-onboarding.v1', required: false, next_step: null, steps: { welcome: { complete: true }, profile: { complete: true }, github: { complete: true }, billing: { complete: true, available: false, status: 'unavailable', current_period_end: null, customer_portal_available: false } } }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/auth/provider/configuration')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'provider-auth-configuration.v1', apple_native: false, apple_web: false, google_native: false, google_web: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/billing/account')) return Promise.resolve(new Response(JSON.stringify({ detail: 'Billing unavailable.' }), { status: 503, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/notifications/preferences')) return Promise.resolve(new Response(JSON.stringify({ enabled: true, quiet_start: null, quiet_end: null, mode: 'moderate' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/agents')) return Promise.resolve(new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/github/pulls/2')) return Promise.resolve(new Response(JSON.stringify({ id: 2, number: 2, title: 'Exact PR metadata', repository: 'acme/ship', author: 'captain', branch: 'fix/attention', state: 'OPEN', is_draft: false, review_status: 'REVIEW_REQUIRED', checks: { status: 'PASSING', passed: 3, failed: 0, pending: 0, summary: '3 passed, 0 failed' }, mergeable: 'MERGEABLE', summary: 'PR summary', body: 'Full PR context', reviews: [], created_at: '2026-08-30T10:00:00Z', updated_at: '2026-08-30T11:00:00Z', merged_at: null, requires_attention: true, url: 'https://github.com/acme/ship/pull/2' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/github/pulls')) return Promise.resolve(new Response(JSON.stringify({ items: [], page: 1, per_page: 20, has_more: false, cached: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -85,7 +97,7 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
       }
       Object.defineProperty(window, 'Notification', { configurable: true, value: FakeNotification });
     } else Object.defineProperty(window, 'Notification', { configurable: true, value: undefined });
-  }, { mode: notificationMode, batch: eventBatch, attentionItems: attention });
+  }, { mode: notificationMode, batch: eventBatch, attentionItems: attention, testResponses: notificationTestResponses });
   await page.goto(`${BASE}${url}`, { waitUntil: 'networkidle0' });
   return page;
 }
@@ -146,6 +158,55 @@ test('Attention approve/reject requires explicit confirmation and displays bound
   await page.waitForSelector('[data-testid="attention-action-evidence"]');
   assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 3, 'only prepare and one execute are sent');
   assert.match(await page.$eval('[data-testid="attention-action-evidence"]', node => node.textContent), /SUCCEEDED|deploy-1|task-1/);
+  await page.close();
+});
+
+test('the authenticated notification test distinguishes provider evidence from unknown phone delivery', async () => {
+  const unknown = { queued: 0, provider_accepted: 1, provider_handoff: 0, failed: 0, expired: 0, observed_phone_delivery: 'unknown', owner_saw_notification: 'unknown' };
+  const handedOff = { ...unknown, provider_accepted: 0, provider_handoff: 1 };
+  const page = await openApp({ notificationMode: 'unsupported', url: '/account', notificationTestResponses: [
+    { status: 200, body: { status: 'accepted', attempts: 1, evidence: unknown } },
+    { status: 200, body: { status: 'deduplicated-or-rate-limited', reason: 'A prior test is tracked; wait at least one minute before requesting a new test.', evidence: handedOff } },
+  ] });
+  await page.click('[data-testid="account-section-notifications"]');
+  await page.click('[data-testid="account-send-notification-test"]');
+  await page.waitForFunction(() => document.body.innerText.includes('Accepted by push provider'));
+  assert.match(await page.$eval('[data-testid="notification-test-result"]', node => node.innerText), /provider accepted|Phone delivery: Unknown|Seen on phone: Unknown/i);
+  await page.click('[data-testid="account-send-notification-test"]');
+  await page.waitForFunction(() => document.body.innerText.includes('No new test sent'));
+  assert.match(await page.$eval('[data-testid="notification-test-result"]', node => node.innerText), /1 provider handoff|Phone delivery: Unknown/i);
+  const calls = await page.evaluate(() => window.__notificationCalls.filter(call => call.url.includes('/notifications/test')));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0].body), JSON.parse(calls[1].body), 'status recovery reuses one idempotent request identity');
+  assert.deepEqual(Object.keys(JSON.parse(calls[0].body)), ['request_id'], 'the authenticated owner is never selected by the client body');
+  await page.close();
+});
+
+test('notification test unavailability gives recovery without claiming delivery', async () => {
+  const evidence = { queued: 0, provider_accepted: 0, provider_handoff: 0, failed: 0, expired: 0, observed_phone_delivery: 'unknown', owner_saw_notification: 'unknown' };
+  const page = await openApp({ notificationMode: 'unsupported', url: '/account', notificationTestResponses: [
+    { status: 200, body: { status: 'unavailable', reason: 'Enable notification permission and register this device in Settings.', evidence } },
+  ] });
+  await page.click('[data-testid="account-section-notifications"]');
+  await page.click('[data-testid="account-send-notification-test"]');
+  await page.waitForSelector('[data-testid="notification-test-result"]');
+  const text = await page.$eval('[data-testid="notification-test-result"]', node => node.innerText);
+  assert.match(text, /Native push unavailable|physical release device|Phone delivery: Unknown/);
+  assert.doesNotMatch(text, /delivered|received on phone/i);
+  await page.close();
+});
+
+test('notification test evidence fails closed if the gateway claims phone delivery', async () => {
+  const invalidEvidence = { queued: 0, provider_accepted: 1, provider_handoff: 1, failed: 0, expired: 0, observed_phone_delivery: 'delivered', owner_saw_notification: 'unknown' };
+  const page = await openApp({ notificationMode: 'unsupported', url: '/account', notificationTestResponses: [
+    { status: 200, body: { status: 'accepted', evidence: invalidEvidence } },
+  ] });
+  await page.click('[data-testid="account-section-notifications"]');
+  await page.click('[data-testid="account-send-notification-test"]');
+  await page.waitForSelector('[data-testid="notification-test-error"]');
+  assert.match(await page.$eval('[data-testid="notification-test-error"]', node => node.innerText), /invalid notification test evidence|No provider or phone outcome is known/i);
+  assert.equal(await page.$('[data-testid="notification-test-result"]'), null);
   await page.close();
 });
 
