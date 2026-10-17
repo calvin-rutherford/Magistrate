@@ -15,6 +15,13 @@ test('iOS App Intents expose product entries through foreground allowlisted rout
     'magistrate:/attention?overview=true',
   ]) assert.ok(swift.includes(route));
   assert.doesNotMatch(swift, /https?:|URLSession|AVAudio/);
+  assert.match(swift, /shortTitle: "Start Voice"/);
+  const visibleCopy = [...swift.matchAll(/(?:LocalizedStringResource = |IntentDescription\(|shortTitle: )"([^"]+)"/g)].map(match => match[1]);
+  assert.ok(visibleCopy.length > 0);
+  assert.doesNotMatch(visibleCopy.join(' '), /Magistrate|Magi/);
+  assert.match(swift, /entry=\\\(UUID\(\)\.uuidString\)/);
+  assert.match(swift, /static var destination: URL \{ MagistrateIntentDestination\.voice \}/);
+  assert.doesNotMatch(swift, /static let destination = MagistrateIntentDestination\.voice/);
 });
 
 test('OpenURLIntent dependency boundary requires iOS 18', () => {

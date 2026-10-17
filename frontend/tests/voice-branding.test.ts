@@ -20,11 +20,12 @@ test('voice renders real perspective-projected tetrahedral geometry rather than 
   for (const state of ['READY', 'LISTENING', 'THINKING', 'SPEAKING', 'ERROR']) assert.match(voiceSource, new RegExp(`${state}:`));
 });
 
-test('tetrahedron has monochrome rest, amplitude response, spectral speaking/thinking, and fallback states', () => {
+test('tetrahedron stays monochrome in all states, with amplitude and fallback support', () => {
   assert.match(tetrahedronSource, /state === 'LISTENING' \? clampAudioPeak\(amplitude\) : 0/);
   assert.match(tetrahedronSource, /state === 'SPEAKING' \|\| state === 'THINKING'/);
   assert.match(tetrahedronSource, /state === 'THINKING' \? 0\.48 : 0\.78/);
-  assert.match(tetrahedronSource, /voice-spectral-ripple-/);
+  assert.doesNotMatch(tetrahedronSource, /spectral|LinearGradient|#8B6CFF|#24D8FF|#54FF87|#FF3FD1/);
+  assert.match(tetrahedronSource, /stroke="#D7DCE4"/);
   assert.match(tetrahedronSource, /StaticFallback/);
   assert.match(tetrahedronSource, /20fps is intentionally capped/);
 });
@@ -54,7 +55,7 @@ test('a test-injectable amplitude source exists for browser evidence without a r
 
 test('reduced motion freezes 3D and amplitude animation without disabling voice', () => {
   assert.match(tetrahedronSource, /const animated = !reducedMotion/);
-  assert.match(tetrahedronSource, /const rippleCount = reducedMotion \? 1/);
+  assert.match(tetrahedronSource, /const bob = reducedMotion \? 0/);
   assert.match(voiceSource, /if \(reducedMotion\) \{ hoverProgress\.setValue\(0\); return; \}/);
   assert.match(voiceSource, /hoverProgress\.interpolate/);
 });

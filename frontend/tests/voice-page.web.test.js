@@ -163,6 +163,46 @@ test('3D tetrahedron reacts to injected amplitude while its accessible stage sta
   await page.close();
 });
 
+test('pausing then restarting cannot submit a delayed transcript from the interrupted turn', async () => {
+  const page = await browser.newPage();
+  await page.evaluateOnNewDocument(() => {
+    window.__sentTurns = [];
+    window.__cancelRequests = [];
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (resource, options) => {
+      const url = typeof resource === 'string' ? resource : resource.url;
+      const json = payload => new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve(json({ authenticated: true, session_token: 'browser-test-session-token-00000001', token_type: 'Bearer', expires_at: 4102444800, scopes: ['read', 'account', 'notifications', 'voice', 'command'], user_id: 'default_user' }));
+      if (url.includes('/api/v1/voice/transcribe')) return new Promise(resolve => { window.__finishOldTranscription = () => resolve(json({ schema_version: 'voice-transcription.v1', text: 'Do not submit this cancelled recording.', is_final: true })); });
+      if (url.includes('/cancel')) window.__cancelRequests.push(url);
+      if (url.includes('/api/v1/magi/messages') && options?.method === 'POST') window.__sentTurns.push(options.body);
+      if (url.includes('/api/v1/')) return Promise.resolve(json({}));
+      return nativeFetch(resource, options);
+    };
+  });
+  await page.goto(VOICE_URL, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
+  await page.waitForFunction(() => document.body.innerText.includes('Listening'));
+  assert.match(await page.$eval('[data-testid="voice-transport-status"]', node => node.textContent), /Streaming Voice Mode is unavailable/);
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  await clickRendered(page, '[data-testid="voice-control"]');
+  await page.waitForFunction(() => typeof window.__finishOldTranscription === 'function');
+  await clickRendered(page, '[data-testid="voice-cancel"]');
+  await page.waitForFunction(() => document.body.innerText.includes('Voice ready'));
+  await clickRendered(page, '[data-testid="voice-control"]');
+  await page.waitForFunction(() => document.body.innerText.includes('Listening'));
+  await page.evaluate(() => window.__finishOldTranscription());
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.deepEqual(await page.evaluate(() => window.__sentTurns), []);
+  assert.deepEqual(await page.evaluate(() => window.__cancelRequests), []);
+  await clickRendered(page, '[data-testid="voice-mute"]');
+  await page.waitForFunction(() => document.body.innerText.includes('Voice ready'));
+  await clickRendered(page, '[data-testid="voice-control"]');
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.match(await page.$$eval('[data-testid="voice-state"]', nodes => nodes.find(node => node.getBoundingClientRect().width > 0)?.textContent || ''), /Voice ready/);
+  await page.close();
+});
+
 test('ending a deep-linked voice session still lands back in chat', async () => {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 860 });

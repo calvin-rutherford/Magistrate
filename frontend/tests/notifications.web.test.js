@@ -31,6 +31,7 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
     window.__notificationCalls = [];
     window.__attentionActionCalls = [];
     window.__browserNotifications = [];
+    window.__notificationInstances = [];
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (resource, options) => {
       const requestUrl = typeof resource === 'string' ? resource : resource.url;
@@ -80,7 +81,7 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
       class FakeNotification {
         static permission = mode;
         static requestPermission = async () => mode;
-        constructor(title, options) { window.__browserNotifications.push({ title, body: options.body, data: options.data }); }
+        constructor(title, options) { window.__browserNotifications.push({ title, body: options.body, data: options.data }); window.__notificationInstances.push(this); }
         close() {}
       }
       Object.defineProperty(window, 'Notification', { configurable: true, value: FakeNotification });
@@ -107,8 +108,17 @@ test('outcome notification uses product-safe copy rather than internal event met
   const page = await openApp({ notificationMode: 'granted', eventBatch: [[completion]], attention: [completion] });
   await page.waitForFunction(() => window.__browserNotifications.length === 1);
   const delivered = await page.evaluate(() => window.__browserNotifications[0]);
-  assert.deepEqual({ title: delivered.title, body: delivered.body }, { title: 'Work completed', body: 'Open Magistrate to review the result.' });
-  assert.doesNotMatch(JSON.stringify(delivered), /runner-7|secret\/repo|private\/path/);
+  assert.deepEqual({ title: delivered.title, body: delivered.body }, { title: 'Work completed', body: 'Open the app to review the result.' });
+  assert.doesNotMatch(JSON.stringify(delivered), /runner-7|secret\/repo|private\/path|Magistrate|Magi/);
+  await page.close();
+});
+
+test('notification taps preserve PR routes instead of treating every target as Attention', async () => {
+  const page = await openApp({ notificationMode: 'granted', eventBatch: [[events[1]]] });
+  await page.waitForFunction(() => window.__notificationInstances.length === 1);
+  await page.evaluate(() => window.__notificationInstances[0].onclick());
+  await page.waitForFunction(() => location.pathname === '/pr-detail' && new URLSearchParams(location.search).get('number') === '2');
+  assert.deepEqual(await page.evaluate(() => window.__attentionActionCalls), []);
   await page.close();
 });
 
