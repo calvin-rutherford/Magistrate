@@ -6,11 +6,12 @@ import * as Linking from 'expo-linking';
 import Constants from 'expo-constants';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { AccountOnboardingState, AuthProviderInfo, BillingAccount, connectAuthProvider, createBillingPortal, deleteGatewayAccount, fetchAccountOnboarding, fetchAuthProviders, fetchBillingAccount, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, logoutGatewaySession, ProviderAuthConfiguration, ProviderLoginMethod, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile } from '../../src/api/client';
+import { AccountOnboardingState, AuthProviderInfo, BillingAccount, connectAuthProvider, createBillingPortal, deleteGatewayAccount, fetchAccountOnboarding, fetchAuthProviders, fetchBillingAccount, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, logoutGatewaySession, NotificationTestResult, ProviderAuthConfiguration, ProviderLoginMethod, sendNotificationTest, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile } from '../../src/api/client';
 import { linkProviderIdentity, providerSignInAvailable, SignInProvider } from '../../src/services/ProviderSignIn';
-import { loadChatPreferences, saveVoiceInputMode, saveVoicePlaybackPreferences } from '../../src/services/ChatPreferences';
+import { loadChatPreferences, saveVoiceInputMode, saveVoicePlaybackPreferences, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
 import { useRouter } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { openExternalUrl } from '../../src/utils/externalLinks';
 import { capabilityFor, getLocalVoiceCapabilities, VOICE_INPUT_MODE_OPTIONS, VoiceInputCapabilities, VoiceInputMode } from '../../src/services/VoiceInputModes';
 import { loadOperatingPermissionMode, saveOperatingPermissionMode, OPERATING_PERMISSION_MODE_OPTIONS, OperatingPermissionMode } from '../../src/services/OperatingPermissionModes';
@@ -30,8 +31,28 @@ function providerActionLabel(provider: AuthProviderInfo): string {
   return 'CONNECT +';
 }
 
+function notificationTestLabel(result: NotificationTestResult): string {
+  if (result.status === 'accepted') return 'Accepted by push provider';
+  if (result.status === 'suppressed') return 'Not sent by notification policy';
+  if (result.status === 'unavailable') return 'Native push unavailable';
+  if (result.status === 'deduplicated-or-rate-limited') return 'No new test sent';
+  if (result.status === 'revoked') return 'Device registration expired';
+  return 'Push provider request failed';
+}
+
+function notificationTestRecovery(result: NotificationTestResult): string {
+  if (result.status === 'accepted') return 'Use Check status to read updated provider evidence for this account.';
+  if (result.status === 'suppressed') return 'Turn on Attention updates and pause quiet hours before retrying.';
+  if (result.status === 'unavailable') return 'Enable native push on a physical release device, then retry.';
+  if (result.status === 'deduplicated-or-rate-limited') return 'Wait at least one minute before starting another test.';
+  if (result.status === 'revoked') return 'Enable native push again to replace the expired device registration.';
+  return 'Check the connection and retry. The same test identity will be reused.';
+}
+
 type AccountSectionKey = 'sign-in' | 'notifications' | 'voice' | 'connections' | 'appearance';
 function AccountSectionHeader({ id, title, expanded, onPress }: { id: AccountSectionKey; title: string; expanded: boolean; onPress: () => void }) {
+  const dark = useChatColorScheme() === 'dark';
+  const styles = React.useMemo(() => themedAccountStyles(dark), [dark]);
   return <TouchableOpacity testID={`account-section-${id}`} accessibilityRole="button" accessibilityLabel={`${title} settings`} accessibilityState={{ expanded }} {...({ 'aria-expanded': expanded } as any)} onPress={onPress} style={styles.sectionHeader} activeOpacity={0.75}>
     <Text style={styles.sectionTitle}>{title}</Text><Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.sectionChevron}>{expanded ? '⌄' : '›'}</Text>
   </TouchableOpacity>;
@@ -39,6 +60,9 @@ function AccountSectionHeader({ id, title, expanded, onPress }: { id: AccountSec
 
 export default function AccountScreen() {
   const router = useRouter();
+  const dark = useChatColorScheme() === 'dark';
+  const theme = dark ? accountThemes.dark : accountThemes.light;
+  const styles = React.useMemo(() => themedAccountStyles(dark), [dark]);
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
@@ -65,10 +89,15 @@ export default function AccountScreen() {
   const [voiceCapabilities, setVoiceCapabilities] = useState<VoiceInputCapabilities>(() => getLocalVoiceCapabilities());
   const [autoSpeak, setAutoSpeak] = useState<boolean>(true);
   const [autoListen, setAutoListen] = useState<boolean>(true);
+  const [voicePreferenceBusy, setVoicePreferenceBusy] = useState(false);
   const [attentionNotifications, setAttentionNotifications] = useState<boolean>(true);
   const [quietHours, setQuietHours] = useState<boolean>(true);
   const [operatingPermissionMode, setOperatingPermissionMode] = useState<OperatingPermissionMode>('moderate');
   const [nativePushStatus, setNativePushStatus] = useState<NativePushStatus>(() => notificationManager.getPushStatus());
+  const [notificationTestRequestId, setNotificationTestRequestId] = useState<string | null>(null);
+  const [notificationTestResult, setNotificationTestResult] = useState<NotificationTestResult | null>(null);
+  const [notificationTestError, setNotificationTestError] = useState<string | null>(null);
+  const [notificationTestBusy, setNotificationTestBusy] = useState(false);
   const [expandedSection, setExpandedSection] = useState<AccountSectionKey | null>(null);
   const toggleSection = (section: AccountSectionKey) => setExpandedSection(current => current === section ? null : section);
 
@@ -174,7 +203,7 @@ export default function AccountScreen() {
 
   const saveProfileName = async () => {
     const name = profileName.trim();
-    if (!name) { Alert.alert('Name required', 'Enter the name Magi should use.'); return; }
+    if (!name) { Alert.alert('Name required', 'Enter the display name the assistant should use.'); return; }
     setSavingProfile(true);
     try { const updated = await updateUserProfile({ name }); setProfile(updated); setProfileName(updated.name); }
     catch (error) { Alert.alert('Profile not saved', errorText(error, 'Your profile could not be updated.')); }
@@ -268,26 +297,56 @@ export default function AccountScreen() {
     finally { setIdentityBusy(null); }
   };
 
-  const handleToggleVoiceOutput = (enabled: boolean) => {
-    setVoiceEnabled(enabled);
-    ttsService.setSettings({ enabled });
-    void saveVoicePlaybackPreferences({ outputEnabled: enabled });
+  const saveVoicePreference = async (update: { outputEnabled?: boolean; autoSpeak?: boolean; autoListen?: boolean }) => {
+    if (voicePreferenceBusy) return;
+    const previous = { outputEnabled: voiceEnabled, autoSpeak, autoListen };
+    setVoicePreferenceBusy(true);
+    if (typeof update.outputEnabled === 'boolean') { setVoiceEnabled(update.outputEnabled); ttsService.setSettings({ enabled: update.outputEnabled }); }
+    if (typeof update.autoSpeak === 'boolean') { setAutoSpeak(update.autoSpeak); ttsService.setSettings({ autoSpeak: update.autoSpeak }); }
+    if (typeof update.autoListen === 'boolean') setAutoListen(update.autoListen);
+    try { await saveVoicePlaybackPreferences(update); }
+    catch {
+      setVoiceEnabled(previous.outputEnabled); setAutoSpeak(previous.autoSpeak); setAutoListen(previous.autoListen);
+      ttsService.setSettings({ enabled: previous.outputEnabled, autoSpeak: previous.autoSpeak });
+      Alert.alert('Preference not saved', 'Your previous voice setting is still active.');
+    } finally { setVoicePreferenceBusy(false); }
+  };
+
+  const chooseVoiceInputMode = async (mode: VoiceInputMode) => {
+    if (voicePreferenceBusy) return;
+    const previous = voiceInputMode; setVoiceInputMode(mode); setVoicePreferenceBusy(true);
+    try { await saveVoiceInputMode(mode); }
+    catch { setVoiceInputMode(previous); Alert.alert('Preference not saved', 'Your previous voice input mode is still active.'); }
+    finally { setVoicePreferenceBusy(false); }
   };
 
   const saveNotificationSettings = async (enabled: boolean, quiet: boolean, mode: OperatingPermissionMode = operatingPermissionMode) => {
-    setAttentionNotifications(enabled);
-    setQuietHours(quiet);
-    setOperatingPermissionMode(mode);
-    await saveOperatingPermissionMode(mode).catch(() => undefined);
+    const previous = { enabled: attentionNotifications, quiet: quietHours, mode: operatingPermissionMode };
+    setAttentionNotifications(enabled); setQuietHours(quiet); setOperatingPermissionMode(mode);
     try {
+      await saveOperatingPermissionMode(mode);
       await updateNotificationPreferences(enabled, quiet, mode);
     } catch {
-      Alert.alert('Settings unavailable', 'Notification preferences could not be saved. The previous server policy remains active.');
+      setAttentionNotifications(previous.enabled); setQuietHours(previous.quiet); setOperatingPermissionMode(previous.mode);
+      await saveOperatingPermissionMode(previous.mode).catch(() => undefined);
+      Alert.alert('Settings not saved', 'Notification preferences could not be confirmed. Your previous selection has been restored.');
     }
+  };
+
+  const runNotificationTest = async () => {
+    if (notificationTestBusy) return;
+    const requestId = notificationTestRequestId || `push-test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    setNotificationTestRequestId(requestId);
+    setNotificationTestBusy(true);
+    setNotificationTestError(null);
+    try { setNotificationTestResult(await sendNotificationTest(requestId)); }
+    catch (error) { setNotificationTestError(errorText(error, 'The notification test could not be confirmed.')); }
+    finally { setNotificationTestBusy(false); }
   };
 
   return (
     <EnvironmentBackground>
+      <SafeAreaView style={styles.safeArea}>
       <View style={styles.headerRow}>
         <TouchableOpacity onPress={() => router.back()}>
           <GlassSurface variant="control" style={styles.headerCircleBtn}>
@@ -295,7 +354,7 @@ export default function AccountScreen() {
           </GlassSurface>
         </TouchableOpacity>
 
-        <Text style={styles.headerTitle}>ACCOUNT & SETTINGS</Text>
+        <Text style={[styles.headerTitle, { color: theme.text }]}>Account & Settings</Text>
 
         <View style={{ width: 36 }} />
       </View>
@@ -326,7 +385,7 @@ export default function AccountScreen() {
             </View>
           </View>
           <View style={styles.profileEditRow}>
-            <TextInput testID="account-profile-name-input" accessibilityLabel="Account display name" maxLength={80} value={profileName} onChangeText={setProfileName} placeholder="Display name" placeholderTextColor="rgba(255,255,255,0.5)" style={styles.profileNameInput} />
+            <TextInput testID="account-profile-name-input" accessibilityLabel="Account display name" maxLength={80} value={profileName} onChangeText={setProfileName} placeholder="Display name" placeholderTextColor={theme.muted} style={styles.profileNameInput} />
             <TouchableOpacity testID="account-profile-save" accessibilityRole="button" accessibilityLabel="Save account display name" accessibilityState={{ disabled: savingProfile || !profileName.trim(), busy: savingProfile }} disabled={savingProfile || !profileName.trim()} onPress={() => void saveProfileName()} style={styles.profileSaveButton}><Text style={styles.profileSaveText}>{savingProfile ? 'SAVING…' : 'SAVE'}</Text></TouchableOpacity>
           </View>
         </GlassSurface>
@@ -349,12 +408,12 @@ export default function AccountScreen() {
           </View>
         </GlassSurface> : null}
 
-        <AccountSectionHeader id="notifications" title="CAPTAIN ATTENTION NOTIFICATIONS" expanded={expandedSection === 'notifications'} onPress={() => toggleSection('notifications')} />
+        <AccountSectionHeader id="notifications" title="ATTENTION NOTIFICATIONS" expanded={expandedSection === 'notifications'} onPress={() => toggleSection('notifications')} />
 
         {expandedSection === 'notifications' ? <GlassSurface variant="card" style={styles.settingsCard}>
           <View style={styles.settingToggleRow}>
             <View style={styles.settingCopy}>
-              <Text style={styles.settingToggleLabel}>CAPTAIN ATTENTION</Text>
+              <Text style={styles.settingToggleLabel}>ATTENTION UPDATES</Text>
               <Text style={styles.settingHint}>Remote native push or open-browser fallback.</Text>
             </View>
             <TouchableOpacity
@@ -379,7 +438,7 @@ export default function AccountScreen() {
             </TouchableOpacity>
           </View>
           <Text testID="account-operating-permission-label" style={[styles.settingLabel, { marginTop: 14 }]}>OPERATING PERMISSION MODE</Text>
-          <Text style={styles.settingHint}>Alert volume only. This never grants merge, destructive, irreversible, security-sensitive, or external-public authority; Firstmate and captain confirmation rules still apply.</Text>
+          <Text style={styles.settingHint}>Alert volume only. This never grants merge, destructive, irreversible, security-sensitive, or external-public authority; Runtime confirmation rules still apply.</Text>
           <View testID="account-operating-permission-options" style={styles.permissionModeColumn}>
             {OPERATING_PERMISSION_MODE_OPTIONS.map(option => {
               const selected = operatingPermissionMode === option.id;
@@ -391,6 +450,20 @@ export default function AccountScreen() {
           </Text>
           {nativePushStatus !== 'registered' && <TouchableOpacity testID="account-enable-native-push" onPress={() => void notificationManager.registerNativePushToken(true)} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>ENABLE NATIVE PUSH</Text></TouchableOpacity>}
           <Text style={styles.settingHint}>Web notifications require an open, eligible browser tab; native push is the beta background channel.</Text>
+          <View style={styles.notificationTestSection}>
+            <Text style={styles.settingLabel}>TEST NOTIFICATION</Text>
+            <Text style={styles.settingHint}>Sends one neutral remote push to the device registered for this authenticated account. A tap only opens Attention and never approves work.</Text>
+            <TouchableOpacity testID="account-send-notification-test" accessibilityRole="button" accessibilityLabel={notificationTestResult ? 'Check notification provider status' : 'Send test notification'} accessibilityState={{ disabled: notificationTestBusy, busy: notificationTestBusy }} disabled={notificationTestBusy} onPress={() => void runNotificationTest()} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>{notificationTestBusy ? 'CHECKING…' : notificationTestResult ? 'CHECK STATUS' : notificationTestError ? 'RETRY TEST' : 'SEND TEST'}</Text></TouchableOpacity>
+            {notificationTestError ? <View testID="notification-test-error" accessibilityRole="alert" style={styles.notificationTestEvidence}><Text style={styles.providerError}>{notificationTestError}</Text><Text style={styles.settingHint}>{notificationTestResult ? 'The latest check is unconfirmed; the last confirmed provider evidence remains below.' : 'No provider or phone outcome is known. Retry reuses the same test identity.'}</Text></View> : null}
+            {notificationTestResult ? <View testID="notification-test-result" accessibilityLiveRegion="polite" style={styles.notificationTestEvidence}>
+              <Text style={styles.settingToggleLabel}>{notificationTestLabel(notificationTestResult)}</Text>
+              {notificationTestResult.reason || notificationTestResult.detail ? <Text style={styles.settingHint}>{notificationTestResult.reason || notificationTestResult.detail}</Text> : null}
+              <Text style={styles.settingHint}>Account delivery evidence: {notificationTestResult.evidence.queued} queued · {notificationTestResult.evidence.provider_accepted} provider accepted · {notificationTestResult.evidence.provider_handoff} provider handoff · {notificationTestResult.evidence.failed} failed · {notificationTestResult.evidence.expired} expired.</Text>
+              <Text style={styles.settingHint}>Provider handoff means an Expo receipt confirmed transfer to APNs or FCM; it is not evidence of phone delivery.</Text>
+              <Text testID="notification-test-phone-unknown" style={styles.settingHint}>Phone delivery: Unknown · Seen on phone: Unknown</Text>
+              <Text style={styles.settingHint}>{notificationTestRecovery(notificationTestResult)}</Text>
+            </View> : null}
+          </View>
         </GlassSurface> : null}
 
         {/* VOICE & AUDIO SETTINGS */}
@@ -401,17 +474,19 @@ export default function AccountScreen() {
             <Text style={styles.settingToggleLabel}>VOICE OUTPUT</Text>
             <TouchableOpacity
               style={[styles.toggleBtn, voiceEnabled ? styles.toggleBtnActive : undefined]}
-              onPress={() => handleToggleVoiceOutput(!voiceEnabled)}
+              accessibilityState={{ disabled: voicePreferenceBusy, busy: voicePreferenceBusy }} disabled={voicePreferenceBusy}
+              onPress={() => void saveVoicePreference({ outputEnabled: !voiceEnabled })}
             >
               <Text style={styles.toggleBtnText}>{voiceEnabled ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>
           </View>
 
           <View style={styles.settingToggleRow}>
-            <Text style={styles.settingToggleLabel}>AUTO-SPEAK MAGISTRATE</Text>
+            <Text style={styles.settingToggleLabel}>AUTO-SPEAK RESPONSES</Text>
             <TouchableOpacity
               style={[styles.toggleBtn, autoSpeak ? styles.toggleBtnActive : undefined]}
-              onPress={() => { const next = !autoSpeak; setAutoSpeak(next); ttsService.setSettings({ autoSpeak: next }); void saveVoicePlaybackPreferences({ autoSpeak: next }); }}
+              accessibilityState={{ disabled: voicePreferenceBusy, busy: voicePreferenceBusy }} disabled={voicePreferenceBusy}
+              onPress={() => void saveVoicePreference({ autoSpeak: !autoSpeak })}
             >
               <Text style={styles.toggleBtnText}>{autoSpeak ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>
@@ -421,14 +496,15 @@ export default function AccountScreen() {
             <Text style={styles.settingToggleLabel}>CONTINUOUS LISTEN AFTER RESPONSE</Text>
             <TouchableOpacity
               style={[styles.toggleBtn, autoListen ? styles.toggleBtnActive : undefined]}
-              onPress={() => { const next = !autoListen; setAutoListen(next); void saveVoicePlaybackPreferences({ autoListen: next }); }}
+              accessibilityState={{ disabled: voicePreferenceBusy, busy: voicePreferenceBusy }} disabled={voicePreferenceBusy}
+              onPress={() => void saveVoicePreference({ autoListen: !autoListen })}
             >
               <Text style={styles.toggleBtnText}>{autoListen ? 'ON ✓' : 'OFF'}</Text>
             </TouchableOpacity>
           </View>
           <Text testID="account-voice-input-label" style={styles.settingLabel}>VOICE INPUT MODE</Text>
           <Text style={styles.settingHint}>Speech is placed in the chat composer for review. OpenAI credentials never leave the gateway.</Text>
-          <View testID="account-voice-input-options" style={styles.voiceModeRow}>{VOICE_INPUT_MODE_OPTIONS.map(option => { const capability = capabilityFor(voiceCapabilities, option.id); const selected = voiceInputMode === option.id; const disabled = capability.available === 'unavailable'; return <TouchableOpacity key={option.id} testID={`account-voice-mode-${option.id}`} accessibilityRole="button" accessibilityLabel={`${option.label}: ${capability.reason || option.description}`} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={() => { setVoiceInputMode(option.id); void saveVoiceInputMode(option.id); }} style={[styles.voiceModePill, selected ? styles.voiceModePillActive : undefined, disabled ? styles.voiceModePillDisabled : undefined]}><Text style={[styles.voiceModeText, selected ? styles.voiceModeTextActive : undefined]}>{option.label}</Text></TouchableOpacity>; })}</View>
+          <View testID="account-voice-input-options" style={styles.voiceModeRow}>{VOICE_INPUT_MODE_OPTIONS.map(option => { const capability = capabilityFor(voiceCapabilities, option.id); const selected = voiceInputMode === option.id; const disabled = capability.available === 'unavailable'; return <TouchableOpacity key={option.id} testID={`account-voice-mode-${option.id}`} accessibilityRole="button" accessibilityLabel={`${option.label}: ${capability.reason || option.description}`} accessibilityState={{ selected, disabled: disabled || voicePreferenceBusy, busy: voicePreferenceBusy }} disabled={disabled || voicePreferenceBusy} onPress={() => void chooseVoiceInputMode(option.id)} style={[styles.voiceModePill, selected ? styles.voiceModePillActive : undefined, disabled ? styles.voiceModePillDisabled : undefined]}><Text style={[styles.voiceModeText, selected ? styles.voiceModeTextActive : undefined]}>{option.label}</Text></TouchableOpacity>; })}</View>
         </GlassSurface> : null}
 
         {/* CONNECTED OAUTH PROVIDERS */}
@@ -469,34 +545,40 @@ export default function AccountScreen() {
         <AccountSectionHeader id="appearance" title="APPEARANCE" expanded={expandedSection === 'appearance'} onPress={() => toggleSection('appearance')} />
         {expandedSection === 'appearance' ? <GlassSurface variant="card" style={styles.settingsCard}>
           <Text style={styles.settingToggleLabel}>SYSTEM, DARK OR LIGHT</Text>
-          <Text style={styles.settingHint}>Appearance is managed in the main Settings sheet. Magistrate uses a flat productivity canvas without wallpaper or transparency effects.</Text>
+          <Text style={styles.settingHint}>Appearance is managed in the main Settings sheet. The interface uses a neutral, flat productivity canvas without wallpaper.</Text>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Return to Chat settings" onPress={() => router.replace('/chat' as any)} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>OPEN CHAT SETTINGS</Text></TouchableOpacity>
         </GlassSurface> : null}
 
         <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>PRIVACY, SUPPORT & ABOUT</Text></View>
         <GlassSurface variant="card" style={styles.settingsCard}>
-          <Text style={styles.settingToggleLabel}>MAGISTRATE</Text>
+          <Text style={styles.settingToggleLabel}>ABOUT</Text>
           <Text testID="account-version" style={styles.settingHint}>Version {Constants.expoConfig?.version || 'unavailable'} · build {Constants.nativeBuildVersion || Constants.expoConfig?.ios?.buildNumber || 'unavailable'}</Text>
-          <Text style={styles.settingHint}>CALM AT REST. SPECTRAL WHEN ALIVE.</Text>
           <View style={styles.accountLinks}>
             <TouchableOpacity accessibilityRole="link" accessibilityLabel="Open privacy and security documentation" onPress={() => void openAccountLink('https://github.com/calvin-rutherford/Magistrate/blob/main/docs/friend-beta-security.md')} style={styles.accountLink}><Text style={styles.accountLinkText}>Privacy & security</Text></TouchableOpacity>
-            <TouchableOpacity accessibilityRole="link" accessibilityLabel="Open Magistrate license" onPress={() => void openAccountLink('https://github.com/calvin-rutherford/Magistrate/blob/main/LICENSE')} style={styles.accountLink}><Text style={styles.accountLinkText}>Legal & license</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="link" accessibilityLabel="Open software license" onPress={() => void openAccountLink('https://github.com/calvin-rutherford/Magistrate/blob/main/LICENSE')} style={styles.accountLink}><Text style={styles.accountLinkText}>Legal & license</Text></TouchableOpacity>
             <TouchableOpacity accessibilityRole="link" accessibilityLabel="Open support" onPress={() => void openAccountLink('https://github.com/calvin-rutherford/Magistrate/issues')} style={styles.accountLink}><Text style={styles.accountLinkText}>Support</Text></TouchableOpacity>
           </View>
-          <TouchableOpacity testID="account-logout" accessibilityRole="button" accessibilityLabel="Sign out of Magistrate" onPress={() => void logoutGatewaySession()} style={styles.accountLogout}><Text style={styles.accountLogoutText}>SIGN OUT</Text></TouchableOpacity>
+          <TouchableOpacity testID="account-logout" accessibilityRole="button" accessibilityLabel="Sign out" onPress={() => void logoutGatewaySession()} style={styles.accountLogout}><Text style={styles.accountLogoutText}>SIGN OUT</Text></TouchableOpacity>
           <View style={styles.deleteSection}>
             <Text style={styles.settingToggleLabel}>DELETE ACCOUNT</Text>
             <Text style={styles.settingHint}>Permanently erases account data. Type DELETE {profile?.user_id || 'your account ID'} to enable this irreversible action.</Text>
-            <TextInput testID="account-delete-confirmation" accessibilityLabel="Account deletion confirmation" autoCapitalize="characters" value={deleteConfirmation} onChangeText={setDeleteConfirmation} placeholder={profile ? `DELETE ${profile.user_id}` : 'Account unavailable'} placeholderTextColor="rgba(255,255,255,0.45)" style={styles.deleteInput} />
-            <TouchableOpacity testID="account-delete" accessibilityRole="button" accessibilityLabel="Permanently delete Magistrate account" accessibilityState={{ disabled: deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`, busy: deletingAccount }} disabled={deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`} onPress={requestAccountDeletion} style={[styles.accountDelete, (deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`) && styles.disabled]}><Text style={styles.accountDeleteText}>{deletingAccount ? 'DELETING…' : 'DELETE ACCOUNT'}</Text></TouchableOpacity>
+            <TextInput testID="account-delete-confirmation" accessibilityLabel="Account deletion confirmation" autoCapitalize="characters" value={deleteConfirmation} onChangeText={setDeleteConfirmation} placeholder={profile ? `DELETE ${profile.user_id}` : 'Account unavailable'} placeholderTextColor={theme.muted} style={styles.deleteInput} />
+            <TouchableOpacity testID="account-delete" accessibilityRole="button" accessibilityLabel="Permanently delete account" accessibilityState={{ disabled: deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`, busy: deletingAccount }} disabled={deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`} onPress={requestAccountDeletion} style={[styles.accountDelete, (deletingAccount || !profile || deleteConfirmation !== `DELETE ${profile.user_id}`) && styles.disabled]}><Text style={styles.accountDeleteText}>{deletingAccount ? 'DELETING…' : 'DELETE ACCOUNT'}</Text></TouchableOpacity>
           </View>
         </GlassSurface>
       </ScrollView>
+      </SafeAreaView>
     </EnvironmentBackground>
   );
 }
 
-const styles = StyleSheet.create({
+const accountThemes = {
+  dark: { text: '#F4F5F7', muted: '#8E99AA', edge: '#303238' },
+  light: { text: '#11151B', muted: '#667180', edge: '#D9DCE1' },
+};
+
+const baseStyles = StyleSheet.create({
+  safeArea: { flex: 1, minHeight: 0 },
   container: { flex: 1, paddingHorizontal: 16 },
   headerRow: {
     flexDirection: 'row',
@@ -558,6 +640,8 @@ const styles = StyleSheet.create({
   permissionModeTitleActive: { color: '#FFFFFF' },
   pushStatusText: { marginTop: 12, fontSize: 10, lineHeight: 15, color: 'rgba(255,255,255,0.72)' },
   enablePushButton: { alignSelf: 'flex-start', marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderWidth: 1, borderColor: '#24D8FF', borderRadius: 999 },
+  notificationTestSection: { marginTop: 18, paddingTop: 16, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.22)' },
+  notificationTestEvidence: { marginTop: 12, padding: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 12 },
   voiceModeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
   voiceModePill: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   voiceModePillActive: { backgroundColor: 'rgba(36, 216, 255, 0.28)', borderColor: '#24D8FF' },
@@ -575,3 +659,19 @@ const styles = StyleSheet.create({
   accountDeleteText: { color: '#FF8E8B', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   disabled: { opacity: 0.45 },
 });
+
+function themedAccountStyles(dark: boolean): typeof baseStyles {
+  const theme = dark ? accountThemes.dark : accountThemes.light;
+  return Object.fromEntries(Object.entries(baseStyles).map(([key, value]) => {
+    const flat = { ...StyleSheet.flatten(value) } as Record<string, unknown>;
+    const mutedWhite = (candidate: unknown) => typeof candidate === 'string' && /^rgba\(255,\s*255,\s*255,/.test(candidate);
+    if (flat.color === '#FFFFFF') flat.color = theme.text;
+    else if (mutedWhite(flat.color)) flat.color = theme.muted;
+    for (const edgeKey of ['borderColor', 'borderTopColor', 'borderBottomColor']) {
+      if (mutedWhite(flat[edgeKey])) flat[edgeKey] = theme.edge;
+    }
+    if (!dark && mutedWhite(flat.backgroundColor)) flat.backgroundColor = '#ECEEF1';
+    if (!dark && flat.backgroundColor === '#FFFFFF') flat.backgroundColor = '#E6E8EB';
+    return [key, flat];
+  })) as typeof baseStyles;
+}

@@ -1079,6 +1079,49 @@ export async function updateNotificationPreferences(enabled: boolean, quietHours
   return checkedJson<NotificationPreferences>(res);
 }
 
+export interface NotificationDeliveryEvidence {
+  queued: number;
+  provider_accepted: number;
+  provider_handoff: number;
+  failed: number;
+  expired: number;
+  observed_phone_delivery: 'unknown';
+  owner_saw_notification: 'unknown';
+}
+
+export interface NotificationTestResult {
+  status: 'accepted' | 'suppressed' | 'unavailable' | 'deduplicated-or-rate-limited' | 'revoked' | 'error';
+  reason?: string;
+  detail?: string;
+  attempts?: number;
+  evidence: NotificationDeliveryEvidence;
+}
+
+const NOTIFICATION_TEST_ID = /^[A-Za-z0-9_-]{8,80}$/;
+const nonNegativeInteger = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+
+export async function sendNotificationTest(requestId: string): Promise<NotificationTestResult> {
+  if (!NOTIFICATION_TEST_ID.test(requestId)) throw new Error('A valid notification test identity is required.');
+  const res = await authorizedFetch(GATEWAY_URL + '/notifications/test', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_id: requestId }),
+  });
+  const value = await checkedJson<unknown>(res);
+  if (!value || typeof value !== 'object') throw new Error('Gateway returned invalid notification test evidence.');
+  const result = value as Record<string, unknown>;
+  const statuses = new Set(['accepted', 'suppressed', 'unavailable', 'deduplicated-or-rate-limited', 'revoked', 'error']);
+  const evidence = result.evidence as Record<string, unknown> | null | undefined;
+  if (typeof result.status !== 'string' || !statuses.has(result.status) || !evidence
+    || !['queued', 'provider_accepted', 'provider_handoff', 'failed', 'expired'].every(key => nonNegativeInteger(evidence[key]))
+    || evidence.observed_phone_delivery !== 'unknown' || evidence.owner_saw_notification !== 'unknown'
+    || (result.reason !== undefined && (typeof result.reason !== 'string' || result.reason.length > 500))
+    || (result.detail !== undefined && (typeof result.detail !== 'string' || result.detail.length > 500))
+    || (result.attempts !== undefined && (!Number.isSafeInteger(result.attempts) || (result.attempts as number) < 1))) {
+    throw new Error('Gateway returned invalid notification test evidence.');
+  }
+  return value as NotificationTestResult;
+}
+
 export async function registerNativePushToken(pushToken: string, platform: 'ios' | 'android' | 'native'): Promise<{ status: string; platform: string }> {
   const formData = new FormData();
   formData.append('push_token', pushToken);
@@ -1458,33 +1501,6 @@ export interface AttentionAction {
   reason?: string | null;
 }
 
-export interface AttentionActionConfirmation {
-  schema_version: 'attention-action.v1';
-  status: 'confirmation_required';
-  action_key: string;
-  action: 'approve' | 'reject';
-  decision_key: string;
-  source_revision: string;
-  target: AttentionAction['target'];
-  consequence: string;
-  reversible: boolean;
-  confirmation_token: string;
-  expires_at: number;
-}
-
-export interface AttentionActionOutcome {
-  schema_version: 'attention-action.v1';
-  item_id?: string | null;
-  action_key: string;
-  decision_key: string;
-  action: 'approve' | 'reject';
-  target: AttentionAction['target'];
-  status: 'pending' | 'succeeded' | 'failed' | 'rejected' | 'stale' | string;
-  evidence: Record<string, string | boolean | number | null>;
-  timestamp: number;
-  idempotent?: boolean;
-}
-
 export interface UnifiedAttentionRecord {
   id: string;
   provider: string;
@@ -1505,6 +1521,68 @@ export interface UnifiedAttentionRecord {
   action?: AttentionAction;
 }
 
+export type DecisionDestination =
+  | { status: 'unpinned' }
+  | { status: 'current'; decisionId: string; revision: number }
+  | { status: 'invalid' | 'unavailable' | 'mismatch' | 'stale'; reason: string };
+
+const OPAQUE_DECISION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const MAX_DECISION_REVISION = 2_147_483_647;
+const positiveDecisionRevision = (value: unknown): number | null => {
+  const parsed = typeof value === 'number' ? value
+    : typeof value === 'string' && /^[1-9][0-9]{0,9}$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= MAX_DECISION_REVISION ? parsed : null;
+};
+const opaqueDecisionId = (value: unknown): string | null => (
+  typeof value === 'string' && OPAQUE_DECISION_ID.test(value) ? value : null
+);
+
+/** Compare notification navigation with the current owner-authorized projection. */
+export function compareDecisionDestination(
+  decisionParam: string | string[] | undefined,
+  revisionParam: string | string[] | undefined,
+  item: UnifiedAttentionRecord | null,
+): DecisionDestination {
+  if ((Array.isArray(decisionParam) && decisionParam.length !== 1)
+    || (Array.isArray(revisionParam) && revisionParam.length !== 1)) {
+    return { status: 'invalid', reason: 'This notification has duplicate decision navigation context. Review the current Attention queue instead.' };
+  }
+  const decisionValue = Array.isArray(decisionParam) ? decisionParam[0] : decisionParam;
+  const revisionValue = Array.isArray(revisionParam) ? revisionParam[0] : revisionParam;
+  if (decisionValue === undefined && revisionValue === undefined) return { status: 'unpinned' };
+  const decisionId = opaqueDecisionId(decisionValue);
+  const revision = positiveDecisionRevision(revisionValue);
+  if (!decisionId || !revision) return { status: 'invalid', reason: 'This notification has invalid decision navigation context. Review the current Attention queue instead.' };
+  if (!item) return { status: 'unavailable', reason: 'This notification no longer points to a current decision. No action was taken.' };
+
+  const contextDecision = opaqueDecisionId(item.context?.decision_id);
+  const targetDecision = opaqueDecisionId(item.target_id);
+  if (contextDecision && targetDecision && contextDecision !== targetDecision) return { status: 'unavailable', reason: 'The current decision identity is inconsistent. No action is available.' };
+  const currentDecision = contextDecision || targetDecision;
+  const itemRevision = positiveDecisionRevision(item.revision);
+  const contextRevision = positiveDecisionRevision(item.context?.decision_revision);
+  if (itemRevision && contextRevision && itemRevision !== contextRevision) return { status: 'unavailable', reason: 'The current decision revision is inconsistent. Refresh Attention before acting.' };
+  const currentRevision = contextRevision || itemRevision;
+  if (!currentDecision || !currentRevision) return { status: 'unavailable', reason: 'The current decision cannot be compared with this notification. No action is available.' };
+  if (currentDecision !== decisionId) return { status: 'mismatch', reason: 'This notification points to a different decision. No action was taken.' };
+  if (currentRevision !== revision) return { status: 'stale', reason: `This notification is for revision ${revision}, but revision ${currentRevision} is current. Review the latest decision before acting.` };
+  return { status: 'current', decisionId, revision };
+}
+
+export const decisionDestinationAllowsAction = (destination: DecisionDestination): boolean => (
+  destination.status === 'unpinned' || destination.status === 'current'
+);
+
+/** Resolve only the canonical decision context; legacy task/action identity is not sufficient. */
+export function currentDecisionDestination(item: UnifiedAttentionRecord | null): DecisionDestination {
+  const decisionId = opaqueDecisionId(item?.context?.decision_id);
+  const revision = positiveDecisionRevision(item?.context?.decision_revision);
+  if (!decisionId || !revision) {
+    return { status: 'unavailable', reason: 'This item has no current canonical decision identity. No answer is available.' };
+  }
+  return compareDecisionDestination(decisionId, String(revision), item);
+}
+
 export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]> {
   const res = await authorizedFetch(GATEWAY_URL + '/attention/unified', {
   });
@@ -1513,30 +1591,121 @@ export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]>
   return data as UnifiedAttentionRecord[];
 }
 
-export async function prepareAttentionAction(actionKey: string, action: 'approve' | 'reject', targetId: string): Promise<AttentionActionConfirmation> {
-  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}/prepare`, {
+export interface DecisionAnswerConfirmation {
+  schema_version: 'firstmate.answer-decision-result.v1';
+  tool_name: 'firstmate.answer_decision';
+  decision_id: string;
+  decision_revision: number;
+  status: 'confirmation_required';
+  confirmation_token: string;
+  expires_at: number;
+  target: { decision_id: string; decision_revision: number; title: string; question: string; project: string | null };
+  consequence: string;
+  reversible: false;
+}
+
+export interface DecisionAnswerOutcome {
+  schema_version: 'firstmate.answer-decision-result.v1';
+  tool_name: 'firstmate.answer_decision';
+  decision_id: string;
+  decision_revision: number;
+  status: 'pending' | 'succeeded' | 'failed';
+  error_code: string | null;
+  evidence: {
+    provider: 'firstmate'; operation: 'firstmate.answer_decision';
+    confirmation_recorded: true; release_requested: true; answer_bytes: number;
+  };
+  timestamp: number;
+  idempotent: boolean;
+}
+
+export type DecisionAnswerResult = DecisionAnswerConfirmation | DecisionAnswerOutcome;
+
+export class DecisionAnswerError extends Error {
+  constructor(message: string, readonly code: string, readonly status: number) {
+    super(message);
+    this.name = 'DecisionAnswerError';
+  }
+}
+
+const NATIVE_USER_MESSAGE_ID = /^mgm_[A-Za-z0-9_-]{4,124}$/;
+
+function decisionError(response: Response, payload: unknown): DecisionAnswerError {
+  const root = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  const detail = root.detail && typeof root.detail === 'object' ? root.detail as Record<string, unknown> : root;
+  const code = typeof detail.code === 'string' && detail.code ? detail.code : 'request_rejected';
+  const message = typeof detail.message === 'string' && detail.message.trim()
+    ? detail.message.trim() : `Decision answer was rejected (${response.status}).`;
+  return new DecisionAnswerError(message, code, response.status);
+}
+
+function normalizeDecisionAnswerResult(
+  raw: unknown, decisionId: string, decisionRevision: number,
+): DecisionAnswerResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Gateway returned an invalid decision answer.');
+  const value = raw as Record<string, unknown>;
+  const baseValid = value.schema_version === 'firstmate.answer-decision-result.v1'
+    && value.tool_name === 'firstmate.answer_decision'
+    && value.decision_id === decisionId && value.decision_revision === decisionRevision;
+  if (!baseValid) throw new Error('Gateway returned mismatched decision answer evidence.');
+  if (value.status === 'confirmation_required') {
+    const target = value.target && typeof value.target === 'object'
+      ? value.target as Record<string, unknown> : null;
+    if (typeof value.confirmation_token !== 'string' || !value.confirmation_token
+      || !Number.isSafeInteger(value.expires_at) || Number(value.expires_at) <= 0
+      || !target || target.decision_id !== decisionId
+      || target.decision_revision !== decisionRevision || typeof target.title !== 'string'
+      || typeof target.question !== 'string'
+      || (target.project !== null && typeof target.project !== 'string')
+      || typeof value.consequence !== 'string' || value.reversible !== false) {
+      throw new Error('Gateway returned an invalid decision confirmation.');
+    }
+    return value as unknown as DecisionAnswerConfirmation;
+  }
+  const evidence = value.evidence && typeof value.evidence === 'object'
+    ? value.evidence as Record<string, unknown> : null;
+  if (typeof value.status !== 'string' || !['pending', 'succeeded', 'failed'].includes(value.status)
+    || (value.error_code !== null && typeof value.error_code !== 'string')
+    || !evidence || typeof evidence !== 'object' || evidence.provider !== 'firstmate'
+    || evidence.operation !== 'firstmate.answer_decision'
+    || evidence.confirmation_recorded !== true || evidence.release_requested !== true
+    || typeof evidence.answer_bytes !== 'number' || !Number.isSafeInteger(evidence.answer_bytes) || evidence.answer_bytes < 1
+    || typeof value.timestamp !== 'number' || !Number.isSafeInteger(value.timestamp) || value.timestamp <= 0
+    || typeof value.idempotent !== 'boolean') {
+    throw new Error('Gateway returned invalid decision answer evidence.');
+  }
+  return value as unknown as DecisionAnswerOutcome;
+}
+
+async function requestDecisionAnswer(
+  decisionId: string, decisionRevision: number, nativeUserMessageId: string,
+  stage: 'confirmation' | 'answer', confirmationToken?: string,
+): Promise<DecisionAnswerResult> {
+  if (!opaqueDecisionId(decisionId) || !positiveDecisionRevision(decisionRevision)
+    || !NATIVE_USER_MESSAGE_ID.test(nativeUserMessageId)
+    || (stage === 'answer' && (!confirmationToken || confirmationToken.length > 128))) {
+    throw new Error('Decision answer identity is invalid.');
+  }
+  const res = await authorizedFetch(`${GATEWAY_URL}/decisions/${encodeURIComponent(decisionId)}/${stage}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action_key: actionKey, action, target_id: targetId }),
+    body: JSON.stringify({ decision_revision: decisionRevision, native_user_message_id: nativeUserMessageId,
+      ...(confirmationToken ? { confirmation_token: confirmationToken } : {}) }),
   });
-  return checkedJson<AttentionActionConfirmation>(res);
+  const payload = await readResponsePayload(res);
+  if (!res.ok) throw decisionError(res, payload);
+  return normalizeDecisionAnswerResult(payload, decisionId, decisionRevision);
 }
 
-export async function executeAttentionAction(actionKey: string, action: 'approve' | 'reject', targetId: string, confirmationToken: string): Promise<AttentionActionOutcome> {
-  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}/execute`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action_key: actionKey, action, target_id: targetId, confirmation_token: confirmationToken }),
-  });
-  return checkedJson<AttentionActionOutcome>(res);
+export async function prepareDecisionAnswer(
+  decisionId: string, decisionRevision: number, nativeUserMessageId: string,
+): Promise<DecisionAnswerResult> {
+  return requestDecisionAnswer(decisionId, decisionRevision, nativeUserMessageId, 'confirmation');
 }
 
-export async function fetchAttentionAction(actionKey: string): Promise<AttentionAction | AttentionActionOutcome> {
-  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/${encodeURIComponent(actionKey)}`);
-  return checkedJson<AttentionAction | AttentionActionOutcome>(res);
-}
-
-export async function fetchAttentionActionForItem(itemId: string): Promise<AttentionAction | AttentionActionOutcome> {
-  const res = await authorizedFetch(`${GATEWAY_URL}/attention/actions/by-item/${encodeURIComponent(itemId)}`);
-  return checkedJson<AttentionAction | AttentionActionOutcome>(res);
+export async function executeDecisionAnswer(
+  decisionId: string, decisionRevision: number, nativeUserMessageId: string, confirmationToken: string,
+): Promise<DecisionAnswerResult> {
+  return requestDecisionAnswer(decisionId, decisionRevision, nativeUserMessageId, 'answer', confirmationToken);
 }
 
 export async function fetchCanonicalActivity(after = 0, limit = 100, reconcile = true): Promise<CanonicalActivityPage> {

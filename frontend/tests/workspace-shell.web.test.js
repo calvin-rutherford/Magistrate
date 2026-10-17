@@ -57,8 +57,8 @@ test('chat ignores retired agent-target deep links and keeps the sole Magi threa
   const page = await open(`${BASE}/chat?agentId=w1%3Ap7`);
   await page.waitForSelector('[data-testid="branded-chat-shell"]');
   assert.equal(await page.$('[data-testid="workspace-shell"]'), null);
-  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('placeholder')), 'Message Magi');
-  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('aria-label')), 'Message Magi');
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('placeholder')), 'Message');
+  assert.equal(await page.$eval('[data-testid="magi-prompt"]', node => node.getAttribute('aria-label')), 'Message the assistant');
   assert.equal(new URL(page.url()).pathname, '/chat');
   await page.close();
 });
