@@ -20,7 +20,7 @@ production-complete declaration. Historical `COMPLETE` labels are not evidence.
 | Upload/resource safety | Existing private owner-bound uploads and actual-byte caps remain in `uploads.py`/ASGI middleware. | Do not bypass caps, content validation, idempotency or provider budgets with personal entitlement. | No changes to those boundaries; integration must run upload/security suites. Foundation admission tests are not upload evidence. |
 | Running service/data ownership | Dedicated Gateway user unit is active/running under the inspected service account; executable is `uv`; working directory is the separate deploy checkout's `gateway`. SQLite has private file permissions. | No service or live database edits. Verify any eventual activation under operator change control. | Selected systemd properties, executable/port inspection and read-only schema existence checks below. No secrets or row contents read out. |
 | Personal UI/native polish | Chat shell, voice, push and App Intents already exist; this lane did not exercise them on a device. | Allocated UI/native lanes finish personal-first presentation and decision-return loop. | Their browser/native test reports and later physical-device evidence; **not established here**. |
-| Current dependency gate | Fresh CI audit failed on the unchanged main frontend lock: 22 high, 1 critical. Narrow compatible updates below remove the critical and one root high advisory; 21 propagated high findings remain. | Await compatible upstream braces/node-forge releases or separately review a dependency replacement; never waive the advisory gate or force Expo/React Native downgrades. | Full frontend validation passes after the two-package correction; `npm audit --audit-level=low --json` still exits 1. **Release blocked**, not clean. |
+| Current dependency gate | Fresh CI audit failed on the unchanged main frontend lock: 22 high, 1 critical. Narrow compatible updates below remove the critical and one root high advisory; the reviewed Expo file-map cleanup further reduces propagated high findings to 20. | Await compatible upstream braces/node-forge releases or separately review a dependency replacement; never waive the advisory gate or force Expo/React Native downgrades. | Full frontend validation passes after the two-package correction; `npm audit --audit-level=low --json` still exits 1. **Release blocked**, not clean. |
 
 ## Baseline and operational evidence
 
@@ -242,8 +242,8 @@ untracked files were generated. One new source-map fixture initially assumed
 indexed lookup semantics unrelated to this fix; it now verifies actual mapping
 enumeration and preserves the hostile-offset refusal.
 
-**Remaining blocker:** the final frontend audit still exits **1**, reporting
-**21 high, 0 critical** findings rooted in:
+**First partial-remediation result:** the frontend audit still exited **1**,
+reporting **21 high, 0 critical** findings rooted in:
 
 - `braces` **3.0.3**, [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm):
   every published version is affected (`<=3.0.3`); reached through micromatch in
@@ -260,3 +260,30 @@ would not clear the unchanged package advisory gate and is not a reviewed
 upstream replacement. No audit suppression, risk waiver, forced framework
 migration or claim that other dependency scans passed is made. Later audit
 steps are not established by a frontend-failing CI job.
+
+### Reviewed Expo file-map follow-up — 2026-10-17
+
+A bounded independent dependency-chain assessment identified one further
+supported cleanup: **`@expo/metro-file-map` 57.0.3 → 57.0.4** removes its own
+micromatch edge. Only that package record changed; the earlier shell-quote and
+source-map-js fixes, Expo/RN versions and both compatibility patches remain.
+`docs/SECURITY_MODEL.md` now distinguishes historical clean scans from the
+[current red advisory gate](SECURITY_MODEL.md#current-dependency-status--2026-10-17-release-blocked).
+
+Added exact-version/removed-edge coverage, 27 positive/negative filename cases
+(extension, dotfile, multipart extension, basename, prefix), and real fallback
+watcher add/change/delete checks over synthetic worktree files. These exercise
+watching directly, independently of Expo's CI no-watch setting; teardown removes
+the fixture and closes its watchers.
+
+Fresh `npm ci` applied both patches. Release tests **12 passed**; full `npm test`
+**150 passed**; typegen/typecheck, lint (0 errors, 15 existing warnings), web
+export, Gateway **103 + 47**, compile and diff checks passed. Release registry
+checks and the **18-test** release-foundation suite passed as hermetic checks,
+not release approval. Validation introduced no generated repository drift.
+
+The exact low-threshold audit still exits **1** with **20 high / 0 critical**:
+remaining unscoped Metro/workspace-finder paths retain braces, and both Expo CLI
+paths retain node-forge. No advisory gate or workflow was changed. This is
+another validated partial improvement, **not a green gate or permission to
+release**.
