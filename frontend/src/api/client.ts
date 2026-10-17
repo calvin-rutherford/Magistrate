@@ -1599,7 +1599,7 @@ export interface DecisionAnswerConfirmation {
   status: 'confirmation_required';
   confirmation_token: string;
   expires_at: number;
-  target: { decision_id: string; decision_revision: number; title: string; question: string; project: string };
+  target: { decision_id: string; decision_revision: number; title: string; question: string; project: string | null };
   consequence: string;
   reversible: false;
 }
@@ -1655,7 +1655,8 @@ function normalizeDecisionAnswerResult(
       || !Number.isSafeInteger(value.expires_at) || Number(value.expires_at) <= 0
       || !target || target.decision_id !== decisionId
       || target.decision_revision !== decisionRevision || typeof target.title !== 'string'
-      || typeof target.question !== 'string' || typeof target.project !== 'string'
+      || typeof target.question !== 'string'
+      || (target.project !== null && typeof target.project !== 'string')
       || typeof value.consequence !== 'string' || value.reversible !== false) {
       throw new Error('Gateway returned an invalid decision confirmation.');
     }

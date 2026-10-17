@@ -37,14 +37,14 @@ function AttentionDetail({ item, confirmation, outcome, answerPreview, actionErr
     <Text style={styles.detailSubtitle}>{item.subtitle}</Text>
     <View style={styles.detailDivider} />
     <Text style={styles.detailLabel}>STATUS</Text>
-    <Text style={styles.detailValue}>{item.status || 'ACTION REQUIRED'}{item.priority ? ` · ${item.priority}` : ''}</Text>
+    <Text style={styles.detailValue}>{outcome ? `ANSWER ${outcome.status.toUpperCase()}` : item.status || 'ACTION REQUIRED'}{item.priority ? ` · ${item.priority}` : ''}</Text>
     {item.project ? <><Text style={styles.detailLabel}>PROJECT</Text><Text style={styles.detailValue}>{item.project}</Text></> : null}
     {item.target_id ? <><Text style={styles.detailLabel}>TARGET</Text><Text selectable style={styles.detailValue}>{item.target_id}</Text></> : null}
     {context.map(([key, value]) => <View key={key}><Text style={styles.detailLabel}>{key.replaceAll('_', ' ').toUpperCase()}</Text><Text style={styles.detailValue}>{String(value)}</Text></View>)}
     {navigationMessage ? <Text testID="attention-navigation-status" accessibilityRole={navigationBlocked ? 'alert' : undefined} style={navigationBlocked ? styles.boundaryText : styles.actionBoundary}>{navigationMessage}</Text> : null}
-    {answerAvailable ? <View testID={`attention-actions-${item.id}`} style={styles.actionBox}>
+    {answerAvailable || outcome ? <View testID={`attention-actions-${item.id}`} style={styles.actionBox}>
       <Text style={styles.detailLabel}>DECISION ANSWER</Text>
-      <Text style={styles.actionBoundary}>Write your approval, decline, or other answer in Chat. Only the latest saved user message can be reviewed and sent; notification text and button labels are never used as an answer.</Text>
+      {!outcome ? <Text style={styles.actionBoundary}>Write your approval, decline, or other answer in Chat. Only the latest saved user message can be reviewed and sent; notification text and button labels are never used as an answer.</Text> : null}
       {!confirmation && !outcome ? <View style={styles.actionButtons}>
         <TouchableOpacity testID={`attention-answer-in-chat-${item.id}`} accessibilityRole="button" accessibilityLabel={`Answer ${item.title} in Chat`} onPress={onOpenChat} style={styles.cancelButton}><Text style={styles.cancelButtonText}>ANSWER IN CHAT</Text></TouchableOpacity>
         <TouchableOpacity testID={`attention-review-answer-${item.id}`} accessibilityRole="button" accessibilityLabel={`Review latest Chat answer for ${item.title}`} onPress={onPrepare} disabled={actionBusy} style={styles.decisionButton}><Text style={styles.decisionButtonText}>{actionBusy ? 'CHECKING…' : 'REVIEW LATEST CHAT ANSWER'}</Text></TouchableOpacity>
@@ -58,7 +58,7 @@ function AttentionDetail({ item, confirmation, outcome, answerPreview, actionErr
         <View style={styles.actionButtons}><TouchableOpacity testID="attention-action-cancel" accessibilityRole="button" accessibilityLabel="Cancel decision answer" onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelButtonText}>CANCEL</Text></TouchableOpacity><TouchableOpacity testID="attention-action-confirm" accessibilityRole="button" accessibilityLabel="Confirm exact Chat answer" onPress={onExecute} disabled={actionBusy} style={styles.decisionButton}><Text style={styles.decisionButtonText}>{actionBusy ? 'WORKING…' : 'CONFIRM ANSWER'}</Text></TouchableOpacity></View>
       </View> : null}
       {actionError ? <Text testID="attention-action-error" accessibilityRole="alert" style={styles.errorText}>{actionError}</Text> : null}
-      {outcome ? <View testID="attention-action-evidence" style={styles.evidenceBox}><Text style={styles.confirmationTitle}>ANSWER · {outcome.status.toUpperCase()}</Text><Text style={styles.confirmationText}>Gateway evidence recorded at {new Date(outcome.timestamp).toISOString()}.</Text><Text style={styles.confirmationText}>Decision {outcome.decision_id} · revision {outcome.decision_revision} · {outcome.evidence.answer_bytes} canonical answer bytes.</Text><Text style={styles.confirmationText}>Release requested: Yes. Later execution progress is not implied.</Text></View> : null}
+      {outcome ? <View testID="attention-action-evidence" style={styles.evidenceBox}><Text style={styles.confirmationTitle}>ANSWER · {outcome.status.toUpperCase()}</Text>{answerPreview ? <Text testID="attention-submitted-answer" selectable style={styles.answerPreview}>{answerPreview}</Text> : null}<Text style={styles.confirmationText}>Gateway evidence recorded at {new Date(outcome.timestamp).toISOString()}.</Text><Text style={styles.confirmationText}>Decision {outcome.decision_id} · revision {outcome.decision_revision} · {outcome.evidence.answer_bytes} canonical answer bytes.</Text><Text style={styles.confirmationText}>Release requested: Yes. Later execution progress is not implied.</Text></View> : null}
     </View> : decision.status !== 'current' && item.provider === 'firstmate' ? <Text testID="attention-action-boundary" style={styles.boundaryText}>{decision.status === 'unpinned' ? 'This decision has no current canonical identity.' : decision.reason}</Text> : null}
     {item.external_url ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open source attention item" onPress={() => void openExternal()} style={styles.detailLink}><Text style={styles.actionPrompt}>OPEN SOURCE ↗</Text></TouchableOpacity> : null}
   </GlassSurface></View>;
@@ -80,10 +80,21 @@ export default function AttentionScreen() {
   const [lastActionItem, setLastActionItem] = useState<UnifiedAttentionRecord | null>(null);
   const focusedRecord = focusedItem ? items.find(item => item.id === focusedItem) || null : null;
   const decisionDestination = compareDecisionDestination(decisionParam, revisionParam, focusedRecord);
-  const navigationBlocked = !decisionDestinationAllowsAction(decisionDestination);
-  const navigationMessage = decisionDestination.status === 'current'
-    ? 'Opened from a notification for the current revision. No decision was sent; use the explicit controls below if available.'
-    : decisionDestination.status !== 'unpinned' ? decisionDestination.reason : undefined;
+  const requestBoundOutcome = (() => {
+    if (!actionOutcome || !lastActionItem || lastActionItem.id !== focusedItem) return null;
+    const binding = currentDecisionDestination(lastActionItem);
+    const routeBinding = compareDecisionDestination(decisionParam, revisionParam, lastActionItem);
+    if (binding.status !== 'current' || binding.decisionId !== actionOutcome.decision_id
+      || binding.revision !== actionOutcome.decision_revision
+      || !decisionDestinationAllowsAction(routeBinding)) return null;
+    return actionOutcome;
+  })();
+  const navigationBlocked = !requestBoundOutcome && !decisionDestinationAllowsAction(decisionDestination);
+  const navigationMessage = requestBoundOutcome
+    ? 'Showing the Gateway response bound to this exact decision and revision. No outcome was inferred from an Attention-list change.'
+    : decisionDestination.status === 'current'
+      ? 'Opened from a notification for the current revision. No decision was sent; use the explicit controls below if available.'
+      : decisionDestination.status !== 'unpinned' ? decisionDestination.reason : undefined;
 
   const loadAttention = async () => {
     setLoading(true);
@@ -152,13 +163,13 @@ export default function AttentionScreen() {
         .sort((left, right) => right.sequence_index - left.sequence_index)[0];
       if (!message) throw new Error('No saved Chat answer is available. Write an approval, decline, or other answer in Chat first.');
       setLastActionItem(current.item);
+      setAnswerMessage({ id: message.id, content: message.content });
       const prepared = await prepareDecisionAnswer(current.decisionId, current.revision, message.id);
       if (prepared.status !== 'confirmation_required') {
         setActionOutcome(prepared);
         await loadAttention();
         return;
       }
-      setAnswerMessage({ id: message.id, content: message.content });
       setConfirmation(prepared);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'This decision answer could not be prepared.');
@@ -178,7 +189,6 @@ export default function AttentionScreen() {
       const result = await executeDecisionAnswer(current.decisionId, current.revision, answerMessage.id, confirmation.confirmation_token);
       if (result.status === 'confirmation_required') throw new Error('The Gateway did not record the confirmed answer. Review it again.');
       setConfirmation(null);
-      setAnswerMessage(null);
       setActionOutcome(result);
       await loadAttention();
     } catch (error) {
@@ -223,7 +233,7 @@ export default function AttentionScreen() {
           <Text style={styles.sectionTitle}>UNIFIED ATTENTION QUEUE ({items.length})</Text>
         </View>
 
-        {(focusedItem && (focusedRecord || (lastActionItem?.id === focusedItem && (actionOutcome || confirmation || actionError)))) ? <AttentionDetail item={focusedRecord || lastActionItem!} confirmation={confirmation} outcome={actionOutcome} answerPreview={answerMessage?.content || null} actionError={actionError} actionBusy={actionBusy} navigationMessage={navigationMessage} navigationBlocked={navigationBlocked} onOpenChat={() => router.push('/chat')} onPrepare={() => void prepareAction()} onCancel={() => { setConfirmation(null); setAnswerMessage(null); setActionError(null); }} onExecute={() => void executeAction()} /> : null}
+        {(focusedItem && (focusedRecord || (lastActionItem?.id === focusedItem && (requestBoundOutcome || confirmation || actionError)))) ? <AttentionDetail item={focusedRecord || lastActionItem!} confirmation={confirmation} outcome={requestBoundOutcome} answerPreview={answerMessage?.content || null} actionError={actionError} actionBusy={actionBusy} navigationMessage={navigationMessage} navigationBlocked={navigationBlocked} onOpenChat={() => router.push('/chat')} onPrepare={() => void prepareAction()} onCancel={() => { setConfirmation(null); setAnswerMessage(null); setActionError(null); }} onExecute={() => void executeAction()} /> : null}
         {focusedItem && !loading && !focusedRecord && navigationBlocked ? <GlassSurface variant="card" style={styles.card}><Text testID="attention-navigation-status" accessibilityRole="alert" style={styles.boundaryText}>{navigationMessage}</Text></GlassSurface> : null}
 
         {loading && <GlassSurface variant="card" style={styles.card}><Text style={styles.itemSubtitle}>Loading live attention data…</Text></GlassSurface>}

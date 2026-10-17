@@ -24,14 +24,15 @@ test.after(async () => {
   await server?.stop();
 });
 
-async function openApp({ notificationMode, eventBatch = [], attention = events, notificationTestResponses = [], chatAnswer = 'Approve option A.', decisionMode = 'normal', url = '/chat' } = {}) {
+async function openApp({ notificationMode, eventBatch = [], attention = events, notificationTestResponses = [], chatAnswer = 'Approve option A.', decisionMode = 'normal', removeAnsweredAttention = false, url = '/chat' } = {}) {
   const page = await browser.newPage();
-  await page.evaluateOnNewDocument(({ mode, batch, attentionItems, testResponses, canonicalAnswer, answerMode }) => {
+  await page.evaluateOnNewDocument(({ mode, batch, attentionItems, testResponses, canonicalAnswer, answerMode, removeAnswered }) => {
     window.__notificationEvents = [...batch];
     window.__notificationTestResponses = [...testResponses];
     window.__notificationCalls = [];
     window.__attentionActionCalls = [];
     window.__decisionAnswerCalls = [];
+    window.__answeredDecision = false;
     window.__browserNotifications = [];
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (resource, options) => {
@@ -67,17 +68,18 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
         window.__decisionAnswerCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
         if (answerMode === 'stale') return Promise.resolve(new Response(JSON.stringify({ detail: { code: 'stale', message: 'The Firstmate decision revision is stale.' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }));
         if (answerMode === 'duplicate') return Promise.resolve(new Response(JSON.stringify({ schema_version: 'firstmate.answer-decision-result.v1', tool_name: 'firstmate.answer_decision', decision_id: 'deploy-1', decision_revision: 1, status: 'succeeded', error_code: null, evidence: { provider: 'firstmate', operation: 'firstmate.answer_decision', confirmation_recorded: true, release_requested: true, answer_bytes: canonicalAnswer.length }, timestamp: 1792260001000, idempotent: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'firstmate.answer-decision-result.v1', tool_name: 'firstmate.answer_decision', decision_id: 'deploy-1', decision_revision: 1, status: 'confirmation_required', confirmation_token: 'confirmation-token-123456', expires_at: 4102444800000, target: { decision_id: 'deploy-1', decision_revision: 1, title: 'Deployment choice', question: 'Choose the rollout window.', project: 'Magistrate' }, consequence: 'Records the exact canonical Native Chat answer and releases held work.', reversible: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        return Promise.resolve(new Response(JSON.stringify({ schema_version: 'firstmate.answer-decision-result.v1', tool_name: 'firstmate.answer_decision', decision_id: 'deploy-1', decision_revision: 1, status: 'confirmation_required', confirmation_token: 'confirmation-token-123456', expires_at: 4102444800000, target: { decision_id: 'deploy-1', decision_revision: 1, title: 'Deployment choice', question: 'Choose the rollout window.', project: null }, consequence: 'Records the exact canonical Native Chat answer and releases held work.', reversible: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (requestUrl.includes('/api/v1/decisions/deploy-1/answer')) {
         window.__decisionAnswerCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
+        window.__answeredDecision = true;
         return Promise.resolve(new Response(JSON.stringify({ schema_version: 'firstmate.answer-decision-result.v1', tool_name: 'firstmate.answer_decision', decision_id: 'deploy-1', decision_revision: 1, status: 'succeeded', error_code: null, evidence: { provider: 'firstmate', operation: 'firstmate.answer_decision', confirmation_recorded: true, release_requested: true, answer_bytes: canonicalAnswer.length }, timestamp: 1792260001000, idempotent: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       if (requestUrl.includes('/api/v1/attention/actions/')) {
         window.__attentionActionCalls.push({ url: requestUrl, method: options?.method, body: options?.body });
         return Promise.resolve(new Response(JSON.stringify({ detail: 'Legacy action path is forbidden.' }), { status: 500, headers: { 'Content-Type': 'application/json' } }));
       }
-      if (requestUrl.includes('/api/v1/attention/unified')) return Promise.resolve(new Response(JSON.stringify(attentionItems), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      if (requestUrl.includes('/api/v1/attention/unified')) return Promise.resolve(new Response(JSON.stringify(removeAnswered && window.__answeredDecision ? [] : attentionItems), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/account/profile')) return Promise.resolve(new Response(JSON.stringify({ user_id: 'default_user', name: 'Owner', email: '', avatar_url: '', bio: '' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/account/login-methods')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'provider-login-methods.v1', methods: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (requestUrl.includes('/api/v1/account/onboarding')) return Promise.resolve(new Response(JSON.stringify({ schema_version: 'account-onboarding.v1', required: false, next_step: null, steps: { welcome: { complete: true }, profile: { complete: true }, github: { complete: true }, billing: { complete: true, available: false, status: 'unavailable', current_period_end: null, customer_portal_available: false } } }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -104,7 +106,7 @@ async function openApp({ notificationMode, eventBatch = [], attention = events, 
       }
       Object.defineProperty(window, 'Notification', { configurable: true, value: FakeNotification });
     } else Object.defineProperty(window, 'Notification', { configurable: true, value: undefined });
-  }, { mode: notificationMode, batch: eventBatch, attentionItems: attention, testResponses: notificationTestResponses, canonicalAnswer: chatAnswer, answerMode: decisionMode });
+  }, { mode: notificationMode, batch: eventBatch, attentionItems: attention, testResponses: notificationTestResponses, canonicalAnswer: chatAnswer, answerMode: decisionMode, removeAnswered: removeAnsweredAttention });
   await page.goto(`${BASE}${url}`, { waitUntil: 'networkidle0' });
   return page;
 }
@@ -150,22 +152,25 @@ test('a PR Attention target preserves exact in-app detail routing and metadata',
   await page.close();
 });
 
-test('Attention sends exact canonical approve and decline Chat rows through the request-bound flow', async () => {
+test('Attention preserves exact approve and decline outcomes after the answered item is removed', async () => {
   for (const answer of ['Approve option A.', 'Decline. Do not proceed.']) {
-    const page = await openApp({ notificationMode: 'unsupported', url: '/attention', eventBatch: [[]], chatAnswer: answer });
-    await page.click('[data-testid="attention-item-question-1"]');
+    const page = await openApp({ notificationMode: 'unsupported', url: '/attention?item=question-1&decision=deploy-1&revision=1', eventBatch: [[]], chatAnswer: answer, removeAnsweredAttention: true });
+    await page.waitForSelector('[data-testid="attention-detail-question-1"]');
     await page.click('[data-testid="attention-review-answer-question-1"]');
     await page.waitForSelector('[data-testid="attention-confirmation"]');
-    assert.equal(await page.$eval('[data-testid="attention-answer-preview"]', node => node.textContent), answer);
+    assert.equal(await page.$eval('[data-testid="attention-answer-preview"]', node => node.textContent), answer, 'a null target project remains a valid confirmation');
     assert.equal(await page.evaluate(() => window.__decisionAnswerCalls.length), 1, 'confirmation preparation is not execution');
     await page.click('[data-testid="attention-action-confirm"]');
-    await page.waitForSelector('[data-testid="attention-action-evidence"]');
+    await page.waitForFunction(() => document.querySelector('[data-testid="attention-action-evidence"]') && !document.querySelector('[data-testid="attention-item-question-1"]'));
     const calls = await page.evaluate(() => window.__decisionAnswerCalls);
     assert.equal(calls.length, 2);
     assert.deepEqual(JSON.parse(calls[0].body), { decision_revision: 1, native_user_message_id: 'mgm_canonical_answer_1' });
     assert.deepEqual(JSON.parse(calls[1].body), { decision_revision: 1, native_user_message_id: 'mgm_canonical_answer_1', confirmation_token: 'confirmation-token-123456' });
     assert.equal(await page.evaluate(() => window.__attentionActionCalls.length), 0, 'legacy attention-action.v1 is never called');
+    assert.equal(await page.$eval('[data-testid="attention-submitted-answer"]', node => node.textContent), answer);
     assert.match(await page.$eval('[data-testid="attention-action-evidence"]', node => node.textContent), /SUCCEEDED|deploy-1|canonical answer bytes|Later execution progress is not implied/);
+    assert.match(await page.$eval('[data-testid="attention-navigation-status"]', node => node.textContent), /Gateway response bound to this exact decision and revision|No outcome was inferred/i);
+    assert.equal(await page.$('[data-testid="attention-navigation-status"][role="alert"]'), null, 'a request-bound outcome is not replaced by a blocked-navigation warning');
     await page.close();
   }
 });
