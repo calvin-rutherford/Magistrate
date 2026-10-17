@@ -40,7 +40,10 @@ test('voice lifecycle stops foreground capture and exposes explicit recovery con
   const capture = readFileSync(new URL('../src/input/VoiceInputAdapter.ts', import.meta.url), 'utf8');
   assert.match(source, /AppState\.addEventListener\('change'/);
   assert.match(source, /Network\.useNetworkState\(\)/);
-  assert.match(source, /cancelMagiChatTurn\(messageId\)/);
+  assert.doesNotMatch(source, /cancelMagiChatTurn|delivery: 'cancelled'/);
+  assert.match(source, /Any submitted work continues in Chat/);
+  assert.match(source, /Streaming Voice Mode is unavailable in this build/);
+  assert.match(source, /microphoneMutedRef\.current/);
   assert.match(source, /testID="voice-mute"/);
   assert.match(source, /testID="voice-cancel"/);
   assert.match(source, /Linking\.openSettings\(\)/);

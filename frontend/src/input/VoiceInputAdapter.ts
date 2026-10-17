@@ -30,6 +30,7 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void, mo
   const audioInputUidRef = useRef<string | null>(null);
   const recognitionRef = useRef<any>(null);
   const browserTranscriptRef = useRef('');
+  const captureGenerationRef = useRef(0);
   const stopBrowserRecognition = useCallback(() => {
     try { recognitionRef.current?.stop(); } catch {}
     recognitionRef.current = null;
@@ -67,6 +68,8 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void, mo
     recognitionRef.current = recognition;
   }, [mode, onIntermediate]);
   const start = useCallback(async () => {
+    const generation = ++captureGenerationRef.current;
+    const cancelled = () => generation !== captureGenerationRef.current;
     setError(null);
     if (mode === 'browser' && !browserSpeechRecognitionAvailable()) {
       const unsupported = new VoiceCaptureError('unsupported', 'Browser speech recognition is unavailable. Choose Automatic or Gateway OpenAI.');
@@ -78,18 +81,22 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void, mo
     }
     const current = await AudioModule.getRecordingPermissionsAsync();
     const permission = current.granted ? current : await AudioModule.requestRecordingPermissionsAsync();
+    if (cancelled()) return;
     if (!permission.granted) {
       const denied = new VoiceCaptureError('permission-denied', 'Microphone permission was denied. Enable it in system settings and try again.');
       setError(denied); throw denied;
     }
     try {
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      if (cancelled()) return;
       await recorder.prepareToRecordAsync();
+      if (cancelled()) { await recorder.stop().catch(() => undefined); return; }
       try {
         const input = await recorder.getCurrentInput();
         audioInputUidRef.current = input.uid;
         setAudioInput(input);
       } catch { /* Web and some simulators do not enumerate audio routes. */ }
+      if (cancelled()) { await recorder.stop().catch(() => undefined); return; }
       recorder.record();
       startBrowserRecognition();
     } catch (cause) {
@@ -117,11 +124,12 @@ export function useVoiceInputAdapter(onIntermediate?: (text: string) => void, mo
     }
   }, [mode, recorder, recorderState.durationMillis, stopBrowserRecognition]);
   const cancel = useCallback(async () => {
+    captureGenerationRef.current += 1;
     browserTranscriptRef.current = '';
     stopBrowserRecognition();
-    if (recorderState.isRecording) await recorder.stop().catch(() => undefined);
+    if (recorder.getStatus().isRecording) await recorder.stop().catch(() => undefined);
     await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => undefined);
-  }, [recorder, recorderState.isRecording, stopBrowserRecognition]);
+  }, [recorder, stopBrowserRecognition]);
   useEffect(() => {
     if (!recorderState.isRecording || Platform.OS === 'web') return;
     let live = true;

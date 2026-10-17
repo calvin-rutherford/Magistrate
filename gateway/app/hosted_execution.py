@@ -507,36 +507,9 @@ class HostedExecutionStore:
 
     def github_target(self, run: dict[str, Any]) -> dict[str, Any] | None:
         """Resolve exactly one current owner-authorized repository for a run."""
-        project_id = run.get("project_id")
-        if not project_id:
-            return None
+        from app.projects import execution_repository
         with self._connect() as connection:
-            rows = connection.execute(
-                """SELECT app_repo.installation_id, app_repo.repository_id,
-                          app_repo.full_name, project_repo.repository_id
-                   FROM project_repositories AS project_repo
-                   JOIN github_app_repositories AS app_repo
-                     ON lower(app_repo.full_name) = lower(project_repo.full_name)
-                    AND app_repo.active = 1
-                   JOIN github_app_installations AS installation
-                     ON installation.installation_id = app_repo.installation_id
-                    AND installation.user_id = project_repo.owner_user_id
-                    AND installation.status = 'active'
-                   WHERE project_repo.owner_user_id = ?
-                     AND project_repo.project_id = ?
-                     AND project_repo.provider = 'github'
-                   ORDER BY app_repo.installation_id, app_repo.repository_id
-                   LIMIT 2""",
-                (run["owner_user_id"], project_id),
-            ).fetchall()
-        if len(rows) != 1:
-            return None
-        return {
-            "installation_id": int(rows[0][0]),
-            "provider_repository_id": int(rows[0][1]),
-            "repository": str(rows[0][2]),
-            "project_repository_id": str(rows[0][3]),
-        }
+            return execution_repository(connection, run['owner_user_id'], run.get('project_id'))
 
 
 class HostedExecutionController:

@@ -505,11 +505,20 @@ def _principal_from_token(token: str) -> Principal:
         token_hash = _hash_token(token)
     except (UnicodeEncodeError, TypeError):
         raise HTTPException(status_code=401, detail="Invalid or expired session") from None
+    return _verified_session(token_hash)
+
+
+def principal_for_execution_session(session_id: str) -> Principal:
+    """Internal revalidation of server-authored tool provenance, never an HTTP grant."""
+    return _verified_session(session_id, by_session_id=True)
+
+
+def _verified_session(identity: str, *, by_session_id: bool = False) -> Principal:
     _session_db()
     now = int(time.time())
     with connect(database.DB_PATH) as connection:
         row = connection.execute(
-            """SELECT s.session_id, s.user_id, s.scopes, s.expires_at, s.revoked_at,
+            f"""SELECT s.session_id, s.user_id, s.scopes, s.expires_at, s.revoked_at,
                       s.access_grant_id, g.expires_at, g.revoked_at,
                       s.provider_session_id, s.auth_account_id,
                       family.expires_at, family.revoked_at, family.provider,
@@ -522,8 +531,8 @@ def _principal_from_token(token: str) -> Principal:
                 AND family.user_id = s.user_id
                LEFT JOIN connected_accounts AS account
                  ON account.id = s.auth_account_id AND account.user_id = s.user_id
-               WHERE s.token_hash = ?""",
-            (token_hash,),
+               WHERE s.{'session_id' if by_session_id else 'token_hash'} = ?""",
+            (identity,),
         ).fetchone()
     scopes = frozenset(filter(None, row[2].split(","))) if row else frozenset()
     grant_invalid = bool(row and row[5] and (row[6] is None or row[6] <= now or row[7] is not None))
@@ -547,9 +556,13 @@ def _principal_from_token(token: str) -> Principal:
         or not _valid_user_id(row[1]) or not scopes or not scopes.issubset(KNOWN_SCOPES)
     ):
         raise HTTPException(status_code=401, detail="Invalid or expired session")
-    return Principal(
-        row[1], scopes, row[0], row[3], row[5], row[8], row[9], row[12], row[10],
-    )
+    from app.deployment_mode import DeploymentModeError
+    from app.structured_runtime import deployment_policy
+    principal = Principal(row[1], scopes, row[0], row[3], row[5], row[8], row[9], row[12], row[10])
+    try:
+        return deployment_policy().require_principal(principal)
+    except DeploymentModeError as exc:
+        raise HTTPException(exc.status_code, detail={'code': exc.code}) from None
 
 
 def authenticate_request(request: Request, authorization: Optional[str]) -> Principal:

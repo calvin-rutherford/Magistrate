@@ -94,6 +94,43 @@ class _StrictDecisionContract(BaseModel):
         return value
 
 
+class FirstmateDecisionRequest(_StrictDecisionContract):
+    """Producer-supplied request identity; no expiry or run is invented by reads."""
+    run_id: str = Field(pattern=r'^[A-Za-z0-9._:-]{1,128}$')
+    request_id: str = Field(pattern=r'^[A-Za-z0-9._:-]{1,128}$')
+    scope: str = Field(pattern=r'^[A-Za-z0-9._:-]{1,128}$')
+    expires_at: int = Field(ge=1, le=9_007_199_254_740_991)
+
+
+def _request_scope(connection, owner: str, task_id: str, request: dict, *, answering: bool = False) -> None:
+    row = connection.execute("""SELECT e.run_id,e.terminal_phase,s.project_id,p.status
+        FROM firstmate_execution_objectives e JOIN magi_objective_submissions s
+        ON s.objective_id=e.objective_id AND s.owner_user_id=e.owner_user_id
+        JOIN projects p ON p.project_id=s.project_id AND p.owner_user_id=s.owner_user_id
+        WHERE e.owner_user_id=? AND e.task_id=?""", (owner, task_id)).fetchone()
+    if (not row or row[0] != request['run_id'] or row[2] != request['scope']
+            or row[3] != 'active' or len(task_id) > 128 or (answering and row[1] is not None)):
+        raise FirstmateDecisionError('request_scope_invalid', 'The decision is not bound to current authorized work.', 409)
+    if answering:
+        from app.projects import execution_repository
+        if execution_repository(connection, owner, row[2]) is None:
+            raise FirstmateDecisionError('request_scope_invalid', 'The decision repository is no longer authorized.', 409)
+
+
+def _require_current_request(connection, decision, now: int) -> dict | None:
+    from app.structured_runtime import personal_owner
+    raw = decision['request_json']
+    if not raw:
+        if personal_owner(decision['owner_user_id']):
+            raise FirstmateDecisionError('request_binding_required', 'This legacy request is read-only in personal mode.', 409)
+        return None
+    request = json.loads(raw)
+    if request['expires_at'] <= now:
+        raise FirstmateDecisionError('request_expired', 'This request expired. Wait for a new runtime request.', 409)
+    _request_scope(connection, decision['owner_user_id'], decision['task_id'], request, answering=True)
+    return request
+
+
 class FirstmateDecisionRequiredEvent(_StrictDecisionContract):
     """Closed normalized event derived only from one structured captain hold."""
 
@@ -108,6 +145,7 @@ class FirstmateDecisionRequiredEvent(_StrictDecisionContract):
     project: Optional[str] = Field(default=None, max_length=160)
     observed_at: int = Field(ge=0, le=9_007_199_254_740_991)
     close_mode: Literal["release"]
+    request: FirstmateDecisionRequest | None = None
 
     @field_validator("lifecycle_identity")
     @classmethod
@@ -576,6 +614,11 @@ class FirstmateDecisionStore:
             "observed_at": int(row["source_observed_at"]),
             "answer_tool": ANSWER_TOOL_NAME,
             "confirmation_required": True,
+            **({'decision_notification': {
+                'schema_version': 'magistrate.decision-notification.v1',
+                'decision_id': row['decision_id'], 'task_id': row['task_id'],
+                'revision': int(row['revision']), **json.loads(row['request_json']),
+            }} if row['request_json'] else {}),
         }
 
     @staticmethod
@@ -676,6 +719,10 @@ class FirstmateDecisionStore:
                     if event.source_instance_id != source_instance_id or event.observed_at != observed_at:
                         raise FirstmateDecisionError("source_invalid", "A decision event has mismatched source identity.", 503)
                     payload = event.model_dump(mode="json")
+                    if event.request is None:
+                        payload.pop('request')  # Preserve historical immutable event bytes.
+                    else:
+                        _request_scope(connection, owner_user_id, event.task_id, payload['request'])
                     # Observation time belongs to the enclosing snapshot, not
                     # the immutable semantic event identity. Re-polling the
                     # same open hold must therefore be an exact duplicate.
@@ -726,7 +773,19 @@ class FirstmateDecisionStore:
                                 now,
                             ),
                         )
+                        if event.request is not None:
+                            connection.execute('UPDATE firstmate_decisions SET request_json=? WHERE decision_id=? AND owner_user_id=?',
+                                               (_canonical_json(payload['request']), decision_id, owner_user_id))
                         continue
+                    incoming_request = _canonical_json(payload['request']) if event.request else None
+                    if existing['request_json'] and incoming_request != existing['request_json']:
+                        prior_request = json.loads(existing['request_json'])
+                        if (incoming_request is None or prior_request['request_id'] == event.request.request_id
+                                or existing['state'] in {'answering', 'answered'}):
+                            raise FirstmateDecisionError('request_binding_conflict', 'A bound request cannot be downgraded or rewritten.', 409)
+                    if existing['state'] in {'pending', 'resolved'}:
+                        connection.execute('UPDATE firstmate_decisions SET request_json=? WHERE decision_id=? AND owner_user_id=?',
+                                           (incoming_request, decision_id, owner_user_id))
                     if existing["decision_id"] != decision_id:
                         raise FirstmateDecisionError("source_conflict", "Firstmate decision identity changed.", 409)
                     if existing["state"] == "resolved":
@@ -827,6 +886,9 @@ class FirstmateDecisionStore:
                          state='available',updated_at=excluded.updated_at""",
                     (owner_user_id, source_instance_id, observed_at, snapshot_sha256, now),
                 )
+                from app.structured_runtime import persist_objective_state
+                for objective in connection.execute('SELECT objective_id FROM magi_objective_submissions WHERE owner_user_id=?', (owner_user_id,)).fetchall():
+                    persist_objective_state(connection, owner_user_id, objective[0])
                 return self._pending_rows(connection, owner_user_id)
         finally:
             connection.close()
@@ -1037,6 +1099,9 @@ class FirstmateDecisionStore:
                     raise FirstmateDecisionError("decision_not_found", "The Firstmate decision was not found.", 404)
                 if int(decision["revision"]) != decision_revision:
                     raise FirstmateDecisionError("stale", "The Firstmate decision revision is stale.", 409)
+                bound = _require_current_request(connection, decision, now)
+                if bound:
+                    expires_at = min(expires_at, bound['expires_at'])
                 if decision["state"] == "answering":
                     raise FirstmateDecisionError("duplicate", "This decision already has an answer in progress.", 409)
                 if decision["state"] != "pending":
@@ -1122,6 +1187,10 @@ class FirstmateDecisionStore:
                     resumed = False
                     execution_claim_id = existing["execution_claim_id"]
                     if existing["status"] == "pending" and int(existing["lease_expires_at"]) <= now:
+                        current = connection.execute('SELECT * FROM firstmate_decisions WHERE owner_user_id=? AND decision_id=?', (owner_user_id, decision_id)).fetchone()
+                        if not current or current['revision'] != decision_revision:
+                            raise FirstmateDecisionError('stale', 'The decision revision is stale.', 409)
+                        _require_current_request(connection, current, now)
                         execution_claim_id = "fmcl_" + secrets.token_hex(16)
                         updated = connection.execute(
                             """UPDATE firstmate_decision_answers
@@ -1171,6 +1240,7 @@ class FirstmateDecisionStore:
                     raise FirstmateDecisionError("duplicate", "This decision already has an answer in progress.", 409)
                 if decision["state"] != "pending":
                     raise FirstmateDecisionError("already_resolved", "The Firstmate decision is no longer pending.", 409)
+                _require_current_request(connection, decision, now)
                 if not isinstance(confirmation_token, str) or not confirmation_token:
                     raise FirstmateDecisionError("confirmation_required", "Explicit confirmation is required.", 400)
                 try:
@@ -1191,7 +1261,7 @@ class FirstmateDecisionStore:
                     or confirmation["native_user_message_id"] != native_user_message_id
                     or confirmation["idempotency_key"] != request["idempotency_key"]
                     or confirmation["answer_sha256"] != request["answer_sha256"]
-                    or int(confirmation["expires_at"]) < now
+                    or int(confirmation["expires_at"]) <= now
                     or confirmation["used_at"] is not None
                 ):
                     raise FirstmateDecisionError("confirmation_invalid", "Confirmation is invalid or expired.", 409)
@@ -1324,6 +1394,12 @@ class FirstmateDecisionStore:
                             row["decision_revision"],
                         ),
                     )
+                from app.structured_runtime import persist_objective_state
+                objective = connection.execute('''SELECT s.objective_id FROM magi_objective_submissions s
+                    JOIN firstmate_decisions d ON d.task_id=s.task_id AND d.owner_user_id=s.owner_user_id
+                    WHERE d.owner_user_id=? AND d.decision_id=?''', (owner_user_id, row['decision_id'])).fetchone()
+                if objective:
+                    persist_objective_state(connection, owner_user_id, objective[0])
                 completed = connection.execute(
                     """SELECT * FROM firstmate_decision_answers
                        WHERE owner_user_id=? AND idempotency_key=?""",
@@ -1492,7 +1568,9 @@ class FirstmateDecisionService:
     @staticmethod
     def _require_source_owner(owner_user_id: str) -> str:
         owner_user_id = _valid_owner(owner_user_id)
-        configured_owner = os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
+        from app.structured_runtime import deployment_policy
+        policy = deployment_policy()
+        configured_owner = policy.contract.owner_principal_id if policy.personal else os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
         if owner_user_id != configured_owner:
             raise FirstmateDecisionError(
                 "forbidden", "The local Firstmate decision source belongs to another principal.", 403
@@ -1541,6 +1619,8 @@ class FirstmateDecisionService:
                 "project": event.project,
                 "close_mode": event.close_mode,
             }
+            if event.request is not None:
+                semantic['request'] = event.request.model_dump(mode='json')
             if event.source_event_id != _event_id(
                 self.source_instance_id, event.task_id,
                 event.lifecycle_identity, semantic,
@@ -1548,7 +1628,11 @@ class FirstmateDecisionService:
                 raise FirstmateDecisionError(
                     "source_invalid", "A Firstmate decision event identity is invalid.", 503
                 )
-        snapshot_hash = _payload_sha256(batch.model_dump(mode="json"))
+        snapshot = batch.model_dump(mode='json')
+        for item in snapshot['events']:
+            if item['request'] is None:
+                item.pop('request')
+        snapshot_hash = _payload_sha256(snapshot)
         async with self._lock(owner_user_id):
             return await asyncio.to_thread(
                 self.store.apply_snapshot,
@@ -1577,7 +1661,9 @@ class FirstmateDecisionService:
         if not isinstance(principal, Principal) or not principal.has("command"):
             raise FirstmateDecisionError("unauthorized", "Command authorization is required.", 403)
         from app.hosted_execution import hosted_execution_enabled
-        owner_id = os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
+        from app.structured_runtime import deployment_policy
+        policy = deployment_policy()
+        owner_id = policy.contract.owner_principal_id if policy.personal else os.getenv("MAGISTRATE_BOOTSTRAP_USER_ID", "default_user").strip()
         if not hosted_execution_enabled() and principal.user_id != owner_id:
             raise FirstmateDecisionError("forbidden", "Only the authenticated owner may answer the local Firstmate runtime.", 403)
         if principal.expires_at <= int(time.time()):
@@ -1628,6 +1714,15 @@ class FirstmateDecisionService:
                 "source-unavailable" if stale else "needs-decision"
             )
             decision_id = decision["decision_id"]
+            envelope = decision.get('decision_notification')
+            expired = bool(envelope and envelope['expires_at'] <= int(time.time() * 1000))
+            from app.structured_runtime import personal_owner
+            unbound = personal_owner(owner_user_id) and not envelope
+            actionable = not (expired or unbound or stale) and decision['state'] == 'pending'
+            if expired:
+                status = 'expired'
+            elif unbound:
+                status = 'request-unbound'
             item_id = f"captain-question-{decision_id}"
             result.append(
                 {
@@ -1641,15 +1736,17 @@ class FirstmateDecisionService:
                     "deep_link": f"/attention?item={item_id}",
                     "target_id": decision_id,
                     "project": decision["project"],
-                    "requires_action": True,
-                    "notification_kind": "captain_question",
+                    "requires_action": actionable,
+                    "notification_kind": 'captain_question' if actionable else None,
                     "revision": str(decision["revision"]),
+                    **({'decision_notification': envelope} if envelope else {}),
                     # Deliberately omit source task/lifecycle identity. The
                     # host resolves the opaque principal-owned decision id.
                     "context": {
                         "decision_id": decision_id,
                         "decision_revision": decision["revision"],
                         "answer_via": "Magi Chat",
+                        **({'answer_available': actionable} if envelope or unbound else {}),
                         "source_status": "stale" if stale else "current",
                     },
                 }

@@ -56,7 +56,9 @@ from app.github_app import (MAX_WEBHOOK_BYTES as GITHUB_MAX_WEBHOOK_BYTES,
                             validate_github_app_configuration)
 from app.recent_activity import RecentActivityService
 from app.activity_store import SourceEventConflict, list_activity, snapshot_activity, source_diagnostics
-from app.structured_runtime import StructuredRuntimeProjection
+from app.structured_runtime import StructuredRuntimeProjection, deployment_policy
+from app.deployment_mode import DeploymentMode, DeploymentModeError
+from app.notification_test_api import router as notification_test_router
 from app.attention_service import attention_service
 from app.attention_actions import (AttentionActionError, action_for_item, execute_confirmation,
                                    prepare_confirmation, outcome_for_item, _outcome_row, _public_outcome)
@@ -133,6 +135,7 @@ app.include_router(billing_router)
 app.include_router(project_memory_router)
 app.include_router(hosted_execution_router)
 app.include_router(perception_router)
+app.include_router(notification_test_router)
 
 # Bound request envelopes before Starlette parses multipart/JSON bodies. The
 # per-file and aggregate checks below remain authoritative because multipart
@@ -286,6 +289,9 @@ async def _reconcile_registered_notifications() -> None:
         try:
             await reconcile_push_receipts()
             for user_id in list_registered_push_users():
+                policy = deployment_policy()
+                if policy.personal and user_id != policy.contract.owner_principal_id:
+                    continue
                 items = await attention_service.get_unified_attention_items(user_id)
                 await dispatch_notification_events(user_id, items, local_hour=registered_local_hour(user_id))
         except asyncio.CancelledError:
@@ -299,14 +305,22 @@ async def _reconcile_registered_notifications() -> None:
 async def start_notification_reconciler():
     global _notification_reconciler_task, _firstmate_delivery_recovery_task, _hosted_execution_task
     validate_production_configuration()
+    from app import structured_runtime as runtime_module
+    policy = DeploymentMode.from_env()
+    from app.hosted_execution import hosted_execution_enabled
+    if policy.personal and hosted_execution_enabled():
+        raise DeploymentModeError('personal_runtime_conflict', 503)
+    runtime_module._deployment_policy = policy
     validate_friend_beta_configuration()
     validate_provider_auth_configuration()
-    validate_billing_configuration()
+    if not policy.personal:
+        validate_billing_configuration()
     validate_magi_chat_configuration()
     validate_github_app_configuration()
     # Hosted mode is a fail-closed production boundary: validate every image,
     # identity, mTLS, network, and resource setting before serving.
-    HostedExecutionConfig.from_env()
+    if not policy.personal:
+        HostedExecutionConfig.from_env()
     # A process cannot resume an in-flight provider socket. Preserve the
     # reserved pair and expose a truthful, explicitly retryable failure.
     await asyncio.to_thread(MagiChatStore().recover_orphaned_pending)
@@ -401,6 +415,15 @@ async def application_events(websocket: WebSocket):
             except asyncio.TimeoutError:
                 pass
 
+            # Revalidate revocation/expiry and exact personal ownership before
+            # every persisted replay, not merely at the socket's first frame.
+            try:
+                principal = _principal_from_token(token)
+                if not principal.has('read'):
+                    raise HTTPException(status_code=403)
+            except HTTPException:
+                await websocket.close(code=1008)
+                return
             payload = await magi_chat_service.current_conversation(principal.user_id)
             fresh = [
                 item for item in payload['messages']
@@ -815,6 +838,30 @@ async def post_account_profile(
         ):
             raise HTTPException(status_code=422, detail='Display name is invalid.')
     return update_profile(user_id=principal.user_id, name=name, email=email, bio=bio, active_theme=active_theme)
+
+@app.get('/api/v1/account/deployment')
+async def get_account_deployment(principal: Principal = Depends(require_scope('account'))):
+    policy = deployment_policy()
+    policy.require_principal(principal)
+    result = {
+        'mode': policy.contract.mode, 'runtime': 'firstmate',
+        'commercial_entitlement_required': policy.requires_commercial_entitlement(principal),
+        'checkout_allowed': policy.checkout_allowed(principal),
+    }
+    if policy.personal:
+        from app.firstmate_execution import PersonalResourceLedger
+        result.update(
+            execution_status='unavailable',
+            execution_blockers=['personal_runtime_limits_unavailable'],
+            limits={
+                'implementation_workers': policy.contract.max_implementation_workers,
+                'objective_micro_usd': policy.contract.objective_spend_limit_micro_usd,
+                'monthly_micro_usd': policy.contract.monthly_spend_limit_micro_usd,
+            },
+            resources=PersonalResourceLedger().summary(principal.user_id),
+        )
+    return result
+
 
 @app.get('/api/v1/account/onboarding')
 async def get_account_onboarding(principal: Principal = Depends(require_scope('account'))):
@@ -1359,13 +1406,49 @@ async def unregister_notifications(principal: Principal = Depends(require_scope(
 async def get_notifications_preferences(principal: Principal = Depends(require_scope('notifications'))):
     return get_notification_preferences(principal.user_id)
 
+class NativeDecisionAnswerRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    decision_revision: int = Field(ge=1, le=2_147_483_647)
+    native_user_message_id: str = Field(pattern=r'^mgm_[A-Za-z0-9_-]{4,124}$')
+
+
+class NativeDecisionAnswerExecution(NativeDecisionAnswerRequest):
+    confirmation_token: str = Field(min_length=1, max_length=128)
+
+
+@app.post('/api/v1/decisions/{decision_id}/confirmation')
+async def prepare_native_decision(decision_id: str, contract: NativeDecisionAnswerRequest,
+                                  principal: Principal = Depends(require_scope('command'))):
+    from app.firstmate_decisions import firstmate_decisions, FirstmateDecisionError
+    try:
+        return await firstmate_decisions.prepare_tool_answer(principal,
+            {'decision_id': decision_id, 'decision_revision': contract.decision_revision},
+            native_user_message_id=contract.native_user_message_id)
+    except FirstmateDecisionError as exc:
+        raise HTTPException(exc.status_code, detail={'code': exc.code, 'message': exc.detail}) from None
+
+
+@app.post('/api/v1/decisions/{decision_id}/answer')
+async def execute_native_decision(decision_id: str, contract: NativeDecisionAnswerExecution,
+                                  principal: Principal = Depends(require_scope('command'))):
+    from app.firstmate_decisions import firstmate_decisions, FirstmateDecisionError
+    try:
+        return await firstmate_decisions.execute_tool_answer(principal,
+            {'decision_id': decision_id, 'decision_revision': contract.decision_revision},
+            native_user_message_id=contract.native_user_message_id,
+            confirmation_token=contract.confirmation_token)
+    except FirstmateDecisionError as exc:
+        raise HTTPException(exc.status_code, detail={'code': exc.code, 'message': exc.detail}) from None
+
+
 @app.get('/api/v1/notifications/status')
 async def get_notifications_status(principal: Principal = Depends(require_scope('notifications'))):
     registered = get_registered_push_token(principal.user_id)
     from app.push_receipts import PushDeliveryStore
     from app.notifications import DB_PATH as notification_db
     return {'native_push': 'registered' if registered else 'unavailable', 'platform': registered['platform'] if registered else None,
-            'receipts': PushDeliveryStore(notification_db).summary(principal.user_id)}
+            'receipts': PushDeliveryStore(notification_db).summary(principal.user_id),
+            'evidence': PushDeliveryStore(notification_db).evidence_summary(principal.user_id)}
 
 @app.get('/api/v1/notifications/events')
 async def get_notification_events(

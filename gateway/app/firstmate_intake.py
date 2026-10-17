@@ -204,6 +204,19 @@ async def reconcile_pending_objective_intake(
     store = ObjectiveSubmissionStore()
     credit_ledger = CreditLedger()
     for row in rows:
+        from app.firstmate_execution import PersonalResourceLedger
+        from app.structured_runtime import deployment_policy
+        personal = PersonalResourceLedger.get(str(row['owner_user_id']), str(row['objective_id']))
+        if personal is not None or deployment_policy().personal:
+            # Never reinterpret admission provenance after a mode switch, mint
+            # a perpetual owner session, or release an uncertain personal hold.
+            # The reviewed pin cannot enforce the frozen resource envelope.
+            with connect(db.DB_PATH) as connection:
+                connection.execute("""UPDATE magi_objective_submissions SET last_error_code=COALESCE(last_error_code,'personal_runtime_limits_unavailable')
+                    WHERE owner_user_id=? AND objective_id=? AND status IN ('submitting','failed')""",
+                    (row['owner_user_id'], row['objective_id']))
+            counts['failed'] += 1
+            continue
         try:
             contract = FirstmateSubmitObjectiveContract.model_validate_json(row["contract_json"])
         except (ValueError, TypeError):
@@ -241,6 +254,9 @@ async def reconcile_pending_objective_intake(
                     row["owner_user_id"], int(row["attempt_count"]),
                 ),
             ).rowcount
+            if changed == 1:
+                from app.structured_runtime import persist_objective_state
+                persist_objective_state(connection, str(row['owner_user_id']), str(row['objective_id']), recovering=True)
         if changed != 1:
             continue
         claim = ObjectiveClaim(

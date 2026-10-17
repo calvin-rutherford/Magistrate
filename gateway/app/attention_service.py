@@ -83,6 +83,10 @@ class AttentionService:
         except Exception:
             record('attention', outcome='error')
 
+        from app.structured_runtime import personal_owner
+        if personal_owner(owner_user_id):
+            return items
+
         # Jira/Teams still use deployment-level provider authority. Never
         # project that operator data into another authenticated tenant.
         if (

@@ -32,6 +32,13 @@ class PortalRequest(_StrictRequest):
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
 
 
+def _require_commercial(principal: Principal) -> None:
+    from app.structured_runtime import deployment_policy
+    if not deployment_policy().checkout_allowed(principal):
+        raise HTTPException(409, detail={'code': 'personal_billing_detached',
+            'message': 'Personal mode uses resource limits, not credits or checkout.'})
+
+
 def _error(exc: BillingError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)})
 
@@ -47,11 +54,13 @@ async def billing_catalog(principal: Principal = Depends(require_scope("read")))
 
 @router.get("/status")
 async def legacy_billing_status(principal: Principal = Depends(require_scope("account"))):
+    _require_commercial(principal)
     return billing_status(principal.user_id)
 
 
 @router.get("/account")
 async def billing_account(principal: Principal = Depends(require_scope("account"))):
+    _require_commercial(principal)
     try:
         return billing_service.ledger.summary(principal.user_id)
     except BillingError as exc:
@@ -64,6 +73,7 @@ async def create_checkout(
     principal: Principal = Depends(require_scope("account")),
 ):
     try:
+        _require_commercial(principal)
         if contract is None or (billing_available() and not stripe_configured()):
             profile = db.get_profile(principal.user_id)
             email = profile.get("email") if isinstance(profile, dict) else None
@@ -87,6 +97,7 @@ async def create_portal(
     principal: Principal = Depends(require_scope("account")),
 ):
     try:
+        _require_commercial(principal)
         if contract is None or (billing_available() and not stripe_configured()):
             legacy = await create_legacy_portal(principal.user_id)
             return legacy if contract is None else {"portal_url": legacy["url"]}

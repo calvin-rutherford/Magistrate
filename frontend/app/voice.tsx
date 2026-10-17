@@ -1,11 +1,11 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import * as Network from 'expo-network';
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { AccessibilityInfo, Animated, AppState, AppStateStatus, Linking, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { EnvironmentBackground } from '../src/components/EnvironmentBackground';
 import {
-  cancelMagiChatTurn, fetchMagiChatConversation, getGatewaySessionRevision, sendMagiChatPrompt,
+  fetchMagiChatConversation, getGatewaySessionRevision, sendMagiChatPrompt,
   transcribeVoiceAudio,
 } from '../src/api/client';
 import { useVoiceInputAdapter } from '../src/input/VoiceInputAdapter';
@@ -28,7 +28,7 @@ declare global {
 const brand = {
   obsidian: '#05070A', command: '#111722', paper: '#F7F8FA', ink: '#11151B',
   mutedDark: '#8E99AA', mutedLight: '#667180', borderDark: '#2A3542', borderLight: '#D5DAE2',
-  green: '#54FF87', cyan: '#24D8FF', violet: '#8B6CFF', magenta: '#FF3FD1', critical: '#FF625F',
+  cyan: '#D7DCE4', violet: '#AAB5C3', critical: '#FF625F',
 };
 const QUIET_AFTER_SPEECH_MS = 1200;
 const MAX_TURN_MS = 30_000;
@@ -47,7 +47,7 @@ const stateCopy: Record<VoiceState, { title: string; detail: string }> = {
 
 export default function VoiceScreen() {
   const router = useRouter();
-  const { autostart } = useLocalSearchParams<{ autostart?: string | string[] }>();
+  const { autostart, entry } = useLocalSearchParams<{ autostart?: string | string[]; entry?: string }>();
   const requestedAutostart = (Array.isArray(autostart) ? autostart[0] : autostart) === 'true';
   const networkState = Network.useNetworkState();
   const { width, height } = useWindowDimensions();
@@ -64,6 +64,8 @@ export default function VoiceScreen() {
   const [reducedMotion, setReducedMotion] = useState(false);
   const [visualAmplitude, setVisualAmplitude] = useState(ENVELOPE_SILENCE_FLOOR);
   const [muted, setMuted] = useState(false);
+  const microphoneMutedRef = useRef(false);
+  const captureStartingRef = useRef(false);
   const [speakResponses, setSpeakResponses] = useState(true);
   const [autoContinue, setAutoContinue] = useState(true);
   const [, setBackgroundReady] = useState(false);
@@ -87,15 +89,17 @@ export default function VoiceScreen() {
   const intermediateRef = useRef(intermediate);
   const amplitudeRef = useRef(capture.amplitude);
   const endingRef = useRef(false);
+  const focusedRef = useRef(false);
   const turnInFlightRef = useRef(false);
   const turnOwnerRef = useRef<string | null>(null);
   const turnSessionRevisionRef = useRef(-1);
   const requestControllerRef = useRef<AbortController | null>(null);
-  const submittedMessageIdRef = useRef('');
+
   const cancelledTurnRef = useRef(false);
+  const turnGenerationRef = useRef(0);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const wasOfflineRef = useRef(false);
-  const autostartConsumedRef = useRef(false);
+  const autostartConsumedRef = useRef<string | null>(null);
   const heardSpeechRef = useRef(false);
   const listeningStartedAtRef = useRef(0);
   const lastSpeechAtRef = useRef(0);
@@ -161,7 +165,7 @@ export default function VoiceScreen() {
   }, []);
 
   const beginListening = useCallback(async () => {
-    if (endingRef.current || turnInFlightRef.current || !voiceSetupReady) return;
+    if (endingRef.current || !focusedRef.current || turnInFlightRef.current || captureStartingRef.current || microphoneMutedRef.current || !voiceSetupReady || appStateRef.current !== 'active') return;
     if (networkState.isConnected === false || networkState.isInternetReachable === false) {
       fail(new Error('You are offline. Reconnect before starting a voice turn.'));
       return;
@@ -169,7 +173,8 @@ export default function VoiceScreen() {
     const owner = getMagiConversationPrincipal();
     const sessionRevision = getGatewaySessionRevision();
     if (!owner) return;
-    const ownsTurn = () => !endingRef.current && !cancelledTurnRef.current
+    const generation = ++turnGenerationRef.current;
+    const ownsTurn = () => generation === turnGenerationRef.current && focusedRef.current && !endingRef.current && !cancelledTurnRef.current
       && appStateRef.current === 'active'
       && getMagiConversationPrincipal() === owner
       && getGatewaySessionRevision() === sessionRevision;
@@ -180,7 +185,7 @@ export default function VoiceScreen() {
     envelopeRef.current = ENVELOPE_SILENCE_FLOOR;
     setVisualAmplitude(ENVELOPE_SILENCE_FLOOR);
     cancelledTurnRef.current = false;
-    submittedMessageIdRef.current = '';
+    captureStartingRef.current = true;
     turnOwnerRef.current = owner;
     turnSessionRevisionRef.current = sessionRevision;
     setVoiceState('STARTING');
@@ -192,6 +197,7 @@ export default function VoiceScreen() {
       heardSpeechRef.current = false;
       setVoiceState('LISTENING');
     } catch (cause) { if (ownsTurn()) fail(cause); }
+    finally { captureStartingRef.current = false; }
   }, [fail, networkState.isConnected, networkState.isInternetReachable, voiceCapabilities, voiceMode, voiceSetupReady]);
 
   const deliverNativeResponse = useCallback((result: Awaited<ReturnType<typeof sendMagiChatPrompt>>) => {
@@ -212,24 +218,26 @@ export default function VoiceScreen() {
     setVoiceState('SPEAKING');
     const afterResponse = () => {
       if (endingRef.current) return;
-      if (autoContinue) void beginListening();
+      if (autoContinue && !microphoneMutedRef.current) void beginListening();
       else { setVoiceState('READY'); setNotice('Response complete. Tap the tetrahedron when you want to speak again.'); }
     };
-    if (muted || !speakResponses) afterResponse();
+    if (!speakResponses) afterResponse();
     else ttsService.speakChunk(assistant.content, afterResponse);
-  }, [autoContinue, beginListening, muted, speakResponses]);
+  }, [autoContinue, beginListening, speakResponses]);
 
   const finishTurn = useCallback(async () => {
     if (endingRef.current || stateRef.current !== 'LISTENING' || turnInFlightRef.current) return;
     const owner = turnOwnerRef.current;
     const sessionRevision = turnSessionRevisionRef.current;
-    const ownsTurn = () => !endingRef.current && !cancelledTurnRef.current && !!owner
+    const generation = turnGenerationRef.current;
+    const ownsTurn = () => generation === turnGenerationRef.current && !endingRef.current && !cancelledTurnRef.current && !!owner
       && getMagiConversationPrincipal() === owner
       && getGatewaySessionRevision() === sessionRevision;
     if (!ownsTurn()) return;
     turnInFlightRef.current = true;
     setVoiceState('TRANSCRIBING');
     let submittedMessageId = '';
+    let turnController: AbortController | null = null;
     try {
       const recording = await captureRef.current.stop();
       if (!ownsTurn()) return;
@@ -251,10 +259,10 @@ export default function VoiceScreen() {
       setFinalTranscript(utterance); setIntermediate('');
       const clientMessageId = `voice-u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       submittedMessageId = clientMessageId;
-      submittedMessageIdRef.current = clientMessageId;
       appendMagiMessage({ id: clientMessageId, role: 'user', text: utterance, sentAt: Date.now(), source: 'voice', delivery: 'sending', progress: 'working' });
       setVoiceState('THINKING');
       const controller = new AbortController();
+      turnController = controller;
       requestControllerRef.current = controller;
       const result = await sendMagiChatPrompt(
         utterance, clientMessageId, 'voice', undefined, { signal: controller.signal },
@@ -266,7 +274,7 @@ export default function VoiceScreen() {
       if (submittedMessageId) updateMagiMessage(submittedMessageId, { delivery: 'failed', progress: 'failed' });
       fail(cause);
     } finally {
-      requestControllerRef.current = null;
+      if (requestControllerRef.current === turnController) requestControllerRef.current = null;
     }
   }, [beginListening, deliverNativeResponse, fail, voiceMode]);
 
@@ -291,11 +299,16 @@ export default function VoiceScreen() {
   }, [finishTurn, reducedMotion, voiceState]);
 
   useEffect(() => {
-    if (!voiceSetupReady || !requestedAutostart || autostartConsumedRef.current) return;
-    autostartConsumedRef.current = true;
-    const timer = setTimeout(() => { void beginListening(); }, 180);
+    const identity = entry || 'legacy-entry';
+    if (!voiceSetupReady || !requestedAutostart || autostartConsumedRef.current === identity) return;
+    const timer = setTimeout(() => {
+      // Consume only when the timer actually runs. Capability/network renders
+      // can replace the callback before then; cleanup must not lose the launch.
+      autostartConsumedRef.current = identity;
+      if (stateRef.current === 'READY' || stateRef.current === 'ERROR') void beginListening();
+    }, 180);
     return () => clearTimeout(timer);
-  }, [beginListening, requestedAutostart, voiceSetupReady]);
+  }, [beginListening, entry, requestedAutostart, voiceSetupReady]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', next => {
@@ -303,7 +316,8 @@ export default function VoiceScreen() {
       appStateRef.current = next;
       if (next !== 'active') {
         ttsService.stop();
-        if (stateRef.current === 'LISTENING' || stateRef.current === 'STARTING') {
+        if (['LISTENING', 'STARTING', 'TRANSCRIBING'].includes(stateRef.current)) {
+          turnGenerationRef.current += 1;
           cancelledTurnRef.current = true;
           turnInFlightRef.current = false;
           void captureRef.current.cancel();
@@ -324,7 +338,8 @@ export default function VoiceScreen() {
     const offline = networkState.isConnected === false || networkState.isInternetReachable === false;
     if (offline) {
       wasOfflineRef.current = true;
-      if (stateRef.current === 'LISTENING' || stateRef.current === 'STARTING') {
+      if (['LISTENING', 'STARTING', 'TRANSCRIBING'].includes(stateRef.current)) {
+        turnGenerationRef.current += 1;
         cancelledTurnRef.current = true;
         turnInFlightRef.current = false;
         void captureRef.current.cancel();
@@ -350,11 +365,28 @@ export default function VoiceScreen() {
 
   useEffect(() => {
     if (!capture.mediaServicesDidReset || stateRef.current !== 'LISTENING') return;
+    turnGenerationRef.current += 1;
     cancelledTurnRef.current = true; turnInFlightRef.current = false;
     void captureRef.current.cancel();
     setError('The system audio service restarted. Tap the tetrahedron to reconnect the microphone.');
     setVoiceState('ERROR');
   }, [capture.mediaServicesDidReset]);
+
+  // Expo Router may retain a hidden screen when a cold URL also queues a
+  // navigation. Only the focused voice screen may own the microphone.
+  useFocusEffect(useCallback(() => {
+    focusedRef.current = true;
+    setVoiceState('READY');
+    return () => {
+      focusedRef.current = false;
+      turnGenerationRef.current += 1;
+      cancelledTurnRef.current = true;
+      turnInFlightRef.current = false;
+      requestControllerRef.current?.abort();
+      void captureRef.current.cancel();
+      ttsService.stop();
+    };
+  }, []));
 
   useEffect(() => () => {
     endingRef.current = true;
@@ -369,28 +401,25 @@ export default function VoiceScreen() {
   };
 
   const cancelCurrentTurn = async () => {
+    turnGenerationRef.current += 1;
     cancelledTurnRef.current = true;
     turnInFlightRef.current = false;
     requestControllerRef.current?.abort();
     requestControllerRef.current = null;
     ttsService.stop();
     await captureRef.current.cancel();
-    const messageId = submittedMessageIdRef.current;
-    submittedMessageIdRef.current = '';
-    if (messageId) {
-      updateMagiMessage(messageId, { delivery: 'cancelled', progress: 'cancelled' });
-      await cancelMagiChatTurn(messageId).catch(() => undefined);
-      void refreshConversation().catch(() => undefined);
-    }
-    setIntermediate(''); setError(''); setNotice('Current turn cancelled.'); setVoiceState('READY');
+    // This is a local audio interruption, never cancellation of a canonical
+    // chat turn or accepted engineering work. Refresh authoritative history.
+    void refreshConversation().catch(() => undefined);
+    setIntermediate(''); setError(''); setNotice('Voice paused. Any submitted work continues in Chat.'); setVoiceState('READY');
   };
 
   const toggleMute = () => {
-    setMuted(value => {
-      const next = !value;
-      if (next && stateRef.current === 'SPEAKING') { ttsService.stop(); setVoiceState('READY'); setNotice('Voice output muted.'); }
-      return next;
-    });
+    const next = !microphoneMutedRef.current;
+    microphoneMutedRef.current = next;
+    setMuted(next);
+    if (next && ['LISTENING', 'STARTING', 'TRANSCRIBING'].includes(stateRef.current)) void cancelCurrentTurn();
+    setNotice(next ? 'Microphone muted. Submitted work continues.' : 'Microphone unmuted. Tap the mark to listen.');
   };
 
   const endConversation = () => {
@@ -430,6 +459,7 @@ export default function VoiceScreen() {
           <Text testID="voice-state" accessibilityRole="header" accessibilityLiveRegion="polite" style={[styles.stateTitle, compact && styles.stateTitleCompact, { color: textColor }]}>{currentCopy.title}</Text>
           <Text style={[styles.stateDetail, { color: mutedColor }]}>{currentCopy.detail}</Text>
           <Text testID="voice-input-mode" style={[styles.modeLabel, { color: mutedColor }]}>Input: {capabilityFor(voiceCapabilities, voiceMode).label}</Text>
+          <Text testID="voice-transport-status" style={[styles.stateDetail, { color: mutedColor }]}>Turn-based audio · record, transcribe, then reply. Streaming Voice Mode is unavailable in this build.</Text>
         </View>
 
         <TouchableOpacity testID="voice-control" accessibilityRole="button" accessibilityHint="Voice uses the same Magi conversation as typed chat." accessibilityLabel={voiceState === 'LISTENING' ? 'Finish speaking' : voiceState === 'SPEAKING' ? 'Interrupt response and listen' : 'Start listening'} accessibilityState={{ busy: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState), disabled: ['STARTING','TRANSCRIBING','THINKING'].includes(voiceState) }} onPress={handleMainControl} {...(hoverHandlers as any)} disabled={['STARTING','TRANSCRIBING','THINKING'].includes(voiceState)} activeOpacity={0.88} style={[styles.stage, { width: stageSize, height: stageSize }]}>
@@ -439,8 +469,8 @@ export default function VoiceScreen() {
         </TouchableOpacity>
 
         <View style={styles.sessionControls} accessibilityRole="toolbar">
-          <TouchableOpacity testID="voice-mute" accessibilityRole="button" accessibilityLabel={muted ? 'Unmute Magi voice output' : 'Mute Magi voice output'} accessibilityState={{ selected: muted }} onPress={toggleMute} style={[styles.sessionButton, muted && styles.sessionButtonActive]}><Text style={[styles.sessionButtonText, { color: textColor }]}>{muted ? 'UNMUTE' : 'MUTE'}</Text></TouchableOpacity>
-          <TouchableOpacity testID="voice-cancel" accessibilityRole="button" accessibilityLabel="Cancel current voice turn" accessibilityState={{ disabled: voiceState === 'READY' }} disabled={voiceState === 'READY'} onPress={() => void cancelCurrentTurn()} style={[styles.sessionButton, voiceState === 'READY' && styles.sessionButtonDisabled]}><Text style={[styles.sessionButtonText, { color: textColor }]}>CANCEL TURN</Text></TouchableOpacity>
+          <TouchableOpacity testID="voice-mute" accessibilityRole="button" accessibilityLabel={muted ? 'Unmute microphone' : 'Mute microphone'} accessibilityState={{ selected: muted }} onPress={toggleMute} style={[styles.sessionButton, muted && styles.sessionButtonActive]}><Text style={[styles.sessionButtonText, { color: textColor }]}>{muted ? 'UNMUTE' : 'MUTE'}</Text></TouchableOpacity>
+          <TouchableOpacity testID="voice-cancel" accessibilityRole="button" accessibilityLabel="Pause voice without cancelling submitted work" accessibilityState={{ disabled: voiceState === 'READY' }} disabled={voiceState === 'READY'} onPress={() => void cancelCurrentTurn()} style={[styles.sessionButton, voiceState === 'READY' && styles.sessionButtonDisabled]}><Text style={[styles.sessionButtonText, { color: textColor }]}>PAUSE VOICE</Text></TouchableOpacity>
         </View>
 
         <View style={styles.liveTranscript} accessibilityLiveRegion="polite">
@@ -487,7 +517,7 @@ const styles = StyleSheet.create({
   markHalo: { alignItems: 'center', justifyContent: 'center', shadowOpacity: 0.45, shadowRadius: 32, shadowOffset: { width: 0, height: 10 } },
   sessionControls: { flexDirection: 'row', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: -8, marginBottom: 5 },
   sessionButton: { minHeight: 44, minWidth: 92, borderWidth: 1, borderColor: 'rgba(142,153,170,0.55)', borderRadius: 999, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14 },
-  sessionButtonActive: { borderColor: brand.cyan, backgroundColor: 'rgba(36,216,255,0.12)' },
+  sessionButtonActive: { borderColor: brand.cyan, backgroundColor: 'rgba(215,220,228,0.12)' },
   sessionButtonDisabled: { opacity: 0.38 },
   sessionButtonText: { fontFamily: interfaceFont, fontSize: 10, lineHeight: 14, fontWeight: '700', letterSpacing: 0.8 },
   liveTranscript: { minHeight: 66, width: '100%', maxWidth: 720, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10 },

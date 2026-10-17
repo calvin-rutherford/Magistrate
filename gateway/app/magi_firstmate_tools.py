@@ -422,6 +422,7 @@ class ObjectiveSubmissionStore:
         context: MagiToolContext,
         invocation_key: str,
         contract: FirstmateSubmitObjectiveContract,
+        personal_principal=None,
     ) -> ObjectiveClaim:
         _validate_context(context)
         if not isinstance(invocation_key, str) or not _SAFE_INVOCATION_KEY.fullmatch(invocation_key):
@@ -525,6 +526,14 @@ class ObjectiveSubmissionStore:
                     concise_objective_title(contract.objective), project_id, now, now,
                 ),
             )
+            if personal_principal is not None:
+                from app.firstmate_execution import PersonalResourceLedger
+                if personal_principal.user_id != context.owner_user_id:
+                    raise MagiToolError('objective_not_authorized', retryable=False)
+                PersonalResourceLedger().reserve(connection, principal=personal_principal,
+                    objective_id=objective_id, contract_sha256=contract_sha256, project_id=project_id)
+            from app.structured_runtime import persist_objective_state
+            persist_objective_state(connection, context.owner_user_id, objective_id)
             connection.commit()
             return ObjectiveClaim(
                 objective_id, task_id, contract_json, contract_sha256,
@@ -554,6 +563,8 @@ class ObjectiveSubmissionStore:
             ).rowcount
             if changed != 1:
                 raise MagiToolError("objective_store_conflict", retryable=False)
+            from app.structured_runtime import persist_objective_state
+            persist_objective_state(connection, owner_user_id, claim.objective_id)
             connection.commit()
         except MagiToolError:
             connection.rollback()
@@ -575,6 +586,9 @@ class ObjectiveSubmissionStore:
                    WHERE objective_id = ? AND owner_user_id = ? AND status != 'accepted'""",
                 (safe_code, _now_ms(), claim.objective_id, owner_user_id),
             ).rowcount
+            if changed:
+                from app.structured_runtime import persist_objective_state
+                persist_objective_state(connection, owner_user_id, claim.objective_id)
             connection.commit()
             return changed == 1
         except sqlite3.Error:
@@ -959,6 +973,38 @@ class FirstmateObjectiveTools:
         if call.name != FIRSTMATE_SUBMIT_OBJECTIVE:
             raise MagiToolError("tool_not_supported", retryable=False)
         contract = parse_submit_objective_arguments(call.arguments_json)
+        from app.structured_runtime import deployment_policy
+        from app.firstmate_execution import PersonalResourceLedger
+        from app.deployment_mode import DeploymentModeError
+        policy = deployment_policy()
+        objective_id, _ = self.store._identities(context.owner_user_id, invocation_key)
+        personal_reservation = PersonalResourceLedger.get(context.owner_user_id, objective_id)
+        if policy.personal:
+            from app.auth import principal_for_execution_session
+            from fastapi import HTTPException
+            try:
+                principal = principal_for_execution_session(context.actor_session_id)
+                policy.require_principal(principal, scope='command')
+                if principal.user_id != context.owner_user_id:
+                    raise DeploymentModeError('personal_owner_required')
+                if not context.explicit_confirmation:
+                    raise MagiToolError('objective_confirmation_required', retryable=False)
+                claim = self.store.claim(context=context, invocation_key=invocation_key,
+                    contract=contract, personal_principal=principal)
+            except (DeploymentModeError, HTTPException) as exc:
+                raise MagiToolError(getattr(exc, 'code', 'objective_not_authorized'), retryable=False) from exc
+            if claim.accepted:
+                return MagiToolExecutionResult(payload={'schema_version': FIRSTMATE_OBJECTIVE_RESULT_SCHEMA,
+                    'status': 'accepted', 'objective_id': claim.objective_id, 'task_id': claim.task_id})
+            # The reviewed pinned tasks-axi bridge has no enforceable cost/worker
+            # envelope. Do not turn prompt prose or an operator boolean into a
+            # resource capability. No subprocess has been called at this edge.
+            self.store.fail(context.owner_user_id, claim, 'personal_runtime_limits_unavailable')
+            if not claim.duplicate:
+                PersonalResourceLedger().release_unpublished(context.owner_user_id, claim.objective_id)
+            raise MagiToolError('personal_runtime_limits_unavailable', retryable=False)
+        if personal_reservation is not None:
+            raise MagiToolError('personal_admission_mode_changed', retryable=False)
         policy_text = "\n".join((
             contract.objective, contract.project,
             *contract.constraints, *contract.acceptance_criteria,
