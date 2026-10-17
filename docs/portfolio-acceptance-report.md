@@ -22,13 +22,15 @@ partial-dispatch and credit-ledger safeguards.
 |---|---|
 | Foundation — https://github.com/calvin-rutherford/Magistrate/pull/124 | `b39e65d77820738dbaba6260c237cb848778f630` |
 | Native — https://github.com/calvin-rutherford/Magistrate/pull/125 | `b940c9b14f62246392fda514e38c5dcd20457a72` |
-| UI — https://github.com/calvin-rutherford/Magistrate/pull/126 | `de4aa39d213e6e27729d96adb1fa4d7c64b6d90e` |
+| UI — https://github.com/calvin-rutherford/Magistrate/pull/126 | `fb3ecac7fc4b42a866a0773972a390319cb989c1` |
 
 These were **unlanded review branches**, not assumed main. Local non-fast-forward
 integration merges preserve their ancestry. Initial inputs were foundation
 `6e20d9ab2f8b9e064259be15ace130f49ab946b6` and UI
 `5a3521a3896210ec050702554288ae3e28642f6c`; the current heads above were then
-merged locally without overwriting integration edits. Native did not change.
+merged locally without overwriting integration edits. UI then advanced through
+`de4aa39d213e6e27729d96adb1fa4d7c64b6d90e` to the canonical answer-flow head
+above. Native did not change.
 Integration-only implementation/docs remain separate commits above those merges.
 Landing order remains foundation → workstreams → integration; refreshing after
 landing requires repeating the contract/full checkpoints. No remote PR was merged
@@ -43,14 +45,14 @@ inputs plus this integration's changes:
 | Command | Observed result |
 |---|---|
 | `cd gateway && uv run pytest tests/test_release_journeys.py tests/test_magi_execution_handoff.py` | **3 passed**, 0 failed/skipped; run first and again after integration. |
-| Focused Gateway command below | **168 passed**, 0 failed/skipped. |
-| `cd gateway && uv run pytest tests/test_portfolio_integration.py tests/test_firstmate_decisions.py` | Final **33 passed**, 0 failed/skipped (24 integration cases). |
-| `cd gateway && uv run pytest` | Final **601 passed, 0 failed, 1 skipped**, 602 collected; 5 FastAPI/Starlette deprecation warnings. |
+| Focused Gateway command below (before nine additional canonical HTTP cases) | **168 passed**, 0 failed/skipped; retained as earlier evidence, not the final suite size. |
+| `cd gateway && uv run pytest tests/test_portfolio_integration.py tests/test_firstmate_decisions.py tests/test_notification_transitions.py tests/test_push_receipts.py` | **65 passed**, 0 failed/skipped (33 integration cases). |
+| `cd gateway && uv run pytest` | **610 passed, 0 failed, 1 skipped**, 611 collected; 5 FastAPI/Starlette deprecation warnings. |
 | `cd frontend && npm ci` | Passed; both existing parser compatibility patches applied. Audit warnings are not waived. |
-| Focused frontend command below | **24 passed**, 0 failed/skipped. |
+| Focused frontend command below | **25 passed**, 0 failed/skipped; additionally notification **6 native-boundary + 11 browser**, product contracts **7 passed** (49 total across these focused commands). |
 | `cd frontend && npm run typegen && npm run typecheck` | Passed. |
 | `cd frontend && npm run lint` | 0 errors, **15 existing warnings**. |
-| `cd frontend && npm test` | **170 passed, 0 failed, 0 skipped**, including all browser suites. The separate Attention-navigation unit suite is included in the focused command, not this total. |
+| `cd frontend && npm test` | **171 passed, 0 failed, 0 skipped**, including all browser suites. The separate Attention-navigation unit suite is included in the focused command, not this total. |
 | `cd frontend && npx expo export --platform web` | Passed; **20 static routes**. There is no `npm run export` script; this is the unchanged Frontend CI command. |
 | `cd gateway && uv run python -m scripts.export_client_protocol` | Passed using the exporter's isolated environment/database. |
 | `cd gateway && uv run python -m compileall -q app tests scripts ../scripts/magistrate_diagnostics.py` | Passed. |
@@ -89,7 +91,7 @@ assertion was suppressed or made a skip. Local raw logs stay ignored under
 | Memory save/retrieve/delete | Integration test freezes exact context digest across deletion; project-memory isolation suite. | Live owner/project data persistence. |
 | Durable objectives, capacity, uncertainty | Atomic two-slot concurrent fixture, prior-month holds, immutable claims, closed real-pin gate, recovery after mode change, measured settlement after logout and crash window. | Runtime-enforced workers, spend, CPU/memory/time and actual supervisor restart. |
 | Repository authority | Owner-bound active GitHub App installation/repository; revocation and arbitrary-project rejection before reservation. | Provisioned external installation and disposable live demo repo. |
-| Approval/decline, stale/expiry/duplicate | Gateway exact canonical answer bytes once, revision/scope/run/expiry checks and confirmation binding; notification navigation unit/boundary tests. | Full canonical Attention UI adapter and actual worker continuation/decline behavior. |
+| Approval/decline, stale/expiry/duplicate | Gateway exact canonical answer bytes once, revision/scope/run/expiry checks, missing/foreign message rejection, nullable project, and confirmation binding; canonical Attention browser flow and navigation unit tests. | Two UI regressions below and actual worker continuation/decline behavior. |
 | Disconnect/reconnect | Canonical-message/revision/browser recovery; immutable task identity and reserved uncertain work; no cancellation-based capacity release. | Phone/network and installed-runtime disconnect journeys. |
 | Notification | Mounted authenticated test route, body-owner rejection, durable dedup, provider evidence buckets, Settings browser tests and native boundary doubles. | APNs credentials, cold-start real push, phone display and viewing. |
 | Attachments | 11 Gateway upload tests plus request-cap/security and truthful upload browser suites. | Real device picker/bytes/network behavior. |
@@ -113,16 +115,19 @@ assertion was suppressed or made a skip. Local raw logs stay ignored under
    No unattended personal supervisor service/restart contract was established.
    Request-bound fields are accepted/persisted when actually supplied, never
    fabricated from a read or wall-clock timeout.
-4. **UI/API seam:** recorded UI head still renders legacy `attention-action.v1`
-   approve/reject controls requiring `context.task_id/decision_key`; canonical
-   Firstmate items intentionally expose `decision_id/revision` instead. This
-   integration supplies command-scoped `/api/v1/decisions/{id}/confirmation` and
-   `/answer`, using an existing canonical user-message ID, not text/owner/task
-   authority in the body. The UI owner is correcting that adapter. Until its exact
-   head and approve/decline/stale/duplicate journeys are validated, do not claim
-   in-app canonical approval. Additive objective-state projection is server-side;
-   frontend compatibility fields remain unchanged, and its shared schema still
-   needs inclusion in the client export registry before client adoption.
+4. **UI/API seam:** the canonical Attention follow-up replaces legacy action
+   calls with `/api/v1/decisions/{id}/confirmation` and `/answer`, using the latest
+   canonical user-message ID and explicit exact-byte preview, never body text,
+   owner or task authority. Approve/decline/stale/duplicate/cancel browser fixtures
+   pass. Two integration regressions were reported to the UI owner: its response
+   parser rejects a valid nullable `target.project` (reproduced against the actual
+   client normalizer); and a successful answer removes the current Attention item,
+   causing a notification-pinned destination to hide the retained outcome. Gateway
+   tests now preserve both real response behaviors. These need owner-branch fixes
+   and regression evidence before claiming the canonical UI journey passed.
+   Additive objective-state projection is server-side; frontend compatibility
+   fields remain unchanged, and its shared schema still needs inclusion in the
+   client export registry before client adoption.
 5. **Deployment/native:** operator-controlled TLS, actual service readiness/auth,
    backups/rollback, resource isolation, credentials and repo installation need
    separate authorization/evidence. Xcode/Apple signing/APNs/EAS, native streaming

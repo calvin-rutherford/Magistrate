@@ -264,7 +264,7 @@ def test_memory_save_retrieve_delete_freezes_exact_objective_context(personal):
     assert ObjectiveSubmissionStore().get(OWNER, value.objective_id)['context_sha256'] == frozen
 
 
-async def bound_decision(personal):
+async def bound_decision(personal, *, project_label='Disposable demo'):
     value, context = claim(personal)
     ObjectiveSubmissionStore().accept(OWNER, value)
     FirstmateExecutionStore().ingest(OWNER, execution_event(value, context))
@@ -277,7 +277,7 @@ async def bound_decision(personal):
     service = FirstmateDecisionService(object(), command=command)
     now = int(time.time() * 1000)
     semantic = {'task_id': value.task_id, 'lifecycle_identity': '#1', 'title': 'Choose the approach',
-        'question': 'Proceed with option A?', 'project': 'Disposable demo', 'close_mode': 'release',
+        'question': 'Proceed with option A?', 'project': project_label, 'close_mode': 'release',
         'request': {'run_id': 'fixture-run', 'request_id': 'request-one', 'scope': personal[2]['id'], 'expires_at': now + 60_000}}
     event = {**semantic, 'schema_version': 'firstmate.decision-event.v1', 'event_type': 'decision.required',
         'source_instance_id': service.source_instance_id, 'observed_at': now,
@@ -290,9 +290,10 @@ async def bound_decision(personal):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('answer', ['Approve option A.', 'Decline. Do not proceed.'])
-async def test_bound_decision_routes_canonical_bytes_once(personal, monkeypatch, answer):
+@pytest.mark.parametrize('project_label', ['Disposable demo', None])
+async def test_bound_decision_routes_canonical_bytes_once(personal, monkeypatch, answer, project_label):
     import app.firstmate_decisions as module
-    service, command, batch, decision = await bound_decision(personal)
+    service, command, batch, decision = await bound_decision(personal, project_label=project_label)
     monkeypatch.setattr(module, 'firstmate_decisions', service)
     item = service.attention_items(OWNER)[0]
     envelope = item['decision_notification']
@@ -306,13 +307,49 @@ async def test_bound_decision_routes_canonical_bytes_once(personal, monkeypatch,
     prefix = '/api/v1/decisions/' + decision['decision_id']
     prepared = client.post(prefix + '/confirmation', headers=personal[3], json=body)
     assert prepared.status_code == 200, prepared.text
+    assert prepared.json()['target']['project'] == project_label
     body['confirmation_token'] = prepared.json()['confirmation_token']
     for _ in range(2):
         response = client.post(prefix + '/answer', headers=personal[3], json=body)
         assert response.status_code == 200, response.text
     assert command.answers == [answer]
+    assert service.attention_items(OWNER) == []  # A real answer removes the pending item.
     projection = structured_runtime.StructuredRuntimeProjection().fleet(OWNER)['tasks'][0]['objective_state']
     assert projection['state'] == 'accepted'  # Answer recorded; no invented worker progress.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case,code', [
+    ('revision', 'stale'), ('missing-message', 'native_message_not_found'),
+    ('foreign-message', 'native_message_not_found'), ('missing-decision', 'decision_not_found'),
+    ('expiry', 'request_expired'), ('repository', 'request_scope_invalid'),
+    ('superseded-message', 'native_message_stale'),
+])
+async def test_canonical_decision_http_refuses_invalid_authority(personal, monkeypatch, case, code):
+    import app.firstmate_decisions as module
+    service, command, _, decision = await bound_decision(personal)
+    monkeypatch.setattr(module, 'firstmate_decisions', service)
+    message = MagiChatStore().prepare_submission(OWNER, 'http-answer', 'Approve option A.')
+    body = {'decision_revision': 1, 'native_user_message_id': message.user_message_id}
+    decision_id = decision['decision_id']
+    if case == 'revision':
+        body['decision_revision'] = 2
+    elif case == 'missing-message':
+        body['native_user_message_id'] = 'mgm_missing_answer'
+    elif case == 'foreign-message':
+        body['native_user_message_id'] = MagiChatStore().prepare_submission('foreign', 'foreign-answer', 'Decline.').user_message_id
+    elif case == 'missing-decision':
+        decision_id = 'fmd_' + '0' * 32
+    elif case == 'expiry':
+        monkeypatch.setattr(module.time, 'time', lambda: decision['decision_notification']['expires_at'] / 1000)
+    elif case == 'repository':
+        GitHubAppStore().set_installation_status(42, 'suspended')
+    elif case == 'superseded-message':
+        MagiChatStore().prepare_submission(OWNER, 'new-http-answer', 'Decline. Do not proceed.')
+    response = TestClient(app).post('/api/v1/decisions/' + decision_id + '/confirmation', headers=personal[3], json=body)
+    assert response.status_code in {404, 409}, response.text
+    assert response.json()['detail']['code'] == code
+    assert command.answers == []
 
 
 @pytest.mark.asyncio
