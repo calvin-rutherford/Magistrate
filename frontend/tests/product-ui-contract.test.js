@@ -67,4 +67,17 @@ test('conversation UI keeps delivery, response, and job state distinct', () => {
   assert.match(chat, /failed: 'Job failed'/);
 });
 
+test('notification decisions are revision-pinned and test evidence never claims phone delivery', () => {
+  const attention = read('app/(tabs)/attention.tsx');
+  const account = read('app/(tabs)/account.tsx');
+  const client = read('src/api/client.ts');
+  assert.match(attention, /compareDecisionDestination\(decisionParam, revisionParam/);
+  assert.match(attention, /action\?\.status === 'available' && !navigationBlocked/);
+  assert.match(attention, /confirmation\.source_revision !== item\.action\.source_revision/);
+  assert.match(account, /Phone delivery: Unknown · Seen on phone: Unknown/);
+  assert.match(account, /same test identity will be reused/i);
+  assert.match(client, /observed_phone_delivery !== 'unknown'/);
+  assert.match(client, /owner_saw_notification !== 'unknown'/);
+});
+
 function chatSource() { return read('app/(tabs)/chat.tsx'); }

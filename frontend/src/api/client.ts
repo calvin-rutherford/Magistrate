@@ -1079,6 +1079,49 @@ export async function updateNotificationPreferences(enabled: boolean, quietHours
   return checkedJson<NotificationPreferences>(res);
 }
 
+export interface NotificationDeliveryEvidence {
+  queued: number;
+  provider_accepted: number;
+  provider_handoff: number;
+  failed: number;
+  expired: number;
+  observed_phone_delivery: 'unknown';
+  owner_saw_notification: 'unknown';
+}
+
+export interface NotificationTestResult {
+  status: 'accepted' | 'suppressed' | 'unavailable' | 'deduplicated-or-rate-limited' | 'revoked' | 'error';
+  reason?: string;
+  detail?: string;
+  attempts?: number;
+  evidence: NotificationDeliveryEvidence;
+}
+
+const NOTIFICATION_TEST_ID = /^[A-Za-z0-9_-]{8,80}$/;
+const nonNegativeInteger = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+
+export async function sendNotificationTest(requestId: string): Promise<NotificationTestResult> {
+  if (!NOTIFICATION_TEST_ID.test(requestId)) throw new Error('A valid notification test identity is required.');
+  const res = await authorizedFetch(GATEWAY_URL + '/notifications/test', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_id: requestId }),
+  });
+  const value = await checkedJson<unknown>(res);
+  if (!value || typeof value !== 'object') throw new Error('Gateway returned invalid notification test evidence.');
+  const result = value as Record<string, unknown>;
+  const statuses = new Set(['accepted', 'suppressed', 'unavailable', 'deduplicated-or-rate-limited', 'revoked', 'error']);
+  const evidence = result.evidence as Record<string, unknown> | null | undefined;
+  if (typeof result.status !== 'string' || !statuses.has(result.status) || !evidence
+    || !['queued', 'provider_accepted', 'provider_handoff', 'failed', 'expired'].every(key => nonNegativeInteger(evidence[key]))
+    || evidence.observed_phone_delivery !== 'unknown' || evidence.owner_saw_notification !== 'unknown'
+    || (result.reason !== undefined && (typeof result.reason !== 'string' || result.reason.length > 500))
+    || (result.detail !== undefined && (typeof result.detail !== 'string' || result.detail.length > 500))
+    || (result.attempts !== undefined && (!Number.isSafeInteger(result.attempts) || (result.attempts as number) < 1))) {
+    throw new Error('Gateway returned invalid notification test evidence.');
+  }
+  return value as NotificationTestResult;
+}
+
 export async function registerNativePushToken(pushToken: string, platform: 'ios' | 'android' | 'native'): Promise<{ status: string; platform: string }> {
   const formData = new FormData();
   formData.append('push_token', pushToken);
@@ -1504,6 +1547,58 @@ export interface UnifiedAttentionRecord {
   context?: Record<string, string | number | boolean | null>;
   action?: AttentionAction;
 }
+
+export type DecisionDestination =
+  | { status: 'unpinned' }
+  | { status: 'current'; decisionId: string; revision: number }
+  | { status: 'invalid' | 'unavailable' | 'mismatch' | 'stale'; reason: string };
+
+const OPAQUE_DECISION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const MAX_DECISION_REVISION = 2_147_483_647;
+const positiveDecisionRevision = (value: unknown): number | null => {
+  const parsed = typeof value === 'number' ? value
+    : typeof value === 'string' && /^[1-9][0-9]{0,9}$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= MAX_DECISION_REVISION ? parsed : null;
+};
+const opaqueDecisionId = (value: unknown): string | null => (
+  typeof value === 'string' && OPAQUE_DECISION_ID.test(value) ? value : null
+);
+
+/** Compare notification navigation with the current owner-authorized projection. */
+export function compareDecisionDestination(
+  decisionParam: string | string[] | undefined,
+  revisionParam: string | string[] | undefined,
+  item: UnifiedAttentionRecord | null,
+): DecisionDestination {
+  if ((Array.isArray(decisionParam) && decisionParam.length !== 1)
+    || (Array.isArray(revisionParam) && revisionParam.length !== 1)) {
+    return { status: 'invalid', reason: 'This notification has duplicate decision navigation context. Review the current Attention queue instead.' };
+  }
+  const decisionValue = Array.isArray(decisionParam) ? decisionParam[0] : decisionParam;
+  const revisionValue = Array.isArray(revisionParam) ? revisionParam[0] : revisionParam;
+  if (decisionValue === undefined && revisionValue === undefined) return { status: 'unpinned' };
+  const decisionId = opaqueDecisionId(decisionValue);
+  const revision = positiveDecisionRevision(revisionValue);
+  if (!decisionId || !revision) return { status: 'invalid', reason: 'This notification has invalid decision navigation context. Review the current Attention queue instead.' };
+  if (!item) return { status: 'unavailable', reason: 'This notification no longer points to a current decision. No action was taken.' };
+
+  const contextDecision = opaqueDecisionId(item.context?.decision_id);
+  const targetDecision = opaqueDecisionId(item.target_id);
+  if (contextDecision && targetDecision && contextDecision !== targetDecision) return { status: 'unavailable', reason: 'The current decision identity is inconsistent. No action is available.' };
+  const currentDecision = contextDecision || targetDecision;
+  const itemRevision = positiveDecisionRevision(item.revision);
+  const contextRevision = positiveDecisionRevision(item.context?.decision_revision);
+  if (itemRevision && contextRevision && itemRevision !== contextRevision) return { status: 'unavailable', reason: 'The current decision revision is inconsistent. Refresh Attention before acting.' };
+  const currentRevision = contextRevision || itemRevision;
+  if (!currentDecision || !currentRevision) return { status: 'unavailable', reason: 'The current decision cannot be compared with this notification. No action is available.' };
+  if (currentDecision !== decisionId) return { status: 'mismatch', reason: 'This notification points to a different decision. No action was taken.' };
+  if (currentRevision !== revision) return { status: 'stale', reason: `This notification is for revision ${revision}, but revision ${currentRevision} is current. Review the latest decision before acting.` };
+  return { status: 'current', decisionId, revision };
+}
+
+export const decisionDestinationAllowsAction = (destination: DecisionDestination): boolean => (
+  destination.status === 'unpinned' || destination.status === 'current'
+);
 
 export async function fetchUnifiedAttention(): Promise<UnifiedAttentionRecord[]> {
   const res = await authorizedFetch(GATEWAY_URL + '/attention/unified', {

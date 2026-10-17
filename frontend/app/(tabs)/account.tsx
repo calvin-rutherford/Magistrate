@@ -6,7 +6,7 @@ import * as Linking from 'expo-linking';
 import Constants from 'expo-constants';
 import { EnvironmentBackground } from '../../src/components/EnvironmentBackground';
 import { GlassSurface } from '../../src/components/GlassSurface';
-import { AccountOnboardingState, AuthProviderInfo, BillingAccount, connectAuthProvider, createBillingPortal, deleteGatewayAccount, fetchAccountOnboarding, fetchAuthProviders, fetchBillingAccount, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, logoutGatewaySession, ProviderAuthConfiguration, ProviderLoginMethod, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile } from '../../src/api/client';
+import { AccountOnboardingState, AuthProviderInfo, BillingAccount, connectAuthProvider, createBillingPortal, deleteGatewayAccount, fetchAccountOnboarding, fetchAuthProviders, fetchBillingAccount, fetchNotificationPreferences, fetchProviderAuthConfiguration, fetchProviderLoginMethods, fetchUserProfile, fetchVoiceInputCapabilities, GATEWAY_URL, logoutGatewaySession, NotificationTestResult, ProviderAuthConfiguration, ProviderLoginMethod, sendNotificationTest, unlinkProviderLoginMethod, updateNotificationPreferences, updateUserProfile, uploadUserAvatar, UserProfile } from '../../src/api/client';
 import { linkProviderIdentity, providerSignInAvailable, SignInProvider } from '../../src/services/ProviderSignIn';
 import { loadChatPreferences, saveVoiceInputMode, saveVoicePlaybackPreferences, useChatColorScheme } from '../../src/services/ChatPreferences';
 import { ttsService } from '../../src/services/TextToSpeechService';
@@ -29,6 +29,24 @@ function providerActionLabel(provider: AuthProviderInfo): string {
   if (provider.deferred) return 'DEFERRED';
   if (!provider.available) return 'UNAVAILABLE';
   return 'CONNECT +';
+}
+
+function notificationTestLabel(result: NotificationTestResult): string {
+  if (result.status === 'accepted') return 'Accepted by push provider';
+  if (result.status === 'suppressed') return 'Not sent by notification policy';
+  if (result.status === 'unavailable') return 'Native push unavailable';
+  if (result.status === 'deduplicated-or-rate-limited') return 'No new test sent';
+  if (result.status === 'revoked') return 'Device registration expired';
+  return 'Push provider request failed';
+}
+
+function notificationTestRecovery(result: NotificationTestResult): string {
+  if (result.status === 'accepted') return 'Use Check status to read updated provider evidence for this account.';
+  if (result.status === 'suppressed') return 'Turn on Attention updates and pause quiet hours before retrying.';
+  if (result.status === 'unavailable') return 'Enable native push on a physical release device, then retry.';
+  if (result.status === 'deduplicated-or-rate-limited') return 'Wait at least one minute before starting another test.';
+  if (result.status === 'revoked') return 'Enable native push again to replace the expired device registration.';
+  return 'Check the connection and retry. The same test identity will be reused.';
 }
 
 type AccountSectionKey = 'sign-in' | 'notifications' | 'voice' | 'connections' | 'appearance';
@@ -76,6 +94,10 @@ export default function AccountScreen() {
   const [quietHours, setQuietHours] = useState<boolean>(true);
   const [operatingPermissionMode, setOperatingPermissionMode] = useState<OperatingPermissionMode>('moderate');
   const [nativePushStatus, setNativePushStatus] = useState<NativePushStatus>(() => notificationManager.getPushStatus());
+  const [notificationTestRequestId, setNotificationTestRequestId] = useState<string | null>(null);
+  const [notificationTestResult, setNotificationTestResult] = useState<NotificationTestResult | null>(null);
+  const [notificationTestError, setNotificationTestError] = useState<string | null>(null);
+  const [notificationTestBusy, setNotificationTestBusy] = useState(false);
   const [expandedSection, setExpandedSection] = useState<AccountSectionKey | null>(null);
   const toggleSection = (section: AccountSectionKey) => setExpandedSection(current => current === section ? null : section);
 
@@ -311,6 +333,17 @@ export default function AccountScreen() {
     }
   };
 
+  const runNotificationTest = async () => {
+    if (notificationTestBusy) return;
+    const requestId = notificationTestRequestId || `push-test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    setNotificationTestRequestId(requestId);
+    setNotificationTestBusy(true);
+    setNotificationTestError(null);
+    try { setNotificationTestResult(await sendNotificationTest(requestId)); }
+    catch (error) { setNotificationTestError(errorText(error, 'The notification test could not be confirmed.')); }
+    finally { setNotificationTestBusy(false); }
+  };
+
   return (
     <EnvironmentBackground>
       <SafeAreaView style={styles.safeArea}>
@@ -417,6 +450,20 @@ export default function AccountScreen() {
           </Text>
           {nativePushStatus !== 'registered' && <TouchableOpacity testID="account-enable-native-push" onPress={() => void notificationManager.registerNativePushToken(true)} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>ENABLE NATIVE PUSH</Text></TouchableOpacity>}
           <Text style={styles.settingHint}>Web notifications require an open, eligible browser tab; native push is the beta background channel.</Text>
+          <View style={styles.notificationTestSection}>
+            <Text style={styles.settingLabel}>TEST NOTIFICATION</Text>
+            <Text style={styles.settingHint}>Sends one neutral remote push to the device registered for this authenticated account. A tap only opens Attention and never approves work.</Text>
+            <TouchableOpacity testID="account-send-notification-test" accessibilityRole="button" accessibilityLabel={notificationTestResult ? 'Check notification provider status' : 'Send test notification'} accessibilityState={{ disabled: notificationTestBusy, busy: notificationTestBusy }} disabled={notificationTestBusy} onPress={() => void runNotificationTest()} style={styles.enablePushButton}><Text style={styles.toggleBtnText}>{notificationTestBusy ? 'CHECKING…' : notificationTestResult ? 'CHECK STATUS' : notificationTestError ? 'RETRY TEST' : 'SEND TEST'}</Text></TouchableOpacity>
+            {notificationTestError ? <View testID="notification-test-error" accessibilityRole="alert" style={styles.notificationTestEvidence}><Text style={styles.providerError}>{notificationTestError}</Text><Text style={styles.settingHint}>{notificationTestResult ? 'The latest check is unconfirmed; the last confirmed provider evidence remains below.' : 'No provider or phone outcome is known. Retry reuses the same test identity.'}</Text></View> : null}
+            {notificationTestResult ? <View testID="notification-test-result" accessibilityLiveRegion="polite" style={styles.notificationTestEvidence}>
+              <Text style={styles.settingToggleLabel}>{notificationTestLabel(notificationTestResult)}</Text>
+              {notificationTestResult.reason || notificationTestResult.detail ? <Text style={styles.settingHint}>{notificationTestResult.reason || notificationTestResult.detail}</Text> : null}
+              <Text style={styles.settingHint}>Account delivery evidence: {notificationTestResult.evidence.queued} queued · {notificationTestResult.evidence.provider_accepted} provider accepted · {notificationTestResult.evidence.provider_handoff} provider handoff · {notificationTestResult.evidence.failed} failed · {notificationTestResult.evidence.expired} expired.</Text>
+              <Text style={styles.settingHint}>Provider handoff means an Expo receipt confirmed transfer to APNs or FCM; it is not evidence of phone delivery.</Text>
+              <Text testID="notification-test-phone-unknown" style={styles.settingHint}>Phone delivery: Unknown · Seen on phone: Unknown</Text>
+              <Text style={styles.settingHint}>{notificationTestRecovery(notificationTestResult)}</Text>
+            </View> : null}
+          </View>
         </GlassSurface> : null}
 
         {/* VOICE & AUDIO SETTINGS */}
@@ -593,6 +640,8 @@ const baseStyles = StyleSheet.create({
   permissionModeTitleActive: { color: '#FFFFFF' },
   pushStatusText: { marginTop: 12, fontSize: 10, lineHeight: 15, color: 'rgba(255,255,255,0.72)' },
   enablePushButton: { alignSelf: 'flex-start', marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderWidth: 1, borderColor: '#24D8FF', borderRadius: 999 },
+  notificationTestSection: { marginTop: 18, paddingTop: 16, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(255,255,255,0.22)' },
+  notificationTestEvidence: { marginTop: 12, padding: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.22)', borderRadius: 12 },
   voiceModeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
   voiceModePill: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.3)' },
   voiceModePillActive: { backgroundColor: 'rgba(36, 216, 255, 0.28)', borderColor: '#24D8FF' },

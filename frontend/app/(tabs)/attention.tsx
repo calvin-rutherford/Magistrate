@@ -5,15 +5,17 @@ import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { openExternalUrl } from '../../src/utils/externalLinks';
-import { AttentionAction, AttentionActionConfirmation, AttentionActionOutcome, executeAttentionAction, fetchAttentionActionForItem, fetchUnifiedAttention, prepareAttentionAction, UnifiedAttentionRecord } from '../../src/api/client';
+import { AttentionAction, AttentionActionConfirmation, AttentionActionOutcome, compareDecisionDestination, decisionDestinationAllowsAction, executeAttentionAction, fetchAttentionActionForItem, fetchUnifiedAttention, prepareAttentionAction, UnifiedAttentionRecord } from '../../src/api/client';
 import { notificationManager } from '../../src/services/NotificationManager';
 
-function AttentionDetail({ item, confirmation, outcome, actionError, actionBusy, onPrepare, onCancel, onExecute }: {
+function AttentionDetail({ item, confirmation, outcome, actionError, actionBusy, navigationMessage, navigationBlocked, onPrepare, onCancel, onExecute }: {
   item: UnifiedAttentionRecord;
   confirmation: AttentionActionConfirmation | null;
   outcome: AttentionActionOutcome | null;
   actionError: string | null;
   actionBusy: boolean;
+  navigationMessage?: string;
+  navigationBlocked: boolean;
   onPrepare: (action: 'approve' | 'reject') => void;
   onCancel: () => void;
   onExecute: () => void;
@@ -35,7 +37,8 @@ function AttentionDetail({ item, confirmation, outcome, actionError, actionBusy,
     {item.project ? <><Text style={styles.detailLabel}>PROJECT</Text><Text style={styles.detailValue}>{item.project}</Text></> : null}
     {item.target_id ? <><Text style={styles.detailLabel}>TARGET</Text><Text selectable style={styles.detailValue}>{item.target_id}</Text></> : null}
     {context.map(([key, value]) => <View key={key}><Text style={styles.detailLabel}>{key.replaceAll('_', ' ').toUpperCase()}</Text><Text style={styles.detailValue}>{String(value)}</Text></View>)}
-    {action?.status === 'available' ? <View testID={`attention-actions-${item.id}`} style={styles.actionBox}>
+    {navigationMessage ? <Text testID="attention-navigation-status" accessibilityRole={navigationBlocked ? 'alert' : undefined} style={navigationBlocked ? styles.boundaryText : styles.actionBoundary}>{navigationMessage}</Text> : null}
+    {action?.status === 'available' && !navigationBlocked ? <View testID={`attention-actions-${item.id}`} style={styles.actionBox}>
       <Text style={styles.detailLabel}>CAPTAIN DECISION</Text>
       <Text style={styles.actionBoundary}>This is a keyed decision record, not notification acknowledgement.</Text>
       {!confirmation && !outcome ? <View style={styles.actionButtons}>
@@ -59,7 +62,7 @@ function AttentionDetail({ item, confirmation, outcome, actionError, actionBusy,
 
 export default function AttentionScreen() {
   const router = useRouter();
-  const { item: focusedItemParam } = useLocalSearchParams<{ item?: string }>();
+  const { item: focusedItemParam, decision: decisionParam, revision: revisionParam } = useLocalSearchParams<{ item?: string | string[]; decision?: string | string[]; revision?: string | string[] }>();
   const focusedItem = Array.isArray(focusedItemParam) ? focusedItemParam[0] : focusedItemParam;
   const [items, setItems] = useState<UnifiedAttentionRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -70,6 +73,12 @@ export default function AttentionScreen() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [lastActionItem, setLastActionItem] = useState<UnifiedAttentionRecord | null>(null);
+  const focusedRecord = focusedItem ? items.find(item => item.id === focusedItem) || null : null;
+  const decisionDestination = compareDecisionDestination(decisionParam, revisionParam, focusedRecord);
+  const navigationBlocked = !decisionDestinationAllowsAction(decisionDestination);
+  const navigationMessage = decisionDestination.status === 'current'
+    ? 'Opened from a notification for the current revision. No decision was sent; use the explicit controls below if available.'
+    : decisionDestination.status !== 'unpinned' ? decisionDestination.reason : undefined;
 
   const loadAttention = async () => {
     setLoading(true);
@@ -96,6 +105,7 @@ export default function AttentionScreen() {
       void notificationManager.markViewed(focusedItem);
     }
     let cancelled = false;
+    if (navigationBlocked) return;
     void fetchAttentionActionForItem(focusedItem).then(result => {
       if (cancelled || !('evidence' in result)) return;
       const resolved = result as AttentionActionOutcome;
@@ -110,7 +120,7 @@ export default function AttentionScreen() {
       }
     }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [focusedItem, items]);
+  }, [focusedItem, items, navigationBlocked]);
 
   const openItem = async (item: UnifiedAttentionRecord) => {
     if (item.url.startsWith('/')) {
@@ -123,14 +133,25 @@ export default function AttentionScreen() {
     }
   };
 
+  const currentDecisionItem = async (): Promise<UnifiedAttentionRecord | null> => {
+    const current = focusedItem ? items.find(candidate => candidate.id === focusedItem) || null : null;
+    if (decisionDestination.status === 'unpinned') return current;
+    const latest = await fetchUnifiedAttention();
+    setItems(latest);
+    const latestItem = focusedItem ? latest.find(candidate => candidate.id === focusedItem) || null : null;
+    const comparison = compareDecisionDestination(decisionParam, revisionParam, latestItem);
+    if (comparison.status !== 'current') throw new Error(comparison.status === 'unpinned' ? 'Decision navigation context is unavailable.' : comparison.reason);
+    return latestItem;
+  };
+
   const prepareAction = async (selectedAction: 'approve' | 'reject') => {
-    const item = focusedItem ? items.find(candidate => candidate.id === focusedItem) : null;
-    if (!item?.action) return;
     setActionBusy(true);
     setActionError(null);
     setActionOutcome(null);
-    setLastActionItem(item);
     try {
+      const item = await currentDecisionItem();
+      if (!item?.action) throw new Error('This decision has no current action.');
+      setLastActionItem(item);
       const prepared = await prepareAttentionAction(item.action.action_key, selectedAction, item.action.target.task_id);
       setConfirmation(prepared);
     } catch (error) {
@@ -139,11 +160,13 @@ export default function AttentionScreen() {
   };
 
   const executeAction = async () => {
-    const item = focusedItem ? items.find(candidate => candidate.id === focusedItem) : null;
-    if (!item?.action || !confirmation) return;
+    if (!confirmation) return;
     setActionBusy(true);
     setActionError(null);
     try {
+      const item = await currentDecisionItem();
+      if (!item?.action) throw new Error('This decision has no current action.');
+      if (confirmation.source_revision !== item.action.source_revision) throw new Error('The decision changed after confirmation. Review the current revision before acting.');
       const result = await executeAttentionAction(item.action.action_key, confirmation.action, confirmation.target.task_id, confirmation.confirmation_token);
       setConfirmation(null);
       setActionOutcome(result);
@@ -190,7 +213,8 @@ export default function AttentionScreen() {
           <Text style={styles.sectionTitle}>UNIFIED ATTENTION QUEUE ({items.length})</Text>
         </View>
 
-        {(focusedItem && (items.find(item => item.id === focusedItem) || (lastActionItem?.id === focusedItem && actionOutcome))) ? <AttentionDetail item={items.find(item => item.id === focusedItem) || lastActionItem!} confirmation={confirmation} outcome={actionOutcome} actionError={actionError} actionBusy={actionBusy} onPrepare={prepareAction} onCancel={() => { setConfirmation(null); setActionError(null); }} onExecute={() => void executeAction()} /> : null}
+        {(focusedItem && (focusedRecord || (lastActionItem?.id === focusedItem && actionOutcome))) ? <AttentionDetail item={focusedRecord || lastActionItem!} confirmation={confirmation} outcome={actionOutcome} actionError={actionError} actionBusy={actionBusy} navigationMessage={navigationMessage} navigationBlocked={navigationBlocked} onPrepare={prepareAction} onCancel={() => { setConfirmation(null); setActionError(null); }} onExecute={() => void executeAction()} /> : null}
+        {focusedItem && !loading && !focusedRecord && navigationBlocked ? <GlassSurface variant="card" style={styles.card}><Text testID="attention-navigation-status" accessibilityRole="alert" style={styles.boundaryText}>{navigationMessage}</Text></GlassSurface> : null}
 
         {loading && <GlassSurface variant="card" style={styles.card}><Text style={styles.itemSubtitle}>Loading live attention data…</Text></GlassSurface>}
         {error && <GlassSurface variant="card" style={styles.card}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadAttention}><Text style={styles.actionPrompt}>TRY AGAIN</Text></TouchableOpacity></GlassSurface>}
