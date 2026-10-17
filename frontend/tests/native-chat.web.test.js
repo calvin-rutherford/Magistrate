@@ -13,6 +13,7 @@ function installNativeGatewayMock() {
     '', '## Repeated markers', '', '1. alpha', '1. beta', '1. gamma',
     '', '## Details', '',
     'This paragraph proves Markdown and long-form prose stay in one canonical assistant message.',
+    '', '| State | Meaning |', '| --- | --- |', '| Saved | The request reached the server |', '| Failed | The response did not complete |',
     '', '```ts', 'const transcript = "provider-native";', '```',
   ].join('\n');
   const nativeFetch = window.fetch.bind(window);
@@ -75,6 +76,7 @@ function installNativeGatewayMock() {
       const turnId = `mgt_browser_${body.client_message_id.replace(/[^A-Za-z0-9_-]/g, '')}`;
       const conversation = previous?.conversation || emptyRecord().conversation;
       const start = previous?.messages?.length || 0;
+      const responseFails = body.content === 'Fail after save';
       const messages = [...(previous?.messages || []), {
         id: `mgm_user_${start}`, conversation_id: conversation.id, turn_id: turnId,
         client_message_id: body.client_message_id, reply_to_message_id: null,
@@ -83,7 +85,7 @@ function installNativeGatewayMock() {
       }, {
         id: `mgm_assistant_${start + 1}`, conversation_id: conversation.id, turn_id: turnId,
         client_message_id: null, reply_to_message_id: `mgm_user_${start}`,
-        role: 'assistant', content: longReply, status: 'completed', source: 'magi-native',
+        role: 'assistant', content: responseFails ? '' : longReply, status: responseFails ? 'failed' : 'completed', source: 'magi-native',
         sequence_index: start + 1, revision: 2, attachments: [], created_at: createdAt, updated_at: createdAt + 1,
       }];
       const record = {
@@ -93,7 +95,7 @@ function installNativeGatewayMock() {
       };
       localStorage.setItem('native-chat-browser-record', JSON.stringify(record));
       const response = { schema_version: record.schema_version, conversation: record.conversation,
-        conversation_id: record.conversation_id, status: 'completed', user_message: messages.at(-2),
+        conversation_id: record.conversation_id, status: responseFails ? 'failed' : 'completed', error: responseFails ? 'Provider response failed.' : null, user_message: messages.at(-2),
         assistant_message: messages.at(-1), messages: messages.slice(-2), duplicate: false, retry: false, attempt: 1 };
       if (localStorage.getItem('native-chat-delay-post') === '1') {
         return new Promise(resolve => setTimeout(() => { void json(response).then(resolve); }, 1_200));
@@ -214,6 +216,7 @@ test('production-default chat composer persists and restores only through native
   const orderedMarkers = await page.$$eval('[data-testid^="assistant-markdown-"][data-testid*="-ordered-marker-"]', elements => elements.map(element => element.textContent));
   assert.deepEqual(orderedMarkers.slice(0, 3), ['1.', '2.', '3.'], 'sequential source markers render as 1, 2, 3');
   assert.deepEqual(orderedMarkers.slice(-3), ['1.', '2.', '3.'], 'CommonMark repeated markers render as 1, 2, 3');
+  assert.match(await page.$eval('[data-testid="assistant-table"]', element => element.innerText), /Saved[\s\S]*request reached the server/);
 
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
@@ -221,6 +224,24 @@ test('production-default chat composer persists and restores only through native
   assert.equal((await page.$$('[data-testid="agent-message"]')).length, 1, 'reload must not duplicate the canonical reply');
   assert.ok(await page.evaluate(() => Number(localStorage.getItem('native-chat-get-count'))) >= 2);
   assert.equal(await page.evaluate(() => Number(localStorage.getItem('native-chat-forbidden-count') || '0')), 0);
+  await page.close();
+});
+
+test('a saved prompt stays saved when its response fails and offers response recovery', async () => {
+  const page = await browser.newPage();
+  await page.evaluateOnNewDocument(installNativeGatewayMock);
+  await page.goto(`${server.base}/chat`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.evaluate(() => { const toast = document.querySelector('#error-toast'); if (toast) toast.style.pointerEvents = 'none'; });
+  await page.waitForSelector('[data-testid="chat-history"][aria-busy="false"]', { timeout: 20_000 });
+  await page.type('[data-testid="magi-prompt"]', 'Fail after save');
+  await page.click('[data-testid="send-magi-prompt"]');
+  await page.waitForSelector('[data-testid^="assistant-failed-"]', { timeout: 20_000 });
+  const delivery = await page.$eval('[data-testid^="delivery-"]', element => element.innerText);
+  assert.equal(delivery, 'Saved · response failed');
+  assert.doesNotMatch(await page.$eval('[data-testid="user-message"]', element => element.innerText), /Not sent/);
+  assert.ok(await page.$('[aria-label="Retry response"]'));
   await page.close();
 });
 

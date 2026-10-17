@@ -5,7 +5,7 @@ import { GlassSurface } from '../../src/components/GlassSurface';
 import { GlassDrawer } from '../../src/components/GlassDrawer';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { openExternalUrl } from '../../src/utils/externalLinks';
-import { AttentionAction, AttentionActionConfirmation, AttentionActionOutcome, executeAttentionAction, fetchAttentionActionForItem, fetchGitHubPRs, fetchUnifiedAttention, prepareAttentionAction, UnifiedAttentionRecord } from '../../src/api/client';
+import { AttentionAction, AttentionActionConfirmation, AttentionActionOutcome, executeAttentionAction, fetchAttentionActionForItem, fetchUnifiedAttention, prepareAttentionAction, UnifiedAttentionRecord } from '../../src/api/client';
 import { notificationManager } from '../../src/services/NotificationManager';
 
 function AttentionDetail({ item, confirmation, outcome, actionError, actionBusy, onPrepare, onCancel, onExecute }: {
@@ -37,20 +37,20 @@ function AttentionDetail({ item, confirmation, outcome, actionError, actionBusy,
     {context.map(([key, value]) => <View key={key}><Text style={styles.detailLabel}>{key.replaceAll('_', ' ').toUpperCase()}</Text><Text style={styles.detailValue}>{String(value)}</Text></View>)}
     {action?.status === 'available' ? <View testID={`attention-actions-${item.id}`} style={styles.actionBox}>
       <Text style={styles.detailLabel}>CAPTAIN DECISION</Text>
-      <Text style={styles.actionBoundary}>This is a keyed Firstmate decision record, not notification acknowledgement.</Text>
+      <Text style={styles.actionBoundary}>This is a keyed decision record, not notification acknowledgement.</Text>
       {!confirmation && !outcome ? <View style={styles.actionButtons}>
         <TouchableOpacity testID={`attention-approve-${item.id}`} accessibilityRole="button" accessibilityLabel={`Approve ${item.title}`} onPress={() => onPrepare('approve')} disabled={actionBusy} style={[styles.decisionButton, styles.approveButton]}><Text style={styles.decisionButtonText}>APPROVE</Text></TouchableOpacity>
         <TouchableOpacity testID={`attention-reject-${item.id}`} accessibilityRole="button" accessibilityLabel={`Reject ${item.title}`} onPress={() => onPrepare('reject')} disabled={actionBusy} style={[styles.decisionButton, styles.rejectButton]}><Text style={styles.decisionButtonText}>REJECT</Text></TouchableOpacity>
       </View> : null}
       {confirmation ? <View testID="attention-confirmation" style={styles.confirmationBox}>
         <Text style={styles.confirmationTitle}>CONFIRM {confirmation.action.toUpperCase()}</Text>
-        <Text style={styles.confirmationText}>Target: Firstmate task {confirmation.target.task_id} · decision {confirmation.decision_key}</Text>
+        <Text style={styles.confirmationText}>Target: task {confirmation.target.task_id} · decision {confirmation.decision_key}</Text>
         <Text style={styles.confirmationText}>Consequence: {confirmation.consequence}</Text>
         <Text style={styles.confirmationText}>Reversible: {confirmation.reversible ? 'Yes' : 'No'}</Text>
         <View style={styles.actionButtons}><TouchableOpacity testID="attention-action-cancel" accessibilityRole="button" accessibilityLabel="Cancel Attention action" onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelButtonText}>CANCEL</Text></TouchableOpacity><TouchableOpacity testID="attention-action-confirm" accessibilityRole="button" accessibilityLabel={`Confirm ${confirmation.action}`} onPress={onExecute} disabled={actionBusy} style={styles.decisionButton}><Text style={styles.decisionButtonText}>{actionBusy ? 'WORKING…' : 'CONFIRM'}</Text></TouchableOpacity></View>
       </View> : null}
       {actionError ? <Text testID="attention-action-error" accessibilityRole="alert" style={styles.errorText}>{actionError}</Text> : null}
-      {outcome ? <View testID="attention-action-evidence" style={styles.evidenceBox}><Text style={styles.confirmationTitle}>{outcome.action.toUpperCase()} · {outcome.status.toUpperCase()}</Text><Text style={styles.confirmationText}>Evidence recorded at {new Date(outcome.timestamp * 1000).toISOString()}.</Text><Text style={styles.confirmationText}>Firstmate keyed decision: {outcome.decision_key} · target: {outcome.target.task_id}.</Text></View> : null}
+      {outcome ? <View testID="attention-action-evidence" style={styles.evidenceBox}><Text style={styles.confirmationTitle}>{outcome.action.toUpperCase()} · {outcome.status.toUpperCase()}</Text><Text style={styles.confirmationText}>Evidence recorded at {new Date(outcome.timestamp * 1000).toISOString()}.</Text><Text style={styles.confirmationText}>Keyed decision: {outcome.decision_key} · target: {outcome.target.task_id}.</Text></View> : null}
     </View> : null}
     {action?.status === 'unsupported' ? <Text testID="attention-action-boundary" style={styles.boundaryText}>{action.reason || 'This item is outside the supported Attention action boundary.'}</Text> : null}
     {item.external_url ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Open source attention item" onPress={() => void openExternal()} style={styles.detailLink}><Text style={styles.actionPrompt}>OPEN SOURCE ↗</Text></TouchableOpacity> : null}
@@ -65,7 +65,6 @@ export default function AttentionScreen() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [showDrawer, setShowDrawer] = useState<boolean>(false);
-  const [prsCount, setPrsCount] = useState(0);
   const [confirmation, setConfirmation] = useState<AttentionActionConfirmation | null>(null);
   const [actionOutcome, setActionOutcome] = useState<AttentionActionOutcome | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -75,10 +74,9 @@ export default function AttentionScreen() {
   const loadAttention = async () => {
     setLoading(true);
     setError(null);
-    const [attentionResult, prsResult] = await Promise.allSettled([fetchUnifiedAttention(), fetchGitHubPRs()]);
+    const [attentionResult] = await Promise.allSettled([fetchUnifiedAttention()]);
     if (attentionResult.status === 'fulfilled') setItems(attentionResult.value);
     else setError(attentionResult.reason instanceof Error ? attentionResult.reason.message : 'Needs-your-attention items could not be loaded.');
-    if (prsResult.status === 'fulfilled') setPrsCount(prsResult.value.items.length);
     if (attentionResult.status === 'rejected') {
       console.error('Error fetching unified attention:', attentionResult.reason);
     }
@@ -229,7 +227,6 @@ export default function AttentionScreen() {
         onClose={() => setShowDrawer(false)}
         onNavigate={(r) => router.push((r === 'index' ? '/' : '/' + r) as any)}
         attentionCount={items.filter(item => item.requires_action !== false).length}
-        prsCount={prsCount}
       />
     </EnvironmentBackground>
   );

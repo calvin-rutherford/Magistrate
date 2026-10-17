@@ -31,7 +31,7 @@ const kindLabel = (record: CanonicalActivityRecord): string => {
   if (record.kind.startsWith('implementation.')) return 'Implementation';
   if (record.kind.startsWith('tests.')) return 'Verification';
   if (record.kind.startsWith('review.')) return 'Review';
-  if (record.kind.startsWith('primary.')) return 'Magi operation';
+  if (record.kind.startsWith('primary.')) return 'Assistant operation';
   return 'Supervision';
 };
 
@@ -101,7 +101,7 @@ export function CanonicalActivitySurface({
           <View style={[styles.handle, { backgroundColor: colors.backgroundSelected }]} />
           <View style={styles.header}>
             <View style={styles.headerCopy}>
-              <Text style={[styles.title, { color: colors.text }]}>Magi activity</Text>
+              <Text style={[styles.title, { color: colors.text }]}>Activity</Text>
               <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
                 {work.active
                   ? `${work.operationCount} recorded operation${work.operationCount === 1 ? '' : 's'} in progress`
