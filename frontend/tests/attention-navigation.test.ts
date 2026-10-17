@@ -6,7 +6,7 @@ import ts from 'typescript';
 
 type Compare = (decision: string | string[] | undefined, revision: string | string[] | undefined, item: any) => any;
 
-function contract(): { compareDecisionDestination: Compare; decisionDestinationAllowsAction: (value: any) => boolean } {
+function contract(): { compareDecisionDestination: Compare; currentDecisionDestination: (item: any) => any; decisionDestinationAllowsAction: (value: any) => boolean } {
   const output = ts.transpileModule(
     readFileSync(new URL('../src/api/client.ts', import.meta.url), 'utf8'),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
@@ -60,4 +60,11 @@ test('stale, mismatched, missing, conflicting, and duplicate context fail closed
 test('an ordinary queue visit is unpinned and does not itself execute anything', () => {
   const { compareDecisionDestination } = contract();
   assert.equal(compareDecisionDestination(undefined, undefined, item()).status, 'unpinned');
+});
+
+test('canonical answer actions require decision identity and revision, never a legacy task action', () => {
+  const { currentDecisionDestination } = contract();
+  assert.equal(currentDecisionDestination(item()).status, 'current');
+  const legacy = item({ target_id: 'task-1', revision: '1', context: { task_id: 'task-1', decision_key: 'deploy-1' } });
+  assert.equal(currentDecisionDestination(legacy).status, 'unavailable');
 });
