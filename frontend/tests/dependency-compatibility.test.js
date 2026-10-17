@@ -48,3 +48,33 @@ test('hostile deep links and image headers terminate in bounded subprocesses', (
     assert.equal(result.status, 0, result.stderr);
   }
 });
+
+test('shell quoting rejects line terminators after comment tokens', () => {
+  const { quote, parse } = require('shell-quote');
+  const lock = JSON.parse(fs.readFileSync('package-lock.json'));
+  assert.equal(lock.packages['node_modules/shell-quote'].version, '1.12.0');
+  assert.deepEqual(parse(quote(['tool', 'space value', 'café'])), ['tool', 'space value', 'café']);
+  for (const terminator of ['\n', '\r', '\u2028', '\u2029']) {
+    assert.throws(() => quote(['echo', 'ok', { comment: 'note' }, `arg${terminator}untrusted;#`]), TypeError);
+  }
+});
+
+test('indexed source maps reject excessive offsets in a bounded subprocess', () => {
+  const lock = JSON.parse(fs.readFileSync('package-lock.json'));
+  assert.equal(lock.packages['node_modules/source-map-js'].version, '1.2.2');
+  const result = spawnSync(process.execPath, ['-e', `
+    const assert = require('node:assert/strict');
+    const { SourceMapConsumer } = require('source-map-js');
+    const map = { version: 3, sources: ['source.js'], names: [], mappings: 'AAAA' };
+    const indexed = line => ({ version: 3, sections: [{ offset: { line, column: 0 }, map }] });
+    const mappings = [];
+    new SourceMapConsumer(indexed(1)).eachMapping(mapping => mappings.push(mapping));
+    assert.equal(mappings[0].generatedLine, 2);
+    assert.equal(mappings[0].originalLine, 1);
+    for (const line of [1e12, Infinity, -1, 1.5]) {
+      assert.throws(() => new SourceMapConsumer(indexed(line)), /Section offset/);
+    }
+  `], { timeout: 3000, encoding: 'utf8' });
+  assert.equal(result.error, undefined, 'Source-map offset validation timed out');
+  assert.equal(result.status, 0, result.stderr);
+});
