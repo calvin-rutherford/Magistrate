@@ -198,8 +198,10 @@ owner/operator must perform the following separately authorized actions:
    explicitly send the owner test. Record registration, provider acceptance,
    receipt, actual phone display and owner viewing independently. Kill the app,
    tap a real request-bound push, restore the session and compare the current
-   decision/revision. A stale/expired tap must remain read-only. The canonical
-   decision UI adapter is still an open code gate, not passed by this checklist.
+   decision/revision. A stale/expired tap must remain read-only. Canonical decision
+   UI behavior passed hermetic tests, not this installed-device checklist. Review
+   the exact saved Chat answer and returned request-bound result; neither a tap
+   nor disappearance from the queue proves approval or worker completion.
 5. On supported hardware choose Settings → Action Button → Shortcut → **Start
    Voice**. In Shortcuts add that action, name the shortcut **Wake Magi**, and
    invoke it through Siri. Verify consent and foreground session restoration;

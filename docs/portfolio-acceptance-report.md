@@ -22,15 +22,16 @@ partial-dispatch and credit-ledger safeguards.
 |---|---|
 | Foundation — https://github.com/calvin-rutherford/Magistrate/pull/124 | `b39e65d77820738dbaba6260c237cb848778f630` |
 | Native — https://github.com/calvin-rutherford/Magistrate/pull/125 | `b940c9b14f62246392fda514e38c5dcd20457a72` |
-| UI — https://github.com/calvin-rutherford/Magistrate/pull/126 | `fb3ecac7fc4b42a866a0773972a390319cb989c1` |
+| UI — https://github.com/calvin-rutherford/Magistrate/pull/126 | `05ca3abeb25943b9b88fd7da015dcd095732e511` |
 
 These were **unlanded review branches**, not assumed main. Local non-fast-forward
 integration merges preserve their ancestry. Initial inputs were foundation
 `6e20d9ab2f8b9e064259be15ace130f49ab946b6` and UI
 `5a3521a3896210ec050702554288ae3e28642f6c`; the current heads above were then
 merged locally without overwriting integration edits. UI then advanced through
-`de4aa39d213e6e27729d96adb1fa4d7c64b6d90e` to the canonical answer-flow head
-above. Native did not change.
+`de4aa39d213e6e27729d96adb1fa4d7c64b6d90e` and canonical answer-flow head
+`fb3ecac7fc4b42a866a0773972a390319cb989c1` to the final nullable-project and
+retained-outcome correction above. Native did not change.
 Integration-only implementation/docs remain separate commits above those merges.
 Landing order remains foundation → workstreams → integration; refreshing after
 landing requires repeating the contract/full checkpoints. No remote PR was merged
@@ -57,8 +58,8 @@ inputs plus this integration's changes:
 | `cd gateway && uv run python -m scripts.export_client_protocol` | Passed using the exporter's isolated environment/database. |
 | `cd gateway && uv run python -m compileall -q app tests scripts ../scripts/magistrate_diagnostics.py` | Passed. |
 | `python3 scripts/production_acceptance.py check` | Passed registry/document check only. |
-| `python3 scripts/production_acceptance.py run --suite release-foundation --output .release/integration/foundation.json` | **18 tests passed**; receipt records dirty implementation workspace, not production approval. |
-| `git diff --check` | Passed. Frontend before/after status comparison had no generated drift. |
+| `python3 scripts/production_acceptance.py run --suite release-foundation --output .release/integration/foundation-final.json` | **18 tests passed** on the clean integration merge; not production approval. |
+| `git diff --check` and `test -z "$(git status --porcelain=v1 --untracked-files=all)"` | Passed after final functional pipeline and again after the audit; no generated drift. |
 | `(cd frontend && npm ci && npm audit --audit-level=low --json > ../.release/frontend-audit.json)` | **Exit 1; 20 high / 0 critical**. Remaining workflow audit steps are not established by this frontend-failing step. |
 
 Focused commands, reproducible from the repository root:
@@ -91,7 +92,7 @@ assertion was suppressed or made a skip. Local raw logs stay ignored under
 | Memory save/retrieve/delete | Integration test freezes exact context digest across deletion; project-memory isolation suite. | Live owner/project data persistence. |
 | Durable objectives, capacity, uncertainty | Atomic two-slot concurrent fixture, prior-month holds, immutable claims, closed real-pin gate, recovery after mode change, measured settlement after logout and crash window. | Runtime-enforced workers, spend, CPU/memory/time and actual supervisor restart. |
 | Repository authority | Owner-bound active GitHub App installation/repository; revocation and arbitrary-project rejection before reservation. | Provisioned external installation and disposable live demo repo. |
-| Approval/decline, stale/expiry/duplicate | Gateway exact canonical answer bytes once, revision/scope/run/expiry checks, missing/foreign message rejection, nullable project, and confirmation binding; canonical Attention browser flow and navigation unit tests. | Two UI regressions below and actual worker continuation/decline behavior. |
+| Approval/decline, stale/expiry/duplicate | Gateway exact canonical answer bytes once, revision/scope/run/expiry checks, missing/foreign message rejection, nullable project, and confirmation binding; canonical Attention browser flow retains exact response/answer after queue removal on a pinned route. | Physical installed UI and actual worker continuation/decline behavior. |
 | Disconnect/reconnect | Canonical-message/revision/browser recovery; immutable task identity and reserved uncertain work; no cancellation-based capacity release. | Phone/network and installed-runtime disconnect journeys. |
 | Notification | Mounted authenticated test route, body-owner rejection, durable dedup, provider evidence buckets, Settings browser tests and native boundary doubles. | APNs credentials, cold-start real push, phone display and viewing. |
 | Attachments | 11 Gateway upload tests plus request-cap/security and truthful upload browser suites. | Real device picker/bytes/network behavior. |
@@ -115,19 +116,22 @@ assertion was suppressed or made a skip. Local raw logs stay ignored under
    No unattended personal supervisor service/restart contract was established.
    Request-bound fields are accepted/persisted when actually supplied, never
    fabricated from a read or wall-clock timeout.
-4. **UI/API seam:** the canonical Attention follow-up replaces legacy action
-   calls with `/api/v1/decisions/{id}/confirmation` and `/answer`, using the latest
-   canonical user-message ID and explicit exact-byte preview, never body text,
-   owner or task authority. Approve/decline/stale/duplicate/cancel browser fixtures
-   pass. Two integration regressions were reported to the UI owner: its response
-   parser rejects a valid nullable `target.project` (reproduced against the actual
-   client normalizer); and a successful answer removes the current Attention item,
-   causing a notification-pinned destination to hide the retained outcome. Gateway
-   tests now preserve both real response behaviors. These need owner-branch fixes
-   and regression evidence before claiming the canonical UI journey passed.
-   Additive objective-state projection is server-side; frontend compatibility
-   fields remain unchanged, and its shared schema still needs inclusion in the
-   client export registry before client adoption.
+4. **Client scope:** additive objective-state projection is server-side; frontend
+   compatibility fields remain unchanged, and its shared schema still needs
+   inclusion in the client export registry before client adoption. Do not claim
+   the new projection has replaced all UI compatibility labels.
+
+   The canonical Attention seam itself is now integrated: it replaces legacy
+   action calls with `/api/v1/decisions/{id}/confirmation` and `/answer`, using the
+   latest canonical user-message ID and explicit exact-byte preview, never body
+   text, owner or task authority. Both reported UI defects were corrected on the
+   owning branch, not forked here. Final browser regressions accept nullable
+   `target.project` and retain the exact request-bound response/submitted answer
+   after the pending item disappears on a notification-pinned route. They do not
+   resurrect the item or infer success from list disappearance. Approve, decline,
+   stale, duplicate and cancel fixtures pass alongside Gateway expiry, ownership,
+   revision and canonical-byte cases. This is hermetic integration evidence, not
+   a live producer/worker/phone journey.
 5. **Deployment/native:** operator-controlled TLS, actual service readiness/auth,
    backups/rollback, resource isolation, credentials and repo installation need
    separate authorization/evidence. Xcode/Apple signing/APNs/EAS, native streaming

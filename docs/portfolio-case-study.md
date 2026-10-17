@@ -22,7 +22,7 @@ is activated: runtime hard-limit and producer-binding gaps remain open.
 | Resource admission | `PersonalResourceLedger` in `firstmate_execution.py`, one DB transaction with the claim | Full micro-USD ceilings and at most two reserved worker slots; unknown work retains capacity. |
 | Execution | Existing pinned Firstmate adapter; no alternative default runtime | The pin lacks enforceable worker/cost envelopes, so personal dispatch fails closed before publication. |
 | Progress | Persisted execution/decision rows; write-side monotonic objective projection | Submitted, queued, accepted, running, waiting, recovering, unknown and terminal are different facts. Cancellation requested is not cancellation observed. |
-| Decisions | Optional producer run/request/scope/expiry binding plus revision and current repository checks | Notifications navigate only. Gateway answers use exact canonical owner-message bytes and confirmation; the UI still needs an adapter to that seam. Old personal holds cannot authorize. |
+| Decisions | Optional producer run/request/scope/expiry binding plus revision and current repository checks | Notifications navigate only. Gateway and Attention use exact canonical owner-message bytes and confirmation; the UI retains only the bound returned outcome. Old personal holds cannot authorize. |
 | Recovery | Frozen identity/context/resource provenance and measured terminal settlement | A timeout is not proof of non-publication. Do not release an uncertain hold or reinterpret it as commercial credit. |
 | Mobile experience | Expo shell; shared Native Magi Chat/Voice record; native push receipts | Foreground voice and provider receipts are implemented surfaces, not proof of background listening or phone delivery. |
 

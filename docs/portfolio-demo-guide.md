@@ -22,7 +22,7 @@ walkthrough**, not the required installed-phone live demonstration.
 | 0:20–0:45 | Canonical Chat/Voice and no-execution test receipt. “Ordinary questions, quoted commands and attachment/repository prose do not launch work.” |
 | 0:45–1:10 | Owner/project/repository and deployment-policy fixture. “No fake subscription: one exact authenticated owner, 1–2 reserved slots, explicit spend ceilings, and execution unavailable.” |
 | 1:10–1:35 | Closed-pin and uncertainty/settlement tests. “A timeout keeps its hold. A measured terminal event settles once. Accounting is not runtime enforcement.” |
-| 1:35–2:05 | Clearly labeled request-bound **fixture**: task/run/request/scope/revision/expiry and Gateway answer tests. “A tap navigates; canonical answer bytes plus confirmation answer once. The live producer and canonical UI adapter remain acceptance gates.” |
+| 1:35–2:05 | Clearly labeled request-bound **fixture**: task/run/request/scope/revision/expiry and Gateway answer tests. “A tap navigates; canonical answer bytes plus confirmation answer once. A nullable project and removed queue item do not erase the bound result. Live producer/worker/phone behavior remains unverified.” |
 | 2:05–2:25 | Settings push-evidence/browser fixture and native-entry documentation. “Receipt is not phone display. Start Voice and a user-created Wake Magi shortcut foreground the app; current speech is turn-based, not streaming parity.” |
 | 2:25–2:40 | Red advisory/runtime/native rows. “Reviewable engineering evidence, not a production or physical-device pass.” |
 
@@ -38,8 +38,8 @@ the shared runtime and does not prove personal hard-limit enforcement.
 
 ## Future live owner loop — BLOCKED / NOT RUN
 
-Requires separate operator authorization, the canonical UI adapter validated, and
-all runtime/dependency gates resolved. The [runbook](portfolio-runbook.md) specifies
+Requires separate operator authorization, all runtime/dependency gates resolved,
+and the exact installed build validated on a physical device. The [runbook](portfolio-runbook.md) specifies
 GitHub App authorization and the disposable one-file demo repository. Never remove
 the fail-closed check to make a demo appear successful.
 
