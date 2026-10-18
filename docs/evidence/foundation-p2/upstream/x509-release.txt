@@ -1,0 +1,40 @@
+url: "https://api.github.com/repos/PeculiarVentures/x509/releases/413637350"
+assets_url: "https://api.github.com/repos/PeculiarVentures/x509/releases/413637350/assets"
+upload_url: "https://uploads.github.com/repos/PeculiarVentures/x509/releases/413637350/assets{?name,label}"
+html_url: "https://github.com/PeculiarVentures/x509/releases/tag/v2.2.0"
+id: 413637350
+author:
+  login: "github-actions[bot]"
+  id: 41898282
+  node_id: MDM6Qm90NDE4OTgyODI=
+  avatar_url: "https://avatars.githubusercontent.com/in/15368?v=4"
+  gravatar_id: ""
+  url: "https://api.github.com/users/github-actions%5Bbot%5D"
+  html_url: "https://github.com/apps/github-actions"
+  followers_url: "https://api.github.com/users/github-actions%5Bbot%5D/followers"
+  following_url: "https://api.github.com/users/github-actions%5Bbot%5D/following{/other_user}"
+  gists_url: "https://api.github.com/users/github-actions%5Bbot%5D/gists{/gist_id}"
+  starred_url: "https://api.github.com/users/github-actions%5Bbot%5D/starred{/owner}{/repo}"
+  subscriptions_url: "https://api.github.com/users/github-actions%5Bbot%5D/subscriptions"
+  organizations_url: "https://api.github.com/users/github-actions%5Bbot%5D/orgs"
+  repos_url: "https://api.github.com/users/github-actions%5Bbot%5D/repos"
+  events_url: "https://api.github.com/users/github-actions%5Bbot%5D/events{/privacy}"
+  received_events_url: "https://api.github.com/users/github-actions%5Bbot%5D/received_events"
+  type: Bot
+  user_view_type: public
+  site_admin: false
+node_id: RE_kwDOEbinb84Yp5rm
+tag_name: v2.2.0
+target_commitish: master
+name: v2.2.0
+draft: false
+immutable: false
+prerelease: false
+created_at: "2026-10-15T09:38:31Z"
+updated_at: "2026-10-15T09:38:37Z"
+published_at: "2026-10-15T09:38:37Z"
+assets: []
+tarball_url: "https://api.github.com/repos/PeculiarVentures/x509/tarball/v2.2.0"
+zipball_url: "https://api.github.com/repos/PeculiarVentures/x509/zipball/v2.2.0"
+body: "## What's Changed\n* fix: don't apply fromBER limits when parsing our own DER by @hacdias in https://github.com/PeculiarVentures/x509/pull/150\n* chore(deps): update non-major dependencies by @microshine in https://github.com/PeculiarVentures/x509/pull/153\n\n\n**Full Changelog**: https://github.com/PeculiarVentures/x509/compare/v2.1.0...v2.2.0"
+mentions_count: 2

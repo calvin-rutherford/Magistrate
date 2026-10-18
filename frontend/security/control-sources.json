@@ -1,0 +1,58 @@
+[
+  {
+    "name": "braces",
+    "version": "3.0.3",
+    "url": "https://registry.npmjs.org/braces/-/braces-3.0.3.tgz",
+    "sha256": "1cd18e862c8640b4568b1425a7df4ee030ff201d45b2da8f9f222d2987494ffc",
+    "integrity": "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA=="
+  },
+  {
+    "name": "fill-range",
+    "version": "7.1.1",
+    "url": "https://registry.npmjs.org/fill-range/-/fill-range-7.1.1.tgz",
+    "sha256": "1a6c3a3446cb1d693cf6b62785e2f6d8f9596305aff474dd2b31b2d8d427593c",
+    "integrity": "sha512-YsGpe3WHLK8ZYi4tWDg2Jy3ebRz2rXowDxnld4bkQB00cc/1Zw9AWnC0i9ztDJitivtQvaI9KaLyKrc+hBW0yg=="
+  },
+  {
+    "name": "is-number",
+    "version": "7.0.0",
+    "url": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+    "sha256": "7b75c1057198cf97696909a9bee176c9c5e9bcb5b03bf3ecef2f484defadd51e",
+    "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="
+  },
+  {
+    "name": "micromatch",
+    "version": "4.0.8",
+    "url": "https://registry.npmjs.org/micromatch/-/micromatch-4.0.8.tgz",
+    "sha256": "c78d05f20aff3bc95f024b19e53f72998cfc5f69c42b126c49dff8b1b271bc46",
+    "integrity": "sha512-PXwfBhYu0hBCPw8Dn0E+WDYb7af3dSLVWKi3HGv84IdF4TyFoC0ysxFd0Goxw7nSv4T/PzEJQxsYsEiFCKo2BA=="
+  },
+  {
+    "name": "node-forge",
+    "version": "1.4.0",
+    "url": "https://registry.npmjs.org/node-forge/-/node-forge-1.4.0.tgz",
+    "sha256": "bf9d7ca0d774235354697bd4b5e642af6505e7ce2066762c3b855138cf870820",
+    "integrity": "sha512-LarFH0+6VfriEhqMMcLX2F7SwSXeWwnEAJEsYm5QKWchiVYVvJyV9v7UDvUv+w5HO23ZpQTXDv/GxdDdMyOuoQ=="
+  },
+  {
+    "name": "picomatch",
+    "version": "2.3.2",
+    "url": "https://registry.npmjs.org/picomatch/-/picomatch-2.3.2.tgz",
+    "sha256": "4c843ba015bec815ac52116162559ab7b4b4efbd3b86f7fcf38f3d770decace6",
+    "integrity": "sha512-V7+vQEJ06Z+c5tSye8S+nHUfI51xoXIXjHQ99cQtKUkQqqO1kO/KCJUfZXuB47h/YBlDhah2H3hdUGXn8ie0oA=="
+  },
+  {
+    "name": "resolve-workspace-root",
+    "version": "2.0.1",
+    "url": "https://registry.npmjs.org/resolve-workspace-root/-/resolve-workspace-root-2.0.1.tgz",
+    "sha256": "161fd5f13b2fc116b4332c25bb1d4983a2f983b15e01d647d5ac1209fd309694",
+    "integrity": "sha512-nR23LHAvaI6aHtMg6RWoaHpdR4D881Nydkzi2CixINyg9T00KgaJdJI6Vwty+Ps8WLxZHuxsS0BseWjxSA4C+w=="
+  },
+  {
+    "name": "to-regex-range",
+    "version": "5.0.1",
+    "url": "https://registry.npmjs.org/to-regex-range/-/to-regex-range-5.0.1.tgz",
+    "sha256": "a63a255ec20a935c3a3334a6645f9245db36e2319ddf1eb6bc0eab2bfe5b42d7",
+    "integrity": "sha512-65P7iz6X5yEr1cwcgvQxbbIw7Uk3gOy5dIdtZ4rDveLqhrdJP+Li/Hx6tyK0NEb+2GCyneCMJiGqrADCSNk8sQ=="
+  }
+]

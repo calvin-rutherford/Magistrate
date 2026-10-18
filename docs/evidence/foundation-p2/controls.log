@@ -1,0 +1,12 @@
+{
+  "braces": {
+    "version": "3.0.3",
+    "nestedPatternStackExhaustion": true
+  },
+  "forge": {
+    "version": "1.4.0",
+    "extraDigestAlgorithmChildAccepted": true,
+    "nodeRejectsSameSignature": true
+  }
+}
+{"orderedMatcherComparisons":8064,"resolverComparisons":2331,"mismatches":0}

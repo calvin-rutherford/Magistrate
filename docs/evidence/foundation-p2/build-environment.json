@@ -1,0 +1,17 @@
+{
+  "artifact_manifest": "frontend/security/artifacts.json",
+  "artifact_manifest_sha256": "b983374abfbc351f099703ec7c4fdb2ae30a107141d39dbf84deca4754ca439c",
+  "build_command": "python3 frontend/security/build_artifacts.py --output .release/reproduced --check",
+  "lock_sha256": "73e08f77840b2d73d5e52ba653fdf5c7345b9b26a2db5614b5c51e3c728b3523",
+  "machine": "x86_64",
+  "method": "Hash-verified registry tarballs, zero-fuzz POSIX patch, hash-verified overlays, exact removal inventory; sorted USTAR and mtime-zero gzip. No upstream lifecycle/build scripts or signing secrets.",
+  "node": "v22.23.2",
+  "npm": "10.9.8",
+  "openssl": "OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)",
+  "python": "3.12.3",
+  "reproduction": "All six artifact archives and full file inventories reproduce byte-identically on Python 3.12.",
+  "source_manifest": "frontend/security/sources.json",
+  "source_manifest_sha256": "e1666949a000de52b205558e243ab28916f5a30479f29cd7fab0fc03979e2365",
+  "system": "Linux",
+  "uv": "uv 0.12.15 (x86_64-unknown-linux-gnu)"
+}

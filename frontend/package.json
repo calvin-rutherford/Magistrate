@@ -53,7 +53,7 @@
     "typescript": "~6.0.3"
   },
   "scripts": {
-    "postinstall": "patch-package --error-on-fail",
+    "postinstall": "node security/verify-install.cjs && patch-package --error-on-fail",
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo run:android",
@@ -86,10 +86,22 @@
     "test:truthful": "node --test tests/truthful-contracts.web.test.js"
   },
   "overrides": {
-    "brace-expansion@1": "1.1.21",
-    "metro": {
-      "image-size": "2.0.4"
+    "metro@0.84.4": {
+      "image-size": "2.0.4",
+      "metro-file-map": "file:security/artifacts/c8f46932563dd8f014a43e8ea457cdd237912c8e3a499ac992e94018d2fd47ed.tgz"
     },
+    "metro@0.84.5": {
+      "image-size": "2.0.4",
+      "metro-file-map": "file:security/artifacts/a5215425521014eeb5a567d21d56e41be2484f77a86f66c3662b0f0cd997925c.tgz"
+    },
+    "@expo/metro": {
+      "metro-file-map": "file:security/artifacts/a5215425521014eeb5a567d21d56e41be2484f77a86f66c3662b0f0cd997925c.tgz"
+    },
+    "resolve-workspace-root@2.0.1": "file:security/artifacts/565ed238a517b764563705d78a4ad53df49126fc0d3ade635b3f4400d4b75336.tgz",
+    "find-yarn-workspace-root@2.0.0": "file:security/artifacts/fe9ecc5e110c08b9774addd54d7440ec4bf5119be3a9b168bc54e651ad4f5dcc.tgz",
+    "@expo/code-signing-certificates@0.0.6": "file:security/artifacts/7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558.tgz",
+    "@expo/cli@57.0.27": "file:security/artifacts/768173514d754ddf6bf7d2b6132fe1830fe609f7bda1c48b86ce701a7643770a.tgz",
+    "brace-expansion@1": "1.1.21",
     "query-string": {
       "decode-uri-component": "0.5.0"
     },

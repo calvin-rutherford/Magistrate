@@ -1,0 +1,146 @@
+{
+  "absence": {
+    "full_installed_inventory_guard": true,
+    "meaning": "npm reports no matching braces/micromatch/node-forge dependencies. This expected absence exit is distinct from the mandatory audit exits, all zero.",
+    "no_daphne_or_twisted_in_either_python_graph": true,
+    "npm_explain_exit": 1,
+    "npm_explain_result": [],
+    "npm_ls_all_exit": 0,
+    "stale_implementation_marker_scan": true
+  },
+  "command_exit_codes": {
+    "adapter-tests": 0,
+    "adapter-typecheck": 0,
+    "backend-tests": 0,
+    "beta-smoke-safeguards": 0,
+    "compile": 0,
+    "compose-tests": 0,
+    "controls": 0,
+    "deployment-safeguards": 0,
+    "deployment-workflow": 0,
+    "foundation": 0,
+    "frontend-tests": 0,
+    "gateway-tests": 0,
+    "installed-graph": 0,
+    "lint": 0,
+    "pinned-install": 0,
+    "pinned-verify": 0,
+    "postgres": 0,
+    "protocol-drift": 0,
+    "protocol-export": 0,
+    "registry": 0,
+    "release": 0,
+    "reproduce": 0,
+    "sbom": 0,
+    "typecheck": 0,
+    "typegen": 0,
+    "web-export": 0,
+    "whitespace": 0
+  },
+  "commands": [
+    "cd frontend && npm run typegen",
+    "cd frontend && npm run typecheck",
+    "cd frontend && npm run lint",
+    "cd frontend && npm test",
+    "cd frontend && npx expo export --platform web",
+    "cd gateway && PYTHONPATH=. uv run pytest -v",
+    "cd gateway && uv run python -m scripts.export_client_protocol --check-types",
+    "cd gateway && uv run python -m scripts.export_client_protocol",
+    "cd backend && python -m pytest -v (both independently installed graphs)",
+    "cd pi-extension && npm run typecheck && npm test",
+    "python3 scripts/production_acceptance.py check",
+    "python3 scripts/production_acceptance.py run --suite release-foundation --output NEW_RECEIPT",
+    "python3 scripts/production_acceptance.py run --suite postgres-persistence --output NEW_RECEIPT",
+    "bash scripts/test_deployment_workflow.sh",
+    "bash scripts/test_deploy_magistrate.sh",
+    "bash scripts/test_smoke_friend_beta.sh"
+  ],
+  "counts": {
+    "compose_backend": {
+      "failed": 0,
+      "passed": 18,
+      "skipped": 0
+    },
+    "foundation": {
+      "failed": 0,
+      "passed": 18,
+      "skipped": 0
+    },
+    "frontend": {
+      "failed": 0,
+      "passed": 185,
+      "skipped": 0
+    },
+    "gateway": {
+      "failed": 0,
+      "passed": 636,
+      "pinned_producer": "2af0d17014cb2e244aa441bfe6df16c4f630475b",
+      "skipped": 0
+    },
+    "lint": {
+      "errors": 0,
+      "existing_warnings": 15
+    },
+    "retained_adapter": {
+      "failed": 0,
+      "passed": 8,
+      "skipped": 0
+    },
+    "retained_backend": {
+      "failed": 0,
+      "passed": 18,
+      "skipped": 0
+    },
+    "web_export": {
+      "static_routes": 20
+    }
+  },
+  "development_failures": [
+    "Initial X.509 fixture lacked its declared reflect-metadata prerequisite; approved clean fixture corrected it, no crypto bypass.",
+    "Initial local override resolver failed to preserve image-size@2.0.4; exact Metro parent-scoped overrides regenerated from manifests and fresh npm ci/npm ls/consumer tests confirmed the corrected graph.",
+    "First qualification used a worktree-only TMPDIR: Chrome/adapter rejected overlong socket paths; Gateway correctly refused invite output inside the checkout. Approved standard disposable test temp restored the CI fixture contract without changing production guards.",
+    "The new Compose audit and SBOM uploads required adding only those two exact paths to the release-test allowlist; approved qualification correction, no wildcard upload.",
+    "Reusing an immutable receipt output correctly refused overwrite. Successful subsequent runs used new receipt paths, not relaxed validation."
+  ],
+  "log_sha256": {
+    "adapter-tests.log": "2ad68de340ad79c94b8d091f8acfa4348f785fa278f6266a625f0aad1f137085",
+    "adapter-typecheck.log": "e72b04203fd64b3b890da851f309c785f9742022b0a44b16afa496a6fd41aa61",
+    "backend-tests.log": "af5957beb34fe56029c0f3d0d07ab28ad4ae01a3518ac3eea0714affadd04678",
+    "beta-smoke-safeguards.log": "ad412bf4e04ccddf2fd665781157a8611a449cbf0d90a4f69c0d05adae9f2f42",
+    "compatibility.log": "cf55322bde9c977d21385e21997ed1323a1e894f1b17fc86bb40ac6900ea393d",
+    "compile.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "compose-tests.log": "64789bfc3bfe8d63863c7bd99ff599e5706b4ec775bfdb326efa16079d91e6a1",
+    "controls.log": "10bbe1a72baad8c3da1086e3f4aeffa0d33fc06acceb1bab32c94448f46a2974",
+    "deployment-safeguards.log": "879dabcd415f8f2785670a3458e55e40fd890570416a9f0f30920d02f2c3b278",
+    "deployment-workflow.log": "4b9eb10338666563b7a79e669f32733a356e056e6447e142640eebae882f5258",
+    "foundation.log": "07d5270665c153e127cecb2f6c71bf6a97c33169455277d60cc829c7aaee4309",
+    "frontend-tests.log": "e5fc7d2d414516828d54d33a3efe08af6add2c3015d7796db3341bdc5483ef79",
+    "gateway-tests.log": "b704b8d0d3c6bd5b239495f33f8a4b2f83766a7343bc67928c959e93137bd8f6",
+    "installed-byte-verification.log": "5e4348209ad833f979a9cedab52b7b8ed2fc77f8f94f99406428d30b1da2ebff",
+    "installed-graph.log": "1d01c4e1689c04b4d30f9fa706d4dfcf259d7b3a9c497862e3c5c1eb072e71ee",
+    "lint.log": "5b36b945c6eb433bfe3aaae8d3da21dc65e81d958a6b49b94cdbb29a05af9379",
+    "pinned-install.log": "4ab18b1fe1658ca879c69b83068360f71198727cdcf5d41e9fad5f4c97e4fe66",
+    "pinned-verify.log": "58377d68d2f588ce91b7dfe211874860a6dafddb58dbdf464ef9af7d7b4d6d73",
+    "postgres.log": "469ecc1bccfb47259ed3004f60a854a28e929d36a39df79f7e70d838068ec9f4",
+    "protocol-drift.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "protocol-export.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "protocol.log": "fcb917e7d86ff7d223154fb6a52745d290587d647ccd9f30b1b6a8cf87baefd3",
+    "registry.log": "ce998412f3c7d1b2892cb69296e73d4aafac41730e3c8dcd5141cafa0bf3970a",
+    "release.log": "9374067c574bbb91c28a4e8091afb43e25a964995c9c45a3d4ce240b848dcf0d",
+    "reproduce.log": "3c54792bda3a89589ce555fd344c85f914330c5a4f1e30384a858124790a3370",
+    "sbom.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "typecheck.log": "d3d579f3c9b564f9d36181649fb875e0a38d3f4f1e1cb8842dadca48b014984c",
+    "typegen.log": "378cf2a4c7490f6d5c164a9155bb14a0d84c6a68ecf19eae463195db7464a3b6",
+    "web-export.log": "5847f7b543c9b09fc99dc1de5118d13e4637463f59a2499e78cd0ac4ecc1519a",
+    "whitespace.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "original_controls": {
+    "braces_3_0_3_stack_exhaustion": true,
+    "bundled_resolver_comparisons": 2331,
+    "differential_mismatches": 0,
+    "forge_1_4_0_accepts_extra_digest_algorithm_child": true,
+    "node_and_openssl_reject": true,
+    "ordered_matcher_comparisons": 8064
+  },
+  "scope": "Linux hermetic compatibility only; synthetic keys, mock online signing APIs, fixture databases and one disposable PostgreSQL container. No provider spend, deployment, live data, physical device, keychain or live Watchman daemon."
+}

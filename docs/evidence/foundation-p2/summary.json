@@ -1,0 +1,199 @@
+{
+  "audits": {
+    "compose": {
+      "command": "uv venv .release/foundation-p2/compose-env && uv pip install --python .release/foundation-p2/compose-env/bin/python -r requirements-backend.txt; uvx --from pip-audit==2.10.1 pip-audit --path .release/foundation-p2/compose-env/lib/python3.12/site-packages --format json",
+      "dependencies": 69,
+      "exit_code": 0,
+      "report": "compose-audit.json",
+      "sha256": "78a792abe227d20e171fbcfcf843dbc1f766b861a4b82587022610c997426b78",
+      "skipped": [],
+      "vulnerabilities": 0
+    },
+    "frontend": {
+      "command": "(cd frontend && npm ci && npm audit --audit-level=low --json)",
+      "dependencies": {
+        "dev": 262,
+        "optional": 38,
+        "peer": 6,
+        "peerOptional": 0,
+        "prod": 695,
+        "total": 973
+      },
+      "exit_code": 0,
+      "report": "frontend-audit.json",
+      "sha256": "0827e7b4bf92e17cc0ce403f14d0bf07ec9af39973de2040c2a87475ea320a9b",
+      "vulnerabilities": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "total": 0
+      }
+    },
+    "gateway": {
+      "command": "cd gateway && uv sync --frozen && uvx --from pip-audit==2.10.1 pip-audit --path .venv/lib/python3.12/site-packages --skip-editable --format json",
+      "dependencies": 30,
+      "exit_code": 0,
+      "report": "gateway-audit.json",
+      "sha256": "951f07c751427bc80b4d6b1c40c6d8a0f9ac758acd29a001594ede45eb1d44a5",
+      "skipped": [
+        {
+          "name": "magistrate-gateway",
+          "skip_reason": "distribution marked as editable"
+        }
+      ],
+      "vulnerabilities": 0
+    },
+    "retained_adapter": {
+      "command": "(cd pi-extension && npm ci && npm audit --audit-level=low --json)",
+      "dependencies": {
+        "dev": 142,
+        "optional": 11,
+        "peer": 0,
+        "peerOptional": 0,
+        "prod": 1,
+        "total": 142
+      },
+      "exit_code": 0,
+      "report": "retained-adapter-audit.json",
+      "sha256": "74c3ede83dc77cae2f4fa06beea7e5d1c5499f359e6e0620d5fc4d049a37d67d",
+      "vulnerabilities": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "total": 0
+      }
+    },
+    "retained_backend": {
+      "command": "uv venv .release/foundation-p2/backend-final-env && uv pip install --python .release/foundation-p2/backend-final-env/bin/python -r backend/requirements.txt; uvx --from pip-audit==2.10.1 pip-audit --path .release/foundation-p2/backend-final-env/lib/python3.12/site-packages --format json",
+      "dependencies": 48,
+      "exit_code": 0,
+      "report": "retained-backend-audit.json",
+      "sha256": "4a0f5b8801ce44016fe382fc4d1fc991ac745ddef5a80fd1c0465eef2fa5177d",
+      "skipped": [],
+      "vulnerabilities": 0
+    }
+  },
+  "baseline": "23b10ce1da0cccbc37239804e3b504d72f6df95e",
+  "branch": "fm/magistrate-contract-deps-p2",
+  "build_provenance": "build-environment.json",
+  "compatibility": "qualification.json",
+  "hermetic_receipts": [],
+  "implementation_hashes": "implementation-hashes.json",
+  "observed_at": "2026-10-18T22:18:41.896669+00:00",
+  "qualification_source_commit": "23b10ce1da0cccbc37239804e3b504d72f6df95e",
+  "reports": {
+    "artifact-reproduction.log": {
+      "bytes": 1746,
+      "sha256": "3c54792bda3a89589ce555fd344c85f914330c5a4f1e30384a858124790a3370"
+    },
+    "build-environment.json": {
+      "bytes": 1063,
+      "sha256": "87f4280d6cacde6d1aefac1aaece116c50cd1a161bbd04a46a6171afad26e6a2"
+    },
+    "compose-audit.json": {
+      "bytes": 4006,
+      "sha256": "78a792abe227d20e171fbcfcf843dbc1f766b861a4b82587022610c997426b78"
+    },
+    "consumer-compatibility.tap": {
+      "bytes": 6280,
+      "sha256": "9374067c574bbb91c28a4e8091afb43e25a964995c9c45a3d4ce240b848dcf0d"
+    },
+    "controls.log": {
+      "bytes": 290,
+      "sha256": "10bbe1a72baad8c3da1086e3f4aeffa0d33fc06acceb1bab32c94448f46a2974"
+    },
+    "frontend-audit-before.json": {
+      "bytes": 11064,
+      "sha256": "bc7eff07c6819eca50158dea4cc6221452b80f73642c8e8f89d9e0848bf55b7e"
+    },
+    "frontend-audit.json": {
+      "bytes": 365,
+      "sha256": "0827e7b4bf92e17cc0ce403f14d0bf07ec9af39973de2040c2a87475ea320a9b"
+    },
+    "frontend-sbom.cdx.json": {
+      "bytes": 1437166,
+      "sha256": "ec16214f0d285bcba3648a8076e48b31c57af1af0a3876ada3f107fba4ce778b"
+    },
+    "gateway-audit.json": {
+      "bytes": 1757,
+      "sha256": "951f07c751427bc80b4d6b1c40c6d8a0f9ac758acd29a001594ede45eb1d44a5"
+    },
+    "implementation-hashes.json": {
+      "bytes": 5841,
+      "sha256": "d3715c5b8cbaebb64d9adcb857db5720e79a35b634c3e031dfbbe8f7e9477b09"
+    },
+    "npm-explain-before-summary.json": {
+      "bytes": 3698,
+      "sha256": "478052e7a8918ef31e38520ff7aa96ec187368ef3eb64ef8cd0a5f6b6401aa02"
+    },
+    "qualification.json": {
+      "bytes": 7032,
+      "sha256": "b082ed4c041465244c51f7cbcbff8901d10b7a2be2479acf154b49689805d323"
+    },
+    "removed-explain.json": {
+      "bytes": 118,
+      "sha256": "af37803733d9ac0ed824651937973bea80f1fdacee28f2cd332c5c8c00d9be65"
+    },
+    "retained-adapter-audit.json": {
+      "bytes": 363,
+      "sha256": "74c3ede83dc77cae2f4fa06beea7e5d1c5499f359e6e0620d5fc4d049a37d67d"
+    },
+    "retained-backend-audit-before.json": {
+      "bytes": 7273,
+      "sha256": "a5ff33c519b59e9f726f99d15e737df9698f759e4dd5c35ebf34f8378fb80206"
+    },
+    "retained-backend-audit.json": {
+      "bytes": 2750,
+      "sha256": "4a0f5b8801ce44016fe382fc4d1fc991ac745ddef5a80fd1c0465eef2fa5177d"
+    },
+    "upstream/GHSA-86w9-cpqp-85rv.txt": {
+      "bytes": 2170,
+      "sha256": "5ae03a3783bb1338fbdd4a0586aab17d59aa828d5b1cd124e38f73ca005cf56d"
+    },
+    "upstream/GHSA-8pqf-f4m5-798g.txt": {
+      "bytes": 7352,
+      "sha256": "0106757cca6ac9c5847f468d2304257ba7dcdcc7e530a738a0b4d3d430bbb28d"
+    },
+    "upstream/GHSA-vfj7-8cjw-p6xm.txt": {
+      "bytes": 2026,
+      "sha256": "375459bb8919bab1f51a6f2389d59b17b125631e0d018a1711c096b4fbf8787e"
+    },
+    "upstream/braces-registry-current.json": {
+      "bytes": 619,
+      "sha256": "0ddef3af916d702a66513c98bd6a65f6608e25e5e7a459e3517250748789d19b"
+    },
+    "upstream/forge-registry-current.json": {
+      "bytes": 629,
+      "sha256": "5555ff5b288a11d0433d69abfbe3b2df39cd2ff51f24b656cb7ad1c514f7ed6b"
+    },
+    "upstream/metro-dotfiles.txt": {
+      "bytes": 2505,
+      "sha256": "1f719f178815f36a165f609b19395ac48f45a518edce650b09f2a17a60f0a661"
+    },
+    "upstream/metro-upstream.txt": {
+      "bytes": 4030,
+      "sha256": "1fe9df90f93bbbb5322e0507c7ea858c81d782dca549358d56d76015cb08ee8f"
+    },
+    "upstream/twisted-release.txt": {
+      "bytes": 6305,
+      "sha256": "81d9290da42378cc67fd2e9f56cf4a63f689b668acd18fae119afec4c2d38ce9"
+    },
+    "upstream/x509-registry.json": {
+      "bytes": 3624,
+      "sha256": "71447ccf525d1f6d8f35cceab5db13d6ee26ccb8e9c32e93b1411e77446288e7"
+    },
+    "upstream/x509-release.txt": {
+      "bytes": 2270,
+      "sha256": "b7970e26121469e7b6e6b441965a903aa14f01e8a894c6f5312378de2b820f1f"
+    }
+  },
+  "required_next_authority": "Independent integration security review of source-derived artifacts and final composition. Separate live/runtime/native acceptance remains required; no advisory waiver or capability activation is implied.",
+  "sbom": "frontend-sbom.cdx.json",
+  "schema_version": "magistrate.foundation-qualification.v1",
+  "source_and_artifact_provenance": "../../../frontend/security/sources.json",
+  "unresolved_owner_policy_decisions": []
+}

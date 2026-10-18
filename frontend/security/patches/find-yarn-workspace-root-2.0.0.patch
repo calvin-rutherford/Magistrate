@@ -1,0 +1,13 @@
+--- a/index.js
++++ b/index.js
+@@ -4 +4 @@
+-const micromatch = require('micromatch');
++const workspaceMatch = require('./workspace-match');
+@@ -28 +28 @@
+-      if (relativePath === '' || micromatch([relativePath], workspaces).length > 0) {
++      if (relativePath === '' || workspaceMatch(relativePath, workspaces)) {
+--- a/package.json
++++ b/package.json
+@@ -23 +23 @@
+-    "micromatch": "^4.0.2"
++    "picomatch": "4.0.7"

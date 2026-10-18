@@ -1,0 +1,185 @@
+[
+  {
+    "key": "metro-file-map-0.84.4",
+    "name": "metro-file-map",
+    "version": "0.84.4",
+    "url": "https://registry.npmjs.org/metro-file-map/-/metro-file-map-0.84.4.tgz",
+    "sha256": "df0b582c576e505cb51224c8a5467a318bb065b37e6a40b84686b49262840885",
+    "integrity": "sha512-KSVDi/u60hKPx++NLu3MTIvyjzNoJnFAF8PQFxaj1jiSka/wjw+Ua6sNuJ0TDHQv+7AAoFQxeMgaRAe8Yic5wQ==",
+    "git_head": "f15550573c17e0ef19774547458baa185d11b56a",
+    "license": "MIT",
+    "repository": {
+      "url": "git+https://github.com/facebook/metro.git",
+      "type": "git",
+      "directory": "packages/metro-file-map"
+    },
+    "patch": "patches/metro-file-map-0.84.4.patch",
+    "patch_sha256": "ee9f5600b69e0bd69405e5d299504517e3265d20f51052fd75b6b927f2384e54",
+    "remove": [],
+    "overlays": {
+      "LICENSE": {
+        "path": "overlays/LICENSE-metro",
+        "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+      }
+    },
+    "upstream_changes": [
+      "a77924694dd4e36c0a3e595956e322033a6c2c57",
+      "3865c007c592c4ab7357f95fa6ae9e6ac735a7d1"
+    ],
+    "license_source": "https://github.com/facebook/metro/blob/f15550573c17e0ef19774547458baa185d11b56a/LICENSE"
+  },
+  {
+    "key": "metro-file-map-0.84.5",
+    "name": "metro-file-map",
+    "version": "0.84.5",
+    "url": "https://registry.npmjs.org/metro-file-map/-/metro-file-map-0.84.5.tgz",
+    "sha256": "87714d2120cc45b250c2ef2a560fead966a6e18ad432ace06e8f63da8c06b364",
+    "integrity": "sha512-mlm/JL8toSbSc2akpKIGmzvrVRSCgZ5vkbycI34oMLoOnLGuLyC8WTyVJ6P0hZG/usDaGwZSl/s9BCRriqjGJA==",
+    "git_head": "b71015ef83904e7086342ddb72205b7242dcd129",
+    "license": "MIT",
+    "repository": {
+      "url": "git+https://github.com/react/metro.git",
+      "type": "git",
+      "directory": "packages/metro-file-map"
+    },
+    "patch": "patches/metro-file-map-0.84.5.patch",
+    "patch_sha256": "ee9f5600b69e0bd69405e5d299504517e3265d20f51052fd75b6b927f2384e54",
+    "remove": [],
+    "overlays": {
+      "LICENSE": {
+        "path": "overlays/LICENSE-metro",
+        "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93"
+      }
+    },
+    "upstream_changes": [
+      "a77924694dd4e36c0a3e595956e322033a6c2c57",
+      "3865c007c592c4ab7357f95fa6ae9e6ac735a7d1"
+    ],
+    "license_source": "https://github.com/facebook/metro/blob/f15550573c17e0ef19774547458baa185d11b56a/LICENSE"
+  },
+  {
+    "key": "find-yarn-workspace-root-2.0.0",
+    "name": "find-yarn-workspace-root",
+    "version": "2.0.0",
+    "url": "https://registry.npmjs.org/find-yarn-workspace-root/-/find-yarn-workspace-root-2.0.0.tgz",
+    "sha256": "c3e72613362315fe648a83f395116b9e18df7862aeaa71b9f45549375d575277",
+    "integrity": "sha512-1IMnbjt4KzsQfnhnzNd8wUEgXZ44IzZaZmnLYx7D5FZlaHt2gW20Cri8Q+E/t5tIj4+epTBub+2Zxu/vNILzqQ==",
+    "git_head": "11f6e31d3fa15a5bb7b7419f0091390e4c16204c",
+    "license": "Apache-2.0",
+    "repository": {
+      "url": "git+https://github.com/square/find-yarn-workspace-root.git",
+      "type": "git"
+    },
+    "patch": "patches/find-yarn-workspace-root-2.0.0.patch",
+    "patch_sha256": "4abfa382b539cd18d774d9ec4a54d1642859aa6556b767dcc478f3857c3a87d7",
+    "remove": [],
+    "overlays": {
+      "workspace-match.js": {
+        "path": "overlays/workspace-match.js",
+        "sha256": "c4ac4c71cc7944b14e3d7d2be719b7fcf5a555832e183c7f24b8468c66fcf0ee"
+      },
+      "LICENSE-micromatch": {
+        "path": "overlays/LICENSE-micromatch",
+        "sha256": "35bdd8a44339719441900fb50fbefc5e2dca1ca662cbaed7a687de842c8b70f2"
+      }
+    },
+    "upstream_changes": []
+  },
+  {
+    "key": "expo-code-signing-certificates-0.0.6",
+    "name": "@expo/code-signing-certificates",
+    "version": "0.0.6",
+    "url": "https://registry.npmjs.org/@expo/code-signing-certificates/-/code-signing-certificates-0.0.6.tgz",
+    "sha256": "0460d57dd2f7d6839e95a42495f2339b6d950c8e171ae6e54778cb594f8fb582",
+    "integrity": "sha512-iNe0puxwBNEcuua9gmTGzq+SuMDa0iATai1FlFTMHJ/vUmKvN/V//drXoLJkVb5i5H3iE/n/qIJxyoBnXouD0w==",
+    "git_head": "83f39c0e8f9c2833571951f3fc21464c9df4bcaf",
+    "license": "MIT",
+    "repository": {
+      "url": "git+https://github.com/expo/code-signing-certificates.git",
+      "type": "git"
+    },
+    "patch": "patches/expo-code-signing-certificates-0.0.6.patch",
+    "patch_sha256": "60951eee7143ef8828d2a1cbbdbb4f187068935330c3083d0f68d8d6f14c61e3",
+    "remove": [
+      "build/__tests__/main-test.d.ts",
+      "build/__tests__/main-test.js",
+      "build/__tests__/main-test.js.map",
+      "build/__tests__/utils-test.d.ts",
+      "build/__tests__/utils-test.js",
+      "build/__tests__/utils-test.js.map",
+      "build/main.js.map"
+    ],
+    "overlays": {
+      "build/main.js": {
+        "path": "overlays/code-signing.js",
+        "sha256": "882039c96aadb31c9361c54a0cf7d2526f164784a52dabe407eb64a27b8c65bc"
+      },
+      "build/main.d.ts": {
+        "path": "overlays/code-signing.d.ts",
+        "sha256": "3e99be8f7f6bb398e250d7718c4679e04a55679fd18aa70973e9c2a1ee4243ae"
+      }
+    },
+    "upstream_changes": []
+  },
+  {
+    "key": "expo-cli-57.0.27",
+    "name": "@expo/cli",
+    "version": "57.0.27",
+    "url": "https://registry.npmjs.org/@expo/cli/-/cli-57.0.27.tgz",
+    "sha256": "7af6768df41f493197b99026f39563d2cb63791624556f222b4e78379e8ca6bf",
+    "integrity": "sha512-Jauk4chxmpVG5ElrMLTCwjFP20jbYU7PB4l3LYV8j+4e/3HU5jdl7qTQ4eVy1AaDUE9Ia2NCQ5A9kar2V1gaLg==",
+    "git_head": "9349d1457178dd9cccb8bdd3aed47473c49134e1",
+    "license": "MIT",
+    "repository": {
+      "url": "git+https://github.com/expo/expo.git",
+      "type": "git",
+      "directory": "packages/@expo/cli"
+    },
+    "patch": "patches/expo-cli-57.0.27.patch",
+    "patch_sha256": "9344c3ef79dbbdfcc1352994c784549737a775733a8d9c8b49801b043d217056",
+    "remove": [
+      "build/src/run/ios/codeSigning/Security.js.map",
+      "build/src/utils/codesigning.js.map"
+    ],
+    "overlays": {},
+    "upstream_changes": []
+  },
+  {
+    "key": "resolve-workspace-root-2.0.1",
+    "name": "resolve-workspace-root",
+    "version": "2.0.1",
+    "url": "https://registry.npmjs.org/resolve-workspace-root/-/resolve-workspace-root-2.0.1.tgz",
+    "sha256": "161fd5f13b2fc116b4332c25bb1d4983a2f983b15e01d647d5ac1209fd309694",
+    "integrity": "sha512-nR23LHAvaI6aHtMg6RWoaHpdR4D881Nydkzi2CixINyg9T00KgaJdJI6Vwty+Ps8WLxZHuxsS0BseWjxSA4C+w==",
+    "git_head": "72f675ae9ea952e832c63f1138346406b0d8630b",
+    "license": "MIT",
+    "repository": {
+      "url": "git+https://github.com/byCedric/resolve-workspace-root.git",
+      "type": "git"
+    },
+    "patch": "patches/resolve-workspace-root-2.0.1.patch",
+    "patch_sha256": "6018f9ea7698ff952fd30bab91a4c1da63a9efbd27e5511906d6d336afb5df6b",
+    "remove": [],
+    "overlays": {
+      "build/index.js": {
+        "path": "overlays/resolve-workspace-root.js",
+        "sha256": "81aafcd36c4e4f8a8d6c1385d8528b210a6a9df8b4d8fd69b0c80571db6bd78d"
+      },
+      "build/workspace-match.js": {
+        "path": "overlays/workspace-match.js",
+        "sha256": "c4ac4c71cc7944b14e3d7d2be719b7fcf5a555832e183c7f24b8468c66fcf0ee"
+      },
+      "LICENSE-micromatch": {
+        "path": "overlays/LICENSE-micromatch",
+        "sha256": "35bdd8a44339719441900fb50fbefc5e2dca1ca662cbaed7a687de842c8b70f2"
+      }
+    },
+    "upstream_changes": [],
+    "source_files": {
+      "workspace-utils-workspaces.ts": "d063b82b49eefdf60fa1a305031b65c87508691f1ba859203ffcc3ccf14c07f9",
+      "workspace-utils-dirs.ts": "4fc2cc6c11006d5c4b6f30582294efd64126ab1695c5cba9bd52738ed16cef5b",
+      "workspace-index.ts": "2f8cf6bf8b4dac2720a2834b56400ba28973c0c5dec3123879cf2c9764a0f640",
+      "workspace-utils-files.ts": "1727f0d92eebd7fa4ffa4f2dc2970ea3838f15304924f12201ba1a3da2fdcca8"
+    }
+  }
+]

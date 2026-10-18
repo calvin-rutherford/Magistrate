@@ -1,0 +1,17 @@
+{
+  "version": "1.4.0",
+  "dist": {
+    "integrity": "sha512-LarFH0+6VfriEhqMMcLX2F7SwSXeWwnEAJEsYm5QKWchiVYVvJyV9v7UDvUv+w5HO23ZpQTXDv/GxdDdMyOuoQ==",
+    "shasum": "1c7b7d8bdc2d078739f58287d589d903a11b2fc2",
+    "tarball": "https://registry.npmjs.org/node-forge/-/node-forge-1.4.0.tgz",
+    "fileCount": 59,
+    "unpackedSize": 1647637,
+    "signatures": [
+      {
+        "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U",
+        "sig": "MEQCIHN+qilMnh4W7N6nrRE5KXZgu26uSkmTfjPiujxr0qAvAiB2zOy5/OdnRK68PHo2WfVDpoLCo8PgFJ5pyBuWqNUO9A=="
+      }
+    ]
+  },
+  "gitHead": "fa385f92440879601240020f158bed68e444e83a"
+}

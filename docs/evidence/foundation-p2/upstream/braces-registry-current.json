@@ -1,0 +1,17 @@
+{
+  "version": "3.0.3",
+  "dist": {
+    "shasum": "490332f40919452272d55a8480adc0c441358789",
+    "tarball": "https://registry.npmjs.org/braces/-/braces-3.0.3.tgz",
+    "fileCount": 10,
+    "integrity": "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==",
+    "signatures": [
+      {
+        "sig": "MEQCICfWLKNcFCGtU07ikrPJ+s1dTDH3VZTE+vQZzC22s6o+AiAEVUE/YXRqHYgctcwHqNawvsOviSDFZPvgNm8+SUXD3w==",
+        "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+      }
+    ],
+    "unpackedSize": 44635
+  },
+  "gitHead": "74b2db2938fad48a2ea54a9c8bf27a37a62c350d"
+}
