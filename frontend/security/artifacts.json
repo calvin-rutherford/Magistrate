@@ -301,22 +301,22 @@
     "version": "2.0.0"
   },
   {
-    "artifact": "7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558.tgz",
+    "artifact": "380bb61b623eff55d94420bcd831394664aaeebf7e1e3577e8679127de54f656.tgz",
     "files": {
       "LICENSE": "41f2eef190265a6ea435951170947e35461707f91631821b3a67421bea5b2a7c",
       "README.md": "2e59a9b1a549b48e31a9fb85076260b77afe459de2457c6a129bc97f51338dd8",
-      "SOURCE.json": "b85c14d46e66f3d21b6802f587eff4227c7f625aff296a70ab2357e4b43444c0",
+      "SOURCE.json": "3c6052ca2a5aacb87944f573a3063cc04534f92c1c3ceda9f24ea0b55704bc18",
       "build/main.d.ts": "3e99be8f7f6bb398e250d7718c4679e04a55679fd18aa70973e9c2a1ee4243ae",
-      "build/main.js": "882039c96aadb31c9361c54a0cf7d2526f164784a52dabe407eb64a27b8c65bc",
+      "build/main.js": "a67f795dad76c518d5bf66f0aabe2207d0a95ffc74e557666b20829954e1d96e",
       "build/utils.d.ts": "b67a5f8e11a2f93b76638c1cc835369de1eb1d6d4ed727826e67f52690d8572b",
       "build/utils.js": "ee9d39791f178d43286fb5c374404cae8d782a09ddce9fce30e6b02ba7734417",
       "build/utils.js.map": "61c136f116600cb8eab4dbce77feb2dc4a5d70103c76746034e2e64aa06cceba",
-      "package.json": "afa021098d8d88751063f89088144dfbf30e22681ed7c73e6f856f1c7cc41534"
+      "package.json": "47072f573d1ac054a40419215fc7aa9c37ae274d8bc1a6b1c6ee7a8f38b6990c"
     },
-    "integrity": "sha512-Kym2cZPqCBpRKALrevblzvfOD/WkjlI7lZ/j1JMKhgQRAF5JA3lhGrZl8UQCRnlGO+19/KWSfZSAALl/1iLGfg==",
+    "integrity": "sha512-a8DdoimDOiegjvYIMrW3KHRm4obn9Z8Ne56/e/qN/Ylis7GImxKjSpoqwcKugcP+qlsvYedhAmEdrV3DSaGNvQ==",
     "key": "expo-code-signing-certificates-0.0.6",
     "name": "@expo/code-signing-certificates",
-    "sha256": "7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558",
+    "sha256": "380bb61b623eff55d94420bcd831394664aaeebf7e1e3577e8679127de54f656",
     "version": "0.0.6"
   },
   {

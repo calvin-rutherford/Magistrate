@@ -148,7 +148,10 @@ The bounded removal route, not a waiver or disguised package version, removes:
   unbundled upstream sources. Expo 57 / RN 0.86.3 remain unchanged.
 - Both Expo CLI Forge consumers via Node OpenSSL/WebCrypto and maintained
   `@peculiar/x509@2.2.0`, with independent OpenSSL CLI signing/CSR/certificate
-  oracles and the original malformed-acceptance negative control.
+  oracles and the original malformed-acceptance negative control. Independent
+  review also requires whole-input CSR consumption: the retained bounded ASN.1
+  decoder's offset must equal the decoded input length, not merely validate its
+  prefix. Original-Forge and OpenSSL-backed fixtures reject trailing bytes.
 - Lab-only Daphne/Twisted via Uvicorn/h11/websockets, retaining Django/Channels
   authentication, origin checks, loopback Compose and production quarantine.
   Both retained requirement graphs are audited and tested, including the

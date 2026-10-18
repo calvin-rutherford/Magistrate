@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { csrPEM, trailingCSRInputs } = require('./csr-input-fixtures.cjs');
 const root = path.resolve(process.argv[2]);
 const braces = path.join(root, 'braces');
 const recursion = spawnSync(process.execPath, ['-e', `
@@ -24,5 +25,19 @@ const signature = crypto.privateEncrypt({ key: pair.privateKey, padding: crypto.
 const publicKey = forge.pki.publicKeyFromPem(pair.publicKey.export({ format: 'pem', type: 'spki' }));
 assert.equal(publicKey.verify(digest.toString('binary'), signature.toString('binary')), true);
 assert.equal(crypto.verify('sha256', message, pair.publicKey, signature), false);
+// The replacement must retain original Forge's whole-input CSR rejection.
+const csr = forge.pki.createCertificationRequest();
+csr.publicKey = publicKey;
+csr.setSubject([{ name: 'commonName', value: 'Synthetic CSR framing control' }]);
+csr.sign(forge.pki.privateKeyFromPem(pair.privateKey.export({ format: 'pem', type: 'pkcs1' })), forge.md.sha256.create());
+const csrDER = Buffer.from(forge.asn1.toDer(forge.pki.certificationRequestToAsn1(csr)).getBytes(), 'binary');
+assert.equal(forge.pki.certificationRequestFromPem(csrPEM(csrDER)).verify(), true);
+const trailing = trailingCSRInputs(csrDER);
+for (const newline of ['\n', '\r\n']) {
+  for (const invalid of trailing) {
+    assert.throws(() => forge.pki.certificationRequestFromPem(csrPEM(invalid.der, newline)), /Unparsed DER bytes remain/, invalid.name);
+  }
+}
 console.log(JSON.stringify({ braces: { version: '3.0.3', nestedPatternStackExhaustion: true },
-  forge: { version: '1.4.0', extraDigestAlgorithmChildAccepted: true, nodeRejectsSameSignature: true } }, null, 2));
+  forge: { version: '1.4.0', extraDigestAlgorithmChildAccepted: true, nodeRejectsSameSignature: true,
+    csrTrailingBytesRejected: trailing.map(test => test.name), csrFramingComparisons: trailing.length * 2 } }, null, 2));

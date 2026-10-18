@@ -8,6 +8,7 @@ const { createRequire } = require('node:module');
 const { spawnSync } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
+const { csrPEM, trailingCSRInputs } = require('../security/csr-input-fixtures.cjs');
 const fixture = process.env.MAGISTRATE_DEPENDENCY_FIXTURE;
 const source = (key, installed) => fixture ? path.join(fixture, key) : path.dirname(require.resolve(installed + '/package.json'));
 const maps = [fixture ? path.join(fixture, 'metro-file-map-0.84.4')
@@ -213,6 +214,34 @@ test('all signing/PEM APIs, UTF-8 manifest and CSR match independent OpenSSL CLI
     const badCSR = Buffer.from(csr.rawData); badCSR[badCSR.length - 1] ^= 1;
     const badPEM = `-----BEGIN CERTIFICATE REQUEST-----\n${badCSR.toString('base64')}\n-----END CERTIFICATE REQUEST-----`;
     await assert.rejects(helper.generateDevelopmentCertificateFromCSR(caKey, ca, helper.convertCSRPEMToCSR(badPEM), 'app', 'scope'), /CSR not self-signed/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('CSR parser consumes the whole input: reject trailing bytes after generated and OpenSSL requests', async () => {
+  const dir = temporary();
+  try {
+    const pair = helper.generateKeyPair();
+    const generated = await helper.generateCSR(pair, 'Whole input café');
+    fs.writeFileSync(path.join(dir, 'key.pem'), helper.convertKeyPairToPEM(pair).privateKeyPEM, { mode: 0o600 });
+    openssl(['req', '-new', '-key', path.join(dir, 'key.pem'), '-outform', 'DER', '-out', path.join(dir, 'request.der'), '-subj', '/CN=Independent CSR framing']);
+    for (const der of [Buffer.from(generated.rawData), fs.readFileSync(path.join(dir, 'request.der'))]) {
+      // The independent standards oracle proves the unmodified request/signature.
+      fs.writeFileSync(path.join(dir, 'request.pem'), csrPEM(der));
+      openssl(['req', '-in', path.join(dir, 'request.pem'), '-verify', '-noout']);
+      for (const newline of ['\n', '\r\n']) {
+        const parsed = helper.convertCSRPEMToCSR(csrPEM(der, newline));
+        assert.equal(await parsed.verify(crypto.webcrypto), true);
+        assert.deepEqual(Buffer.from(parsed.rawData), der);
+        for (const invalid of trailingCSRInputs(der)) {
+          assert.throws(() => helper.convertCSRPEMToCSR(csrPEM(invalid.der, newline)), /Trailing CSR bytes/, invalid.name);
+        }
+      }
+      // Truncation/invalid ASN.1 must still fail; no recovered or prefix-only CSR.
+      for (const invalid of [der.subarray(0, -1), Buffer.from([0x30, 0x82, 0xff, 0xff])]) {
+        assert.throws(() => helper.convertCSRPEMToCSR(csrPEM(invalid)), /Invalid CSR ASN\.1/);
+      }
+      assert.throws(() => helper.convertCSRPEMToCSR(csrPEM(der) + csrPEM(der)), /exactly one/);
+    }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

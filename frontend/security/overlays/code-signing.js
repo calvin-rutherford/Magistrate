@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 require('reflect-metadata');
 const x509 = require('@peculiar/x509');
+const { fromBER } = require('asn1js');
 const algorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
 const parseOptions = { berOptions: { maxDepth: 32, maxNodes: 4096, maxContentLength: 1024 * 1024 } };
 const expoProjectInformationOID = '1.2.840.113556.1.8000.2554.43437.254.128.102.157.7894389.20439.2.1';
@@ -69,7 +70,14 @@ function convertKeyPairPEMToKeyPair({ privateKeyPEM, publicKeyPEM }) {
 function convertCertificatePEMToCertificate(pem) { return new Certificate(pem); }
 function convertCertificateToCertificatePEM(cert) { return cert.native.toString(); }
 function convertCSRPEMToCSR(pem) {
-  return new x509.Pkcs10CertificateRequest(pemDER(pem, 'CERTIFICATE REQUEST'), parseOptions);
+  const der = pemDER(pem, 'CERTIFICATE REQUEST');
+  // X.509's schema decoder accepts the first ASN.1 value and rawData retains
+  // the original input, so rawData equality cannot prove full consumption.
+  // Use the same maintained, resource-bounded decoder's consumed-byte offset.
+  const decoded = fromBER(der, parseOptions.berOptions);
+  assert(decoded.offset >= 0 && !decoded.result.error, 'Invalid CSR ASN.1');
+  assert.equal(decoded.offset, der.length, 'Trailing CSR bytes');
+  return new x509.Pkcs10CertificateRequest(der, parseOptions);
 }
 function convertCSRToCSRPEM(csr) { return csr.toString('pem'); }
 function serial() {

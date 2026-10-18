@@ -138,6 +138,31 @@ modification/source/patch hashes via `security/sbom.cjs`. It includes maintained
 X.509/ASN.1/picomatch/yaml dependencies, not just the six modified consumers.
 Review exact hashes in the committed manifests and the audit evidence index.
 
+### Independent review correction: whole-input CSR consumption
+
+Artifact review found that candidate `86fa67a` accepted a valid CSR DER value
+followed by `00` or `0500`, unlike the pinned original Forge. The reproduction
+also accepted end-of-content/empty-sequence/integer suffixes, arbitrary bytes,
+encoded whitespace, a second CSR and zero padding. This was a real parser-boundary
+regression despite the clean advisory result; the earlier candidate is superseded.
+
+`convertCSRPEMToCSR` now requires successful, **whole-input** consumption from the
+same maintained, resource-bounded `asn1js@3.1.0` decoder before X.509 schema parsing.
+Comparing X.509 `rawData` would be insufficient: it retains the entire input even
+when only its prefix was parsed. The helper declares the already-installed ASN.1
+decoder directly; no package/version or unrelated resolution changes. No custom
+ASN.1 parser or new crypto implementation is introduced.
+
+Shared framing fixtures prove all nine suffix classes are rejected by both the
+original Forge control and the replacement, with LF/CRLF PEM. Replacement tests
+use both generated and independent OpenSSL requests, verify valid signatures,
+and retain truncated/invalid ASN.1 and multiple-block refusal. All six archives
+were rebuilt; only the CSR helper's implementation/manifest/provenance changes.
+Its new SHA-256 is `380bb61b623eff55d94420bcd831394664aaeebf7e1e3577e8679127de54f656`;
+the previous helper archive is removed from the submitted tree. The five other
+archives are byte-identical. Updated hashes, SBOM and clean-source qualification
+are recorded in the evidence index, not inferred from the previous receipt.
+
 ## Retained laboratory ASGI replacement and rollback
 
 Both requirement paths, Docker default command and `legacy-lab` Compose broker

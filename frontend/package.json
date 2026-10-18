@@ -99,7 +99,7 @@
     },
     "resolve-workspace-root@2.0.1": "file:security/artifacts/565ed238a517b764563705d78a4ad53df49126fc0d3ade635b3f4400d4b75336.tgz",
     "find-yarn-workspace-root@2.0.0": "file:security/artifacts/fe9ecc5e110c08b9774addd54d7440ec4bf5119be3a9b168bc54e651ad4f5dcc.tgz",
-    "@expo/code-signing-certificates@0.0.6": "file:security/artifacts/7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558.tgz",
+    "@expo/code-signing-certificates@0.0.6": "file:security/artifacts/380bb61b623eff55d94420bcd831394664aaeebf7e1e3577e8679127de54f656.tgz",
     "@expo/cli@57.0.27": "file:security/artifacts/768173514d754ddf6bf7d2b6132fe1830fe609f7bda1c48b86ce701a7643770a.tgz",
     "brace-expansion@1": "1.1.21",
     "query-string": {

@@ -99,7 +99,7 @@
       "type": "git"
     },
     "patch": "patches/expo-code-signing-certificates-0.0.6.patch",
-    "patch_sha256": "60951eee7143ef8828d2a1cbbdbb4f187068935330c3083d0f68d8d6f14c61e3",
+    "patch_sha256": "d03365f877ac9c4b2a58460ed05a9a07f7f35a27348a0a107623bbe2a98462bf",
     "remove": [
       "build/__tests__/main-test.d.ts",
       "build/__tests__/main-test.js",
@@ -112,7 +112,7 @@
     "overlays": {
       "build/main.js": {
         "path": "overlays/code-signing.js",
-        "sha256": "882039c96aadb31c9361c54a0cf7d2526f164784a52dabe407eb64a27b8c65bc"
+        "sha256": "a67f795dad76c518d5bf66f0aabe2207d0a95ffc74e557666b20829954e1d96e"
       },
       "build/main.d.ts": {
         "path": "overlays/code-signing.d.ts",
