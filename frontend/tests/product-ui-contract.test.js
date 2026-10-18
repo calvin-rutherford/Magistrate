@@ -20,7 +20,7 @@ test('resting customer surfaces are flat and reserve spectral color for state', 
   assert.doesNotMatch(background, /ImageBackground|WeatherOverlay|LinearGradient|BlurView/);
   assert.doesNotMatch(surface, /LinearGradient|backdropFilter|BlurView/);
   assert.match(background, /monochrome at rest/);
-  assert.match(chatSource(), /Spectral color appears only when work is active or needs attention/);
+  assert.match(chatSource(), /Accent color appears only when work is active or needs attention/);
   assert.doesNotMatch([chatSource(), read('app/(tabs)/account.tsx'), read('app/(tabs)/attention.tsx')].join('\n'), /fontFamily:/);
 });
 
@@ -28,7 +28,7 @@ test('Account exposes connected profile, plan, preferences, lifecycle and suppor
   const account = read('app/(tabs)/account.tsx');
   for (const contract of [
     'account-profile-name-input', 'PLAN, CREDITS & BILLING', 'CONNECTED OAUTH PROVIDERS',
-    'CAPTAIN ATTENTION NOTIFICATIONS', 'VOICE & SPEECH SYNTHESIS', 'APPEARANCE',
+    'ATTENTION NOTIFICATIONS', 'VOICE & SPEECH SYNTHESIS', 'APPEARANCE',
     'Privacy & security', 'Legal & license', 'Support', 'account-version',
     'account-logout', 'account-delete-confirmation', 'account-delete',
   ]) assert.match(account, new RegExp(contract.replace(/[&]/g, '\\&')));
@@ -43,6 +43,44 @@ test('project creation and destructive controls have accessible, product-safe co
   assert.match(chat, /Request cancellation of this objective\?/);
   assert.match(chat, /does not signal a process or claim success early/);
   assert.doesNotMatch(chat, /OPEN LEGACY AGENT CHAT|TAP SPHERE|COMMAND NAVIGATION/);
+});
+
+test('normal conversation, drawer and settings copy is quiet and unbranded', () => {
+  const chat = chatSource();
+  const account = read('app/(tabs)/account.tsx');
+  const legacyDrawer = read('src/components/GlassDrawer.tsx');
+  for (const source of [chat, account, legacyDrawer]) {
+    assert.doesNotMatch(source, />\s*(?:Magi|Magistrate)\s*</i);
+  }
+  assert.match(chat, /placeholder="Message"/);
+  assert.match(chat, /accessibilityLabel="Assistant conversation"/);
+  assert.match(chat, /executionProfiles\.some\(profile => profile\.available\)/,
+    'execution controls stay hidden without observed capabilities');
+});
+
+test('conversation UI keeps delivery, response, and job state distinct', () => {
+  const chat = chatSource();
+  assert.match(chat, /const saved = Boolean\(message\.serverId\)/);
+  assert.match(chat, /Saved · response failed/);
+  assert.match(chat, />Not sent</);
+  assert.match(chat, /blocked: 'Job blocked'/);
+  assert.match(chat, /failed: 'Job failed'/);
+});
+
+test('notification decisions are revision-pinned and test evidence never claims phone delivery', () => {
+  const attention = read('app/(tabs)/attention.tsx');
+  const account = read('app/(tabs)/account.tsx');
+  const client = read('src/api/client.ts');
+  assert.match(attention, /compareDecisionDestination\(decisionParam, revisionParam/);
+  assert.match(attention, /currentDecisionDestination\(latestItem\)/);
+  assert.match(attention, /prepareDecisionAnswer\(current\.decisionId, current\.revision, message\.id\)/);
+  assert.match(attention, /executeDecisionAnswer\(current\.decisionId, current\.revision, answerMessage\.id, confirmation\.confirmation_token\)/);
+  assert.doesNotMatch(attention, /prepareAttentionAction|executeAttentionAction|fetchAttentionActionForItem/);
+  assert.doesNotMatch(client, /\/attention\/actions\//);
+  assert.match(account, /Phone delivery: Unknown · Seen on phone: Unknown/);
+  assert.match(account, /same test identity will be reused/i);
+  assert.match(client, /observed_phone_delivery !== 'unknown'/);
+  assert.match(client, /owner_saw_notification !== 'unknown'/);
 });
 
 function chatSource() { return read('app/(tabs)/chat.tsx'); }
