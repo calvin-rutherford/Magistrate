@@ -1,6 +1,89 @@
 from typing import Literal, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+PERSONAL_DEPLOYMENT_SCHEMA = 'magistrate.personal-deployment.v1'
+OBJECTIVE_STATE_SCHEMA = 'magistrate.objective-state.v1'
+MAX_CONTRACT_INTEGER = 9_007_199_254_740_991
+PRINCIPAL_ID_PATTERN = r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+
+
+class PersonalDeploymentContract(BaseModel):
+    """Server configuration, never a request-body grant or subscription row.
+
+    Spend is denominated in micro-USD, not purchased credits. Both ceilings
+    must be explicitly configured before personal execution can be admitted.
+    """
+
+    model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
+    schema_version: Literal['magistrate.personal-deployment.v1'] = PERSONAL_DEPLOYMENT_SCHEMA
+    mode: Literal['public-saas', 'personal'] = 'public-saas'
+    owner_principal_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=128, pattern=PRINCIPAL_ID_PATTERN,
+    )
+    max_implementation_workers: int = Field(default=1, ge=1, le=2)
+    objective_spend_limit_micro_usd: Optional[int] = Field(
+        default=None, ge=1, le=MAX_CONTRACT_INTEGER,
+    )
+    monthly_spend_limit_micro_usd: Optional[int] = Field(
+        default=None, ge=1, le=MAX_CONTRACT_INTEGER,
+    )
+
+    @model_validator(mode='after')
+    def validate_personal_settings(self) -> 'PersonalDeploymentContract':
+        settings = (
+            self.owner_principal_id, self.objective_spend_limit_micro_usd,
+            self.monthly_spend_limit_micro_usd,
+        )
+        if self.mode == 'personal':
+            if any(value is None for value in settings):
+                raise ValueError('Personal mode requires an exact owner and explicit spend ceilings.')
+            if self.objective_spend_limit_micro_usd > self.monthly_spend_limit_micro_usd:
+                raise ValueError('The objective ceiling must fit inside the monthly ceiling.')
+        elif any(value is not None for value in settings):
+            raise ValueError('Personal settings cannot grant authority in public-SaaS mode.')
+        return self
+
+
+ObjectiveState = Literal[
+    'unknown', 'submitting', 'queued', 'accepted', 'running', 'waiting_for_input',
+    'recovering', 'succeeded', 'failed', 'cancelled',
+]
+
+
+class ObjectiveStateContract(BaseModel):
+    """Versioned projection of durable facts, not a worker-control request.
+
+    Revision comes from persisted authority, never wall-clock reconstruction.
+    Unknown/recovering and cancellation-requested are nonterminal and retain
+    capacity. Completion is supplied only after execution-evidence validation.
+    """
+
+    model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
+    schema_version: Literal['magistrate.objective-state.v1'] = OBJECTIVE_STATE_SCHEMA
+    objective_id: str = Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+    owner_principal_id: str = Field(min_length=1, max_length=128, pattern=PRINCIPAL_ID_PATTERN)
+    revision: int = Field(ge=0, le=MAX_CONTRACT_INTEGER)
+    state: ObjectiveState
+    # Persist this high-water mark through unknown/recovering/input waits so a
+    # later retry cannot forget acceptance or restart already-running work.
+    progress_stage: Literal['unobserved', 'submitting', 'queued', 'accepted', 'running', 'terminal']
+    cancellation: Literal['none', 'requested', 'observed'] = 'none'
+
+    @model_validator(mode='after')
+    def validate_state(self) -> 'ObjectiveStateContract':
+        if (self.cancellation == 'observed') != (self.state == 'cancelled'):
+            raise ValueError('Only an observed cancellation establishes cancelled state.')
+        if self.terminal != (self.progress_stage == 'terminal'):
+            raise ValueError('Terminal progress requires a terminal objective state.')
+        if self.state in {'submitting', 'queued', 'accepted', 'running'} and self.progress_stage != self.state:
+            raise ValueError('Observed progress must agree with the objective state.')
+        return self
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in {'succeeded', 'failed', 'cancelled'}
+
 
 class UploadedAttachmentContract(BaseModel):
     upload_id: str = Field(min_length=16, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
