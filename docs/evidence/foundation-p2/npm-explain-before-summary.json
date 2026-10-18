@@ -1,0 +1,139 @@
+{
+  "command": "npm explain braces micromatch node-forge --json",
+  "limitation": "npm does not expose the bundled braces originally in resolve-workspace-root; installed-byte inspection found and removed that separately.",
+  "original_sha256": "37890b7304187fd55035d489edb94286e836869843a3f6945d1a6f61df299aa4",
+  "summary": [
+    {
+      "immediate_dependents": [
+        {
+          "parent": {
+            "location": "node_modules/micromatch",
+            "name": "micromatch",
+            "version": "4.0.8"
+          },
+          "spec": "^3.0.3",
+          "type": "prod"
+        }
+      ],
+      "location": "node_modules/braces",
+      "name": "braces",
+      "version": "3.0.3"
+    },
+    {
+      "immediate_dependents": [
+        {
+          "parent": {
+            "location": "node_modules/@expo/code-signing-certificates",
+            "name": "@expo/code-signing-certificates",
+            "version": "0.0.6"
+          },
+          "spec": "^1.3.3",
+          "type": "prod"
+        },
+        {
+          "parent": {
+            "location": "node_modules/expo/node_modules/@expo/cli",
+            "name": "@expo/cli",
+            "version": "57.0.27"
+          },
+          "spec": "^1.3.3",
+          "type": "prod"
+        }
+      ],
+      "location": "node_modules/node-forge",
+      "name": "node-forge",
+      "version": "1.4.0"
+    },
+    {
+      "immediate_dependents": [
+        {
+          "parent": {
+            "location": "node_modules/@expo/metro/node_modules/metro-file-map",
+            "name": "metro-file-map",
+            "version": "0.84.5"
+          },
+          "spec": "^4.0.4",
+          "type": "prod"
+        },
+        {
+          "parent": {
+            "location": "node_modules/find-yarn-workspace-root",
+            "name": "find-yarn-workspace-root",
+            "version": "2.0.0"
+          },
+          "spec": "^4.0.2",
+          "type": "prod"
+        },
+        {
+          "parent": {
+            "location": "node_modules/metro-file-map",
+            "name": "metro-file-map",
+            "version": "0.84.4"
+          },
+          "spec": "^4.0.4",
+          "type": "prod"
+        }
+      ],
+      "location": "node_modules/micromatch",
+      "name": "micromatch",
+      "version": "4.0.8"
+    },
+    {
+      "immediate_dependents": [
+        {
+          "parent": {
+            "location": "node_modules/@expo/metro",
+            "name": "@expo/metro",
+            "version": "56.0.2"
+          },
+          "spec": "0.84.5",
+          "type": "prod"
+        },
+        {
+          "parent": {
+            "location": "node_modules/@expo/metro/node_modules/metro",
+            "name": "metro",
+            "version": "0.84.5"
+          },
+          "spec": "0.84.5",
+          "type": "prod"
+        }
+      ],
+      "location": "node_modules/@expo/metro/node_modules/metro-file-map",
+      "name": "metro-file-map",
+      "version": "0.84.5"
+    },
+    {
+      "immediate_dependents": [
+        {
+          "parent": {
+            "location": "node_modules/metro",
+            "name": "metro",
+            "version": "0.84.4"
+          },
+          "spec": "0.84.4",
+          "type": "prod"
+        }
+      ],
+      "location": "node_modules/metro-file-map",
+      "name": "metro-file-map",
+      "version": "0.84.4"
+    },
+    {
+      "immediate_dependents": [
+        {
+          "parent": {
+            "location": "node_modules/patch-package",
+            "name": "patch-package",
+            "version": "8.0.1"
+          },
+          "spec": "^2.0.0",
+          "type": "prod"
+        }
+      ],
+      "location": "node_modules/find-yarn-workspace-root",
+      "name": "find-yarn-workspace-root",
+      "version": "2.0.0"
+    }
+  ]
+}

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from channels.testing import WebsocketCommunicator
+from .asgi_helpers import WebsocketCommunicator
 from django.contrib.auth.models import Permission, User
 from django.test import Client
 

@@ -4,6 +4,10 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
+// Required, not an optional security path: all retained consumers and oracles.
+require('./dependency-removal.test');
+require('./dependency-integrity.test');
+
 // Expo SDK 57 keeps RN 0.86 / Metro 0.84.4. Narrow call-site patches bridge
 // patched dependencies without downgrading Expo or forking either parser.
 test('patched Metro handles buffer and filesystem assets on web/iOS/Android', async () => {

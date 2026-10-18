@@ -1,0 +1,50 @@
+url: "https://api.github.com/repos/twisted/twisted/releases/320412320"
+assets_url: "https://api.github.com/repos/twisted/twisted/releases/320412320/assets"
+upload_url: "https://uploads.github.com/repos/twisted/twisted/releases/320412320/assets{?name,label}"
+html_url: "https://github.com/twisted/twisted/releases/tag/twisted-26.4.0"
+id: 320412320
+author:
+  login: adiroiban
+  id: 204609
+  node_id: MDQ6VXNlcjIwNDYwOQ==
+  avatar_url: "https://avatars.githubusercontent.com/u/204609?v=4"
+  gravatar_id: ""
+  url: "https://api.github.com/users/adiroiban"
+  html_url: "https://github.com/adiroiban"
+  followers_url: "https://api.github.com/users/adiroiban/followers"
+  following_url: "https://api.github.com/users/adiroiban/following{/other_user}"
+  gists_url: "https://api.github.com/users/adiroiban/gists{/gist_id}"
+  starred_url: "https://api.github.com/users/adiroiban/starred{/owner}{/repo}"
+  subscriptions_url: "https://api.github.com/users/adiroiban/subscriptions"
+  organizations_url: "https://api.github.com/users/adiroiban/orgs"
+  repos_url: "https://api.github.com/users/adiroiban/repos"
+  events_url: "https://api.github.com/users/adiroiban/events{/privacy}"
+  received_events_url: "https://api.github.com/users/adiroiban/received_events"
+  type: User
+  user_view_type: public
+  site_admin: false
+node_id: RE_kwDOAB5LTs4TGRqg
+tag_name: twisted-26.4.0
+target_commitish: release-26.4.0-12634
+name: Twisted 26.4.0
+draft: false
+immutable: false
+prerelease: false
+created_at: "2026-05-11T11:16:58Z"
+updated_at: "2026-05-11T11:23:50Z"
+published_at: "2026-05-11T11:23:50Z"
+assets: []
+tarball_url: "https://api.github.com/repos/twisted/twisted/tarball/twisted-26.4.0"
+zipball_url: "https://api.github.com/repos/twisted/twisted/zipball/twisted-26.4.0"
+body: "Twisted 26.4.0 (2026-05-11)\r\n==============================\r\n\r\nThis is the last release with support for Python 3.9.\r\n\r\n\r\nSecurity\r\n--------\r\n\r\n- twisted.names was fix for Denial of Service (DoS) attack via resource exhaustion during DNS name decompression.\r\n  Reported and fixed by Tomas Illuminati Balbin CVE-2026-42304 (#12626)\r\n\r\n\r\nFeatures\r\n--------\r\n\r\n- twisted.internet.ssl.CertificateOptions has a new constructor argument, contextForServerName, which takes a callback that will get invoked when a client sends a server name indication, with the sent servername, and returns a new OpenSSL.SSL.Context that the connection will switch to. (#4887)\r\n- twisted.internet.endpoints.serverFromString now supports the `tls` endpoint\r\n  type, which allows you to do `twist web\r\n  --listen=tls:.../certbot-dir/config/live` pointed at a certbot live\r\n  configuration directory and have your certbot certificates automatically\r\n  discovered and served appropriately. (#9885)\r\n- ``twisted.internet.reactor`` now has type annotations and will appear to be an object of an appropriate type, allowing for idiomatic common usages with correct type information. (#9909)\r\n- twisted.conch.ssh.SSHUserAuthServer now supports the security key ssh types \"sk-ecdsa-sha2-nistp256@openssh.com\" and \"sk-ssh-ed25519@openssh.com\" and extracting the `application` property from these new key types. (#12212)\r\n\r\n\r\nBugfixes\r\n--------\r\n\r\n- twisted.mail.smtp will now return a meaningful Failure when TLS validation fails. (#10210)\r\n- TLS version range constraints passed to twisted.internet.ssl.CertificateOptions are now properly respected rather than excluding the version being passed as the desired constraint. (#10232)\r\n- A potential reference cycle that might cause intermittent memory spikes while\r\n  using twisted.internet.defer.inlineCallbacks was removed. (#12120)\r\n- Trial no longer emits the error `RuntimeWarning: TestResult has no addDuration method` when running PyUnit tests. (#12229)\r\n- twisted.python.rebuild.rebuild() now handles changes to ``sys.modules`` gracefully. Prior to the change, it could possibly raise a \"dictionary changed size during iteration\" error if the module list changed. (#12458)\r\n- twisted.internet.protocol.ReconnectingClientFactory: Don't multiply by ``factor`` for initial delay, but use ``initialDelay`` directly. (#12478)\r\n- twisted.internet.ssl and twisted.protocols.tls no longer mutate the pyOpenSSL context after creating pyOpenSSL connections, maintaining compatibility with an upcoming version of pyOpenSSL and increasing reliability (possibly even fixing a very rare segfault) (#12500)\r\n- `twisted.internet.testing.MemoryReactor.callWhenRunning` now invokes the callback immediately, if already started. (#12514)\r\n- Twisted now correctly detects EOF on OpenSSL 4. (#12632)\r\n\r\n\r\nImproved Documentation\r\n----------------------\r\n\r\n- The example code from the documentation describing how to create a custom DNS server was updated to Python3. (#12480)\r\n- Type annotations now use modern PEP 585 built-in generics and PEP 604 union syntax throughout the project. (#12556)\r\n\r\n\r\nDeprecations and Removals\r\n-------------------------\r\n\r\n- Support for the obsolete TLS \"Next Protocol Negotiation\" has been removed from\r\n  twisted.protocols.tls. (#9588)\r\n- Remove support for python3.8. (#12462)\r\n\r\n\r\nMisc\r\n----\r\n\r\n- #11590, #12426, #12450, #12454, #12459, #12476, #12487, #12489, #12491, #12493, #12505, #12510, #12517, #12523, #12525, #12531, #12533, #12535, #12536, #12539, #12547, #12549, #12560, #12562, #12564, #12572, #12576, #12586, #12588, #12592, #12594, #12598, #12600, #12605, #12612, #12614, #12616, #12618, #12622, #12629\r\n\r\n\r\nConch\r\n-----\r\n\r\n\r\n\r\n- #12544, #12554\r\n\r\n\r\nWeb\r\n---\r\n\r\n\r\n- #12542, #12580\r\n\r\n\r\nMail\r\n----\r\n\r\nNo significant changes.\r\n\r\n\r\nWords\r\n-----\r\n\r\nNo significant changes.\r\n\r\n\r\nNames\r\n-----\r\n\r\nBugfixes\r\n\r\n\r\n\r\n- twisted.names now does not throw an error when attempting to load bind zone file. (#11972)\r\n- twisted.names was fix for Denial of Service (DoS) attack via resource exhaustion during DNS name decompression. CVE-2026-42304 (#12626)\r\n\r\n\r\nTrial\r\n-----\r\n\r\n\r\n\r\n- #12566\r\n"
+reactions:
+  url: "https://api.github.com/repos/twisted/twisted/releases/320412320/reactions"
+  total_count: 2
+  "+1": 2
+  "-1": 0
+  laugh: 0
+  hooray: 0
+  confused: 0
+  heart: 0
+  rocket: 0
+  eyes: 0

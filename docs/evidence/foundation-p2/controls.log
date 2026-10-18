@@ -1,0 +1,24 @@
+{
+  "braces": {
+    "version": "3.0.3",
+    "nestedPatternStackExhaustion": true
+  },
+  "forge": {
+    "version": "1.4.0",
+    "extraDigestAlgorithmChildAccepted": true,
+    "nodeRejectsSameSignature": true,
+    "csrTrailingBytesRejected": [
+      "00",
+      "0500",
+      "0000",
+      "3000",
+      "020101",
+      "ff",
+      "200d0a",
+      "second-csr",
+      "zero-padding"
+    ],
+    "csrFramingComparisons": 18
+  }
+}
+{"orderedMatcherComparisons":8064,"resolverComparisons":2331,"mismatches":0}

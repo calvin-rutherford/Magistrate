@@ -1,0 +1,42 @@
+{
+  "candidate": "86fa67afad00de0517f9f46c808f9c2a1aaa9bdb",
+  "artifact_sha256": "7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558",
+  "cases": [
+    {
+      "suffix": "00",
+      "accepted": true
+    },
+    {
+      "suffix": "0500",
+      "accepted": true
+    },
+    {
+      "suffix": "0000",
+      "accepted": true
+    },
+    {
+      "suffix": "3000",
+      "accepted": true
+    },
+    {
+      "suffix": "020101",
+      "accepted": true
+    },
+    {
+      "suffix": "ff",
+      "accepted": true
+    },
+    {
+      "suffix": "200d0a",
+      "accepted": true
+    },
+    {
+      "suffix": "second-csr",
+      "accepted": true
+    },
+    {
+      "suffix": "zero-padding",
+      "accepted": true
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "all_six_archives_rebuilt": true,
+  "before_report": "csr-whole-input-before.json",
+  "changed_artifact_files": [
+    "SOURCE.json",
+    "build/main.js",
+    "package.json"
+  ],
+  "corrected_source_commit": "32119f0ffd5c69395b09f8b866c167fc74679037",
+  "correction": "Require the successful bounded asn1js decoder offset to equal the entire decoded CSR input length before X.509 schema parsing; rawData equality cannot prove consumption.",
+  "dependency_delta": "Only the CSR consumer artifact resolution and an explicit direct edge to already-installed asn1js@3.1.0; all package names, versions and other resolutions unchanged.",
+  "expected_red_test": {
+    "exit_code": 1,
+    "reason": "Missing expected exception: 00"
+  },
+  "new_artifact_sha256": "380bb61b623eff55d94420bcd831394664aaeebf7e1e3577e8679127de54f656",
+  "old_artifact_sha256": "7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558",
+  "original_forge_framing_comparisons": 18,
+  "original_forge_rejects": [
+    "00",
+    "0500",
+    "0000",
+    "3000",
+    "020101",
+    "ff",
+    "200d0a",
+    "second-csr",
+    "zero-padding"
+  ],
+  "pem_newlines": [
+    "LF",
+    "CRLF"
+  ],
+  "replacement_framing_comparisons": 36,
+  "replacement_rejects": [
+    "00",
+    "0500",
+    "0000",
+    "3000",
+    "020101",
+    "ff",
+    "200d0a",
+    "second-csr",
+    "zero-padding"
+  ],
+  "replacement_valid_sources": [
+    "X.509-generated CSR",
+    "independent OpenSSL CSR"
+  ],
+  "reviewed_candidate": "86fa67afad00de0517f9f46c808f9c2a1aaa9bdb",
+  "scope": "Synthetic keys/requests and hermetic standards-oracle controls only; not live signing or native acceptance.",
+  "targeted_command": "cd frontend && node --test --test-name-pattern='signing/PEM|CSR parser|certificate validation|Expo Go|iOS identity' tests/dependency-removal.test.js",
+  "targeted_exit_code": 0,
+  "targeted_report": "csr-targeted-compatibility.tap",
+  "targeted_tests_passed": 5,
+  "truncated_invalid_asn1_and_multiple_pem_blocks_rejected": true,
+  "unchanged_artifact_count": 5,
+  "valid_signatures_verified": true
+}

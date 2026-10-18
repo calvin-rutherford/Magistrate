@@ -23,4 +23,4 @@ RUN pip install -r requirements-backend.txt
 COPY . /app/
 
 # The default command will be overridden by docker-compose for each service
-CMD ["python", "backend/manage.py", "runserver", "0.0.0.0:8000"]
+CMD ["uvicorn", "og_broker.asgi:application", "--app-dir", "backend", "--host", "0.0.0.0", "--port", "8000", "--http", "h11", "--ws", "websockets-sansio", "--lifespan", "off", "--no-proxy-headers", "--no-access-log"]

@@ -1,9 +1,11 @@
 # Security model — release authority boundaries
 
 Authority: [production matrix](PRODUCTION_STATUS.md). Repository controls are
-implemented; current advisory remediation is **BLOCKED** on upstream dependency
-fixes (see the 2026-10-17 status below). Deployed isolation, legal/security review
-and physical-device evidence: **BLOCKED_EXTERNAL**. No compliance certification,
+implemented; the 2026-10-18 foundation candidate has independently clean advisory
+reports for all five installed graphs after bounded consumer removal/replacement.
+Security-sensitive artifacts still require independent integration review; a scan
+is not security proof. Deployed isolation, legal/security review and physical-device
+evidence: **BLOCKED_EXTERNAL**. No compliance certification,
 penetration test or production threat-model approval is inferred from unit tests.
 
 ## Trust boundaries
@@ -81,9 +83,10 @@ four scans; reports are separate from hermetic receipts. No risk waiver or
 unresolved upstream exception is being claimed. Isolate CI/build credentials
 from untrusted repo code even with a clean scan.
 
-## Current dependency status — 2026-10-17: release blocked
+## Historical dependency status — 2026-10-17: release blocked
 
-The historical zero-advisory receipt above is not the current release state.
+This retained snapshot describes the preceding revision, not the remediated
+2026-10-18 candidate below. The September receipt had ceased to describe main.
 The unchanged main frontend lock reproduced **22 high / 1 critical** findings.
 Two compatible transitive updates (`shell-quote` 1.10.0 → 1.12.0 and
 `source-map-js` 1.2.1 → 1.2.2) removed the critical command-injection advisory
@@ -133,6 +136,53 @@ frontend failure does not establish current Pi/backend/Gateway audit results;
 the dated clean reports above remain historical evidence only. Full remediation
 requires compatible upstream fixes or a separately reviewed maintained consumer
 replacement covering every remaining edge.
+
+## Foundation candidate — 2026-10-18: independent audits clean, review required
+
+Current official advisories still list no patched braces, Forge or Twisted release.
+The bounded removal route, not a waiver or disguised package version, removes:
+
+- Both unscoped Metro micromatch edges via both official matching backports;
+  patch-package's workspace edge via a qualified ordered picomatch selector;
+  and a stale bundled braces copy in `resolve-workspace-root` via attributed
+  unbundled upstream sources. Expo 57 / RN 0.86.3 remain unchanged.
+- Both Expo CLI Forge consumers via Node OpenSSL/WebCrypto and maintained
+  `@peculiar/x509@2.2.0`, with independent OpenSSL CLI signing/CSR/certificate
+  oracles and the original malformed-acceptance negative control. Independent
+  review also requires whole-input CSR consumption: the retained bounded ASN.1
+  decoder's offset must equal the decoded input length, not merely validate its
+  prefix. Original-Forge and OpenSSL-backed fixtures reject trailing bytes.
+- Lab-only Daphne/Twisted via Uvicorn/h11/websockets, retaining Django/Channels
+  authentication, origin checks, loopback Compose and production quarantine.
+  Both retained requirement graphs are audited and tested, including the
+  patched Django 5.2 LTS/DRF/protobuf path in Compose requirements.
+
+Every modified npm consumer retains its real upstream name/version and license.
+`frontend/security/sources.json` pins source, patch and overlay hashes;
+`artifacts.json` pins reproducible SHA-256-named archives and every installed byte.
+The install guard rejects drift, stale bundled implementations and affected edges;
+`patch-package --error-on-fail` and the existing image/URI/UUID safeguards remain
+mandatory. The attributed full-graph CycloneDX SBOM exposes these modifications.
+Nothing is published as an upstream package. Known-vulnerable controls are fetched
+only into disposable, hash-pinned test fixtures and never ship in artifacts.
+
+Fresh online frontend and retained-adapter audits report **0 vulnerabilities**;
+Gateway, retained-backend and Compose-root pip-audit reports each have **0 known
+vulnerabilities**. Each graph runs even if an earlier audit fails, and every
+failure still fails CI. No threshold, path, finding or gate is suppressed.
+
+Exact reports, source provenance, limitations, qualification commands and rollback
+are in [foundation-dependency-remediation.md](foundation-dependency-remediation.md)
+and its evidence index. Linux fixture success is not macOS keychain/FSEvents,
+physical phone, provider activation, sandbox or production acceptance. No live
+state, deployment or spending is authorized by these results. Re-run all gates
+at integration/release; do not reinstate vulnerable consumers as rollback.
+
+The additive [foundation protocol](foundation-protocol-v3.md) exports immutable
+objective/decision/runtime/voice value contracts from Gateway to generated client
+types. `PERSONAL_RUNTIME_V2` selects no capability on its own: authenticated,
+exact-envelope producer acknowledgment and write-side ledger enforcement remain
+necessary. Legacy persisted projections are retained, not silently relabeled.
 
 ## Lifecycle, secrets and recovery
 
