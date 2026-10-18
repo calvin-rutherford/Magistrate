@@ -144,6 +144,14 @@ class ObjectiveCancellationService:
             ).fetchall()
         counts = {"examined": len(rows), "recovered": 0, "failed": 0, "terminal": 0}
         for row in rows:
+            with connect(db.DB_PATH) as check:
+                uncertain = check.execute('''SELECT 1 FROM personal_resource_reservations p
+                    WHERE p.owner_user_id=? AND p.objective_id=? AND NOT EXISTS
+                    (SELECT 1 FROM firstmate_execution_objectives e WHERE e.owner_user_id=p.owner_user_id AND e.objective_id=p.objective_id)''',
+                    (row['owner_user_id'], row['objective_id'])).fetchone()
+            if uncertain:
+                counts['failed'] += 1
+                continue  # Reconcile dispatch first; never free an unknown hold.
             if row["terminal_phase"] is not None:
                 now = int(time.time() * 1000)
                 observed = row["terminal_phase"] == "objective.cancelled"
@@ -200,6 +208,12 @@ class ObjectiveCancellationService:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("BEGIN IMMEDIATE")
+            uncertain = connection.execute('''SELECT 1 FROM personal_resource_reservations p
+                WHERE p.owner_user_id=? AND p.objective_id=? AND NOT EXISTS
+                (SELECT 1 FROM firstmate_execution_objectives e WHERE e.owner_user_id=p.owner_user_id AND e.objective_id=p.objective_id)''',
+                (owner_user_id, objective_id)).fetchone()
+            if uncertain:
+                raise ObjectiveCancellationError('dispatch_unobserved', 'Runtime acceptance is unobserved. Reconcile dispatch before cancellation.', 409)
             existing = connection.execute(
                 """SELECT * FROM objective_cancellation_requests
                    WHERE owner_user_id = ? AND idempotency_key = ?""",
@@ -290,6 +304,8 @@ class ObjectiveCancellationService:
                 "SELECT * FROM objective_cancellation_requests WHERE request_id = ?",
                 (request_id,),
             ).fetchone()
+            from app.structured_runtime import persist_objective_state
+            persist_objective_state(connection, owner_user_id, objective_id)
             connection.commit()
         except ObjectiveCancellationError:
             connection.rollback()

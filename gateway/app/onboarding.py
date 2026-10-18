@@ -80,7 +80,10 @@ def _state(connection: sqlite3.Connection, user_id: str) -> dict[str, Any]:
         billing and billing_status in {"active", "trialing"}
         and billing["subscription_id"] and billing["provider_event_created"] is not None
     )
+    from app.structured_runtime import personal_owner
+    personal = personal_owner(user_id)
     required = (
+        not (welcome_complete and profile_complete) if personal else
         not profile_complete if not provider_account else
         not (welcome_complete and profile_complete and github_complete and billing_complete)
     )
@@ -101,12 +104,14 @@ def _state(connection: sqlite3.Connection, user_id: str) -> dict[str, Any]:
             "profile": {"complete": profile_complete},
             "github": {
                 "complete": github_complete,
+                "required": not personal,
                 "available": github_available,
                 "unavailable_reason": None if github_available else github_adapter.unavailable_reason(),
             },
             "billing": {
                 "complete": billing_complete,
-                "available": billing_available(),
+                "required": not personal,
+                "available": not personal and billing_available(),
                 "status": billing_status,
                 "current_period_end": int(billing["current_period_end"]) if billing and billing["current_period_end"] is not None else None,
                 "customer_portal_available": bool(billing and billing["external_customer_ref"]),

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+from datetime import datetime, timezone
 import os
 import sqlite3
 from app.persistence import connect
@@ -280,6 +282,8 @@ class FirstmateMeasuredUsage(_StrictExecutionContract):
     input_tokens: int = Field(ge=0, le=MAX_SAFE_INTEGER)
     output_tokens: int = Field(ge=0, le=MAX_SAFE_INTEGER)
     compute_milliseconds: int = Field(ge=0, le=MAX_SAFE_INTEGER)
+    # Optional additive measured total for noncommercial settlement, not credits.
+    cost_micro_usd: int | None = Field(default=None, ge=0, le=MAX_SAFE_INTEGER)
 
 
 class FirstmateObjectiveCompletedEvent(_FirstmateExecutionEventBase):
@@ -361,6 +365,118 @@ def _public_event(row: sqlite3.Row, *, duplicate: bool) -> dict[str, Any]:
         },
         "completion_message": generation,
     }
+
+
+class PersonalResourceLedger:
+    """Atomic full-ceiling holds; unknown work never silently frees capacity.
+
+    This ledger is not evidence that Firstmate enforces limits. Personal dispatch
+    remains closed until the pinned runtime supplies that enforceable contract.
+    """
+
+    @staticmethod
+    def _period(now: int) -> str:
+        return datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m')
+
+    @staticmethod
+    def get(owner: str, objective_id: str) -> dict | None:
+        with _connect() as connection:
+            row = connection.execute('SELECT * FROM personal_resource_reservations WHERE owner_user_id=? AND objective_id=?', (owner, objective_id)).fetchone()
+            return dict(row) if row else None
+
+    def usage(self, connection, owner: str, now: int):
+        from app.deployment_mode import DeploymentModeError, PersonalResourceUsage
+        active, workers, reserved = connection.execute("""SELECT COUNT(*), COALESCE(SUM(implementation_workers),0),
+            COALESCE(SUM(reserved_micro_usd),0) FROM personal_resource_reservations
+            WHERE owner_user_id=? AND status='reserved'""", (owner,)).fetchone()
+        spent = connection.execute("""SELECT COALESCE(SUM(actual_micro_usd),0) FROM personal_resource_reservations
+            WHERE owner_user_id=? AND status='settled' AND period_key=?""", (owner, self._period(now))).fetchone()[0]
+        historical = connection.execute("SELECT COUNT(*) FROM credit_reservations WHERE owner_user_id=? AND status='reserved'", (owner,)).fetchone()[0]
+        unknown = connection.execute("""SELECT COUNT(*) FROM firstmate_execution_objectives e
+            WHERE e.owner_user_id=? AND e.terminal_phase IS NULL AND NOT EXISTS
+            (SELECT 1 FROM personal_resource_reservations p WHERE p.objective_id=e.objective_id AND p.status='reserved')""", (owner,)).fetchone()[0]
+        if historical or unknown:
+            raise DeploymentModeError('historical_execution_unsettled', 409)
+        return PersonalResourceUsage(owner_principal_id=owner, observation_complete=True,
+            active_objectives=active, active_implementation_workers=workers,
+            spent_micro_usd=spent, reserved_micro_usd=reserved)
+
+    def summary(self, owner: str) -> dict:
+        from app.deployment_mode import DeploymentModeError
+        with _connect() as connection:
+            try:
+                value = self.usage(connection, owner, int(time.time())).model_dump()
+                value.pop('owner_principal_id')
+                return value
+            except DeploymentModeError as exc:
+                return {'observation_complete': False, 'error_code': exc.code}
+
+    def reserve(self, connection, *, principal, objective_id: str, contract_sha256: str,
+                project_id: str | None, implementation_workers: int = 1) -> None:
+        from app.deployment_mode import DeploymentModeError
+        from app.structured_runtime import deployment_policy
+        from app.projects import execution_repository
+        policy = deployment_policy()
+        policy.require_principal(principal, scope='command')
+        existing = connection.execute('SELECT owner_user_id,contract_sha256,status FROM personal_resource_reservations WHERE objective_id=?', (objective_id,)).fetchone()
+        if existing:
+            if tuple(existing) != (principal.user_id, contract_sha256, 'reserved'):
+                raise DeploymentModeError('personal_reservation_conflict', 409)
+            return
+        repository = execution_repository(connection, principal.user_id, project_id)
+        if repository is None:
+            raise DeploymentModeError('authorized_repository_required', 403)
+        now = int(time.time())
+        ceiling = policy.check_personal_admission(principal, usage=self.usage(connection, principal.user_id, now), implementation_workers=implementation_workers)
+        connection.execute("""INSERT INTO personal_resource_reservations
+            (objective_id,owner_user_id,actor_session_id,contract_sha256,policy_json,repository_json,
+             reserved_micro_usd,implementation_workers,status,period_key,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,'reserved',?,?,?)""", (objective_id, principal.user_id, principal.session_id,
+                contract_sha256, policy.contract.model_dump_json(), canonical_json(repository), ceiling,
+                implementation_workers, self._period(now), now, now))
+
+    def release_unpublished(self, owner: str, objective_id: str) -> bool:
+        """Only proven pre-dispatch refusal; never a timeout, cancel, or wake error."""
+        with _connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            return connection.execute("""UPDATE personal_resource_reservations SET status='released',updated_at=?
+                WHERE owner_user_id=? AND objective_id=? AND status='reserved'
+                AND NOT EXISTS (SELECT 1 FROM firstmate_execution_objectives WHERE objective_id=?)
+                AND EXISTS (SELECT 1 FROM magi_objective_submissions WHERE objective_id=? AND status!='accepted')""",
+                (int(time.time()), owner, objective_id, objective_id, objective_id)).rowcount == 1
+
+    def settle(self, owner: str, objective_id: str, *, event_id: str, usage: dict) -> None:
+        from app.deployment_mode import DeploymentModeError
+        actual = usage.get('cost_micro_usd')
+        if type(actual) is not int or not 0 <= actual <= MAX_SAFE_INTEGER:
+            raise DeploymentModeError('personal_measured_usage_required', 422)
+        encoded = canonical_json(usage)
+        with _connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('SELECT * FROM personal_resource_reservations WHERE owner_user_id=? AND objective_id=?', (owner, objective_id)).fetchone()
+            event = connection.execute('SELECT phase,payload_json FROM firstmate_execution_events WHERE owner_user_id=? AND objective_id=? AND event_id=?', (owner, objective_id, event_id)).fetchone()
+            if not row or not event or event['phase'] not in _TERMINAL_PHASES or json.loads(event['payload_json']).get('usage') != usage:
+                raise DeploymentModeError('personal_terminal_evidence_required', 409)
+            if row['status'] == 'settled' and (row['settlement_event_id'], row['usage_json']) == (event_id, encoded):
+                return
+            if row['status'] != 'reserved':
+                raise DeploymentModeError('personal_settlement_conflict', 409)
+            now = int(time.time())
+            # Record overruns honestly. They count against subsequent admission.
+            connection.execute("""UPDATE personal_resource_reservations SET status='settled',actual_micro_usd=?,
+                usage_json=?,settlement_event_id=?,period_key=?,updated_at=? WHERE owner_user_id=? AND objective_id=?""",
+                (actual, encoded, event_id, self._period(now), now, owner, objective_id))
+
+    def recover_settlements(self) -> int:
+        with _connect() as connection:
+            rows = connection.execute("""SELECT p.owner_user_id,p.objective_id,e.event_id,e.payload_json
+                FROM personal_resource_reservations p JOIN firstmate_execution_events e
+                ON e.owner_user_id=p.owner_user_id AND e.objective_id=p.objective_id
+                WHERE p.status='reserved' AND e.phase IN ('objective.completed','objective.failed','objective.cancelled')
+                ORDER BY e.created_at LIMIT 100""").fetchall()
+        for row in rows:
+            self.settle(row['owner_user_id'], row['objective_id'], event_id=row['event_id'], usage=json.loads(row['payload_json'])['usage'])
+        return len(rows)
 
 
 class FirstmateExecutionStore:
@@ -541,6 +657,8 @@ class FirstmateExecutionStore:
                    WHERE owner_user_id = ? AND event_id = ?""",
                 (owner_user_id, event.event_id),
             ).fetchone()
+            from app.structured_runtime import persist_objective_state
+            persist_objective_state(connection, owner_user_id, event.objective_id)
             connection.commit()
             return _public_event(stored, duplicate=False)
         except Exception:
@@ -686,12 +804,15 @@ class FirstmateExecutionStore:
     def queued_completions(self, *, limit: int = MAX_RECOVERY_WAKEUPS) -> list[tuple[str, str]]:
         if not 1 <= limit <= MAX_RECOVERY_WAKEUPS:
             raise ValueError("Completion recovery limit is invalid.")
+        from app.structured_runtime import deployment_policy
+        policy = deployment_policy()
+        owner = policy.contract.owner_principal_id if policy.personal else None
         with _connect() as connection:
             rows = connection.execute(
                 """SELECT owner_user_id, event_id FROM firstmate_execution_events
-                   WHERE generation_state = 'queued'
+                   WHERE generation_state = 'queued' AND (? IS NULL OR owner_user_id=?)
                    ORDER BY created_at LIMIT ?""",
-                (limit,),
+                (owner, owner, limit),
             ).fetchall()
         return [(row["owner_user_id"], row["event_id"]) for row in rows]
 
@@ -826,16 +947,22 @@ class FirstmateExecutionService:
         }
         if production and event.phase in _TERMINAL_PHASES and getattr(event, "usage", None) is None:
             raise ValueError("Terminal execution events require measured billing usage in production.")
-        stored = await asyncio.to_thread(self.store.ingest, owner_user_id, event)
+        personal = await asyncio.to_thread(PersonalResourceLedger.get, owner_user_id, event.objective_id)
         usage = getattr(event, "usage", None)
-        if event.phase in _TERMINAL_PHASES:
+        if personal and event.phase in _TERMINAL_PHASES and (usage is None or usage.cost_micro_usd is None):
+            raise ValueError('Personal terminal events require measured cost in micro-USD.')
+        stored = await asyncio.to_thread(self.store.ingest, owner_user_id, event)
+        if personal and event.phase in _TERMINAL_PHASES:
+            await asyncio.to_thread(PersonalResourceLedger().settle, owner_user_id, event.objective_id,
+                                    event_id=event.event_id, usage=usage.model_dump(mode='json', exclude_none=True))
+        elif event.phase in _TERMINAL_PHASES:
             ledger = CreditLedger()
             if usage is not None:
                 await asyncio.to_thread(
                     ledger.settle_objective,
                     owner_user_id,
                     event.objective_id,
-                    usage.model_dump(mode="json"),
+                    usage.model_dump(mode="json", exclude={'cost_micro_usd'}),
                     event_id=event.event_id,
                 )
             else:
@@ -877,6 +1004,7 @@ class FirstmateExecutionService:
         """Requeue interrupted claims and start a bounded durable queue drain."""
         if self._recovery_task is not None and not self._recovery_task.done():
             return 0
+        await asyncio.to_thread(PersonalResourceLedger().recover_settlements)
         recovered = await asyncio.to_thread(self.store.recover_interrupted)
         queued = await asyncio.to_thread(self.store.queued_completions)
         tasks: list[asyncio.Task[None]] = []
