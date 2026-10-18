@@ -81,10 +81,13 @@
   "branch": "fm/magistrate-contract-deps-p2",
   "build_provenance": "build-environment.json",
   "compatibility": "qualification.json",
-  "hermetic_receipts": [],
+  "hermetic_receipts": [
+    "foundation-hermetic-receipt.json",
+    "postgres-hermetic-receipt.json"
+  ],
   "implementation_hashes": "implementation-hashes.json",
-  "observed_at": "2026-10-18T22:18:41.896669+00:00",
-  "qualification_source_commit": "23b10ce1da0cccbc37239804e3b504d72f6df95e",
+  "observed_at": "2026-10-18T22:25:56.791055+00:00",
+  "qualification_source_commit": "3006e28a29a6950425ba21117960ec4e373640e7",
   "reports": {
     "artifact-reproduction.log": {
       "bytes": 1746,
@@ -99,12 +102,16 @@
       "sha256": "78a792abe227d20e171fbcfcf843dbc1f766b861a4b82587022610c997426b78"
     },
     "consumer-compatibility.tap": {
-      "bytes": 6280,
-      "sha256": "9374067c574bbb91c28a4e8091afb43e25a964995c9c45a3d4ce240b848dcf0d"
+      "bytes": 6277,
+      "sha256": "813e23df203aa1f214dfb09448663e104dca760045d3e27c1efd0e97fe5d36cb"
     },
     "controls.log": {
       "bytes": 290,
       "sha256": "10bbe1a72baad8c3da1086e3f4aeffa0d33fc06acceb1bab32c94448f46a2974"
+    },
+    "foundation-hermetic-receipt.json": {
+      "bytes": 453,
+      "sha256": "b04b7aa0e23e8fd53893f13310df21ec0c27a5a22130d5edbf9ec38bd6354156"
     },
     "frontend-audit-before.json": {
       "bytes": 11064,
@@ -116,7 +123,7 @@
     },
     "frontend-sbom.cdx.json": {
       "bytes": 1437166,
-      "sha256": "ec16214f0d285bcba3648a8076e48b31c57af1af0a3876ada3f107fba4ce778b"
+      "sha256": "501d7a3127b8ab59de15c56bfd2dc11f73e576f4bac1f11f27bd3c7e927d3b3c"
     },
     "gateway-audit.json": {
       "bytes": 1757,
@@ -130,9 +137,13 @@
       "bytes": 3698,
       "sha256": "478052e7a8918ef31e38520ff7aa96ec187368ef3eb64ef8cd0a5f6b6401aa02"
     },
+    "postgres-hermetic-receipt.json": {
+      "bytes": 455,
+      "sha256": "5e9e554f2cbd8e6d413779154ef0c301a63b52b180183db9da84f3fcbddd7350"
+    },
     "qualification.json": {
-      "bytes": 7032,
-      "sha256": "b082ed4c041465244c51f7cbcbff8901d10b7a2be2479acf154b49689805d323"
+      "bytes": 6744,
+      "sha256": "a077f03d7c1e66d865a24085174c35f6f810a934c3ceecf18895cbb3a9d76cf1"
     },
     "removed-explain.json": {
       "bytes": 118,

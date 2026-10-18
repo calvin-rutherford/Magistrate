@@ -1,0 +1,16 @@
+{
+  "clean": true,
+  "finished_at": "2026-10-18T22:25:23.567183Z",
+  "registry_sha256": "4d71fe9ddc27aa8e1c521e7106c1c49882207b5129a4f425bc10dfb6bb84ca35",
+  "results": [
+    {
+      "exit_code": 0,
+      "id": "release-foundation",
+      "reason": null,
+      "status": "COMPLETE"
+    }
+  ],
+  "revision": "3006e28a29a6950425ba21117960ec4e373640e7",
+  "schema_version": "magistrate.hermetic-receipt.v1",
+  "started_at": "2026-10-18T22:25:23.352554Z"
+}
