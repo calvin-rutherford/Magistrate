@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.db import DB_PATH
 from app.push_receipts import PushDeliveryStore, install_schema as install_push_receipts
@@ -33,12 +34,35 @@ MAX_PUSH_ATTEMPTS = 3
 # mode can change alert volume only; it never authorizes a command.
 ACCOUNT_ATTENTION_KINDS = frozenset({"budget", "credit", "repository_disconnected", "payment_issue"})
 RESTRICTED_KINDS = frozenset({"captain_question", "blocker", "consequential_decision"}) | ACCOUNT_ATTENTION_KINDS
-MODERATE_KINDS = RESTRICTED_KINDS | frozenset({"pr_ready", "milestone", "stall", "failure", "completion"})
+MODERATE_KINDS = RESTRICTED_KINDS | frozenset({"pr_ready", "stall", "failure", "completion"})
 FULL_KINDS = frozenset({"captain_question", "blocker", "stall", "failure", "completion", "consequential_decision"}) | ACCOUNT_ATTENTION_KINDS
 # A terminal outcome can be useful without demanding a captain action. It may
 # be pushed once, but the client will not turn it into an unread Attention dot.
-INFORMATIONAL_KINDS = frozenset({"completion", "failure"})
+INFORMATIONAL_KINDS = frozenset({"completion", "pr_ready"})
 KNOWN_PLATFORMS = frozenset({"ios", "android", "native"})
+
+
+class DecisionNotification(BaseModel):
+    """Opaque navigation snapshot, never authority to answer or execute.
+
+    The execution producer must supply the durable request's binding and expiry.
+    Legacy decision projections are not silently promoted to this schema.
+    """
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: str = Field(pattern=r"^magistrate\.decision-notification\.v1$")
+    decision_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    task_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    run_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    request_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    scope: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    revision: int = Field(ge=1, le=2_147_483_647)
+    expires_at: int = Field(ge=1, le=9_007_199_254_740_991)
+
+
+def _decision_notification(event: Dict[str, Any]) -> Optional[DecisionNotification]:
+    value = event.get("decision_notification")
+    return DecisionNotification.model_validate(value) if value is not None else None
+
 
 
 def init_notification_db() -> None:
@@ -104,7 +128,7 @@ def _validate_push_token(push_token: str) -> str:
     token = push_token.strip()
     # Gateway delivery uses Expo's authenticated push service.  Do not accept
     # arbitrary text or a local notification identifier as a server token.
-    if not (token.startswith("ExponentPushToken[") and token.endswith("]") and len(token) > 19):
+    if not re.fullmatch(r"(?:ExponentPushToken|ExpoPushToken)\[[A-Za-z0-9_-]{1,200}\]", token):
         raise ValueError("Expected a real Expo push token.")
     return token
 
@@ -212,7 +236,7 @@ async def send_push_notification(
     title: str,
     body: str,
     data: Optional[Dict[str, Any]] = None,
-    *, expected_token: Optional[str] = None,
+    *, expected_token: Optional[str] = None, max_attempts: int = MAX_PUSH_ATTEMPTS,
 ) -> Dict[str, Any]:
     """Send one remote push, retrying transient Expo failures.
 
@@ -228,7 +252,8 @@ async def send_push_notification(
         return {"status": "skipped", "detail": "Push registration changed"}
     payload = {"to": token, "sound": "default", "title": title, "body": body, "data": data or {}}
     last_error = "Push provider unavailable"
-    for attempt in range(MAX_PUSH_ATTEMPTS):
+    max_attempts = max(1, min(MAX_PUSH_ATTEMPTS, max_attempts))
+    for attempt in range(max_attempts):
         try:
             timeout = httpx.Timeout(10.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
@@ -255,12 +280,12 @@ async def send_push_notification(
                 return {"status": "error", "attempts": attempt + 1, "detail": last_error}
         except Exception:
             last_error = "Push provider unavailable"
-        if attempt + 1 < MAX_PUSH_ATTEMPTS:
+        if attempt + 1 < max_attempts:
             # A short bounded backoff keeps request latency predictable while
             # allowing a transient provider/network failure to recover.
             import asyncio
             await asyncio.sleep(0.25 * (2 ** attempt))
-    return {"status": "error", "attempts": MAX_PUSH_ATTEMPTS, "detail": last_error, "retryable": True}
+    return {"status": "error", "attempts": max_attempts, "detail": last_error, "retryable": True}
 
 
 async def reconcile_push_receipts() -> None:
@@ -309,6 +334,7 @@ def _fingerprint(item: Dict[str, Any]) -> str:
         "subtitle": item.get("subtitle"),
         "status": item.get("status"),
         "url": item.get("url"),
+        "decision_notification": item.get("decision_notification"),
     }
     return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -434,7 +460,11 @@ def _safe_deep_link(event: Dict[str, Any]) -> str:
         return "/attention?overview=true"
     item = query.get("item", [""])[0]
     if parsed.path == "/attention" and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", item):
-        return "/attention?" + urlencode({"item": item})
+        decision = _decision_notification(event)
+        params = {"item": item}
+        if decision:
+            params.update(decision=decision.decision_id, revision=str(decision.revision))
+        return "/attention?" + urlencode(params)
     if parsed.path == "/attention" and query.get("overview") == ["true"]:
         return "/attention?overview=true"
     agent_id = query.get("agentId", [""])[0]
@@ -451,20 +481,20 @@ def _safe_deep_link(event: Dict[str, Any]) -> str:
 def _safe_push_copy(kind: Optional[str]) -> tuple[str, str]:
     """Visible push copy never exposes repository, task, provider, or billing identifiers."""
     if kind in {"captain_question", "consequential_decision", "blocker"}:
-        return "Your answer is needed", "Open Magistrate to review an item that needs your attention."
+        return "Your answer is needed", "Open the app to review an item that needs your attention."
     if kind == "completion":
-        return "Work completed", "Open Magistrate to review the result."
+        return "Work completed", "Open the app to review the result."
     if kind in {"failure", "stall"}:
-        return "Work needs attention", "Open Magistrate to review what happened."
+        return "Work needs attention", "Open the app to review what happened."
     if kind in {"budget", "credit"}:
-        return "Usage needs attention", "Open Magistrate to review account usage."
+        return "Usage needs attention", "Open the app to review account usage."
     if kind == "repository_disconnected":
-        return "A repository needs reconnecting", "Open Magistrate to review the connection."
+        return "A repository needs reconnecting", "Open the app to review the connection."
     if kind == "payment_issue":
-        return "Billing needs attention", "Open Magistrate to review billing."
+        return "Billing needs attention", "Open the app to review billing."
     if kind == "pr_ready":
-        return "A pull request is ready", "Open Magistrate to review it."
-    return "Magistrate attention", "Open Magistrate to review the update."
+        return "A pull request is ready", "Open the app to review it."
+    return "Needs attention", "Open the app to review the update."
 
 
 def _push_intent_data(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -486,6 +516,9 @@ def _push_intent_data(event: Dict[str, Any]) -> Dict[str, Any]:
         "target_id": target_id,
         "route": route,
     }
+    decision = _decision_notification(event)
+    if decision:
+        payload["decision"] = decision.model_dump()
     action = event.get("action") if isinstance(event.get("action"), dict) else None
     if action and isinstance(action.get("action_key"), str):
         # The key is an opaque server-issued handle, not authority by itself;
@@ -510,6 +543,14 @@ async def dispatch_notification_events(
     failures: List[Dict[str, Any]] = []
     store = PushDeliveryStore(DB_PATH)
     for event in events:
+        try:
+            decision = _decision_notification(event)
+        except ValidationError:
+            failures.append({"id": event.get("id"), "status": "invalid-decision-envelope"})
+            continue
+        if decision and decision.expires_at <= int(time.time() * 1000):
+            failures.append({"id": event.get("id"), "status": "expired-decision"})
+            continue
         claim = store.claim_send(user_id, str(event["id"]), _fingerprint(event), registered["push_token"])
         if claim is None:
             continue  # Pending, terminal or leased: never send again on a read.
@@ -520,8 +561,8 @@ async def dispatch_notification_events(
             user_id,
             title,
             body,
-            {**_push_intent_data(event), "url": safe_route, "item_id": event.get("id"), "notification_kind": kind},
-            expected_token=registered["push_token"],
+            {**_push_intent_data(event), "url": safe_route, "item_id": event.get("id"), "notification_kind": kind, "delivery_id": claim["delivery_id"]},
+            expected_token=registered["push_token"], max_attempts=1,
         )
         if outcome.get("status") == "accepted":
             try:
@@ -568,6 +609,37 @@ def update_notification_preferences(
               quiet_end=excluded.quiet_end, mode=excluded.mode, updated_at=excluded.updated_at
         """, (user_id, int(enabled), quiet_start, quiet_end, mode, now))
     return {"enabled": enabled, "quiet_start": quiet_start, "quiet_end": quiet_end, "mode": mode}
+
+
+async def send_owner_test_notification(user_id: str, request_id: str) -> Dict[str, Any]:
+    """Explicit authenticated test only; never called by startup or a read."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", request_id):
+        raise ValueError("Expected a stable test request identity.")
+    init_notification_db()
+    store = PushDeliveryStore(DB_PATH)
+    preferences = get_notification_preferences(user_id)
+    if not preferences["enabled"] or _quiet(registered_local_hour(user_id), preferences["quiet_start"], preferences["quiet_end"]):
+        return {"status": "suppressed", "reason": "Notifications are disabled or quiet hours are active.", "evidence": store.evidence_summary(user_id)}
+    registered = get_registered_push_token(user_id)
+    if not registered:
+        return {"status": "unavailable", "reason": "Enable notification permission and register this device in Settings.", "evidence": store.evidence_summary(user_id)}
+    claim = store.claim_send(user_id, f"owner-test-{request_id}", "owner-test-v1", registered["push_token"], owner_test=True)
+    if not claim:
+        return {"status": "deduplicated-or-rate-limited", "reason": "A prior test is tracked; wait at least one minute before requesting a new test.", "evidence": store.evidence_summary(user_id)}
+    result = await send_push_notification(
+        user_id, "Test notification", "You requested this test. It does not authorize any work.",
+        {"intent_version": 1, "target_type": "attention-overview", "route": "/attention?overview=true", "notification_kind": "owner_test", "delivery_id": claim["delivery_id"]},
+        expected_token=registered["push_token"], max_attempts=1,
+    )
+    if result.get("status") == "accepted":
+        try:
+            store.accepted(claim, result["ticket_id"])
+        except sqlite3.IntegrityError:
+            store.send_failed(claim, retryable=False)
+            result = {"status": "error", "detail": "Conflicting push ticket"}
+    else:
+        store.send_failed(claim, retryable=result.get("retryable") is True)
+    return {**result, "evidence": store.evidence_summary(user_id)}
 
 
 init_notification_db()

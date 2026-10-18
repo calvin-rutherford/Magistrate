@@ -1,11 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import Svg, { Circle, Defs, G, LinearGradient, Polygon, Stop } from 'react-native-svg';
+import Svg, { G, Polygon } from 'react-native-svg';
 import type { VoiceState } from '../services/VoiceSessionReducer';
 import { clampAudioPeak } from '../services/VoiceVisuals';
 import { projectTetrahedron } from '../services/VoiceTetrahedronGeometry';
-
-const palette = ['#8B6CFF', '#24D8FF', '#54FF87', '#FF3FD1'];
 
 function StaticFallback({ size }: { size: number }) {
   return <Svg testID="voice-tetrahedron-fallback" width={size} height={size} viewBox="0 0 240 240" accessibilityLabel="Magistrate voice tetrahedron, motion unavailable">
@@ -42,23 +40,13 @@ function VoiceTetrahedronScene({ size, state, amplitude, reducedMotion }: VoiceT
   }, [energy, phase, size]);
   if (!faces) return <StaticFallback size={size} />;
 
-  const spectral = state === 'SPEAKING' || state === 'THINKING';
-  const rippleCount = reducedMotion ? 1 : state === 'SPEAKING' ? 4 : state === 'THINKING' ? 2 : 0;
+  const responding = state === 'SPEAKING' || state === 'THINKING';
   const bob = reducedMotion ? 0 : Math.sin(phase * 1.25) * (state === 'LISTENING' ? 2 + energy * 5 : 3);
   return <View testID="voice-tetrahedron-renderer" style={[styles.root, { width: size, height: size, transform: [{ translateY: bob }] }]}>
     <Svg testID="voice-active-mark" width={size} height={size} viewBox={`0 0 ${size} ${size}`} accessibilityLabel={`Three dimensional Magistrate tetrahedron. ${state.toLowerCase()}.`}>
-      <Defs>
-        <LinearGradient id="voiceSpectralFace" x1="0%" y1="0%" x2="100%" y2="100%">
-          <Stop offset="0%" stopColor="#8B6CFF" /><Stop offset="48%" stopColor="#24D8FF" /><Stop offset="100%" stopColor="#54FF87" />
-        </LinearGradient>
-      </Defs>
-      {Array.from({ length: rippleCount }, (_, index) => {
-        const progress = reducedMotion ? 0.5 : (phase * 0.32 + index / Math.max(1, rippleCount)) % 1;
-        return <Circle key={index} testID={`voice-spectral-ripple-${index}`} cx={size / 2} cy={size / 2} r={size * (0.25 + progress * 0.22)} fill="none" stroke={palette[index % palette.length]} strokeWidth={0.7} opacity={(1 - progress) * (state === 'THINKING' ? 0.16 : 0.3)} />;
-      })}
       {faces.map(face => <Polygon key={face.index} testID={`voice-tetrahedron-face-${face.index}`} points={face.points}
-        fill={spectral ? 'url(#voiceSpectralFace)' : '#F7F8FA'} fillOpacity={spectral ? 0.025 + face.light * 0.09 : 0.018 + face.light * 0.055}
-        stroke={spectral ? palette[face.index] : '#D7DCE4'} strokeOpacity={spectral ? (state === 'THINKING' ? 0.48 : 0.78) : 0.38 + face.light * 0.42}
+        fill="#F7F8FA" fillOpacity={0.018 + face.light * 0.055}
+        stroke="#D7DCE4" strokeOpacity={responding ? (state === 'THINKING' ? 0.48 : 0.78) : 0.38 + face.light * 0.42}
         strokeWidth={state === 'LISTENING' ? 1.25 + energy * 1.1 : 1.25} strokeLinejoin="round" />)}
     </Svg>
   </View>;

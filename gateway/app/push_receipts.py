@@ -50,7 +50,7 @@ class PushDeliveryStore:
         connection.row_factory = sqlite3.Row
         return connection
 
-    def claim_send(self, user: str, item: str, fingerprint: str, token: str) -> dict | None:
+    def claim_send(self, user: str, item: str, fingerprint: str, token: str, *, owner_test: bool = False) -> dict | None:
         now = int(time.time())
         token_hash = token_digest(token)
         identity = hashlib.sha256(f"push-v1\0{user}\0{item}\0{fingerprint}\0{token_hash}".encode()).hexdigest()
@@ -58,6 +58,9 @@ class PushDeliveryStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM notification_push_deliveries WHERE delivery_id=?", (identity,)).fetchone()
             if row:
+                if row['state'] in {'sending', 'retry'} and row['expires_at'] <= now:
+                    connection.execute("UPDATE notification_push_deliveries SET state='expired',error_code='send_expired',updated_at=? WHERE delivery_id=?", (now, identity))
+                    return None
                 if row['state'] not in {'sending', 'retry'} or row['next_attempt_at'] > now:
                     return None
                 if row['send_attempts'] >= MAX_SENDS:
@@ -67,6 +70,12 @@ class PushDeliveryStore:
                     SET state='sending',send_attempts=send_attempts+1,next_attempt_at=?,updated_at=?
                     WHERE delivery_id=?""", (now + 120, now, identity))
             else:
+                # Owner-triggered tests cannot bypass idempotency or flood a
+                # device. The database transaction serializes across instances.
+                if owner_test and connection.execute("""SELECT 1 FROM notification_push_deliveries
+                    WHERE user_id=? AND item_id LIKE 'owner-test-%' AND created_at>? LIMIT 1""",
+                    (user, now - 60)).fetchone():
+                    return None
                 connection.execute("""INSERT INTO notification_push_deliveries
                     (delivery_id,user_id,item_id,fingerprint,token_sha256,state,next_attempt_at,expires_at,created_at,updated_at)
                     VALUES (?,?,?,?,?,'sending',?,?,?,?)""",
@@ -124,6 +133,23 @@ class PushDeliveryStore:
                 connection.execute("""UPDATE notification_state SET delivered=1
                     WHERE user_id=? AND item_id=? AND fingerprint=? AND active=1""",
                     (delivery['user_id'], delivery['item_id'], delivery['fingerprint']))
+
+    def evidence_summary(self, user: str) -> dict:
+        """Provider handoff is not device receipt, visibility, or authorization.
+
+        Keep legacy DB state names compatible; expose unambiguous public copy.
+        No device-delivery observations are collected by this store.
+        """
+        states = self.summary(user)
+        return {
+            'queued': states.get('sending', 0) + states.get('retry', 0),
+            'provider_accepted': states.get('pending', 0),
+            'provider_handoff': states.get('delivered', 0),
+            'failed': states.get('failed', 0),
+            'expired': states.get('expired', 0),
+            'observed_phone_delivery': 'unknown',
+            'owner_saw_notification': 'unknown',
+        }
 
     def summary(self, user: str) -> dict[str, int]:
         with self._connect() as connection:

@@ -3,7 +3,11 @@ import Foundation
 
 @available(iOS 18.0, *)
 private enum MagistrateIntentDestination {
-  static let voice = URL(string: "magistrate:/voice?autostart=true")!
+  // One invocation identity survives duplicate OS URL callbacks, while a later
+  // Action Button press remains a new entry (never an execution authorization).
+  static var voice: URL {
+    URL(string: "magistrate:/voice?autostart=true&entry=\(UUID().uuidString)")!
+  }
   static let running = URL(string: "magistrate:/chat?shortcut=running")!
   static let attention = URL(string: "magistrate:/attention?overview=true")!
 }
@@ -25,54 +29,54 @@ extension MagistrateOpeningIntent {
 
 @available(iOS 18.0, *)
 struct StartMagistrateIntent: MagistrateOpeningIntent {
-  static var title: LocalizedStringResource = "Start Magistrate"
-  static var description = IntentDescription("Open Magistrate to continue your Magi conversation.")
-  static let destination = MagistrateIntentDestination.voice
+  static var title: LocalizedStringResource = "Open Voice"
+  static var description = IntentDescription("Open foreground voice input for your conversation.")
+  static var destination: URL { MagistrateIntentDestination.voice }
 }
 
 @available(iOS 18.0, *)
 struct TalkToMagistrateIntent: MagistrateOpeningIntent {
-  static var title: LocalizedStringResource = "Talk to Magistrate"
-  static var description = IntentDescription("Open foreground Voice Mode and start listening.")
-  static let destination = MagistrateIntentDestination.voice
+  static var title: LocalizedStringResource = "Talk"
+  static var description = IntentDescription("Open foreground voice input after session restoration and microphone consent.")
+  static var destination: URL { MagistrateIntentDestination.voice }
 }
 
 @available(iOS 18.0, *)
 struct AskMagistrateIntent: MagistrateOpeningIntent {
-  static var title: LocalizedStringResource = "Ask Magistrate"
-  static var description = IntentDescription("Open foreground Voice Mode to ask Magi.")
-  static let destination = MagistrateIntentDestination.voice
+  static var title: LocalizedStringResource = "Ask"
+  static var description = IntentDescription("Open foreground voice input to ask a question.")
+  static var destination: URL { MagistrateIntentDestination.voice }
 }
 
 @available(iOS 18.0, *)
 struct WhatsRunningIntent: MagistrateOpeningIntent {
-  static var title: LocalizedStringResource = "What's running?"
-  static var description = IntentDescription("Ask Magi for the current structured work summary.")
+  static var title: LocalizedStringResource = "Work status"
+  static var description = IntentDescription("Open the current structured work summary.")
   static let destination = MagistrateIntentDestination.running
 }
 
 @available(iOS 18.0, *)
 struct WhatNeedsAttentionIntent: MagistrateOpeningIntent {
-  static var title: LocalizedStringResource = "What needs attention?"
-  static var description = IntentDescription("Open the current Magistrate Attention overview.")
+  static var title: LocalizedStringResource = "Attention"
+  static var description = IntentDescription("Open current items that need your attention.")
   static let destination = MagistrateIntentDestination.attention
 }
 
 @available(iOS 18.0, *)
 struct MagistrateVoiceIntent: MagistrateOpeningIntent {
-  static var title: LocalizedStringResource = "Magistrate Voice"
-  static var description = IntentDescription("Start Magistrate Voice from the Action Button or Shortcuts.")
-  static let destination = MagistrateIntentDestination.voice
+  static var title: LocalizedStringResource = "Start Voice"
+  static var description = IntentDescription("Open voice input in the foreground. Listening requires a restored session and microphone consent.")
+  static var destination: URL { MagistrateIntentDestination.voice }
 }
 
 @available(iOS 18.0, *)
 struct MagistrateAppShortcuts: AppShortcutsProvider {
   static var appShortcuts: [AppShortcut] {
-    AppShortcut(intent: StartMagistrateIntent(), phrases: ["Start \(.applicationName)"], shortTitle: "Start", systemImageName: "triangle")
+    AppShortcut(intent: StartMagistrateIntent(), phrases: ["Start \(.applicationName)"], shortTitle: "Open Voice", systemImageName: "triangle")
     AppShortcut(intent: TalkToMagistrateIntent(), phrases: ["Talk to \(.applicationName)"], shortTitle: "Talk", systemImageName: "waveform")
     AppShortcut(intent: AskMagistrateIntent(), phrases: ["Ask \(.applicationName)"], shortTitle: "Ask", systemImageName: "mic")
-    AppShortcut(intent: WhatsRunningIntent(), phrases: ["What's running in \(.applicationName)"], shortTitle: "What's running?", systemImageName: "bolt.horizontal")
-    AppShortcut(intent: WhatNeedsAttentionIntent(), phrases: ["What needs attention in \(.applicationName)"], shortTitle: "Needs attention", systemImageName: "exclamationmark.circle")
-    AppShortcut(intent: MagistrateVoiceIntent(), phrases: ["Open \(.applicationName) Voice"], shortTitle: "Magistrate Voice", systemImageName: "action")
+    AppShortcut(intent: WhatsRunningIntent(), phrases: ["What's running in \(.applicationName)"], shortTitle: "Work status", systemImageName: "bolt.horizontal")
+    AppShortcut(intent: WhatNeedsAttentionIntent(), phrases: ["What needs attention in \(.applicationName)"], shortTitle: "Attention", systemImageName: "exclamationmark.circle")
+    AppShortcut(intent: MagistrateVoiceIntent(), phrases: ["Start Voice in \(.applicationName)", "Open \(.applicationName) Voice"], shortTitle: "Start Voice", systemImageName: "mic")
   }
 }

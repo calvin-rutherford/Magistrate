@@ -2,19 +2,24 @@
 
 The Gateway is the source of truth for Captain Attention transitions. It
 reconciles an item fingerprint (`kind`, revision, copy, status, and deep link)
-and sends at most one Expo push for each active fingerprint. Sparse supported
-kinds cover decisions, completion/failure, budget/credit, repository disconnect,
-and payment issues (plus existing review/stall milestones). Visible push copy is
+and tracks one durable delivery per active fingerprint/token, with at most three
+network send attempts. An ambiguous network failure can duplicate a provider
+push, but never grants duplicate execution authority. Sparse supported kinds
+cover decisions, completion, actionable failure/stall, review-ready results,
+budget/credit, repository disconnect, and payment issues; ordinary milestones
+are not sent. Visible push copy is
 fixed product language: task, repository, provider, host, path, and billing
 identifiers never appear on the lock screen. App-owned payload targets retain
 only the opaque key needed to open the authenticated Attention/Magi destination. Provider errors
 retry with bounded backoff; invalid device tokens are revoked. Quiet hours
 defer a transition rather than acknowledging it, so it is eligible after the
-quiet window. A successful remote send marks delivery, but not viewing: the
-app keeps the item unread until its detailed Attention/PR view is opened and
-acknowledged.
+quiet window. An Expo ticket records provider acceptance; an Expo receipt records
+provider handoff to APNs/FCM, **not observed phone arrival or viewing**. The app
+keeps actionable items unread until the authenticated destination is opened and
+acknowledged. The legacy DB `delivered` field must not be presented as evidence
+that a phone displayed the notification.
 
-Native beta builds obtain a real `ExponentPushToken[...]` from
+Native beta builds obtain a real `ExponentPushToken[...]` / `ExpoPushToken[...]` from
 `expo-notifications` after an explicit owner action in Account, register it over
 the authenticated Gateway session, and receive push data containing an
 app-owned deep link (`/attention`, `/chat`, or `/pr-detail`). The payload also
@@ -39,12 +44,20 @@ credentials; Expo Go and simulators cannot validate production delivery.
 Settings persist `restricted` (restricted / ask-first), `moderate`, or `full`.
 They select notification policy only: restricted surfaces decisions/blockers
 and account/repository issues, moderate also includes review-ready PRs,
-meaningful milestones, and sparse outcomes, and full suppresses routine review
+and sparse outcomes, and full suppresses routine review
 progress while retaining stalls, failures, completions, consequential
 decisions, and account/repository issues. These modes do **not** grant
 merge, destructive, irreversible, security-sensitive, or external-public
 authority. Existing Firstmate policy, command scopes, and Captain confirmation
 rules remain the authority for every operation.
+
+## Native loop integration
+
+See [native loop evidence](native-loop-evidence.md) for the exact
+`magistrate.decision-notification.v1` producer/consumer seam, owner-triggered
+neutral test endpoint (requires integration mounting), token rotation handling,
+and explicit streaming/native/device blockers. A tap is navigation only and is
+not an approval, even if a notification action identifier says `approve`.
 
 ## Keyed Attention decisions (MVP boundary)
 
