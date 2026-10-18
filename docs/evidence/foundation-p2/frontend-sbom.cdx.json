@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:045ff9aa-6fd6-433a-80c9-07b957b8c731",
+  "serialNumber": "urn:uuid:8a3292bc-45d0-44b6-8eed-84f7e72bf56a",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-18T22:19:11.024Z",
+    "timestamp": "2026-10-18T22:43:30.494Z",
     "lifecycles": [
       {
         "phase": "build"
@@ -4356,11 +4356,11 @@
         },
         {
           "name": "magistrate:artifact-sha256",
-          "value": "7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558"
+          "value": "380bb61b623eff55d94420bcd831394664aaeebf7e1e3577e8679127de54f656"
         },
         {
           "name": "magistrate:patch-sha256",
-          "value": "60951eee7143ef8828d2a1cbbdbb4f187068935330c3083d0f68d8d6f14c61e3"
+          "value": "d03365f877ac9c4b2a58460ed05a9a07f7f35a27348a0a107623bbe2a98462bf"
         },
         {
           "name": "magistrate:source-manifest",
@@ -4370,7 +4370,7 @@
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "file:security/artifacts/7dbf2d229de75d030475630fb17daab7dacca18812c0e677a827c9c72af03558.tgz"
+          "url": "file:security/artifacts/380bb61b623eff55d94420bcd831394664aaeebf7e1e3577e8679127de54f656.tgz"
         },
         {
           "type": "vcs",
@@ -4388,7 +4388,7 @@
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2b29b67193ea081a512802eb7af6e5cef7ce0ff5a48e523b959fe3d4930a860411005e490379611ab665f144024679463bed7dfca5927d948000b97fd622c67e"
+          "content": "6bc0dda229833a27a08ef60832b5b7287466e286e7f59f0d7b9ebf7bfa8dfd8962b3b1889b12a34a9a2ac1c2ae81c3feaa5b2f61e76102611dad5dc349a18dbd"
         }
       ],
       "licenses": [
@@ -45627,6 +45627,7 @@
       "ref": "@expo/code-signing-certificates@0.0.6",
       "dependsOn": [
         "@peculiar/x509@2.2.0",
+        "asn1js@3.1.0",
         "reflect-metadata@0.2.2"
       ]
     },

@@ -6,166 +6,172 @@ TAP version 13
 # Subtest: metro-file-map@0.84.4: suffix semantics and no removed edge
 ok 1 - metro-file-map@0.84.4: suffix semantics and no removed edge
   ---
-  duration_ms: 1.364364
+  duration_ms: 1.446517
   type: 'test'
   ...
 # Subtest: metro-file-map@0.84.4: real fallback watcher add/change/delete and native event filtering
 ok 2 - metro-file-map@0.84.4: real fallback watcher add/change/delete and native event filtering
   ---
-  duration_ms: 1233.035872
+  duration_ms: 1236.111235
   type: 'test'
   ...
 # Subtest: metro-file-map@0.84.4: Watchman subscribe and structured event compatibility
 ok 3 - metro-file-map@0.84.4: Watchman subscribe and structured event compatibility
   ---
-  duration_ms: 3.833039
+  duration_ms: 3.485367
   type: 'test'
   ...
 # Subtest: metro-file-map@0.84.5: suffix semantics and no removed edge
 ok 4 - metro-file-map@0.84.5: suffix semantics and no removed edge
   ---
-  duration_ms: 0.408214
+  duration_ms: 0.402463
   type: 'test'
   ...
 # Subtest: metro-file-map@0.84.5: real fallback watcher add/change/delete and native event filtering
 ok 5 - metro-file-map@0.84.5: real fallback watcher add/change/delete and native event filtering
   ---
-  duration_ms: 1228.472373
+  duration_ms: 1224.095418
   type: 'test'
   ...
 # Subtest: metro-file-map@0.84.5: Watchman subscribe and structured event compatibility
 ok 6 - metro-file-map@0.84.5: Watchman subscribe and structured event compatibility
   ---
-  duration_ms: 2.55995
+  duration_ms: 3.537881
   type: 'test'
   ...
 # Subtest: workspace finder retains ordered positives, exclusions, re-inclusions, only-negatives and root traversal
 ok 7 - workspace finder retains ordered positives, exclusions, re-inclusions, only-negatives and root traversal
   ---
-  duration_ms: 9.474214
+  duration_ms: 9.320783
   type: 'test'
   ...
 # Subtest: unbundled workspace resolver preserves pnpm/package priority, options and async APIs
 ok 8 - unbundled workspace resolver preserves pnpm/package priority, options and async APIs
   ---
-  duration_ms: 18.825792
+  duration_ms: 18.621023
   type: 'test'
   ...
 # Subtest: all signing/PEM APIs, UTF-8 manifest and CSR match independent OpenSSL CLI
 ok 9 - all signing/PEM APIs, UTF-8 manifest and CSR match independent OpenSSL CLI
   ---
-  duration_ms: 380.617208
+  duration_ms: 356.167217
+  type: 'test'
+  ...
+# Subtest: CSR parser consumes the whole input: reject trailing bytes after generated and OpenSSL requests
+ok 10 - CSR parser consumes the whole input: reject trailing bytes after generated and OpenSSL requests
+  ---
+  duration_ms: 124.070261
   type: 'test'
   ...
 # Subtest: certificate validation refuses wrong keys, expired/future validity, bad signature and missing usages
-ok 10 - certificate validation refuses wrong keys, expired/future validity, bad signature and missing usages
+ok 11 - certificate validation refuses wrong keys, expired/future validity, bad signature and missing usages
   ---
-  duration_ms: 142.842074
+  duration_ms: 89.020325
   type: 'test'
   ...
 # Offline and no cached development certificate found, unable to sign manifest
 # Subtest: Expo Go online CSR flow, cache continuity and offline refusal use the adapted async API
-ok 11 - Expo Go online CSR flow, cache continuity and offline refusal use the adapted async API
+ok 12 - Expo Go online CSR flow, cache continuity and offline refusal use the adapted async API
   ---
-  duration_ms: 174.809485
+  duration_ms: 277.824116
   type: 'test'
   ...
 # Subtest: iOS identity consumer preserves CN/O/OU extraction without shell or keychain access
-ok 12 - iOS identity consumer preserves CN/O/OU extraction without shell or keychain access
+ok 13 - iOS identity consumer preserves CN/O/OU extraction without shell or keychain access
   ---
-  duration_ms: 402.222068
+  duration_ms: 224.455859
   type: 'test'
   ...
 # Subtest: install guard fails closed on drift, extra bytes, reintroduced edges and stale bundled copies
-ok 13 - install guard fails closed on drift, extra bytes, reintroduced edges and stale bundled copies
+ok 14 - install guard fails closed on drift, extra bytes, reintroduced edges and stale bundled copies
   ---
-  duration_ms: 607.227722
+  duration_ms: 642.807345
   type: 'test'
   ...
 # Subtest: patch-package remains mandatory and exits nonzero for a stale compatibility patch
-ok 14 - patch-package remains mandatory and exits nonzero for a stale compatibility patch
+ok 15 - patch-package remains mandatory and exits nonzero for a stale compatibility patch
   ---
-  duration_ms: 103.088171
+  duration_ms: 103.286388
   type: 'test'
   ...
 # Subtest: patched Metro handles buffer and filesystem assets on web/iOS/Android
-ok 15 - patched Metro handles buffer and filesystem assets on web/iOS/Android
+ok 16 - patched Metro handles buffer and filesystem assets on web/iOS/Android
   ---
-  duration_ms: 17.804481
+  duration_ms: 17.281472
   type: 'test'
   ...
 # Subtest: Expo file-map removes only its micromatch edge and preserves filename matching
-ok 16 - Expo file-map removes only its micromatch edge and preserves filename matching
+ok 17 - Expo file-map removes only its micromatch edge and preserves filename matching
   ---
-  duration_ms: 2.65
+  duration_ms: 2.839029
   type: 'test'
   ...
 # Subtest: Expo fallback watcher observes real add/change/delete for matched filenames
-ok 17 - Expo fallback watcher observes real add/change/delete for matched filenames
+ok 18 - Expo fallback watcher observes real add/change/delete for matched filenames
   ---
-  duration_ms: 1524.530827
+  duration_ms: 1529.494121
   type: 'test'
   ...
 # Subtest: Expo Router query parser retains Unicode, duplicate and malformed-link behavior
-ok 18 - Expo Router query parser retains Unicode, duplicate and malformed-link behavior
+ok 19 - Expo Router query parser retains Unicode, duplicate and malformed-link behavior
   ---
-  duration_ms: 5.538563
+  duration_ms: 5.394048
   type: 'test'
   ...
 # Subtest: hostile deep links and image headers terminate in bounded subprocesses
-ok 19 - hostile deep links and image headers terminate in bounded subprocesses
+ok 20 - hostile deep links and image headers terminate in bounded subprocesses
   ---
-  duration_ms: 149.549337
+  duration_ms: 149.766432
   type: 'test'
   ...
 # Subtest: shell quoting rejects line terminators after comment tokens
-ok 20 - shell quoting rejects line terminators after comment tokens
+ok 21 - shell quoting rejects line terminators after comment tokens
   ---
-  duration_ms: 3.855235
+  duration_ms: 3.922513
   type: 'test'
   ...
 # Subtest: indexed source maps reject excessive offsets in a bounded subprocess
-ok 21 - indexed source maps reject excessive offsets in a bounded subprocess
+ok 22 - indexed source maps reject excessive offsets in a bounded subprocess
   ---
-  duration_ms: 34.510175
+  duration_ms: 33.790412
   type: 'test'
   ...
 # Subtest: the patched Xcode UUID dependency preserves its CommonJS v4-only interface
-ok 22 - the patched Xcode UUID dependency preserves its CommonJS v4-only interface
+ok 23 - the patched Xcode UUID dependency preserves its CommonJS v4-only interface
   ---
-  duration_ms: 37.462958
+  duration_ms: 37.896358
   type: 'test'
   ...
 # Subtest: the committed preview configuration passes repository-side Friend Beta preflight
-ok 23 - the committed preview configuration passes repository-side Friend Beta preflight
+ok 24 - the committed preview configuration passes repository-side Friend Beta preflight
   ---
-  duration_ms: 1.138157
+  duration_ms: 1.146227
   type: 'test'
   ...
 # Subtest: preflight rejects unsafe device endpoints and secret-shaped public variables
-ok 24 - preflight rejects unsafe device endpoints and secret-shaped public variables
+ok 25 - preflight rejects unsafe device endpoints and secret-shaped public variables
   ---
-  duration_ms: 0.448882
+  duration_ms: 0.458658
   type: 'test'
   ...
 # Subtest: preflight rejects duplicate or unsupported iOS background declarations
-ok 25 - preflight rejects duplicate or unsupported iOS background declarations
+ok 26 - preflight rejects duplicate or unsupported iOS background declarations
   ---
-  duration_ms: 0.285007
+  duration_ms: 0.276898
   type: 'test'
   ...
 # Subtest: production remains fail-closed until a real App Store Connect record is linked
-ok 26 - production remains fail-closed until a real App Store Connect record is linked
+ok 27 - production remains fail-closed until a real App Store Connect record is linked
   ---
-  duration_ms: 0.733265
+  duration_ms: 0.736517
   type: 'test'
   ...
-1..26
-# tests 26
+1..27
+# tests 27
 # suites 0
-# pass 26
+# pass 27
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 6183.379944
+# duration_ms 6188.677971

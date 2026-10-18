@@ -1,6 +1,6 @@
 {
   "clean": true,
-  "finished_at": "2026-10-18T22:25:23.567183Z",
+  "finished_at": "2026-10-18T22:49:41.642341Z",
   "registry_sha256": "4d71fe9ddc27aa8e1c521e7106c1c49882207b5129a4f425bc10dfb6bb84ca35",
   "results": [
     {
@@ -10,7 +10,7 @@
       "status": "COMPLETE"
     }
   ],
-  "revision": "3006e28a29a6950425ba21117960ec4e373640e7",
+  "revision": "32119f0ffd5c69395b09f8b866c167fc74679037",
   "schema_version": "magistrate.hermetic-receipt.v1",
-  "started_at": "2026-10-18T22:25:23.352554Z"
+  "started_at": "2026-10-18T22:49:41.477785Z"
 }

@@ -86,8 +86,9 @@
     "postgres-hermetic-receipt.json"
   ],
   "implementation_hashes": "implementation-hashes.json",
-  "observed_at": "2026-10-18T22:25:56.791055+00:00",
-  "qualification_source_commit": "3006e28a29a6950425ba21117960ec4e373640e7",
+  "independent_review_correction": "csr-whole-input-review.json",
+  "observed_at": "2026-10-18T22:51:14.676352+00:00",
+  "qualification_source_commit": "32119f0ffd5c69395b09f8b866c167fc74679037",
   "reports": {
     "artifact-reproduction.log": {
       "bytes": 1746,
@@ -95,23 +96,35 @@
     },
     "build-environment.json": {
       "bytes": 1063,
-      "sha256": "87f4280d6cacde6d1aefac1aaece116c50cd1a161bbd04a46a6171afad26e6a2"
+      "sha256": "dedf14bde1fafc36118993e108889dbe5e915fa247bb471d3afaef82a52b9197"
     },
     "compose-audit.json": {
       "bytes": 4006,
       "sha256": "78a792abe227d20e171fbcfcf843dbc1f766b861a4b82587022610c997426b78"
     },
     "consumer-compatibility.tap": {
-      "bytes": 6277,
-      "sha256": "813e23df203aa1f214dfb09448663e104dca760045d3e27c1efd0e97fe5d36cb"
+      "bytes": 6545,
+      "sha256": "2a831645b24d38efc37925159f0c71b45ca61396ea71ceea391a90dfd9e53e86"
     },
     "controls.log": {
-      "bytes": 290,
-      "sha256": "10bbe1a72baad8c3da1086e3f4aeffa0d33fc06acceb1bab32c94448f46a2974"
+      "bytes": 503,
+      "sha256": "ef6f281b04b88ca50dfa7f52bbd6bf3bd907bd950e4d3e2f9861ee5030722196"
+    },
+    "csr-targeted-compatibility.tap": {
+      "bytes": 1440,
+      "sha256": "2e8297b6b6005b189b13ca6db8a9cb4ca1a182228d5792f518203b1b5601cd01"
+    },
+    "csr-whole-input-before.json": {
+      "bytes": 722,
+      "sha256": "220ddcc2cff5d9ed97ad0b25338cf3db5f435f847fad6f00ff7b3302a83e35bf"
+    },
+    "csr-whole-input-review.json": {
+      "bytes": 2067,
+      "sha256": "7a842447692022d71c9de2bfa7b5266ea6d37f7420ea06c53e45859f91356ce7"
     },
     "foundation-hermetic-receipt.json": {
       "bytes": 453,
-      "sha256": "b04b7aa0e23e8fd53893f13310df21ec0c27a5a22130d5edbf9ec38bd6354156"
+      "sha256": "7acb39909e33d1ddaa438e581674ffa6d39823646e558c8c77fe883623886e7c"
     },
     "frontend-audit-before.json": {
       "bytes": 11064,
@@ -122,16 +135,16 @@
       "sha256": "0827e7b4bf92e17cc0ce403f14d0bf07ec9af39973de2040c2a87475ea320a9b"
     },
     "frontend-sbom.cdx.json": {
-      "bytes": 1437166,
-      "sha256": "501d7a3127b8ab59de15c56bfd2dc11f73e576f4bac1f11f27bd3c7e927d3b3c"
+      "bytes": 1437190,
+      "sha256": "547666d39dc884b48b559aa079c6d0fe01c91e954f9b8abd0a4a2aadf85e0731"
     },
     "gateway-audit.json": {
       "bytes": 1757,
       "sha256": "951f07c751427bc80b4d6b1c40c6d8a0f9ac758acd29a001594ede45eb1d44a5"
     },
     "implementation-hashes.json": {
-      "bytes": 5841,
-      "sha256": "d3715c5b8cbaebb64d9adcb857db5720e79a35b634c3e031dfbbe8f7e9477b09"
+      "bytes": 5955,
+      "sha256": "bb91f368e3be631d1d7f61286f432e678d253a20a29163def41fad2f3d78a2b4"
     },
     "npm-explain-before-summary.json": {
       "bytes": 3698,
@@ -139,11 +152,11 @@
     },
     "postgres-hermetic-receipt.json": {
       "bytes": 455,
-      "sha256": "5e9e554f2cbd8e6d413779154ef0c301a63b52b180183db9da84f3fcbddd7350"
+      "sha256": "90865b58e41946e939f2a16068b4524e2421d0a88daef94ac730edaa1662d693"
     },
     "qualification.json": {
-      "bytes": 6744,
-      "sha256": "a077f03d7c1e66d865a24085174c35f6f810a934c3ceecf18895cbb3a9d76cf1"
+      "bytes": 7223,
+      "sha256": "3739594bcf88db09d05dd2e912c88771642ab9e72d15b57a7226df35d667f834"
     },
     "removed-explain.json": {
       "bytes": 118,

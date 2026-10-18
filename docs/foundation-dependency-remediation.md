@@ -206,8 +206,8 @@ Executed local qualification (the index pins the tested implementation hashes):
 |---|---|
 | Fresh installed frontend / retained adapter `npm audit --audit-level=low --json` | Each exit 0, all severity buckets 0 |
 | Gateway / retained backend / Compose installed `pip-audit==2.10.1` | Each exit 0, zero known vulnerabilities; only Gateway's editable project source is outside the package advisory database, as in the unchanged CI command |
-| `npm test` | 185 passed, no failed/skipped tests, browser suites included |
-| `npm run test:release` | 26 passed, including all modified consumers and install/patch negative tests |
+| `npm test` | 186 passed, no failed/skipped tests, browser suites included |
+| `npm run test:release` | 27 passed, including all modified consumers, whole-input CSR rejection and install/patch negative tests |
 | `npm run typegen`, `npm run typecheck`, `npm run lint` | Passed; lint has 15 existing warnings, 0 errors |
 | `npx expo export --platform web` | Passed, 20 static routes |
 | Gateway `PYTHONPATH=. uv run pytest -v` | 636 passed, none skipped; isolated installed/verified producer fixture selected |
@@ -231,6 +231,11 @@ overwrite refusal was preserved; reruns use new output paths.
 
 Exact JSON reports and command results are indexed in
 [`evidence/foundation-p2/summary.json`](evidence/foundation-p2/summary.json).
+The final clean-source qualification and new immutable receipts bind corrected
+implementation `32119f0ffd5c69395b09f8b866c167fc74679037`; all 27 command exits
+are zero, with five fresh independent audit reports. The CSR review's before/after
+controls are recorded in `csr-whole-input-review.json`; earlier green receipts do
+not substitute for this correction's evidence.
 Clean advisory results are point-in-time database evidence, not proof that code
 is secure. Separate security artifact review and deployed/native acceptance are
 still required. No unresolved owner policy decision is being waived here.
