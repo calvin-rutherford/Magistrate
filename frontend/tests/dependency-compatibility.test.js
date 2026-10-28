@@ -3,6 +3,65 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const crypto = require('node:crypto');
+
+test('Forge rejects an extra DigestAlgorithm child and preserves valid RSA and CSR signatures', () => {
+  const forge = require('node-forge');
+  const pair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, publicExponent: 3 });
+  const message = Buffer.from('Synthetic signature validation control');
+  const digest = crypto.createHash('sha256').update(message).digest();
+  const publicKey = forge.pki.publicKeyFromPem(pair.publicKey.export({ format: 'pem', type: 'spki' }));
+  const signature = crypto.sign('sha256', message, pair.privateKey);
+  assert.equal(publicKey.verify(digest.toString('binary'), signature.toString('binary')), true);
+  assert.equal(publicKey.verify(crypto.randomBytes(32).toString('binary'), signature.toString('binary')), false);
+
+  // Validly padded RSA block with a second NULL in DigestAlgorithm. Forge 1.4.0
+  // accepted it; Node/OpenSSL rejects it. No operator keys or signing services.
+  const info = Buffer.concat([Buffer.from('3033300f0609608648016503040201050005000420', 'hex'), digest]);
+  const block = Buffer.concat([Buffer.from([0, 1]), Buffer.alloc(256 - info.length - 3, 255), Buffer.from([0]), info]);
+  const malformed = crypto.privateEncrypt({ key: pair.privateKey, padding: crypto.constants.RSA_NO_PADDING }, block);
+  assert.equal(crypto.verify('sha256', message, pair.publicKey, malformed), false);
+  let accepted;
+  try {
+    accepted = publicKey.verify(digest.toString('binary'), malformed.toString('binary'));
+  } catch (error) {
+    assert.match(error.message, /Invalid|Digest|ASN\.1/);
+    accepted = false;
+  }
+  assert.equal(accepted, false);
+
+  const csr = forge.pki.createCertificationRequest();
+  csr.publicKey = publicKey;
+  csr.setSubject([{ name: 'commonName', value: 'Synthetic CSR control' }]);
+  csr.sign(forge.pki.privateKeyFromPem(pair.privateKey.export({ format: 'pem', type: 'pkcs1' })), forge.md.sha256.create());
+  const der = Buffer.from(forge.asn1.toDer(forge.pki.certificationRequestToAsn1(csr)).getBytes(), 'binary');
+  const pem = bytes => `-----BEGIN CERTIFICATE REQUEST-----\n${bytes.toString('base64').match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE REQUEST-----\n`;
+  assert.equal(forge.pki.certificationRequestFromPem(pem(der)).verify(), true);
+  for (const suffix of ['00', '0500', '3000']) {
+    assert.throws(() => forge.pki.certificationRequestFromPem(pem(Buffer.concat([der, Buffer.from(suffix, 'hex')]))), /Unparsed DER bytes remain/);
+  }
+});
+
+test('Expo certificate, manifest signing and CSR consumers remain compatible with Forge', () => {
+  const signing = require('@expo/code-signing-certificates');
+  const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const keyPair = signing.convertKeyPairPEMToKeyPair({
+    privateKeyPEM: keys.privateKey.export({ format: 'pem', type: 'pkcs1' }),
+    publicKeyPEM: keys.publicKey.export({ format: 'pem', type: 'spki' }),
+  });
+  const certificate = signing.generateSelfSignedCodeSigningCertificate({
+    keyPair, validityNotBefore: new Date(Date.now() - 60000),
+    validityNotAfter: new Date(Date.now() + 60000), commonName: 'Synthetic Expo signing control',
+  });
+  signing.validateSelfSignedCertificate(certificate, keyPair);
+  const parsed = signing.convertCertificatePEMToCertificate(signing.convertCertificateToCertificatePEM(certificate));
+  const manifest = Buffer.from('{"synthetic":"café 東京"}');
+  const signature = Buffer.from(signing.signBufferRSASHA256AndVerify(keyPair.privateKey, parsed, manifest), 'base64');
+  assert.equal(crypto.verify('sha256', manifest, keys.publicKey, signature), true);
+  assert.equal(crypto.verify('sha256', Buffer.from('altered manifest'), keys.publicKey, signature), false);
+  const csr = signing.generateCSR(keyPair, 'Synthetic Expo CSR control');
+  assert.equal(signing.convertCSRPEMToCSR(signing.convertCSRToCSRPEM(csr)).verify(), true);
+});
 
 // Expo SDK 57 keeps RN 0.86 / Metro 0.84.4. Narrow call-site patches bridge
 // patched dependencies without downgrading Expo or forking either parser.

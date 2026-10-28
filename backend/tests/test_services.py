@@ -1,3 +1,6 @@
+import threading
+from unittest.mock import Mock
+
 import pytest
 from agents.models import (
     UserPresident, CivilServantAgent, Agency, Branch, Department, Law, Court
@@ -36,7 +39,11 @@ def test_judicial_issue_ruling(base_government):
     assert ruling.creates_precedent is True
 
 @pytest.mark.django_db
-def test_executive_launch_fleet(base_government):
+def test_executive_launch_fleet(base_government, monkeypatch):
+    # This compatibility suite must never invoke the retained lab's external
+    # model/Firstmate orchestrator. Assert scheduling, but do not start a worker.
+    thread = Mock()
+    monkeypatch.setattr(threading, 'Thread', thread)
     president, agency, agent = base_government
     ExecutiveService.issue_executive_order(president, "Rebuild Omnigent to Magistrate")
     
@@ -45,3 +52,6 @@ def test_executive_launch_fleet(base_government):
     assert fleet.ships.count() == 1
     assert fleet.ships.first().captain == agent
     assert fleet.ships.first().missions.first().status == 'Planning'
+    thread.assert_called_once()
+    assert thread.call_args.kwargs['daemon'] is True
+    thread.return_value.start.assert_called_once_with()

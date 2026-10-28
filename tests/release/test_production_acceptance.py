@@ -91,6 +91,7 @@ class ReleaseGateTests(unittest.TestCase):
                 "dependency-advisory-reports": [
                     ".release/frontend-audit.json", ".release/pi-audit.json",
                     ".release/gateway-audit.json", ".release/backend-audit.json",
+                    ".release/compose-audit.json",
                 ],
             },
             "gateway.yml": {
