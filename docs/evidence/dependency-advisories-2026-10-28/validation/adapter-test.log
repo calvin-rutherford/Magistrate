@@ -1,0 +1,74 @@
+
+> @magistrate/pi-ownership-adapter@1.0.0 test
+> sh -c 'trap "rm -rf .test-dist" EXIT; tsc --noEmit false --outDir .test-dist && node --test tests/*.test.mjs'
+
+TAP version 13
+# Subtest: adapter external Undici rejects incorrect integrity with uppercase algorithm tokens
+ok 1 - adapter external Undici rejects incorrect integrity with uppercase algorithm tokens
+  ---
+  duration_ms: 103.875844
+  type: 'test'
+  ...
+# Subtest: agent external Undici rejects incorrect integrity with uppercase algorithm tokens
+ok 2 - agent external Undici rejects incorrect integrity with uppercase algorithm tokens
+  ---
+  duration_ms: 87.255352
+  type: 'test'
+  ...
+# Subtest: canonical hashes match the language-neutral ownership vector
+ok 3 - canonical hashes match the language-neutral ownership vector
+  ---
+  duration_ms: 6.067559
+  type: 'test'
+  ...
+# Subtest: unset feature flag activates the adapter and false literals disable it
+ok 4 - unset feature flag activates the adapter and false literals disable it
+  ---
+  duration_ms: 7.793101
+  type: 'test'
+  ...
+# Subtest: native Pi dispatch binds exact entries, redacts internals, and recovers from encrypted journal
+ok 5 - native Pi dispatch binds exact entries, redacts internals, and recovers from encrypted journal
+  ---
+  duration_ms: 38.386881
+  type: 'test'
+  ...
+# Subtest: status recovery finalizes a persisted assistant after a lost turn_end boundary
+ok 6 - status recovery finalizes a persisted assistant after a lost turn_end boundary
+  ---
+  duration_ms: 20.70321
+  type: 'test'
+  ...
+# Subtest: a matching non-native Pi input cannot bind the prepared ownership
+ok 7 - a matching non-native Pi input cannot bind the prepared ownership
+  ---
+  duration_ms: 17.789541
+  type: 'test'
+  ...
+# Subtest: unknown feature flag values fail closed before extension activation
+ok 8 - unknown feature flag values fail closed before extension activation
+  ---
+  duration_ms: 0.43153
+  type: 'test'
+  ...
+# Subtest: extension rejects malformed runtime, endpoint boundary, UID, and journal metadata
+ok 9 - extension rejects malformed runtime, endpoint boundary, UID, and journal metadata
+  ---
+  duration_ms: 3.333993
+  type: 'test'
+  ...
+# Subtest: restart status closes an abnormal persisted assistant without exposing its text
+ok 10 - restart status closes an abnormal persisted assistant without exposing its text
+  ---
+  duration_ms: 28.16166
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 245.192788

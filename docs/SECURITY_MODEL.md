@@ -2,7 +2,9 @@
 
 Authority: [production matrix](PRODUCTION_STATUS.md). Repository controls are
 implemented; current advisory remediation is **BLOCKED** on upstream dependency
-fixes (see the 2026-10-17 status below). Deployed isolation, legal/security review
+fixes (see the [2026-10-28 reconciliation](dependency-advisories-2026-10-28.md),
+including the embedded Undici blocker; the 2026-10-17 section below is historical).
+Deployed isolation, legal/security review
 and physical-device evidence: **BLOCKED_EXTERNAL**. No compliance certification,
 penetration test or production threat-model approval is inferred from unit tests.
 

@@ -1,0 +1,35 @@
+React Compiler enabled
+Starting Metro Bundler
+
+Static rendering is enabled. Learn more: https://docs.expo.dev/router/web/static-rendering/
+λ Bundled 1542ms node_modules/expo/node_modules/@expo/cli/node_modules/@expo/router-server/node/render.js (1367 modules)
+[expo-notifications] Listening to push token changes is not yet fully supported on web. Adding a listener will have no effect.
+Web Bundled 1893ms node_modules/expo-router/entry.js (1200 modules)
+
+› web bundles (2):
+_expo/static/css/global-e3f5d89356ff0e61b3fa720033189a99.css (579B)
+_expo/static/js/web/entry-caaa7a09e6bb6085eed2f53d72f7c7cf.js (2.6MB)
+
+› Static routes (20):
+/map (20KB)
+/prs (20KB)
+/home (20KB)
+/chat (20KB)
+/voice (20KB)
+/ (index) (20KB)
+/status (20KB)
+/account (20KB)
+/_sitemap (20KB)
+/pr-detail (20KB)
+/attention (20KB)
+/+not-found (20KB)
+/(tabs)/map (20KB)
+/(tabs)/prs (20KB)
+/(tabs)/chat (20KB)
+/diagnostics (20KB)
+/(tabs) (20KB)
+/(tabs)/account (20KB)
+/(tabs)/attention (20KB)
+/(tabs)/diagnostics (20KB)
+
+Exported: dist

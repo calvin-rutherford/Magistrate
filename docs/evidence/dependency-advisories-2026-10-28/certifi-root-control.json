@@ -1,0 +1,30 @@
+{
+  "command": [
+    "GATEWAY_VENV_PYTHON",
+    "-c",
+    "import certifi,json;from cryptography import x509;from cryptography.x509.oid import NameOID;certs=x509.load_pem_x509_certificates(open(certifi.where(),'rb').read());names=[c.subject.rfc4514_string() for c in certs if 'emsign' in c.subject.rfc4514_string().lower()];print(json.dumps({'version':certifi.__version__,'certificates':len(certs),'emsign_subjects':names,'compromised_root_present':any('emSign ECC Root CA - G3' in x for x in names)}))"
+  ],
+  "results": [
+    {
+      "graph": "audit-main",
+      "version": "2026.07.22",
+      "certificates": 121,
+      "emsign_subjects": [
+        "CN=emSign Root CA - G1,O=eMudhra Technologies Limited,OU=emSign PKI,C=IN",
+        "CN=emSign ECC Root CA - G3,O=eMudhra Technologies Limited,OU=emSign PKI,C=IN",
+        "CN=emSign Root CA - C1,O=eMudhra Inc,OU=emSign PKI,C=US",
+        "CN=emSign ECC Root CA - C3,O=eMudhra Inc,OU=emSign PKI,C=US"
+      ],
+      "compromised_root_present": true
+    },
+    {
+      "graph": "tacticrew",
+      "version": "2026.10.23",
+      "certificates": 118,
+      "emsign_subjects": [
+        "CN=emSign Root CA - G1,O=eMudhra Technologies Limited,OU=emSign PKI,C=IN"
+      ],
+      "compromised_root_present": false
+    }
+  ]
+}

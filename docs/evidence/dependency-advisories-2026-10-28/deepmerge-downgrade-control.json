@@ -1,0 +1,23 @@
+{
+  "download_sha256": "d5300e15da882a5727236d9509bd7c57349f4dc72bede59ee1c9af1f9ad9fb56",
+  "registry_integrity": "sha512-9ZXh/8Fp+ggcscoRg324S1aNdGSCl2X1P8F1FPTHbtq3RAxy9ECbU2Wgy2J12r6x/O0BStDlkzcpKK/HptX+Kg==",
+  "command": [
+    "node",
+    "-e",
+    "const assert=require('node:assert/strict');const merge=require(process.argv[1]);const input=JSON.parse('{\"__proto__\":{\"inheritedMarker\":true}}');const result=merge(input,{});assert.equal(Object.hasOwn(result,'inheritedMarker'),false);assert.equal(result.inheritedMarker,true);console.log(JSON.stringify({version:process.argv[2],returnedObjectPrototypePoisoned:true,globalPrototypeUnchanged:({}).inheritedMarker===undefined}));",
+    "PACKAGE_PATH",
+    "VERSION"
+  ],
+  "controls": [
+    {
+      "version": "4.3.1",
+      "returnedObjectPrototypePoisoned": true,
+      "globalPrototypeUnchanged": true
+    },
+    {
+      "version": "4.1.2",
+      "returnedObjectPrototypePoisoned": true,
+      "globalPrototypeUnchanged": true
+    }
+  ]
+}

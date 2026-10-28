@@ -1,0 +1,32 @@
+test_argv_execution_and_dirty_worktree_are_recorded_truthfully (test_production_acceptance.ReleaseGateTests.test_argv_execution_and_dirty_worktree_are_recorded_truthfully) ... Running unit (gateway)
+COMPLETE: unit
+ok
+test_artifact_integrity_and_path_confinement (test_production_acceptance.ReleaseGateTests.test_artifact_integrity_and_path_confinement) ... ok
+test_authoritative_docs_links_and_statuses_are_valid (test_production_acceptance.ReleaseGateTests.test_authoritative_docs_links_and_statuses_are_valid) ... ok
+test_complete_synthetic_packet_is_structurally_valid (test_production_acceptance.ReleaseGateTests.test_complete_synthetic_packet_is_structurally_valid) ... ok
+test_dirty_stale_failed_duplicate_and_boolean_exit_receipts_fail (test_production_acceptance.ReleaseGateTests.test_dirty_stale_failed_duplicate_and_boolean_exit_receipts_fail) ... ok
+test_duplicate_json_keys_and_unknown_contract_fields_fail (test_production_acceptance.ReleaseGateTests.test_duplicate_json_keys_and_unknown_contract_fields_fail) ... ok
+test_failed_and_unavailable_commands_cannot_pass_or_overwrite (test_production_acceptance.ReleaseGateTests.test_failed_and_unavailable_commands_cannot_pass_or_overwrite) ... Running unit (gateway)
+FAILED: unit
+Running unit (gateway)
+FAILED: unit
+Running unit (gateway)
+FAILED: unit
+ok
+test_hermetic_or_unattested_evidence_cannot_be_physical_proof (test_production_acceptance.ReleaseGateTests.test_hermetic_or_unattested_evidence_cannot_be_physical_proof) ... ok
+test_merged_registry_has_no_unimplemented_suite_or_retired_entrypoint (test_production_acceptance.ReleaseGateTests.test_merged_registry_has_no_unimplemented_suite_or_retired_entrypoint) ... ok
+test_missing_implementation_emits_failed_receipt_without_subprocess (test_production_acceptance.ReleaseGateTests.test_missing_implementation_emits_failed_receipt_without_subprocess) ... FAILED: billing-ledger
+ok
+test_missing_suite_checkpoint_and_acceptance_fail (test_production_acceptance.ReleaseGateTests.test_missing_suite_checkpoint_and_acceptance_fail) ... ok
+test_postgres_fixture_never_inherits_deployment_authority (test_production_acceptance.ReleaseGateTests.test_postgres_fixture_never_inherits_deployment_authority) ... ok
+test_registry_rejects_removed_gate_and_ambiguous_gap (test_production_acceptance.ReleaseGateTests.test_registry_rejects_removed_gate_and_ambiguous_gap) ... ok
+test_registry_requires_every_domain_and_external_journey (test_production_acceptance.ReleaseGateTests.test_registry_requires_every_domain_and_external_journey) ... ok
+test_repository_gap_cannot_be_waived_by_receipt (test_production_acceptance.ReleaseGateTests.test_repository_gap_cannot_be_waived_by_receipt) ... ok
+test_spencer_and_seven_moat_checkpoints_cannot_disappear (test_production_acceptance.ReleaseGateTests.test_spencer_and_seven_moat_checkpoints_cannot_disappear) ... ok
+test_template_is_not_accepted (test_production_acceptance.ReleaseGateTests.test_template_is_not_accepted) ... ok
+test_workflow_receipt_uploads_include_only_allowlisted_hidden_artifacts (test_production_acceptance.ReleaseGateTests.test_workflow_receipt_uploads_include_only_allowlisted_hidden_artifacts) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.053s
+
+OK

@@ -1,0 +1,1333 @@
+
+> frontend@1.0.0 test
+> npm run test:release && npm run test:product-ui && npm run test:agent-status && npm run test:ambient && npm run test:theme && npm run test:chat-formatting && npm run test:native-chat && npm run test:canonical-activity && npm run test:pending-intents && npm run test:protocol && npm run test:voice && npm run test:operating-permissions && npm run test:auth && npm run test:chat && npm run test:shell && npm run test:home && npm run test:github && npm run test:notifications && npm run test:truthful
+
+
+> frontend@1.0.0 test:release
+> node --test tests/friend-beta-release-preflight.test.mjs tests/dependency-compatibility.test.js
+
+TAP version 13
+# Subtest: Forge rejects an extra DigestAlgorithm child and preserves valid RSA and CSR signatures
+ok 1 - Forge rejects an extra DigestAlgorithm child and preserves valid RSA and CSR signatures
+  ---
+  duration_ms: 216.299155
+  type: 'test'
+  ...
+# Subtest: patched Metro handles buffer and filesystem assets on web/iOS/Android
+ok 2 - patched Metro handles buffer and filesystem assets on web/iOS/Android
+  ---
+  duration_ms: 67.532945
+  type: 'test'
+  ...
+# Subtest: Expo file-map removes only its micromatch edge and preserves filename matching
+ok 3 - Expo file-map removes only its micromatch edge and preserves filename matching
+  ---
+  duration_ms: 3.346333
+  type: 'test'
+  ...
+# Subtest: Expo fallback watcher observes real add/change/delete for matched filenames
+ok 4 - Expo fallback watcher observes real add/change/delete for matched filenames
+  ---
+  duration_ms: 1518.065941
+  type: 'test'
+  ...
+# Subtest: Expo Router query parser retains Unicode, duplicate and malformed-link behavior
+ok 5 - Expo Router query parser retains Unicode, duplicate and malformed-link behavior
+  ---
+  duration_ms: 4.636882
+  type: 'test'
+  ...
+# Subtest: hostile deep links and image headers terminate in bounded subprocesses
+ok 6 - hostile deep links and image headers terminate in bounded subprocesses
+  ---
+  duration_ms: 150.585257
+  type: 'test'
+  ...
+# Subtest: shell quoting rejects line terminators after comment tokens
+ok 7 - shell quoting rejects line terminators after comment tokens
+  ---
+  duration_ms: 10.737678
+  type: 'test'
+  ...
+# Subtest: indexed source maps reject excessive offsets in a bounded subprocess
+ok 8 - indexed source maps reject excessive offsets in a bounded subprocess
+  ---
+  duration_ms: 37.717094
+  type: 'test'
+  ...
+# Subtest: the patched Xcode UUID dependency preserves its CommonJS v4-only interface
+ok 9 - the patched Xcode UUID dependency preserves its CommonJS v4-only interface
+  ---
+  duration_ms: 44.660679
+  type: 'test'
+  ...
+# Subtest: the committed preview configuration passes repository-side Friend Beta preflight
+ok 10 - the committed preview configuration passes repository-side Friend Beta preflight
+  ---
+  duration_ms: 1.46138
+  type: 'test'
+  ...
+# Subtest: preflight rejects unsafe device endpoints and secret-shaped public variables
+ok 11 - preflight rejects unsafe device endpoints and secret-shaped public variables
+  ---
+  duration_ms: 0.49243
+  type: 'test'
+  ...
+# Subtest: preflight rejects duplicate or unsupported iOS background declarations
+ok 12 - preflight rejects duplicate or unsupported iOS background declarations
+  ---
+  duration_ms: 0.309704
+  type: 'test'
+  ...
+# Subtest: production remains fail-closed until a real App Store Connect record is linked
+ok 13 - production remains fail-closed until a real App Store Connect record is linked
+  ---
+  duration_ms: 0.807825
+  type: 'test'
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 13
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2060.012134
+
+> frontend@1.0.0 test:product-ui
+> node --test tests/product-ui-contract.test.js
+
+TAP version 13
+# Subtest: customer navigation is canonical and excludes legacy developer destinations
+ok 1 - customer navigation is canonical and excludes legacy developer destinations
+  ---
+  duration_ms: 1.524721
+  type: 'test'
+  ...
+# Subtest: resting customer surfaces are flat and reserve spectral color for state
+ok 2 - resting customer surfaces are flat and reserve spectral color for state
+  ---
+  duration_ms: 2.800578
+  type: 'test'
+  ...
+# Subtest: Account exposes connected profile, plan, preferences, lifecycle and support surfaces
+ok 3 - Account exposes connected profile, plan, preferences, lifecycle and support surfaces
+  ---
+  duration_ms: 0.628909
+  type: 'test'
+  ...
+# Subtest: project creation and destructive controls have accessible, product-safe copy
+ok 4 - project creation and destructive controls have accessible, product-safe copy
+  ---
+  duration_ms: 0.763337
+  type: 'test'
+  ...
+# Subtest: normal conversation, drawer and settings copy is quiet and unbranded
+ok 5 - normal conversation, drawer and settings copy is quiet and unbranded
+  ---
+  duration_ms: 1.18437
+  type: 'test'
+  ...
+# Subtest: conversation UI keeps delivery, response, and job state distinct
+ok 6 - conversation UI keeps delivery, response, and job state distinct
+  ---
+  duration_ms: 1.134665
+  type: 'test'
+  ...
+# Subtest: notification decisions are revision-pinned and test evidence never claims phone delivery
+ok 7 - notification decisions are revision-pinned and test evidence never claims phone delivery
+  ---
+  duration_ms: 0.677584
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 58.18854
+
+> frontend@1.0.0 test:agent-status
+> npx tsx --test tests/agent-status.test.ts
+
+npm warn exec The following package was not found and will be installed: tsx@4.23.15
+TAP version 13
+# Subtest: uses Herdr names and fails closed for generic or missing labels
+ok 1 - uses Herdr names and fails closed for generic or missing labels
+  ---
+  duration_ms: 0.913976
+  type: 'test'
+  ...
+# Subtest: maps only known live states and never guesses unknown values
+ok 2 - maps only known live states and never guesses unknown values
+  ---
+  duration_ms: 0.178538
+  type: 'test'
+  ...
+# Subtest: counts and orders active, idle, blocked, and unavailable agents with stable ties
+ok 3 - counts and orders active, idle, blocked, and unavailable agents with stable ties
+  ---
+  duration_ms: 0.716614
+  type: 'test'
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 186.726547
+
+> frontend@1.0.0 test:ambient
+> node --test tests/ambient-source.test.js
+
+TAP version 13
+# Subtest: backgrounds are bundled and weather is explicitly configured
+ok 1 - backgrounds are bundled and weather is explicitly configured
+  ---
+  duration_ms: 1.139587
+  type: 'test'
+  ...
+# Subtest: voice metering uses recorder data, never randomized amplitude
+ok 2 - voice metering uses recorder data, never randomized amplitude
+  ---
+  duration_ms: 0.281963
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 50.207686
+
+> frontend@1.0.0 test:theme
+> node --test tests/theme-background.test.js
+
+TAP version 13
+# Subtest: legacy custom-theme data remains migratable but is absent from customer appearance UI
+ok 1 - legacy custom-theme data remains migratable but is absent from customer appearance UI
+  ---
+  duration_ms: 1.16264
+  type: 'test'
+  ...
+# Subtest: the MVP appearance defaults and persistence contract are explicit
+ok 2 - the MVP appearance defaults and persistence contract are explicit
+  ---
+  duration_ms: 0.867412
+  type: 'test'
+  ...
+# Subtest: custom background rendering is isolated from built-in weather scenes
+ok 3 - custom background rendering is isolated from built-in weather scenes
+  ---
+  duration_ms: 0.157369
+  type: 'test'
+  ...
+1..3
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 47.963422
+
+> frontend@1.0.0 test:chat-formatting
+> npx tsx --test tests/chat-formatting.test.ts
+
+TAP version 13
+# Subtest: safe Markdown covers prose, headings, lists, emphasis, code, and safe links
+ok 1 - safe Markdown covers prose, headings, lists, emphasis, code, and safe links
+  ---
+  duration_ms: 2.135698
+  type: 'test'
+  ...
+# Subtest: ordered Markdown preserves its start and auto-numbers repeated markers
+ok 2 - ordered Markdown preserves its start and auto-numbers repeated markers
+  ---
+  duration_ms: 0.543415
+  type: 'test'
+  ...
+# Subtest: HTML and unsafe URL schemes never become active content
+ok 3 - HTML and unsafe URL schemes never become active content
+  ---
+  duration_ms: 0.218658
+  type: 'test'
+  ...
+# Subtest: timestamps are absent for replayed messages and accessible values are full localized values
+ok 4 - timestamps are absent for replayed messages and accessible values are full localized values
+  ---
+  duration_ms: 52.411841
+  type: 'test'
+  ...
+# Subtest: thinking summaries require a provider label and are bounded
+ok 5 - thinking summaries require a provider label and are bounded
+  ---
+  duration_ms: 0.2
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 232.924344
+
+> frontend@1.0.0 test:native-chat
+> npx tsx --test tests/native-chat.test.ts && node --test --test-concurrency=1 tests/native-chat.web.test.js
+
+TAP version 13
+# Subtest: provider-native records replace the matching optimistic user by canonical identity
+ok 1 - provider-native records replace the matching optimistic user by canonical identity
+  ---
+  duration_ms: 1.690597
+  type: 'test'
+  ...
+# Subtest: provider-native records preserve exact Unicode and stable identities
+ok 2 - provider-native records preserve exact Unicode and stable identities
+  ---
+  duration_ms: 0.708345
+  type: 'test'
+  ...
+# Subtest: verified completion evidence can append an assistant-only native row
+ok 3 - verified completion evidence can append an assistant-only native row
+  ---
+  duration_ms: 0.350099
+  type: 'test'
+  ...
+# Subtest: unrecognised provenance, status, identity, controls, and unknown fields fail closed
+ok 4 - unrecognised provenance, status, identity, controls, and unknown fields fail closed
+  ---
+  duration_ms: 0.405638
+  type: 'test'
+  ...
+# Subtest: pending, failed, and cancelled pairs map to truthful render state
+ok 5 - pending, failed, and cancelled pairs map to truthful render state
+  ---
+  duration_ms: 0.360667
+  type: 'test'
+  ...
+# Subtest: monotonic revision reconciliation rejects identity mutation and stale rollback
+ok 6 - monotonic revision reconciliation rejects identity mutation and stale rollback
+  ---
+  duration_ms: 0.477691
+  type: 'test'
+  ...
+# Subtest: message batches reject partial, mixed-conversation, and duplicate identity payloads
+ok 7 - message batches reject partial, mixed-conversation, and duplicate identity payloads
+  ---
+  duration_ms: 0.210458
+  type: 'test'
+  ...
+# Subtest: authoritative reads prune only server rows and retain genuine pending sends
+ok 8 - authoritative reads prune only server rows and retain genuine pending sends
+  ---
+  duration_ms: 0.187995
+  type: 'test'
+  ...
+# Subtest: a cached failed row accepts a newer canonical completed revision
+ok 9 - a cached failed row accepts a newer canonical completed revision
+  ---
+  duration_ms: 0.416869
+  type: 'test'
+  ...
+# Subtest: bounded change replay updates a cached row outside the newest history page
+ok 10 - bounded change replay updates a cached row outside the newest history page
+  ---
+  duration_ms: 0.964483
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 10
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 198.392176
+TAP version 13
+# Subtest: production-default chat composer persists and restores only through native Magi APIs
+ok 1 - production-default chat composer persists and restores only through native Magi APIs
+  ---
+  duration_ms: 10571.238231
+  type: 'test'
+  ...
+# Subtest: a saved prompt stays saved when its response fails and offers response recovery
+ok 2 - a saved prompt stays saved when its response fails and offers response recovery
+  ---
+  duration_ms: 3321.539885
+  type: 'test'
+  ...
+# Subtest: one workspace refresh coordinates Chat, Fleet, Activity and Attention and opens product-safe Fleet details
+ok 3 - one workspace refresh coordinates Chat, Fleet, Activity and Attention and opens product-safe Fleet details
+  ---
+  duration_ms: 3693.392663
+  type: 'test'
+  ...
+# Subtest: Projects creates and renders a durable standalone project through the Gateway
+ok 4 - Projects creates and renders a durable standalone project through the Gateway
+  ---
+  duration_ms: 2737.196111
+  type: 'test'
+  ...
+# Subtest: an activity outage does not interrupt an active native LLM turn
+ok 5 - an activity outage does not interrupt an active native LLM turn
+  ---
+  duration_ms: 3395.774856
+  type: 'test'
+  ...
+# Subtest: voice-to-text uses the same native message endpoint and never invokes voice moves
+ok 6 - voice-to-text uses the same native message endpoint and never invokes voice moves
+  ---
+  duration_ms: 4244.270417
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 28284.747389
+
+> frontend@1.0.0 test:canonical-activity
+> npx tsx --test tests/canonical-activity.test.ts
+
+TAP version 13
+# Subtest: structured execution milestones retain their typed Activity kinds
+ok 1 - structured execution milestones retain their typed Activity kinds
+  ---
+  duration_ms: 2.306766
+  type: 'test'
+  ...
+# Subtest: a terminal execution fact closes an immutable accepted milestone locally
+ok 2 - a terminal execution fact closes an immutable accepted milestone locally
+  ---
+  duration_ms: 1.282927
+  type: 'test'
+  ...
+# Subtest: canonical activity appends, revises by stable id, and advances a change cursor
+ok 3 - canonical activity appends, revises by stable id, and advances a change cursor
+  ---
+  duration_ms: 1.267076
+  type: 'test'
+  ...
+# Subtest: principal change clears non-durable activity memory and resets replay position
+ok 4 - principal change clears non-durable activity memory and resets replay position
+  ---
+  duration_ms: 0.23145
+  type: 'test'
+  ...
+# Subtest: malformed fields, credentials, controls, and cursor gaps fail closed without advancement
+ok 5 - malformed fields, credentials, controls, and cursor gaps fail closed without advancement
+  ---
+  duration_ms: 0.901614
+  type: 'test'
+  ...
+# Subtest: a delayed snapshot cannot regress a newer realtime revision or lifecycle summary
+ok 6 - a delayed snapshot cannot regress a newer realtime revision or lifecycle summary
+  ---
+  duration_ms: 0.775843
+  type: 'test'
+  ...
+# Subtest: historical snapshot pages cannot checkpoint past unseen replay rows
+ok 7 - historical snapshot pages cannot checkpoint past unseen replay rows
+  ---
+  duration_ms: 0.60384
+  type: 'test'
+  ...
+# Subtest: a current complete focus projection clears a stale cached pending decision without inventing an outcome
+ok 8 - a current complete focus projection clears a stale cached pending decision without inventing an outcome
+  ---
+  duration_ms: 0.340263
+  type: 'test'
+  ...
+# Subtest: working state and decision routing use only canonical identities
+ok 9 - working state and decision routing use only canonical identities
+  ---
+  duration_ms: 1.609218
+  type: 'test'
+  ...
+# Subtest: activity outage never reclassifies an active canonical LLM turn as interrupted
+ok 10 - activity outage never reclassifies an active canonical LLM turn as interrupted
+  ---
+  duration_ms: 0.401563
+  type: 'test'
+  ...
+# Subtest: snapshot and replay retention preserves full focus capacity and recent revisions
+ok 11 - snapshot and replay retention preserves full focus capacity and recent revisions
+  ---
+  duration_ms: 109.585057
+  type: 'test'
+  ...
+# Subtest: an overflowing replay prefix recovers through the authoritative cursor snapshot
+ok 12 - an overflowing replay prefix recovers through the authoritative cursor snapshot
+  ---
+  duration_ms: 188.859357
+  type: 'test'
+  ...
+# Subtest: an authoritative recovery requested during an in-flight sync runs afterward
+ok 13 - an authoritative recovery requested during an in-flight sync runs afterward
+  ---
+  duration_ms: 0.367359
+  type: 'test'
+  ...
+# Subtest: snapshot pagination reveals complete older pages and stops at retained history capacity
+ok 14 - snapshot pagination reveals complete older pages and stops at retained history capacity
+  ---
+  duration_ms: 6.883024
+  type: 'test'
+  ...
+# Subtest: focus overlap keeps older history reachable and bounds the next complete page
+ok 15 - focus overlap keeps older history reachable and bounds the next complete page
+  ---
+  duration_ms: 16.120917
+  type: 'test'
+  ...
+# Subtest: safe references and more than ten ordered activity rows survive bounded catch-up
+ok 16 - safe references and more than ten ordered activity rows survive bounded catch-up
+  ---
+  duration_ms: 0.446098
+  type: 'test'
+  ...
+1..16
+# tests 16
+# suites 0
+# pass 16
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 561.709232
+
+> frontend@1.0.0 test:pending-intents
+> npx tsx --test tests/pending-intents.test.ts
+
+TAP version 13
+# Subtest: parses the versioned owner routes and preserves exact targets
+ok 1 - parses the versioned owner routes and preserves exact targets
+  ---
+  duration_ms: 1.623738
+  type: 'test'
+  ...
+# Subtest: rejects malformed, external, unsupported, and unsafe targets
+ok 2 - rejects malformed, external, unsupported, and unsafe targets
+  ---
+  duration_ms: 0.369205
+  type: 'test'
+  ...
+# Subtest: each explicit shortcut invocation routes once, while later invocations are not suppressed
+ok 3 - each explicit shortcut invocation routes once, while later invocations are not suppressed
+  ---
+  duration_ms: 0.368244
+  type: 'test'
+  ...
+# Subtest: decision envelope is exact, expired envelopes remain read-only navigation and malformed bindings fail closed
+ok 4 - decision envelope is exact, expired envelopes remain read-only navigation and malformed bindings fail closed
+  ---
+  duration_ms: 0.504922
+  type: 'test'
+  ...
+# Subtest: queues an unauthenticated intent and consumes duplicate delivery once
+ok 5 - queues an unauthenticated intent and consumes duplicate delivery once
+  ---
+  duration_ms: 0.192512
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 191.772258
+
+> frontend@1.0.0 test:protocol
+> npx tsx --test tests/perception-protocol.test.ts
+
+TAP version 13
+# Subtest: v1 remains device-neutral and rejects incompatible schema versions
+ok 1 - v1 remains device-neutral and rejects incompatible schema versions
+  ---
+  duration_ms: 1.329423
+  type: 'test'
+  ...
+# Subtest: result validation requires server principal and a non-executing authorization
+ok 2 - result validation requires server principal and a non-executing authorization
+  ---
+  duration_ms: 0.272354
+  type: 'test'
+  ...
+# Subtest: local renderer fails safe for low-confidence, high-impact, and neural intent
+ok 3 - local renderer fails safe for low-confidence, high-impact, and neural intent
+  ---
+  duration_ms: 0.148129
+  type: 'test'
+  ...
+# Subtest: byte-bearing and biometric modalities require references and consent
+ok 4 - byte-bearing and biometric modalities require references and consent
+  ---
+  duration_ms: 0.163452
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 176.607083
+
+> frontend@1.0.0 test:voice
+> npx tsx --test tests/voice-session.test.ts tests/voice-capture.test.ts tests/voice-branding.test.ts tests/voice-input-modes.test.ts tests/voice-envelope.test.ts tests/voice-tetrahedron.test.ts tests/ios-entry-config.test.ts && node --test tests/voice-page.web.test.js
+
+TAP version 13
+# Subtest: iOS App Intents expose product entries through foreground allowlisted routes
+ok 1 - iOS App Intents expose product entries through foreground allowlisted routes
+  ---
+  duration_ms: 1.019293
+  type: 'test'
+  ...
+# Subtest: OpenURLIntent dependency boundary requires iOS 18
+ok 2 - OpenURLIntent dependency boundary requires iOS 18
+  ---
+  duration_ms: 0.15121
+  type: 'test'
+  ...
+# Subtest: native configuration has microphone copy, foreground-only audio, push, and App Intents plugin
+ok 3 - native configuration has microphone copy, foreground-only audio, push, and App Intents plugin
+  ---
+  duration_ms: 0.695849
+  type: 'test'
+  ...
+# Subtest: voice renders real perspective-projected tetrahedral geometry rather than an image or fake CSS perspective
+ok 4 - voice renders real perspective-projected tetrahedral geometry rather than an image or fake CSS perspective
+  ---
+  duration_ms: 0.941526
+  type: 'test'
+  ...
+# Subtest: tetrahedron stays monochrome in all states, with amplitude and fallback support
+ok 5 - tetrahedron stays monochrome in all states, with amplitude and fallback support
+  ---
+  duration_ms: 0.19503
+  type: 'test'
+  ...
+# Subtest: no giant secondary triangle, fake target reticle, or equalizer-style bars remain
+ok 6 - no giant secondary triangle, fake target reticle, or equalizer-style bars remain
+  ---
+  duration_ms: 0.256112
+  type: 'test'
+  ...
+# Subtest: ambient energy accepts real microphone peaks but stays restrained
+ok 7 - ambient energy accepts real microphone peaks but stays restrained
+  ---
+  duration_ms: 0.274335
+  type: 'test'
+  ...
+# Subtest: a test-injectable amplitude source exists for browser evidence without a real microphone
+ok 8 - a test-injectable amplitude source exists for browser evidence without a real microphone
+  ---
+  duration_ms: 0.184409
+  type: 'test'
+  ...
+# Subtest: reduced motion freezes 3D and amplitude animation without disabling voice
+ok 9 - reduced motion freezes 3D and amplitude animation without disabling voice
+  ---
+  duration_ms: 0.118997
+  type: 'test'
+  ...
+# Subtest: voice is a dedicated near-black ceremonial canvas, not the selected chat scene dimmed
+ok 10 - voice is a dedicated near-black ceremonial canvas, not the selected chat scene dimmed
+  ---
+  duration_ms: 0.182434
+  type: 'test'
+  ...
+# Subtest: cancelling while microphone consent is pending cannot start capture after consent resolves
+ok 11 - cancelling while microphone consent is pending cannot start capture after consent resolves
+  ---
+  duration_ms: 79.510587
+  type: 'test'
+  ...
+# Subtest: capture cancellation reads the native recorder, not the previous React recording snapshot
+ok 12 - capture cancellation reads the native recorder, not the previous React recording snapshot
+  ---
+  duration_ms: 21.993054
+  type: 'test'
+  ...
+# Subtest: microphone denial is recoverable and never starts recording
+ok 13 - microphone denial is recoverable and never starts recording
+  ---
+  duration_ms: 21.669516
+  type: 'test'
+  ...
+# Subtest: envelope rests at the silence floor, never fully flat
+ok 14 - envelope rests at the silence floor, never fully flat
+  ---
+  duration_ms: 0.904755
+  type: 'test'
+  ...
+# Subtest: attack is fast: a loud sample moves most of the way to target within one attack time constant
+ok 15 - attack is fast: a loud sample moves most of the way to target within one attack time constant
+  ---
+  duration_ms: 0.159505
+  type: 'test'
+  ...
+# Subtest: decay is slower than attack for the same elapsed time
+ok 16 - decay is slower than attack for the same elapsed time
+  ---
+  duration_ms: 0.125687
+  type: 'test'
+  ...
+# Subtest: envelope converges to target given enough elapsed time, and clamps to [floor, 1]
+ok 17 - envelope converges to target given enough elapsed time, and clamps to [floor, 1]
+  ---
+  duration_ms: 0.173912
+  type: 'test'
+  ...
+# Subtest: envelope tolerates non-finite elapsed time by treating it as no time passing
+ok 18 - envelope tolerates non-finite elapsed time by treating it as no time passing
+  ---
+  duration_ms: 0.115116
+  type: 'test'
+  ...
+# Subtest: ring phase/speed offsets are deterministic and spread layers apart
+ok 19 - ring phase/speed offsets are deterministic and spread layers apart
+  ---
+  duration_ms: 0.675548
+  type: 'test'
+  ...
+# Subtest: capability reporting identifies unsupported providers without pretending they work
+ok 20 - capability reporting identifies unsupported providers without pretending they work
+  ---
+  duration_ms: 0.85897
+  type: 'test'
+  ...
+# Subtest: selected unavailable mode resolves to Automatic with an explicit fallback reason
+ok 21 - selected unavailable mode resolves to Automatic with an explicit fallback reason
+  ---
+  duration_ms: 0.800179
+  type: 'test'
+  ...
+# Subtest: unknown gateway capability preserves the explicit choice while the operation remains truthful
+ok 22 - unknown gateway capability preserves the explicit choice while the operation remains truthful
+  ---
+  duration_ms: 0.134941
+  type: 'test'
+  ...
+# Subtest: continuous voice loop cycles listening, thinking, speaking, then listening again
+ok 23 - continuous voice loop cycles listening, thinking, speaking, then listening again
+  ---
+  duration_ms: 0.803634
+  type: 'test'
+  ...
+# Subtest: fleet-control moves pause the loop for confirmation and resume it either way
+ok 24 - fleet-control moves pause the loop for confirmation and resume it either way
+  ---
+  duration_ms: 0.163785
+  type: 'test'
+  ...
+# Subtest: cancel and permission errors recover without entering chat
+ok 25 - cancel and permission errors recover without entering chat
+  ---
+  duration_ms: 0.759235
+  type: 'test'
+  ...
+# Subtest: voice lifecycle stops foreground capture and exposes explicit recovery controls
+ok 26 - voice lifecycle stops foreground capture and exposes explicit recovery controls
+  ---
+  duration_ms: 0.45012
+  type: 'test'
+  ...
+# Subtest: voice object is a true four-vertex, four-face tetrahedron
+ok 27 - voice object is a true four-vertex, four-face tetrahedron
+  ---
+  duration_ms: 1.412741
+  type: 'test'
+  ...
+# Subtest: perspective projection stays finite, depth sorted, and amplitude responsive
+ok 28 - perspective projection stays finite, depth sorted, and amplitude responsive
+  ---
+  duration_ms: 0.686974
+  type: 'test'
+  ...
+1..28
+# tests 28
+# suites 0
+# pass 28
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 782.477329
+TAP version 13
+# Subtest: voice control keeps the compact stage and enlarged branded mark proportions
+ok 1 - voice control keeps the compact stage and enlarged branded mark proportions
+  ---
+  duration_ms: 6370.514429
+  type: 'test'
+  ...
+# Subtest: voice mode surfaces a recoverable error and never leaves /voice when the microphone is denied
+ok 2 - voice mode surfaces a recoverable error and never leaves /voice when the microphone is denied
+  ---
+  duration_ms: 1749.154067
+  type: 'test'
+  ...
+# Subtest: voice mode listens continuously: transcribes a turn, answers in the thread, speaks, and listens again
+ok 3 - voice mode listens continuously: transcribes a turn, answers in the thread, speaks, and listens again
+  ---
+  duration_ms: 3048.714746
+  type: 'test'
+  ...
+# Subtest: 3D tetrahedron reacts to injected amplitude while its accessible stage stays stable
+ok 4 - 3D tetrahedron reacts to injected amplitude while its accessible stage stays stable
+  ---
+  duration_ms: 2443.202461
+  type: 'test'
+  ...
+# Subtest: pausing then restarting cannot submit a delayed transcript from the interrupted turn
+ok 5 - pausing then restarting cannot submit a delayed transcript from the interrupted turn
+  ---
+  duration_ms: 3522.329569
+  type: 'test'
+  ...
+# Subtest: ending a deep-linked voice session still lands back in chat
+ok 6 - ending a deep-linked voice session still lands back in chat
+  ---
+  duration_ms: 2539.551298
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 20535.703786
+
+> frontend@1.0.0 test:operating-permissions
+> npx tsx --test tests/operating-permission-modes.test.ts
+
+TAP version 13
+# Subtest: operating permission modes persist durably and reject unknown values
+ok 1 - operating permission modes persist durably and reject unknown values
+  ---
+  duration_ms: 1.145228
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 181.856657
+
+> frontend@1.0.0 test:auth
+> node --test tests/auth-lifecycle.web.test.js
+
+TAP version 13
+# Subtest: provider sign-in controls are product-visible without persisting browser authority
+ok 1 - provider sign-in controls are product-visible without persisting browser authority
+  ---
+  duration_ms: 6883.169351
+  type: 'test'
+  ...
+# Subtest: unconfigured provider sign-in stays fail-closed and is not offered
+ok 2 - unconfigured provider sign-in stays fail-closed and is not offered
+  ---
+  duration_ms: 1866.722222
+  type: 'test'
+  ...
+# Subtest: web provider continuity restores through cookie refresh without JavaScript bearer persistence
+ok 3 - web provider continuity restores through cookie refresh without JavaScript bearer persistence
+  ---
+  duration_ms: 2061.302082
+  type: 'test'
+  ...
+# Subtest: fresh browser gates protected routes, rejects invalid bootstrap, then reaches usable Chat after validation
+ok 4 - fresh browser gates protected routes, rejects invalid bootstrap, then reaches usable Chat after validation
+  ---
+  duration_ms: 2668.151056
+  type: 'test'
+  ...
+# Subtest: a Friend Beta access code creates its own principal and requires profile onboarding before mounting Chat
+ok 5 - a Friend Beta access code creates its own principal and requires profile onboarding before mounting Chat
+  ---
+  duration_ms: 2414.4935
+  type: 'test'
+  ...
+# Subtest: web restore rejects a persisted Friend Beta renewal credential
+ok 6 - web restore rejects a persisted Friend Beta renewal credential
+  ---
+  duration_ms: 3129.294731
+  type: 'test'
+  ...
+# Subtest: a transient validation failure returns to the login gate and permits retry
+ok 7 - a transient validation failure returns to the login gate and permits retry
+  ---
+  duration_ms: 2366.293175
+  type: 'test'
+  ...
+# Subtest: a validated bearer and expiry metadata survive reload without re-bootstrap
+ok 8 - a validated bearer and expiry metadata survive reload without re-bootstrap
+  ---
+  duration_ms: 3641.726835
+  type: 'test'
+  ...
+# Subtest: server-observed principal change evicts the previous principal cache before protected remount
+ok 9 - server-observed principal change evicts the previous principal cache before protected remount
+  ---
+  duration_ms: 3610.864009
+  type: 'test'
+  ...
+# Subtest: obvious expiry invalidates the session, evicts principal chat caches, and returns to login
+ok 10 - obvious expiry invalidates the session, evicts principal chat caches, and returns to login
+  ---
+  duration_ms: 19653.824449
+  type: 'test'
+  ...
+# Subtest: an active protected 401 invalidates once, evicts principal chat caches, and returns to login
+ok 11 - an active protected 401 invalidates once, evicts principal chat caches, and returns to login
+  ---
+  duration_ms: 4840.808368
+  type: 'test'
+  ...
+# Subtest: a 403 remains an authorization error and does not invalidate the session
+ok 12 - a 403 remains an authorization error and does not invalidate the session
+  ---
+  duration_ms: 2597.235288
+  type: 'test'
+  ...
+# Subtest: logout revokes the session, evicts principal chat caches, and returns to the authentication gate
+ok 13 - logout revokes the session, evicts principal chat caches, and returns to the authentication gate
+  ---
+  duration_ms: 2910.534634
+  type: 'test'
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 13
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 58931.273031
+
+> frontend@1.0.0 test:chat
+> node --test tests/chat-mic-contract.test.js
+
+TAP version 13
+# Subtest: chat mic contract covers every truthful capture state and hold release guard
+ok 1 - chat mic contract covers every truthful capture state and hold release guard
+  ---
+  duration_ms: 0.930871
+  type: 'test'
+  ...
+# Subtest: iOS composer follows keyboard frames without double-counting the home indicator
+ok 2 - iOS composer follows keyboard frames without double-counting the home indicator
+  ---
+  duration_ms: 0.221491
+  type: 'test'
+  ...
+# Subtest: chat keeps one voice entry point and limits blur to a reduced-transparency-aware header
+ok 3 - chat keeps one voice entry point and limits blur to a reduced-transparency-aware header
+  ---
+  duration_ms: 0.324226
+  type: 'test'
+  ...
+# Subtest: voice preferences have durable keys, defaults, validation, and save functions
+ok 4 - voice preferences have durable keys, defaults, validation, and save functions
+  ---
+  duration_ms: 0.163367
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 52.832269
+
+> frontend@1.0.0 test:shell
+> node --test tests/workspace-shell.web.test.js
+
+TAP version 13
+# Subtest: root and explicit home resolve to the standalone chat shell
+ok 1 - root and explicit home resolve to the standalone chat shell
+  ---
+  duration_ms: 12545.49192
+  type: 'test'
+  ...
+# Subtest: chat ignores retired agent-target deep links and keeps the sole Magi thread
+ok 2 - chat ignores retired agent-target deep links and keeps the sole Magi thread
+  ---
+  duration_ms: 4181.417388
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 17069.503446
+
+> frontend@1.0.0 test:home
+> node --test tests/home-realdata.web.test.js
+
+TAP version 13
+# Subtest: Home renders live agent identity and links agent context to the sole Magi conversation
+ok 1 - Home renders live agent identity and links agent context to the sole Magi conversation
+  ---
+  duration_ms: 8561.873676
+  type: 'test'
+  ...
+# Subtest: Home derives live status counts and orders active before idle deterministically
+ok 2 - Home derives live status counts and orders active before idle deterministically
+  ---
+  duration_ms: 2736.005493
+  type: 'test'
+  ...
+# Subtest: Home reports an agent error instead of inventing an empty or active state
+ok 3 - Home reports an agent error instead of inventing an empty or active state
+  ---
+  duration_ms: 2687.674945
+  type: 'test'
+  ...
+# Subtest: Home shows live attention items and dismisses them through the notification contract
+ok 4 - Home shows live attention items and dismisses them through the notification contract
+  ---
+  duration_ms: 2699.825823
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 17006.132629
+
+> frontend@1.0.0 test:github
+> node --test tests/github-prs.web.test.js
+
+TAP version 13
+# Subtest: Recent Activity opens an in-app PR detail before GitHub
+ok 1 - Recent Activity opens an in-app PR detail before GitHub
+  ---
+  duration_ms: 5997.669498
+  type: 'test'
+  ...
+# Subtest: Recent Activity renders general real events newest first
+ok 2 - Recent Activity renders general real events newest first
+  ---
+  duration_ms: 2013.03575
+  type: 'test'
+  ...
+# Subtest: Recent Activity has a truthful empty state
+ok 3 - Recent Activity has a truthful empty state
+  ---
+  duration_ms: 2044.041565
+  type: 'test'
+  ...
+# Subtest: repository list routes pull details with repository identity
+ok 4 - repository list routes pull details with repository identity
+  ---
+  duration_ms: 2733.764738
+  type: 'test'
+  ...
+# Subtest: repository UI reports external activation block without offering a fake install
+ok 5 - repository UI reports external activation block without offering a fake install
+  ---
+  duration_ms: 2665.965289
+  type: 'test'
+  ...
+# Subtest: detail external link opens the validated GitHub URL in a new tab
+ok 6 - detail external link opens the validated GitHub URL in a new tab
+  ---
+  duration_ms: 3054.480003
+  type: 'test'
+  ...
+# Subtest: invalid external URL is rejected without opening an empty tab
+ok 7 - invalid external URL is rejected without opening an empty tab
+  ---
+  duration_ms: 2692.934539
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 21509.272496
+
+> frontend@1.0.0 test:notifications
+> npx tsx --test tests/notification-native.test.ts && node --test tests/notifications.web.test.js
+
+TAP version 13
+# Subtest: cold tap waits through session restoration, consumes once, and clears OS replay only after routing
+ok 1 - cold tap waits through session restoration, consumes once, and clears OS replay only after routing
+  ---
+  duration_ms: 102.389879
+  type: 'test'
+  ...
+# Subtest: rejected OS cleanup cannot lose an authenticated route or leak an unhandled rejection
+ok 2 - rejected OS cleanup cannot lose an authenticated route or leak an unhandled rejection
+  ---
+  duration_ms: 33.800878
+  type: 'test'
+  ...
+# Subtest: a superseded registration waits for the new lifecycle poll instead of recursively registering
+ok 3 - a superseded registration waits for the new lifecycle poll instead of recursively registering
+  ---
+  duration_ms: 25.05909
+  type: 'test'
+  ...
+# Subtest: native token rotation registers an Expo token, not APNs, and rechecks permission on resume
+ok 4 - native token rotation registers an Expo token, not APNs, and rechecks permission on resume
+  ---
+  duration_ms: 20.907616
+  type: 'test'
+  ...
+# Subtest: permission denial and an owner change during permission restoration never register
+ok 5 - permission denial and an owner change during permission restoration never register
+  ---
+  duration_ms: 36.180569
+  type: 'test'
+  ...
+# Subtest: offline registration retries are throttled; stopping monitoring clears prior-principal state
+ok 6 - offline registration retries are throttled; stopping monitoring clears prior-principal state
+  ---
+  duration_ms: 16.586052
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 841.005662
+TAP version 13
+# Subtest: new attention transition uses one real browser notification, an unread dot, and no in-app popup
+ok 1 - new attention transition uses one real browser notification, an unread dot, and no in-app popup
+  ---
+  duration_ms: 6584.415897
+  type: 'test'
+  ...
+# Subtest: outcome notification uses product-safe copy rather than internal event metadata
+ok 2 - outcome notification uses product-safe copy rather than internal event metadata
+  ---
+  duration_ms: 2444.672158
+  type: 'test'
+  ...
+# Subtest: notification taps preserve PR routes instead of treating every target as Attention
+ok 3 - notification taps preserve PR routes instead of treating every target as Attention
+  ---
+  duration_ms: 2536.761741
+  type: 'test'
+  ...
+# Subtest: denied or unsupported browser notifications retain a quiet unread drawer fallback without a popup
+ok 4 - denied or unsupported browser notifications retain a quiet unread drawer fallback without a popup
+  ---
+  duration_ms: 4960.097639
+  type: 'test'
+  ...
+# Subtest: a PR Attention target preserves exact in-app detail routing and metadata
+ok 5 - a PR Attention target preserves exact in-app detail routing and metadata
+  ---
+  duration_ms: 2744.381126
+  type: 'test'
+  ...
+# Subtest: Attention preserves exact approve and decline outcomes after the answered item is removed
+ok 6 - Attention preserves exact approve and decline outcomes after the answered item is removed
+  ---
+  duration_ms: 5590.87065
+  type: 'test'
+  ...
+# Subtest: Attention cancellation, stale revisions, and duplicate answers fail closed
+ok 7 - Attention cancellation, stale revisions, and duplicate answers fail closed
+  ---
+  duration_ms: 8332.365712
+  type: 'test'
+  ...
+# Subtest: the authenticated notification test distinguishes provider evidence from unknown phone delivery
+ok 8 - the authenticated notification test distinguishes provider evidence from unknown phone delivery
+  ---
+  duration_ms: 2226.323404
+  type: 'test'
+  ...
+# Subtest: notification test unavailability gives recovery without claiming delivery
+ok 9 - notification test unavailability gives recovery without claiming delivery
+  ---
+  duration_ms: 2094.489856
+  type: 'test'
+  ...
+# Subtest: notification test evidence fails closed if the gateway claims phone delivery
+ok 10 - notification test evidence fails closed if the gateway claims phone delivery
+  ---
+  duration_ms: 2098.105857
+  type: 'test'
+  ...
+# Subtest: selecting an Attention item opens its detailed view and acknowledges only that item
+ok 11 - selecting an Attention item opens its detailed view and acknowledges only that item
+  ---
+  duration_ms: 2744.132544
+  type: 'test'
+  ...
+1..11
+# tests 11
+# suites 0
+# pass 11
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 42677.359865
+
+> frontend@1.0.0 test:truthful
+> node --test tests/truthful-contracts.web.test.js
+
+TAP version 13
+# Subtest: a provider with missing configuration renders unavailable with its reason
+ok 1 - a provider with missing configuration renders unavailable with its reason
+  ---
+  duration_ms: 5961.209852
+  type: 'test'
+  ...
+# Subtest: an expired credential renders RECONNECT, never a connected account
+ok 2 - an expired credential renders RECONNECT, never a connected account
+  ---
+  duration_ms: 2033.162596
+  type: 'test'
+  ...
+# Subtest: a stale connected row without a credential renders disconnected with its reason
+ok 3 - a stale connected row without a credential renders disconnected with its reason
+  ---
+  duration_ms: 2062.390991
+  type: 'test'
+  ...
+# Subtest: a connected status on an unavailable provider fails closed to unavailable
+ok 4 - a connected status on an unavailable provider fails closed to unavailable
+  ---
+  duration_ms: 2055.056417
+  type: 'test'
+  ...
+# Subtest: an unknown status string is not promoted to connected
+ok 5 - an unknown status string is not promoted to connected
+  ---
+  duration_ms: 2066.058823
+  type: 'test'
+  ...
+# Subtest: Jira and Teams render as deferred and are never connectable
+ok 6 - Jira and Teams render as deferred and are never connectable
+  ---
+  duration_ms: 2028.098507
+  type: 'test'
+  ...
+# Subtest: a non-2xx provider directory surfaces the gateway detail, not an empty account
+ok 7 - a non-2xx provider directory surfaces the gateway detail, not an empty account
+  ---
+  duration_ms: 2075.826158
+  type: 'test'
+  ...
+# Subtest: a 500 with no body still surfaces a specific status-bearing error
+ok 8 - a 500 with no body still surfaces a specific status-bearing error
+  ---
+  duration_ms: 2051.319156
+  type: 'test'
+  ...
+# Subtest: a truly empty provider directory is stated as such, not as an error
+ok 9 - a truly empty provider directory is stated as such, not as an error
+  ---
+  duration_ms: 3080.280117
+  type: 'test'
+  ...
+# Subtest: a configured provider with a live credential is the only connected render
+ok 10 - a configured provider with a live credential is the only connected render
+  ---
+  duration_ms: 2050.987276
+  type: 'test'
+  ...
+# Subtest: a degraded gateway reports process-free runtime state without invented Herdr telemetry
+ok 11 - a degraded gateway reports process-free runtime state without invented Herdr telemetry
+  ---
+  duration_ms: 2648.505771
+  type: 'test'
+  ...
+# Subtest: a healthy gateway stays operational while Herdr remains deliberately unprobed
+ok 12 - a healthy gateway stays operational while Herdr remains deliberately unprobed
+  ---
+  duration_ms: 2690.655735
+  type: 'test'
+  ...
+# Subtest: a non-2xx health response surfaces unavailable rather than a fabricated status
+ok 13 - a non-2xx health response surfaces unavailable rather than a fabricated status
+  ---
+  duration_ms: 2663.705693
+  type: 'test'
+  ...
+# Subtest: an upload the gateway did not confirm as stored fails instead of reading as sent
+ok 14 - an upload the gateway did not confirm as stored fails instead of reading as sent
+  ---
+  duration_ms: 2153.527135
+  type: 'test'
+  ...
+# Subtest: a rejected upload reports the gateway reason and never claims delivery
+ok 15 - a rejected upload reports the gateway reason and never claims delivery
+  ---
+  duration_ms: 2159.758998
+  type: 'test'
+  ...
+# Subtest: a confirmed upload reports Attached only after the prompt is accepted
+ok 16 - a confirmed upload reports Attached only after the prompt is accepted
+  ---
+  duration_ms: 2138.954612
+  type: 'test'
+  ...
+1..16
+# tests 16
+# suites 0
+# pass 16
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 40198.827066

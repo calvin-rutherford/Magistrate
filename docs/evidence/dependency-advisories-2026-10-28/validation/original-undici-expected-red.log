@@ -1,0 +1,40 @@
+TAP version 13
+# Subtest: adapter rejects incorrect integrity with uppercase algorithm tokens
+not ok 1 - adapter rejects incorrect integrity with uppercase algorithm tokens
+  ---
+  duration_ms: 925.314332
+  type: 'test'
+  location: '/home/spectre/Documents/Codex/2026-10-28/task-6/audit-main/pi-extension/tests/dependency-security-control.test.mjs:10:3'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/spectre/Documents/Codex/2026-10-28/task-6/audit-main/pi-extension/tests/dependency-security-control.test.mjs:18:7)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: retained Pi agent rejects incorrect integrity with uppercase algorithm tokens
+not ok 2 - retained Pi agent rejects incorrect integrity with uppercase algorithm tokens
+  ---
+  duration_ms: 121.208039
+  type: 'test'
+  location: '/home/spectre/Documents/Codex/2026-10-28/task-6/audit-main/pi-extension/tests/dependency-security-control.test.mjs:10:3'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  stack: |-
+    async TestContext.<anonymous> (file:///home/spectre/Documents/Codex/2026-10-28/task-6/audit-main/pi-extension/tests/dependency-security-control.test.mjs:18:7)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 0
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1125.462801

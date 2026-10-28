@@ -6,7 +6,7 @@ import test from 'node:test';
 const root = createRequire(import.meta.url);
 const agent = createRequire(new URL('../node_modules/@earendil-works/pi-coding-agent/package.json', import.meta.url));
 
-for (const [consumer, require] of [['adapter', root], ['retained Pi agent', agent]]) {
+for (const [consumer, require] of [['adapter external Undici', root], ['agent external Undici', agent]]) {
   test(`${consumer} rejects incorrect integrity with uppercase algorithm tokens`, { timeout: 5000 }, async () => {
     const { fetch } = require('undici');
     const body = 'synthetic integrity control';

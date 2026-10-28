@@ -1,0 +1,29 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0 -- /home/spectre/Documents/Codex/2026-10-28/task-6/evidence/candidate/backend-env/bin/python
+cachedir: .pytest_cache
+django: version: 6.1.2, settings: og_broker.settings (from ini)
+rootdir: /home/spectre/Documents/Codex/2026-10-28/task-6/tacticrew/backend
+configfile: pytest.ini
+plugins: libtmux-0.62.0, django-4.14.0
+collecting ... collected 18 items
+
+tests/test_services.py::test_legislative_propose_law PASSED              [  5%]
+tests/test_services.py::test_judicial_issue_ruling PASSED                [ 11%]
+tests/test_services.py::test_executive_launch_fleet PASSED               [ 16%]
+tests/test_asgi_server.py::test_uvicorn_http_websocket_auth_origin_permission_and_shutdown PASSED [ 22%]
+tests/test_consumers.py::test_anonymous_socket_is_rejected_before_joining_a_group PASSED [ 27%]
+tests/test_consumers.py::test_authenticated_observer_cannot_dispatch PASSED [ 33%]
+tests/test_consumers.py::test_authorized_principal_dispatches_a_valid_command PASSED [ 38%]
+tests/test_consumers.py::test_malformed_and_oversized_messages_close_predictably[not-json-4400] PASSED [ 44%]
+tests/test_consumers.py::test_malformed_and_oversized_messages_close_predictably[payload1-4400] PASSED [ 50%]
+tests/test_consumers.py::test_malformed_and_oversized_messages_close_predictably[payload2-4400] PASSED [ 55%]
+tests/test_consumers.py::test_malformed_and_oversized_messages_close_predictably[payload3-4400] PASSED [ 61%]
+tests/test_consumers.py::test_malformed_and_oversized_messages_close_predictably[payload4-4400] PASSED [ 66%]
+tests/test_consumers.py::test_malformed_and_oversized_messages_close_predictably[payload5-1009] PASSED [ 72%]
+tests/test_consumers.py::test_message_size_limit_applies_to_json_envelope PASSED [ 77%]
+tests/test_consumers.py::test_rate_limit_closes_after_bounded_messages PASSED [ 83%]
+tests/test_consumers.py::test_browser_origin_must_be_allowlisted PASSED  [ 88%]
+tests/test_consumers.py::test_events_are_isolated_to_the_authenticated_user PASSED [ 94%]
+tests/test_asgi_server.py::test_no_daphne_or_twisted_and_production_stays_quarantined PASSED [100%]
+
+============================= 18 passed in 14.31s ==============================

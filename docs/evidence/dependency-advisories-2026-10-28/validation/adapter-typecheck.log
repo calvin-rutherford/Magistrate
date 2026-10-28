@@ -1,0 +1,4 @@
+
+> @magistrate/pi-ownership-adapter@1.0.0 typecheck
+> tsc --noEmit
+

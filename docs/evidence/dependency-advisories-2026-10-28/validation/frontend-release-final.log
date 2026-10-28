@@ -1,0 +1,98 @@
+
+> frontend@1.0.0 test:release
+> node --test tests/friend-beta-release-preflight.test.mjs tests/dependency-compatibility.test.js
+
+TAP version 13
+# Subtest: Forge rejects an extra DigestAlgorithm child and preserves valid RSA and CSR signatures
+ok 1 - Forge rejects an extra DigestAlgorithm child and preserves valid RSA and CSR signatures
+  ---
+  duration_ms: 330.228982
+  type: 'test'
+  ...
+# Subtest: Expo certificate, manifest signing and CSR consumers remain compatible with Forge
+ok 2 - Expo certificate, manifest signing and CSR consumers remain compatible with Forge
+  ---
+  duration_ms: 235.203885
+  type: 'test'
+  ...
+# Subtest: patched Metro handles buffer and filesystem assets on web/iOS/Android
+ok 3 - patched Metro handles buffer and filesystem assets on web/iOS/Android
+  ---
+  duration_ms: 43.8769
+  type: 'test'
+  ...
+# Subtest: Expo file-map removes only its micromatch edge and preserves filename matching
+ok 4 - Expo file-map removes only its micromatch edge and preserves filename matching
+  ---
+  duration_ms: 3.84747
+  type: 'test'
+  ...
+# Subtest: Expo fallback watcher observes real add/change/delete for matched filenames
+ok 5 - Expo fallback watcher observes real add/change/delete for matched filenames
+  ---
+  duration_ms: 1528.843383
+  type: 'test'
+  ...
+# Subtest: Expo Router query parser retains Unicode, duplicate and malformed-link behavior
+ok 6 - Expo Router query parser retains Unicode, duplicate and malformed-link behavior
+  ---
+  duration_ms: 3.407691
+  type: 'test'
+  ...
+# Subtest: hostile deep links and image headers terminate in bounded subprocesses
+ok 7 - hostile deep links and image headers terminate in bounded subprocesses
+  ---
+  duration_ms: 182.549249
+  type: 'test'
+  ...
+# Subtest: shell quoting rejects line terminators after comment tokens
+ok 8 - shell quoting rejects line terminators after comment tokens
+  ---
+  duration_ms: 50.472548
+  type: 'test'
+  ...
+# Subtest: indexed source maps reject excessive offsets in a bounded subprocess
+ok 9 - indexed source maps reject excessive offsets in a bounded subprocess
+  ---
+  duration_ms: 37.245426
+  type: 'test'
+  ...
+# Subtest: the patched Xcode UUID dependency preserves its CommonJS v4-only interface
+ok 10 - the patched Xcode UUID dependency preserves its CommonJS v4-only interface
+  ---
+  duration_ms: 44.588422
+  type: 'test'
+  ...
+# Subtest: the committed preview configuration passes repository-side Friend Beta preflight
+ok 11 - the committed preview configuration passes repository-side Friend Beta preflight
+  ---
+  duration_ms: 1.240035
+  type: 'test'
+  ...
+# Subtest: preflight rejects unsafe device endpoints and secret-shaped public variables
+ok 12 - preflight rejects unsafe device endpoints and secret-shaped public variables
+  ---
+  duration_ms: 0.619583
+  type: 'test'
+  ...
+# Subtest: preflight rejects duplicate or unsupported iOS background declarations
+ok 13 - preflight rejects duplicate or unsupported iOS background declarations
+  ---
+  duration_ms: 0.362022
+  type: 'test'
+  ...
+# Subtest: production remains fail-closed until a real App Store Connect record is linked
+ok 14 - production remains fail-closed until a real App Store Connect record is linked
+  ---
+  duration_ms: 0.879938
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2471.171374

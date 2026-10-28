@@ -1,0 +1,9 @@
+{
+  "package": "0.84.4",
+  "chunk": "chunk-OMWWHBTG.js",
+  "chunk_sha256": "08cbc4d2d6d3cafe995cf3c3a1a6fded7b07f07009101b6fee7cdce5daf8062d",
+  "factory_sha256": "71cc405fe314b2c431206355815ee243e56111583ce22a0dd7ed87925ef1edfb",
+  "valid_lowercase_accepted": true,
+  "wrong_lowercase_accepted": false,
+  "wrong_uppercase_accepted": true
+}
