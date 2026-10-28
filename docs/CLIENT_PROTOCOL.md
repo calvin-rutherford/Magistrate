@@ -18,6 +18,14 @@ opens a deployment DB, requests a provider or invokes a worker. The deterministi
 export tests include poisoned PostgreSQL/state configuration and route parity.
 This is a schema bundle, not a full response OpenAPI specification.
 
+The additive `PERSONAL_RUNTIME_V2` foundation also exports legacy/v3 objective
+state, runtime envelopes/acknowledgments/spend, decision bindings/acknowledgments
+and voice-session continuity. `--write-types` generates
+`frontend/src/protocol/ObjectiveStateProtocol.ts`; `--check-types` rejects drift.
+See [foundation-protocol-v3.md](foundation-protocol-v3.md) for exact authority and
+legacy-compatibility rules. Exporting a schema or setting a feature never proves
+producer capability, downstream adoption or physical-device acceptance.
+
 ## Identity and onboarding
 
 Use short-lived `Authorization: Bearer` credentials, never query tokens. Owner

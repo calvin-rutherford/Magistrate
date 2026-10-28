@@ -1,0 +1,41 @@
+TAP version 13
+# Subtest: all signing/PEM APIs, UTF-8 manifest and CSR match independent OpenSSL CLI
+ok 1 - all signing/PEM APIs, UTF-8 manifest and CSR match independent OpenSSL CLI
+  ---
+  duration_ms: 320.789781
+  type: 'test'
+  ...
+# Subtest: CSR parser consumes the whole input: reject trailing bytes after generated and OpenSSL requests
+ok 2 - CSR parser consumes the whole input: reject trailing bytes after generated and OpenSSL requests
+  ---
+  duration_ms: 436.641379
+  type: 'test'
+  ...
+# Subtest: certificate validation refuses wrong keys, expired/future validity, bad signature and missing usages
+ok 3 - certificate validation refuses wrong keys, expired/future validity, bad signature and missing usages
+  ---
+  duration_ms: 119.060243
+  type: 'test'
+  ...
+# Offline and no cached development certificate found, unable to sign manifest
+# Subtest: Expo Go online CSR flow, cache continuity and offline refusal use the adapted async API
+ok 4 - Expo Go online CSR flow, cache continuity and offline refusal use the adapted async API
+  ---
+  duration_ms: 314.89645
+  type: 'test'
+  ...
+# Subtest: iOS identity consumer preserves CN/O/OU extraction without shell or keychain access
+ok 5 - iOS identity consumer preserves CN/O/OU extraction without shell or keychain access
+  ---
+  duration_ms: 80.054372
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1393.530069

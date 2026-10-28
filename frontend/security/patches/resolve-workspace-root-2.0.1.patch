@@ -1,0 +1,11 @@
+--- a/package.json
++++ b/package.json
+@@ -38 +37,0 @@
+-    "@types/micromatch": "^4.0.9",
+@@ -45 +43,0 @@
+-    "micromatch": "^4.0.7",
+@@ -60,0 +59,4 @@
++  },
++  "dependencies": {
++    "picomatch": "4.0.7",
++    "js-yaml": "4.3.2"

@@ -1,0 +1,52 @@
+--- a/build/src/run/ios/codeSigning/Security.js
++++ b/build/src/run/ios/codeSigning/Security.js
+@@ -41,6 +41,3 @@
+-function _nodeforge() {
+-    const data = /*#__PURE__*/ _interop_require_default(require("node-forge"));
+-    _nodeforge = function() {
+-        return data;
+-    };
+-    return data;
++function _x509() {
++    require('reflect-metadata');
++    return require('@peculiar/x509');
+@@ -70 +67 @@
+-    return _nodeforge().default.pki.certificateFromPem(pem);
++    return new (_x509().X509Certificate)(pem, { berOptions: { maxDepth: 32, maxNodes: 4096, maxContentLength: 1048576 } });
+@@ -102 +98,0 @@
+-    var _certificate_subject_getField, _certificate_subject_getField1, _certificate_subject_getField2;
+@@ -106,3 +102,3 @@
+-        codeSigningInfo: (_certificate_subject_getField = certificate.subject.getField('CN')) == null ? void 0 : _certificate_subject_getField.value,
+-        appleTeamName: (_certificate_subject_getField1 = certificate.subject.getField('O')) == null ? void 0 : _certificate_subject_getField1.value,
+-        appleTeamId: (_certificate_subject_getField2 = certificate.subject.getField('OU')) == null ? void 0 : _certificate_subject_getField2.value
++        codeSigningInfo: certificate.subjectName.getField('CN')[0],
++        appleTeamName: certificate.subjectName.getField('O')[0],
++        appleTeamId: certificate.subjectName.getField('OU')[0]
+@@ -110,0 +107 @@
++
+@@ -115,2 +111,0 @@
+-
+-//# sourceMappingURL=Security.js.map
+\ No newline at end of file
+--- a/build/src/utils/codesigning.js
++++ b/build/src/utils/codesigning.js
+@@ -372 +372 @@
+-    const csr = (0, _codesigningcertificates().generateCSR)(keyPair, `Development Certificate for ${easProjectId}`);
++    const csr = await (0, _codesigningcertificates().generateCSR)(keyPair, `Development Certificate for ${easProjectId}`);
+@@ -403,2 +402,0 @@
+-
+-//# sourceMappingURL=codesigning.js.map
+\ No newline at end of file
+--- a/package.json
++++ b/package.json
+@@ -80 +79,0 @@
+-    "node-forge": "^1.3.3",
+@@ -98 +97,3 @@
+-    "zod": "^3.25.76"
++    "zod": "^3.25.76",
++    "@peculiar/x509": "2.2.0",
++    "reflect-metadata": "0.2.2"
+@@ -177 +178 @@
+-}
+\ No newline at end of file
++}

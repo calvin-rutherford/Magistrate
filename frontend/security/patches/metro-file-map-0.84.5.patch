@@ -1,0 +1,264 @@
+--- a/package.json
++++ b/package.json
+@@ -4 +4 @@
+-  "description": "[Experimental] - 🚇 File crawling, watching and mapping for Metro",
++  "description": "[Experimental] - \ud83d\ude87 File crawling, watching and mapping for Metro",
+@@ -28 +27,0 @@
+-    "micromatch": "^4.0.4",
+--- a/src/Watcher.js
++++ b/src/Watcher.js
+@@ -176,6 +176,5 @@
+-        dot: true,
+-        globs: [
+-          "**/package.json",
+-          "**/" + this.#options.healthCheckFilePrefix + "*",
+-          ...extensions.map((extension) => "**/*." + extension),
+-        ],
++        included: {
++          extensions: new Set(extensions),
++          basenames: new Set(['package.json']),
++          basenamePrefixes: [this.#options.healthCheckFilePrefix],
++        },
+--- a/src/Watcher.js.flow
++++ b/src/Watcher.js.flow
+@@ -208,9 +208,5 @@
+-        dot: true,
+-        globs: [
+-          // Ensure we always include package.json files, which are crucial for
+-          /// module resolution.
+-          '**/package.json',
+-          // Ensure we always watch any health check files
+-          '**/' + this.#options.healthCheckFilePrefix + '*',
+-          ...extensions.map(extension => '**/*.' + extension),
+-        ],
++        included: {
++          extensions: new Set(extensions),
++          basenames: new Set(['package.json']),
++          basenamePrefixes: [this.#options.healthCheckFilePrefix],
++        },
+--- a/src/flow-types.d.ts
++++ b/src/flow-types.d.ts
+@@ -9 +9 @@
+- * @generated SignedSource<<b3646c81d37188726a1fc27777dcbede>>
++ * Magistrate backport: declarations updated with the two upstream matcher changes.
+@@ -316 +315,0 @@
+-export type Glob = string;
+@@ -440,2 +439 @@
+-  globs: ReadonlyArray<string>;
+-  dot: boolean;
++  included: WatcherIncludedFiles | null;
+@@ -459,0 +458,6 @@
++}>;
++
++export type WatcherIncludedFiles = Readonly<{
++  extensions: ReadonlySet<string>;
++  basenames: ReadonlySet<string>;
++  basenamePrefixes: ReadonlyArray<string>;
+--- a/src/flow-types.js.flow
++++ b/src/flow-types.js.flow
+@@ -368 +367,0 @@
+-export type Glob = string;
+@@ -549,2 +548 @@
+-  globs: ReadonlyArray<string>,
+-  dot: boolean,
++  included: ?WatcherIncludedFiles,
+@@ -573,0 +572,6 @@
++}>;
++
++export type WatcherIncludedFiles = Readonly<{
++  extensions: ReadonlySet<string>,
++  basenames: ReadonlySet<string>,
++  basenamePrefixes: ReadonlyArray<string>,
+--- a/src/watchers/AbstractWatcher.d.ts
++++ b/src/watchers/AbstractWatcher.d.ts
+@@ -0,0 +1 @@
++import type {WatcherIncludedFiles} from '../flow-types';
+@@ -8 +9 @@
+- * @generated SignedSource<<ba8a5de14ca08c751a87bea6b356a670>>
++ * Magistrate backport: declarations updated with the two upstream matcher changes.
+@@ -30,2 +31 @@
+-  readonly globs: ReadonlyArray<string>;
+-  readonly dot: boolean;
++  readonly included: WatcherIncludedFiles | null;
+--- a/src/watchers/AbstractWatcher.js
++++ b/src/watchers/AbstractWatcher.js
+@@ -43,2 +43,2 @@
+-    const { ignored, globs, dot } = opts;
+-    this.dot = dot || false;
++    const { ignored, included } = opts;
++
+@@ -46 +46 @@
+-    this.globs = globs;
++    this.included = included;
+--- a/src/watchers/AbstractWatcher.js.flow
++++ b/src/watchers/AbstractWatcher.js.flow
+@@ -0,0 +1 @@
++import type {WatcherIncludedFiles} from '../flow-types';
+@@ -29,2 +30 @@
+-  +globs: ReadonlyArray<string>;
+-  +dot: boolean;
++  +included: ?WatcherIncludedFiles;
+@@ -36,2 +36,2 @@
+-    const {ignored, globs, dot} = opts;
+-    this.dot = dot || false;
++    const {ignored, included} = opts;
++
+@@ -39 +39 @@
+-    this.globs = globs;
++    this.included = included;
+--- a/src/watchers/FallbackWatcher.js
++++ b/src/watchers/FallbackWatcher.js
+@@ -84 +84 @@
+-        !common.includedByGlob("f", this.globs, this.dot, relativePath))
++        !common.isIncluded("f", this.included, relativePath))
+@@ -226 +226 @@
+-          !common.includedByGlob("d", this.globs, this.dot, relativePath)
++          !common.isIncluded("d", this.included, relativePath)
+--- a/src/watchers/FallbackWatcher.js.flow
++++ b/src/watchers/FallbackWatcher.js.flow
+@@ -101 +101 @@
+-        !common.includedByGlob('f', this.globs, this.dot, relativePath))
++        !common.isIncluded('f', this.included, relativePath))
+@@ -295 +295 @@
+-          !common.includedByGlob('d', this.globs, this.dot, relativePath)
++          !common.isIncluded('d', this.included, relativePath)
+--- a/src/watchers/NativeWatcher.d.ts
++++ b/src/watchers/NativeWatcher.d.ts
+@@ -0,0 +1 @@
++import type {WatcherIncludedFiles} from '../flow-types';
+@@ -8 +9 @@
+- * @generated SignedSource<<b68c5620efd3f5bec83279059d0d1b4e>>
++ * Magistrate backport: declarations updated with the two upstream matcher changes.
+@@ -44,2 +45 @@
+-      globs: ReadonlyArray<string>;
+-      dot: boolean;
++      included: WatcherIncludedFiles | null;
+--- a/src/watchers/NativeWatcher.js
++++ b/src/watchers/NativeWatcher.js
+@@ -99 +99 @@
+-        !(0, _common.includedByGlob)(type, this.globs, this.dot, relativePath)
++        !(0, _common.isIncluded)(type, this.included, relativePath)
+--- a/src/watchers/NativeWatcher.js.flow
++++ b/src/watchers/NativeWatcher.js.flow
+@@ -0,0 +1 @@
++import type {WatcherIncludedFiles} from '../flow-types';
+@@ -14 +15 @@
+-import {includedByGlob, typeFromStat} from './common';
++import {isIncluded, typeFromStat} from './common';
+@@ -57,2 +58 @@
+-      globs: ReadonlyArray<string>,
+-      dot: boolean,
++      included: ?WatcherIncludedFiles,
+@@ -125 +125 @@
+-      if (!includedByGlob(type, this.globs, this.dot, relativePath)) {
++      if (!isIncluded(type, this.included, relativePath)) {
+--- a/src/watchers/WatchmanWatcher.js
++++ b/src/watchers/WatchmanWatcher.js
+@@ -129,10 +129 @@
+-      if (self.globs.length === 0 && !self.dot) {
+-        options.expression = [
+-          "match",
+-          "**",
+-          "wholename",
+-          {
+-            includedotfiles: false,
+-          },
+-        ];
+-      }
++
+@@ -230 +221 @@
+-      !common.includedByGlob(type, this.globs, this.dot, relativePath)
++      !common.isIncluded(type, this.included, relativePath)
+--- a/src/watchers/WatchmanWatcher.js.flow
++++ b/src/watchers/WatchmanWatcher.js.flow
+@@ -146,11 +146 @@
+-      // Make sure we honor the dot option if even we're not using globs.
+-      if (self.globs.length === 0 && !self.dot) {
+-        options.expression = [
+-          'match',
+-          '**',
+-          'wholename',
+-          {
+-            includedotfiles: false,
+-          },
+-        ];
+-      }
++
+@@ -272 +262 @@
+-      !common.includedByGlob(type, this.globs, this.dot, relativePath)
++      !common.isIncluded(type, this.included, relativePath)
+--- a/src/watchers/common.d.ts
++++ b/src/watchers/common.d.ts
+@@ -0,0 +1 @@
++import type {WatcherIncludedFiles} from '../flow-types';
+@@ -9 +10 @@
+- * @generated SignedSource<<ebebfbca9d43e034fde8489e1d9f2dbb>>
++ * Magistrate backport: declarations updated with the two upstream matcher changes.
+@@ -37,2 +38 @@
+-  globs: ReadonlyArray<string>;
+-  dot: boolean;
++  included: WatcherIncludedFiles | null;
+@@ -45 +45 @@
+- * Checks a file relative path against the globs array.
++ * Matches extension suffixes (including dotfiles/multipart), basenames and prefixes.
+@@ -47 +47 @@
+-export declare function includedByGlob(
++export declare function isIncluded(
+@@ -49,2 +49 @@
+-  globs: ReadonlyArray<string>,
+-  dot: boolean,
++  included: WatcherIncludedFiles | null,
+--- a/src/watchers/common.js
++++ b/src/watchers/common.js
+@@ -11 +11 @@
+-exports.includedByGlob = includedByGlob;
++exports.isIncluded = isIncluded;
+@@ -14 +13,0 @@
+-var _micromatch = _interopRequireDefault(require("micromatch"));
+@@ -23,3 +22,5 @@
+-function includedByGlob(type, globs, dot, relativePath) {
+-  if (globs.length === 0 || type !== "f") {
+-    return dot || _micromatch.default.some(relativePath, "**/*");
++function isIncluded(type, included, relativePath) {
++  if (included == null || type !== "f") return true;
++  const basename = _path.default.basename(relativePath);
++  for (let i = basename.indexOf('.'); i !== -1; i = basename.indexOf('.', i + 1)) {
++    if (included.extensions.has(basename.slice(i + 1))) return true;
+@@ -27,3 +28 @@
+-  return _micromatch.default.some(relativePath, globs, {
+-    dot,
+-  });
++  return included.basenames.has(basename) || included.basenamePrefixes.some(prefix => basename.startsWith(prefix));
+--- a/src/watchers/common.js.flow
++++ b/src/watchers/common.js.flow
+@@ -0,0 +1 @@
++import type {WatcherIncludedFiles} from '../flow-types';
+@@ -20,2 +20,0 @@
+-// $FlowFixMe[untyped-import] - Write libdefs for `micromatch`
+-import micromatch from 'micromatch';
+@@ -33,2 +32 @@
+-  globs: ReadonlyArray<string>,
+-  dot: boolean,
++  included: ?WatcherIncludedFiles,
+@@ -42 +40 @@
+- * Checks a file relative path against the globs array.
++ * Matches extension suffixes (including dotfiles/multipart), basenames and prefixes.
+@@ -44 +42 @@
+-export function includedByGlob(
++export function isIncluded(
+@@ -46,2 +44 @@
+-  globs: ReadonlyArray<string>,
+-  dot: boolean,
++  included: ?WatcherIncludedFiles,
+@@ -50,4 +47,4 @@
+-  // For non-regular files or if there are no glob matchers, just respect the
+-  // `dot` option to filter dotfiles if dot === false.
+-  if (globs.length === 0 || type !== 'f') {
+-    return dot || micromatch.some(relativePath, '**/*');
++  if (included == null || type !== 'f') return true;
++  const basename = path.basename(relativePath);
++  for (let i = basename.indexOf('.'); i !== -1; i = basename.indexOf('.', i + 1)) {
++    if (included.extensions.has(basename.slice(i + 1))) return true;
+@@ -55 +52 @@
+-  return micromatch.some(relativePath, globs, {dot});
++  return included.basenames.has(basename) || included.basenamePrefixes.some(prefix => basename.startsWith(prefix));

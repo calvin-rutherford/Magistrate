@@ -51,16 +51,40 @@ jobs:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v5
       - run: mkdir -p .release
-      - name: Audit installed frontend and retained adapter
+      # Independent gates: a red graph must not hide the other reports. None is
+      # optional, suppressed or continue-on-error; each failed step fails the job.
+      - name: Audit installed frontend
+        if: ${{ !cancelled() }}
+        run: (cd frontend && npm ci && npm audit --audit-level=low --json > ../.release/frontend-audit.json)
+      - name: Audit installed retained adapter
+        if: ${{ !cancelled() }}
+        run: (cd pi-extension && npm ci && npm audit --audit-level=low --json > ../.release/pi-audit.json)
+      - name: Audit Gateway
+        if: ${{ !cancelled() }}
+        run: (cd gateway && uv sync --frozen && uvx --from pip-audit==2.10.1 pip-audit --path .venv/lib/python3.12/site-packages --skip-editable --format json --output ../.release/gateway-audit.json)
+      - name: Audit retained lab backend
+        if: ${{ !cancelled() }}
         run: |
-          (cd frontend && npm ci && npm audit --audit-level=low --json > ../.release/frontend-audit.json)
-          (cd pi-extension && npm ci && npm audit --audit-level=low --json > ../.release/pi-audit.json)
-      - name: Audit Gateway and retained lab backend
-        run: |
-          (cd gateway && uv sync --frozen && uvx --from pip-audit==2.10.1 pip-audit --path .venv/lib/python3.12/site-packages --skip-editable --format json --output ../.release/gateway-audit.json)
           uv venv .release/backend-env
           uv pip install --python .release/backend-env/bin/python -r backend/requirements.txt
           uvx --from pip-audit==2.10.1 pip-audit --path .release/backend-env/lib/python3.12/site-packages --format json --output .release/backend-audit.json
+      - name: Audit retained Compose requirements independently
+        if: ${{ !cancelled() }}
+        run: |
+          uv venv .release/compose-env
+          uv pip install --python .release/compose-env/bin/python -r requirements-backend.txt
+          uvx --from pip-audit==2.10.1 pip-audit --path .release/compose-env/lib/python3.12/site-packages --format json --output .release/compose-audit.json
+      - name: Reproduce source-derived artifacts and inventory the installed graph
+        if: ${{ !cancelled() }}
+        run: |
+          python3 frontend/security/build_artifacts.py --output .release/reproduced --check
+          node frontend/security/sbom.cjs > .release/frontend-sbom.json
+      - name: Qualify original negative controls and every retained consumer
+        if: ${{ !cancelled() }}
+        run: |
+          python3 frontend/security/qualify_controls.py
+          (cd frontend && npm run test:release)
+          (cd gateway && uv run python -m scripts.export_client_protocol --check-types)
       - name: Assert no generated repository drift
         run: test -z "$(git status --porcelain --untracked-files=all)"
       # Advisory services are online evidence, separate from hermetic receipts
@@ -75,6 +99,8 @@ jobs:
             .release/pi-audit.json
             .release/gateway-audit.json
             .release/backend-audit.json
+            .release/compose-audit.json
+            .release/frontend-sbom.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

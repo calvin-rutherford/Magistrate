@@ -8,9 +8,11 @@ pytest-django
 libtmux
 requests
 channels
-daphne
+# Retained laboratory ASGI only; Gateway remains the sole production service.
+uvicorn==0.54.0
+h11==0.16.0
 channels-redis
-websockets
+websockets==17.2
 python-dotenv
 dj-database-url
 rich==13.7.1
