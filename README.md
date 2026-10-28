@@ -1,8 +1,15 @@
-# Magistrate
+# Tacticrew
 
-An owner-facing engineering assistant with one persistent conversation across
-Chat and Voice, explicit repository objectives, request-bound decisions, and
-structured progress—not a terminal disguised as chat.
+Working product name; formerly **Magistrate**. The repository URL and internal
+identifiers retain the existing name.
+
+A developer-focused prototype for agent supervision and control, with one
+persistent conversation across Chat and Voice, explicit repository objectives,
+request-bound decisions, and structured progress.
+
+The product direction is own-machine operation: bring your own machine (BYOM)
+and supervise agents from a shared interface. This is a direction for the
+prototype, not a claim of validated runtime enforcement or production readiness.
 
 **Current portfolio candidate:** reviewable code, not an activated personal
 execution release. Personal dispatch is deliberately closed because the reviewed
