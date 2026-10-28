@@ -625,31 +625,31 @@ tests/test_voice_session_backgrounds.py::test_background_customization_persisten
     from starlette.testclient import TestClient as TestClient  # noqa
 
 app/main.py:304
-  /home/spectre/Documents/Codex/2026-10-28/task-6/tacticrew/gateway/app/main.py:304: DeprecationWarning: 
+  /home/spectre/Documents/Codex/2026-10-28/task-6/tacticrew/gateway/app/main.py:304: DeprecationWarning:
           on_event is deprecated, use lifespan event handlers instead.
-  
+
           Read more about it in the
           [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
-          
+
     @app.on_event('startup')
 
 .venv/lib/python3.12/site-packages/fastapi/applications.py:4681
 .venv/lib/python3.12/site-packages/fastapi/applications.py:4681
-  /home/spectre/Documents/Codex/2026-10-28/task-6/tacticrew/gateway/.venv/lib/python3.12/site-packages/fastapi/applications.py:4681: DeprecationWarning: 
+  /home/spectre/Documents/Codex/2026-10-28/task-6/tacticrew/gateway/.venv/lib/python3.12/site-packages/fastapi/applications.py:4681: DeprecationWarning:
           on_event is deprecated, use lifespan event handlers instead.
-  
+
           Read more about it in the
           [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
-          
+
     return self.router.on_event(event_type)  # ty: ignore[deprecated]
 
 app/main.py:343
-  /home/spectre/Documents/Codex/2026-10-28/task-6/tacticrew/gateway/app/main.py:343: DeprecationWarning: 
+  /home/spectre/Documents/Codex/2026-10-28/task-6/tacticrew/gateway/app/main.py:343: DeprecationWarning:
           on_event is deprecated, use lifespan event handlers instead.
-  
+
           Read more about it in the
           [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
-          
+
     @app.on_event('shutdown')
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html

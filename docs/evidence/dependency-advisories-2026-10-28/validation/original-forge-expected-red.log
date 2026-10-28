@@ -8,9 +8,9 @@ not ok 1 - Forge rejects an extra DigestAlgorithm child and preserves valid RSA 
   failureType: 'testCodeFailure'
   error: |-
     Expected values to be strictly equal:
-    
+
     true !== false
-    
+
   code: 'ERR_ASSERTION'
   name: 'AssertionError'
   expected: false

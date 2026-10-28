@@ -995,19 +995,19 @@
     "pr128/gateway-audit.json": "0201c62333794171d9695d857cf3052af4a6630c3a7291d84f00e803e8171e8f",
     "registry-records.json": "b6c693d2573e979cc0ca968338230307db83a7b5bdc99c093564d4eaa21ad7af",
     "validation/adapter-test.log": "36adab3675114f878c4f9abee69ed80d9849fd41c08d8ac9ba53574b79fcc040",
-    "validation/adapter-typecheck.log": "e72b04203fd64b3b890da851f309c785f9742022b0a44b16afa496a6fd41aa61",
+    "validation/adapter-typecheck.log": "721967237fe77f8fb97a417d8f1f2c9509d80482129da583df6a82e7563cf13b",
     "validation/backend-test.log": "6b940d26c5a823e0001acd42b339b13cf8821f57313b67efed1cc2995a4853d6",
     "validation/compose-test.log": "3d120d08f474ac41d956bd94d7276ad2579553e208bac29cc2cd46d6a394e5c1",
     "validation/frontend-export-verified.log": "6550c2a6a3f0ab6b838966115e899384a4ab5a6456176d8615739ebd31a9da5d",
-    "validation/frontend-lint.log": "439d2beb8a762b15fc01f981c62f879b7373ae15def59c184d972f2369ff64eb",
+    "validation/frontend-lint.log": "a1bb4c5059be5f875c14425972a5d81d16a58fc6e588ea29e87c66b90e7bc56a",
     "validation/frontend-release-final.log": "4be3b4d52ecfbb37f7757d383bcf2f3fc2ec7678ff77873a549fd0452ac8f87e",
     "validation/frontend-test.log": "3acc1c3bb234cfb652eef3f8082a9745599db9b57550d30e937db978d764b505",
-    "validation/frontend-typecheck.log": "d3d579f3c9b564f9d36181649fb875e0a38d3f4f1e1cb8842dadca48b014984c",
+    "validation/frontend-typecheck.log": "821ac5193f0bf19d54afcb84462fbb9af4972d0833329bd647c31df77928d298",
     "validation/frontend-typegen.log": "378cf2a4c7490f6d5c164a9155bb14a0d84c6a68ecf19eae463195db7464a3b6",
     "validation/gateway-producer-install.log": "4ab18b1fe1658ca879c69b83068360f71198727cdcf5d41e9fad5f4c97e4fe66",
     "validation/gateway-producer-verify.log": "58377d68d2f588ce91b7dfe211874860a6dafddb58dbdf464ef9af7d7b4d6d73",
-    "validation/gateway-test.log": "c3a9c514c5dbb9feda79a74f723f6c6e3d1c99efdf9b04051a9c2e6b98e69f7a",
-    "validation/original-forge-expected-red.log": "3cf9a864e1423f6fcf5a68c6ee15dbbfe9089c8ac8925a82c3fabaaba9aac5bf",
+    "validation/gateway-test.log": "c224dba420d206a5cd71a5c9c0e32d7f9cc74a43854e1a40bea1078cc45ce023",
+    "validation/original-forge-expected-red.log": "06c198240a4cd767e10c42869201df60e774e765967f4fa1131aa7aa4eb6f7be",
     "validation/original-undici-expected-red.log": "0ab23e931b2f4fe179d731ace8aae181912b130318a3f31dad75443fc4d0a4fa",
     "validation/release-check.log": "ce998412f3c7d1b2892cb69296e73d4aafac41730e3c8dcd5141cafa0bf3970a",
     "validation/release-tests.log": "5d1fa44d46114e52578dc1f2f51adc144f55bc1182199ed2d466146bd9105ff6"
@@ -1273,5 +1273,6 @@
   "qualification_source": {
     "implementation_parent_commit": "deec51eae82f90e6d96f5f04aebdf1459f7190a1",
     "followup_scope": "Documentation, explicit external-only Undici scope comment, and more precise adapter test labels; final hashes below identify those tested files."
-  }
+  },
+  "validation_log_format": "Committed validation logs normalize trailing horizontal whitespace and trailing blank lines only; raw task-local command logs remain under task-6/evidence/validation. Raw npm/pip-audit JSON reports are unchanged. Report hashes identify committed bytes."
 }
